@@ -26,9 +26,13 @@ case "$TARGET" in
     ;;
   x86_64-unknown-linux-gnu)
     # ffmpeg — BtbN static
-    curl -L -o /tmp/ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
-    tar -xf /tmp/ffmpeg.tar.xz -C /tmp/
-    find /tmp/ -name 'ffmpeg' -type f -perm -u+x | head -1 | xargs -I{} cp {} "$OUT_DIR/ffmpeg-$TARGET"
+    EXTRACT_DIR="$(mktemp -d)"
+    trap 'rm -rf "$EXTRACT_DIR"' EXIT
+    curl -L -o "$EXTRACT_DIR/ffmpeg.tar.xz" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+    tar -xf "$EXTRACT_DIR/ffmpeg.tar.xz" -C "$EXTRACT_DIR/"
+    FFMPEG_BIN="$(find "$EXTRACT_DIR" -name 'ffmpeg' -type f -perm -u+x 2>/dev/null | head -1)"
+    [[ -n "$FFMPEG_BIN" ]] || { echo "ffmpeg binary not found in archive"; exit 1; }
+    cp "$FFMPEG_BIN" "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
