@@ -1,0 +1,60 @@
+name: audit
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt,clippy" }
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve target
+        shell: bash
+        run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
+      - name: Fetch sidecars (required for goop-tauri build)
+        shell: bash
+        run: ./scripts/fetch-sidecars.sh "$TARGET"
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features
+
+  web:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm" }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run lint
+
+  sidecar-smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve target
+        shell: bash
+        run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
+      - name: Fetch sidecars
+        shell: bash
+        run: ./scripts/fetch-sidecars.sh "$TARGET"
+      - name: Smoke test
+        shell: bash
+        run: |
+          ls src-tauri/bin/
+          # Verify binaries invoke
+          "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
+          "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version

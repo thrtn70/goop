@@ -1,0 +1,43 @@
+{
+  "name": "goop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'eslint not configured for v0.1' && exit 0",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2",
+    "@tauri-apps/plugin-shell": "^2",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.446",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26",
+    "zustand": "^4.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@testing-library/react": "^16",
+    "@testing-library/user-event": "^14",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3",
+    "autoprefixer": "^10.4",
+    "jsdom": "^25",
+    "postcss": "^8.4",
+    "tailwindcss": "^3.4",
+    "typescript": "^5.4",
+    "vite": "^5.4",
+    "vitest": "^2"
+  }
+}

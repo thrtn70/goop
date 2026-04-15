@@ -1,0 +1,22 @@
+[package]
+name = "goop-queue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+goop-core = { path = "../goop-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
+parking_lot = "0.12"
+dashmap = "6"
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+goop-core = { path = "../goop-core", features = ["test-util"] }
