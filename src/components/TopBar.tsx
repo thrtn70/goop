@@ -25,7 +25,7 @@ export default function TopBar({ onSubmit, onOpenSettings }: Props) {
               setUrl("");
             }
           }}
-          placeholder="Paste link or drop file…"
+          placeholder="Paste a link and press Enter…"
           className="w-full rounded-md bg-neutral-800 px-3 py-2 text-sm text-white placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
         />
       </div>

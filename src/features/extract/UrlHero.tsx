@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "@/ipc/commands";
+import { formatError } from "@/ipc/error";
 import type { UrlProbe, FormatOption } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import ProbeCard from "./ProbeCard";
@@ -17,7 +18,7 @@ export default function UrlHero({ url }: { url?: string }) {
     try {
       setProbe(await api.extract.probe(u));
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setLoading(false);
     }
@@ -33,7 +34,7 @@ export default function UrlHero({ url }: { url?: string }) {
         format: format ? format.format_id : null,
       });
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     }
   }
 
@@ -50,7 +51,7 @@ export default function UrlHero({ url }: { url?: string }) {
       {!loading && !probe && !error && (
         <div className="flex h-full flex-col items-center justify-center text-center text-neutral-500">
           <div className="text-4xl">⬇</div>
-          <p className="mt-2">Paste a URL or drop a file above.</p>
+          <p className="mt-2">Paste a URL above and press Enter.</p>
         </div>
       )}
     </div>

@@ -12,8 +12,9 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 
 ## Features (v0.1)
 
+**v0.1 is extract-only.** Convert / compress / edit features are planned for later releases — this initial release is just the download pipeline.
+
 - Paste a video or audio URL, probe it, pick a format, and download.
-- Drop files onto the window to queue them.
 - Queue sidebar with live progress, speed, and ETA; per-row cancel.
 - Reveal finished downloads in the OS file manager.
 - Persistent settings (download folder, theme, concurrency) in your OS config dir.

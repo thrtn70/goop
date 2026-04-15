@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "@/ipc/commands";
+import { formatError } from "@/ipc/error";
 import type { Settings, SettingsPatch, Theme } from "@/types";
 
 export default function SettingsPage() {
@@ -11,7 +12,7 @@ export default function SettingsPage() {
     void api.settings
       .get()
       .then(setS)
-      .catch((e: unknown) => setErr(String(e)));
+      .catch((e: unknown) => setErr(formatError(e)));
   }, []);
 
   async function patch(p: SettingsPatch): Promise<void> {
@@ -19,7 +20,7 @@ export default function SettingsPage() {
       const next = await api.settings.set(p);
       setS(next);
     } catch (e: unknown) {
-      setErr(String(e));
+      setErr(formatError(e));
     }
   }
 

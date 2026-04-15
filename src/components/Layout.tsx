@@ -1,13 +1,10 @@
 import { Outlet, useNavigate } from "react-router-dom";
 import LeftNav from "./LeftNav";
 import TopBar from "./TopBar";
-import DropOverlay from "./DropOverlay";
 import QueueSidebar from "@/features/queue/QueueSidebar";
-import { useDropTarget } from "@/hooks/useDropTarget";
 
 export default function Layout() {
   const nav = useNavigate();
-  const dragging = useDropTarget();
   return (
     <div className="flex h-screen flex-col">
       <TopBar
@@ -21,7 +18,6 @@ export default function Layout() {
         </main>
         <QueueSidebar />
       </div>
-      <DropOverlay active={dragging} />
     </div>
   );
 }

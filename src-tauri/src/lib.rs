@@ -22,11 +22,14 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let sidecar_dir = app
-                .path()
-                .resource_dir()
-                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?
-                .join("bin");
+            // Tauri's externalBin bundler ships sidecars in the same directory as
+            // the app's main executable (Contents/MacOS on macOS; next to the .exe
+            // on Windows). Resolve that dir via current_exe so both bundled and
+            // dev-mode (PATH fallback) scenarios work without hard-coding OS logic.
+            let sidecar_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
             let resolver = Arc::new(BinaryResolver::new(sidecar_dir));
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
