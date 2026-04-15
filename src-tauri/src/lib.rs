@@ -71,7 +71,16 @@ pub fn run() {
                 extract_worker,
                 noop_worker,
             );
-            scheduler.clone().run_forever();
+            // Tauri's setup closure runs synchronously outside a Tokio context,
+            // so spawn the worker loops on Tauri's own async runtime.
+            let s_extract = scheduler.clone();
+            tauri::async_runtime::spawn(async move {
+                s_extract.run_kind(goop_core::JobKind::Extract).await
+            });
+            let s_convert = scheduler.clone();
+            tauri::async_runtime::spawn(async move {
+                s_convert.run_kind(goop_core::JobKind::Convert).await
+            });
 
             app.manage(AppState {
                 resolver,

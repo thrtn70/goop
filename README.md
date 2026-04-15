@@ -26,7 +26,6 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 
 - **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
 - **macOS 13+** on Intel or Apple Silicon.
-- **Linux** (Debian/Ubuntu 22.04+, Fedora 38+, or any distro with `libwebkit2gtk-4.1` available).
 - ~150 MB disk for the app + bundled sidecars.
 - A working network connection *only* when downloading.
 
@@ -51,11 +50,6 @@ Grab the build for your OS from the [Releases page](https://github.com/thrtn70/g
    Goop is not signed with an Apple Developer ID, so macOS will otherwise refuse to launch it.
 4. Open Goop from Launchpad or Spotlight.
 
-### Linux
-Pick one:
-- `goop_<version>_amd64.deb` — `sudo dpkg -i goop_<version>_amd64.deb` on Debian/Ubuntu.
-- `goop_<version>_amd64.AppImage` — `chmod +x` and run. Needs FUSE.
-
 ---
 
 ## Tips & Troubleshooting
@@ -65,7 +59,6 @@ Pick one:
 - **Downloads stall or fail with "HTTP 403".** Usually means `yt-dlp` needs an update — same fix as above. If that doesn't help, the host may be blocking data-center IPs or require sign-in (Goop doesn't support authenticated sessions in v0.1).
 - **The audio-only checkbox produces video anyway.** Make sure the selected format row has `audio only` in the dropdown, or toggle the "audio only" checkbox and pick "Best (auto)".
 - **Progress bar stays at 99% for a while.** Normal for large files — `yt-dlp` is muxing/finalizing. Don't cancel.
-- **Linux: "WebKit2GTK not found".** Install `libwebkit2gtk-4.1-0` (or your distro's equivalent). On Ubuntu 22.04: `sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1`.
 - **Windows Defender flags the installer.** The installer is not yet code-signed. Verify the SHA-256 of the `.msi` against the hash on the Releases page, then allow it through SmartScreen.
 - **Where does Goop store files?** The default download folder is your OS's standard Downloads directory. Change it in Settings. The queue database and settings file live in your OS config directory under `goop/`.
 - **Reporting bugs.** Open a [GitHub issue](https://github.com/thrtn70/goop/issues) with your OS, the exact URL pattern (redact personal info), and a snippet from the log (launch with `RUST_LOG=goop=debug` to get verbose output).

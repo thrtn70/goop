@@ -10,7 +10,6 @@ Thanks for your interest. Goop is early — v0.1 MVP is still landing. Read this
 - **Platform system libraries for Tauri 2:**
   - **Windows:** MSVC Build Tools 2022 and WebView2 Runtime (usually pre-installed on Windows 11).
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`).
-  - **Linux:** `webkit2gtk-4.1`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `build-essential`, `curl`, `wget`, `file`. Distro package names vary — see the Tauri 2 prerequisites page if your distro differs.
 
 ## Dev Loop
 
@@ -40,8 +39,7 @@ Goop does not bundle third-party binaries in the repo. `scripts/fetch-sidecars.s
 
 - **Windows `ffmpeg`:** `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` (Gyan.dev — the ffmpeg project's own recommended Windows build host).
 - **macOS `ffmpeg`:** `https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip` (evermeet.cx — signed static builds maintained by Helmut K. C. Tessarek).
-- **Linux `ffmpeg`:** `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz` (BtbN/FFmpeg-Builds — GitHub-hosted LGPL static builds referenced by ffmpeg.org).
-- **`yt-dlp` (all OSes):** `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp` (Linux), `yt-dlp_macos` (macOS), `yt-dlp.exe` (Windows) — selected per platform by the script.
+- **`yt-dlp` (per OS):** `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos` (macOS), `yt-dlp.exe` (Windows) — selected per platform by the script.
 
 Do not commit sidecar binaries. Do not point the script at mirrors or personal forks. Any change to these URLs requires a PR that includes the upstream rationale.
 

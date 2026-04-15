@@ -13,7 +13,7 @@ goop-sidecar = { path = "../crates/goop-sidecar" }
 goop-extractor = { path = "../crates/goop-extractor" }
 goop-queue = { path = "../crates/goop-queue" }
 goop-config = { path = "../crates/goop-config" }
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"

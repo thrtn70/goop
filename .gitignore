@@ -5,11 +5,19 @@ Cargo.lock
 
 # ts-rs per-crate dependency bindings (regenerated on each `cargo test`)
 /crates/*/bindings/
+/crates/shared/
 
 # Node
 node_modules
 dist
 /src-tauri/target
+
+# TypeScript incremental build + accidental tsc emit (we use Vite for builds)
+tsconfig.tsbuildinfo
+/src/**/*.js
+/src/**/*.test.js
+/shared/**/*.js
+
 
 # Editor
 .idea

@@ -49,6 +49,8 @@ impl Scheduler {
     }
 
     /// Spawn a background loop that pulls queued jobs per kind and runs them.
+    /// Caller MUST be inside a Tokio runtime context (or use `run_kind` manually
+    /// with their own spawner — Tauri's `async_runtime::spawn`, for example).
     pub fn run_forever(self: Arc<Self>) {
         let s1 = self.clone();
         tokio::spawn(async move { s1.run_kind(JobKind::Extract).await });
@@ -56,7 +58,10 @@ impl Scheduler {
         tokio::spawn(async move { s2.run_kind(JobKind::Convert).await });
     }
 
-    async fn run_kind(self: Arc<Self>, kind: JobKind) {
+    /// One worker loop for a given kind. Public so callers that aren't inside a
+    /// Tokio runtime context (e.g. Tauri's setup closure) can spawn it via
+    /// their own runtime handle.
+    pub async fn run_kind(self: Arc<Self>, kind: JobKind) {
         let sem = match kind {
             JobKind::Extract => self.extract_sem.clone(),
             JobKind::Convert => self.convert_sem.clone(),
