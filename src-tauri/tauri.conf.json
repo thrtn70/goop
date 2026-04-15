@@ -26,7 +26,13 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "nsis", "msi", "deb", "appimage"],
-    "icon": ["icons/icon.png"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "externalBin": ["bin/ffmpeg", "bin/yt-dlp"]
   }
 }
