@@ -27,11 +27,22 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Per-file metadata probe with smart default target selection.
 - **Media formats**: MP4, MKV, WebM, GIF, AVI, MOV, MP3, M4A, Opus, WAV, FLAC, OGG, AAC, or extract audio with the original codec.
 - **Image formats** (v0.1.4): PNG, JPEG, WebP, BMP — built-in, no external tools needed.
-- **Compression presets** (v0.1.4): Original, Fast, Balanced, Small quality tiers with optional resolution cap (1080p, 720p, 480p).
 - **Video-to-GIF** (v0.1.4): three size presets (320/480/720px) with optional duration trim.
 - Automatic remux-vs-re-encode based on a built-in compatibility matrix.
 - Single file: Save-As dialog for full control. Batch: outputs land next to each source file, or pick an override folder.
 - Live progress, speed, ETA, and per-job cancel in the shared queue sidebar.
+
+### Compress (v0.1.6)
+
+- Dedicated Compress tab with two modes: **Quality** (1–100 slider) or **Target size** (KB / MB).
+- Works on video (CRF or bitrate math), audio (bitrate), and images (JPEG/WebP quality, PNG lossless re-optimize).
+- Shows source file size and warns when the target would yield unacceptable quality.
+- Re-uses the same queue sidebar and progress events as Extract and Convert.
+
+### Notifications (v0.1.6)
+
+- Toast notifications fire when jobs finish, fail, or cancel. Single-file jobs get per-file toasts; batch jobs get one summary toast when the batch settles.
+- Queue badge shows a count of completed jobs finished while you were on a different page. Click the queue header to clear.
 
 ---
 

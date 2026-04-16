@@ -10,14 +10,36 @@ type ProgressEntry = {
   speed_hr: string | null;
 };
 
+export type ToastVariant = "success" | "error" | "cancelled" | "info";
+
+export interface Toast {
+  id: string;
+  variant: ToastVariant;
+  title: string;
+  /** Optional detail message (shown under title, or expanded for errors). */
+  detail?: string;
+  /** Optional output path — if present, the toast gets a Reveal action. */
+  outputPath?: string;
+  /** When this toast should auto-dismiss (ms epoch). null = sticky. */
+  dismissAt: number | null;
+  createdAt: number;
+}
+
 type AppStoreState = {
   settings: Settings | null;
   jobs: Job[];
   progressById: Record<string, ProgressEntry>;
+  toasts: Toast[];
+  /** Jobs finished while user was on a different page — clears on queue-focus. */
+  unseenCompletions: number;
   loadAll: () => Promise<void>;
   applyProgress: (e: ProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
   cancel: (id: JobId) => Promise<void>;
+  enqueueToast: (t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & { ttlMs?: number | null }) => string;
+  dismissToast: (id: string) => void;
+  incrementUnseen: () => void;
+  clearUnseen: () => void;
 };
 
 /**
@@ -34,10 +56,23 @@ export function jobIdKey(id: JobId): string {
   return String(id);
 }
 
+const DEFAULT_TOAST_TTL_MS = 5000;
+
+function newToastId(): string {
+  // Crypto-safe enough for UI keys; falls back if `crypto` is unavailable (tests).
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `t-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
 export const useAppStore = create<AppStoreState>((set) => ({
   settings: null,
   jobs: [],
   progressById: {},
+  toasts: [],
+  unseenCompletions: 0,
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
@@ -67,6 +102,32 @@ export const useAppStore = create<AppStoreState>((set) => ({
   },
   async cancel(id) {
     await api.queue.cancel(id);
+  },
+  enqueueToast(t) {
+    const id = newToastId();
+    const now = Date.now();
+    const ttl = t.ttlMs === undefined ? DEFAULT_TOAST_TTL_MS : t.ttlMs;
+    const dismissAt = ttl === null ? null : now + ttl;
+    const toast: Toast = {
+      id,
+      variant: t.variant,
+      title: t.title,
+      detail: t.detail,
+      outputPath: t.outputPath,
+      dismissAt,
+      createdAt: now,
+    };
+    set((s) => ({ toasts: [...s.toasts, toast] }));
+    return id;
+  },
+  dismissToast(id) {
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
+  incrementUnseen() {
+    set((s) => ({ unseenCompletions: s.unseenCompletions + 1 }));
+  },
+  clearUnseen() {
+    set({ unseenCompletions: 0 });
   },
 }));
 

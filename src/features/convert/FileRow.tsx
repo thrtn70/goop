@@ -1,29 +1,16 @@
 import { useEffect, useState } from "react";
-import { api } from "@/ipc/commands";
-import { formatError } from "@/ipc/error";
-import type { GifOptions, ProbeResult, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { GifOptions, TargetFormat } from "@/types";
+import { useProbe } from "@/hooks/useProbe";
 import TargetPicker, { smartDefault } from "./TargetPicker";
-import CompressionPresets from "./CompressionPresets";
 import GifOptionsPanel from "./GifOptionsPanel";
 
-const IMAGE_TARGETS: TargetFormat[] = ["png", "jpeg", "webp", "bmp"];
-
-type FileState =
-  | { phase: "probing" }
-  | {
-      phase: "ready";
-      probe: ProbeResult;
-      target: TargetFormat;
-      qualityPreset: QualityPreset;
-      resolutionCap: ResolutionCap;
-      gifOptions: GifOptions | null;
-    }
-  | { phase: "error"; message: string };
+interface RowOptionsState {
+  target: TargetFormat;
+  gifOptions: GifOptions | null;
+}
 
 export interface FileRowOptions {
   target: TargetFormat;
-  qualityPreset: QualityPreset;
-  resolutionCap: ResolutionCap;
   gifOptions: GifOptions | null;
 }
 
@@ -60,30 +47,22 @@ function defaultGifOptions(): GifOptions {
 }
 
 export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: FileRowProps) {
-  const [state, setState] = useState<FileState>({ phase: "probing" });
+  const { state, retry } = useProbe(path);
+  const [opts, setOpts] = useState<RowOptionsState | null>(null);
 
-  const doProbe = async () => {
-    setState({ phase: "probing" });
-    try {
-      const result = await api.convert.probe(path);
-      const target = smartDefault(result);
-      const opts: FileRowOptions = {
+  // Seed options once the probe lands; derive smart defaults from the probe.
+  useEffect(() => {
+    if (state.phase === "ready" && opts === null) {
+      const target = smartDefault(state.probe);
+      const seeded: RowOptionsState = {
         target,
-        qualityPreset: "original",
-        resolutionCap: "original",
         gifOptions: target === "gif" ? defaultGifOptions() : null,
       };
-      setState({ phase: "ready", probe: result, ...opts });
-      onOptionsChange(path, opts);
-    } catch (e) {
-      setState({ phase: "error", message: formatError(e) });
+      setOpts(seeded);
+      onOptionsChange(path, seeded);
     }
-  };
-
-  useEffect(() => {
-    void doProbe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- doProbe depends on path via closure; including it causes infinite re-probe loops
-  }, [path]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onOptionsChange is stable via parent useCallback; depending on it would re-seed on every parent render
+  }, [state, path]);
 
   if (state.phase === "probing") {
     return (
@@ -106,7 +85,7 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
         <p className="mt-1 text-xs text-error/80">{state.message}</p>
         <button
           type="button"
-          onClick={() => void doProbe()}
+          onClick={() => retry()}
           className="btn-press mt-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
         >
           Try again
@@ -115,21 +94,27 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
     );
   }
 
-  const { probe: p, target, qualityPreset, resolutionCap, gifOptions } = state;
+  if (opts === null) {
+    // Probe finished but effect hasn't seeded opts yet — render a skeleton for this frame.
+    return (
+      <div className="enter-stagger animate-pulse rounded-lg bg-surface-1 p-3" style={{ "--i": index } as React.CSSProperties}>
+        <div className="h-4 w-48 rounded bg-surface-3" />
+      </div>
+    );
+  }
 
-  const update = (partial: Partial<FileRowOptions>) => {
-    const next = {
+  const p = state.probe;
+  const { target, gifOptions } = opts;
+
+  const update = (partial: Partial<RowOptionsState>) => {
+    const next: RowOptionsState = {
       target: partial.target ?? target,
-      qualityPreset: partial.qualityPreset ?? qualityPreset,
-      resolutionCap: partial.resolutionCap ?? resolutionCap,
       gifOptions: partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
     };
-    setState({ ...state, ...next });
+    setOpts(next);
     onOptionsChange(path, next);
   };
 
-  const isImageTarget = IMAGE_TARGETS.includes(target);
-  const showCompression = !isImageTarget && p.source_kind !== "image";
   const showGifOpts = target === "gif" && p.source_kind === "video";
 
   const meta: string[] = [];
@@ -165,13 +150,6 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
           }
         />
       </div>
-      <CompressionPresets
-        qualityPreset={qualityPreset}
-        resolutionCap={resolutionCap}
-        onQualityChange={(q) => update({ qualityPreset: q })}
-        onResolutionChange={(r) => update({ resolutionCap: r })}
-        visible={showCompression}
-      />
       {showGifOpts && gifOptions && (
         <GifOptionsPanel
           gifOptions={gifOptions}

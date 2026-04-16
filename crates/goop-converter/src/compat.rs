@@ -1,4 +1,6 @@
-use goop_core::{GifOptions, GifSizePreset, QualityPreset, ResolutionCap, TargetFormat};
+use goop_core::{
+    CompressMode, GifOptions, GifSizePreset, QualityPreset, ResolutionCap, TargetFormat,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -418,6 +420,264 @@ fn audio_bitrate(q: QualityPreset) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Compression (v0.1.6)
+// ---------------------------------------------------------------------------
+
+/// Build a compression plan for the Compress tab.
+///
+/// `target` is the source's existing format (Compress keeps the container).
+/// `duration_ms` is required for `TargetSizeBytes` on video/audio; pass 0 for
+/// image targets (which route through the ImageMagick backend rather than
+/// this function).
+///
+/// Image targets (`Png`, `Jpeg`, `Webp`, `Bmp`) are **not** handled here.
+/// The caller is expected to dispatch image compression to the ImageMagick
+/// backend's in-memory encode path, which performs iterative quality search
+/// for `TargetSizeBytes`. This function returns an empty plan for image
+/// targets so ffmpeg never processes them.
+pub fn decide_compression(
+    target: TargetFormat,
+    vcodec: Option<&str>,
+    acodec: Option<&str>,
+    mode: CompressMode,
+    duration_ms: u64,
+) -> Plan {
+    if target.is_image() {
+        return Plan {
+            args: vec![],
+            video_filters: vec![],
+            reencoded: true,
+            ext: target.extension(),
+        };
+    }
+
+    match target {
+        TargetFormat::Mp4 | TargetFormat::Mkv | TargetFormat::Mov | TargetFormat::Avi => {
+            let mut p = compress_video_h264(mode, duration_ms, vcodec, acodec);
+            p.ext = target.extension();
+            p
+        }
+        TargetFormat::Webm => compress_video_vp9(mode, duration_ms),
+        TargetFormat::Gif => {
+            // GIFs are already heavily compressed via palettegen; quality/size
+            // controls don't translate cleanly. Fall back to the standard GIF
+            // plan (same as Convert) so the user still gets a result.
+            plan_gif(None)
+        }
+        TargetFormat::Mp3 => compress_audio(mode, duration_ms, "libmp3lame", "mp3", 32, 320),
+        TargetFormat::M4a | TargetFormat::Aac => {
+            compress_audio(mode, duration_ms, "aac", target.extension(), 32, 320)
+        }
+        TargetFormat::Opus => compress_audio(mode, duration_ms, "libopus", "opus", 16, 256),
+        TargetFormat::Ogg => compress_audio(mode, duration_ms, "libvorbis", "ogg", 32, 320),
+        TargetFormat::Flac | TargetFormat::Wav => {
+            // Lossless formats — Quality/TargetSize don't reduce size
+            // meaningfully. Return the same plan as a normal encode (caller
+            // will get a warning in the UI when they pick these sources).
+            match target {
+                TargetFormat::Flac => audio_flac(acodec),
+                TargetFormat::Wav => audio_wav(acodec),
+                _ => unreachable!(),
+            }
+        }
+        TargetFormat::ExtractAudioKeepCodec => plan_extract_audio(acodec),
+        // Image targets handled above.
+        TargetFormat::Png | TargetFormat::Jpeg | TargetFormat::Webp | TargetFormat::Bmp => {
+            unreachable!("image targets short-circuit at the top of decide_compression")
+        }
+    }
+}
+
+/// Linear slider-to-CRF mapping: 100 -> crf 18, 50 -> crf 28, 1 -> crf 40.
+/// Clamped to [18, 40].
+pub(crate) fn slider_to_crf(slider: u8) -> u8 {
+    let slider = slider.clamp(1, 100) as i32;
+    // 40 at slider=1, 18 at slider=100 -> linear between them.
+    let crf = 40 - ((slider - 1) * 22) / 99;
+    crf.clamp(18, 40) as u8
+}
+
+/// Linear slider-to-audio-bitrate mapping, clamped to [min_kbps, max_kbps].
+/// 100 -> max, 50 -> roughly center, 1 -> min.
+pub(crate) fn slider_to_audio_kbps(slider: u8, min_kbps: u32, max_kbps: u32) -> u32 {
+    let slider = slider.clamp(1, 100) as u32;
+    let range = max_kbps.saturating_sub(min_kbps);
+    min_kbps + (range * (slider - 1) / 99)
+}
+
+/// Target-size bitrate math for audio (single stream).
+/// Returns kbps clamped to [min_kbps, max_kbps]. Returns min_kbps if duration
+/// is zero (undefined math, pick the safest floor).
+pub(crate) fn target_bytes_to_audio_kbps(
+    target_bytes: u64,
+    duration_ms: u64,
+    min_kbps: u32,
+    max_kbps: u32,
+) -> u32 {
+    if duration_ms == 0 {
+        return min_kbps;
+    }
+    let kbps = (target_bytes.saturating_mul(8) / 1000) / (duration_ms / 1000).max(1);
+    (kbps as u32).clamp(min_kbps, max_kbps)
+}
+
+/// Target-size bitrate math for video. Reserves 128 kbps for audio and gives
+/// the rest to video. Enforces a 100-kbps video floor for readability.
+pub(crate) fn target_bytes_to_video_kbps(target_bytes: u64, duration_ms: u64) -> (u32, u32) {
+    let audio_reserve: u32 = 128;
+    if duration_ms == 0 {
+        return (100, audio_reserve);
+    }
+    let total_kbps = (target_bytes.saturating_mul(8) / 1000) / (duration_ms / 1000).max(1);
+    let total = total_kbps as u32;
+    let video = total.saturating_sub(audio_reserve).max(100);
+    (video, audio_reserve)
+}
+
+fn compress_video_h264(
+    mode: CompressMode,
+    duration_ms: u64,
+    _vcodec: Option<&str>,
+    _acodec: Option<&str>,
+) -> Plan {
+    match mode {
+        CompressMode::Quality(slider) => {
+            let crf = slider_to_crf(slider).to_string();
+            Plan {
+                args: args(&[
+                    "-c:v", "libx264", "-preset", "medium", "-crf", &crf, "-c:a", "aac", "-b:a",
+                    "192k",
+                ]),
+                video_filters: vec![],
+                reencoded: true,
+                ext: "mp4",
+            }
+        }
+        CompressMode::TargetSizeBytes(bytes) => {
+            let (v_kbps, a_kbps) = target_bytes_to_video_kbps(bytes, duration_ms);
+            let maxrate = (v_kbps * 3 / 2).to_string();
+            let bufsize = (v_kbps * 2).to_string();
+            let b_v = format!("{v_kbps}k");
+            let maxrate_k = format!("{maxrate}k");
+            let bufsize_k = format!("{bufsize}k");
+            let b_a = format!("{a_kbps}k");
+            Plan {
+                args: vec![
+                    "-c:v".into(),
+                    "libx264".into(),
+                    "-preset".into(),
+                    "medium".into(),
+                    "-b:v".into(),
+                    b_v,
+                    "-maxrate".into(),
+                    maxrate_k,
+                    "-bufsize".into(),
+                    bufsize_k,
+                    "-c:a".into(),
+                    "aac".into(),
+                    "-b:a".into(),
+                    b_a,
+                ],
+                video_filters: vec![],
+                reencoded: true,
+                ext: "mp4",
+            }
+        }
+        CompressMode::LosslessReoptimize => {
+            // Not meaningful for video; fall back to a quality=50 encode so
+            // we still produce output rather than silently doing nothing.
+            compress_video_h264(CompressMode::Quality(50), duration_ms, _vcodec, _acodec)
+        }
+    }
+}
+
+fn compress_video_vp9(mode: CompressMode, duration_ms: u64) -> Plan {
+    match mode {
+        CompressMode::Quality(slider) => {
+            let crf = slider_to_crf(slider).to_string();
+            Plan {
+                args: args(&[
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-deadline",
+                    "good",
+                    "-b:v",
+                    "0",
+                    "-crf",
+                    &crf,
+                    "-c:a",
+                    "libopus",
+                ]),
+                video_filters: vec![],
+                reencoded: true,
+                ext: "webm",
+            }
+        }
+        CompressMode::TargetSizeBytes(bytes) => {
+            let (v_kbps, a_kbps) = target_bytes_to_video_kbps(bytes, duration_ms);
+            let b_v = format!("{v_kbps}k");
+            let minrate_k = format!("{}k", v_kbps / 2);
+            let maxrate_k = format!("{}k", v_kbps * 3 / 2);
+            let b_a = format!("{a_kbps}k");
+            Plan {
+                args: vec![
+                    "-c:v".into(),
+                    "libvpx-vp9".into(),
+                    "-deadline".into(),
+                    "good".into(),
+                    "-b:v".into(),
+                    b_v,
+                    "-minrate".into(),
+                    minrate_k,
+                    "-maxrate".into(),
+                    maxrate_k,
+                    "-c:a".into(),
+                    "libopus".into(),
+                    "-b:a".into(),
+                    b_a,
+                ],
+                video_filters: vec![],
+                reencoded: true,
+                ext: "webm",
+            }
+        }
+        CompressMode::LosslessReoptimize => {
+            compress_video_vp9(CompressMode::Quality(50), duration_ms)
+        }
+    }
+}
+
+fn compress_audio(
+    mode: CompressMode,
+    duration_ms: u64,
+    codec: &'static str,
+    ext: &'static str,
+    min_kbps: u32,
+    max_kbps: u32,
+) -> Plan {
+    let kbps = match mode {
+        CompressMode::Quality(slider) => slider_to_audio_kbps(slider, min_kbps, max_kbps),
+        CompressMode::TargetSizeBytes(bytes) => {
+            target_bytes_to_audio_kbps(bytes, duration_ms, min_kbps, max_kbps)
+        }
+        CompressMode::LosslessReoptimize => slider_to_audio_kbps(50, min_kbps, max_kbps),
+    };
+    let b_a = format!("{kbps}k");
+    Plan {
+        args: vec![
+            "-vn".into(),
+            "-c:a".into(),
+            codec.into(),
+            "-b:a".into(),
+            b_a,
+        ],
+        video_filters: vec![],
+        reencoded: true,
+        ext,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -774,5 +1034,196 @@ mod tests {
             None,
         );
         assert!(p.video_filters.is_empty());
+    }
+
+    // --- v0.1.6 compression tests ---
+
+    #[test]
+    fn slider_to_crf_endpoints_and_middle() {
+        assert_eq!(slider_to_crf(100), 18);
+        assert_eq!(slider_to_crf(1), 40);
+        // Middle (slider 50) sits near CRF ~29 — within linear tolerance.
+        let mid = slider_to_crf(50);
+        assert!(
+            (28..=30).contains(&mid),
+            "expected ~29 at slider=50, got {mid}"
+        );
+    }
+
+    #[test]
+    fn slider_to_crf_clamps_out_of_range() {
+        assert_eq!(slider_to_crf(0), 40);
+        assert_eq!(slider_to_crf(200), 18);
+    }
+
+    #[test]
+    fn slider_to_audio_kbps_covers_range() {
+        assert_eq!(slider_to_audio_kbps(1, 48, 320), 48);
+        assert_eq!(slider_to_audio_kbps(100, 48, 320), 320);
+        let mid = slider_to_audio_kbps(50, 48, 320);
+        assert!(
+            (180..=200).contains(&mid),
+            "expected ~190 at slider=50, got {mid}"
+        );
+    }
+
+    #[test]
+    fn target_bytes_to_audio_kbps_matches_formula() {
+        // 3 MB over 2 minutes = 3*1024*1024 bytes over 120_000 ms
+        //   = 3*1024*1024*8 bits / 120 s = ~209 kbps
+        let kbps = target_bytes_to_audio_kbps(3 * 1024 * 1024, 120_000, 48, 320);
+        assert!((200..=220).contains(&kbps), "got {kbps}");
+    }
+
+    #[test]
+    fn target_bytes_to_audio_kbps_clamps_to_bounds() {
+        // tiny target -> clamp up to minimum
+        assert_eq!(target_bytes_to_audio_kbps(1000, 120_000, 48, 320), 48);
+        // huge target -> clamp down to maximum
+        assert_eq!(
+            target_bytes_to_audio_kbps(u64::MAX / 100, 120_000, 48, 320),
+            320
+        );
+    }
+
+    #[test]
+    fn target_bytes_to_audio_kbps_handles_zero_duration() {
+        assert_eq!(target_bytes_to_audio_kbps(1_000_000, 0, 48, 320), 48);
+    }
+
+    #[test]
+    fn target_bytes_to_video_kbps_reserves_audio_and_floors_video() {
+        // Plenty of headroom: 50 MB over 60s -> total ~6990 kbps, video ~6862
+        let (v, a) = target_bytes_to_video_kbps(50 * 1024 * 1024, 60_000);
+        assert_eq!(a, 128);
+        assert!(v > 6000, "video got {v}");
+
+        // Tight budget: 500 KB over 60s -> total ~66 kbps, video floors to 100
+        let (v, a) = target_bytes_to_video_kbps(500 * 1024, 60_000);
+        assert_eq!(a, 128);
+        assert_eq!(v, 100);
+    }
+
+    #[test]
+    fn decide_compression_video_quality_uses_libx264() {
+        let p = decide_compression(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            CompressMode::Quality(50),
+            60_000,
+        );
+        assert!(p.reencoded);
+        assert_eq!(p.ext, "mp4");
+        assert!(p.args.iter().any(|a| a == "libx264"));
+        assert!(p.args.iter().any(|a| a == "-crf"));
+    }
+
+    #[test]
+    fn decide_compression_video_target_size_sets_bitrate() {
+        let p = decide_compression(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            CompressMode::TargetSizeBytes(10 * 1024 * 1024),
+            60_000,
+        );
+        assert!(p.reencoded);
+        assert!(p.args.windows(2).any(|w| w[0] == "-b:v"));
+        assert!(p.args.windows(2).any(|w| w[0] == "-maxrate"));
+    }
+
+    #[test]
+    fn decide_compression_audio_quality_sets_bitrate() {
+        let p = decide_compression(
+            TargetFormat::Mp3,
+            None,
+            Some("mp3"),
+            CompressMode::Quality(75),
+            180_000,
+        );
+        assert!(p.reencoded);
+        assert_eq!(p.ext, "mp3");
+        assert!(p.args.iter().any(|a| a == "libmp3lame"));
+        assert!(p.args.windows(2).any(|w| w[0] == "-b:a"));
+    }
+
+    #[test]
+    fn decide_compression_audio_target_size_computes_kbps() {
+        let p = decide_compression(
+            TargetFormat::Mp3,
+            None,
+            Some("mp3"),
+            CompressMode::TargetSizeBytes(2 * 1024 * 1024),
+            180_000,
+        );
+        assert!(p.reencoded);
+        let idx = p.args.iter().position(|a| a == "-b:a").unwrap();
+        let bitrate = &p.args[idx + 1];
+        assert!(bitrate.ends_with("k"));
+    }
+
+    #[test]
+    fn decide_compression_mov_uses_mov_ext() {
+        let p = decide_compression(
+            TargetFormat::Mov,
+            Some("h264"),
+            Some("aac"),
+            CompressMode::Quality(60),
+            60_000,
+        );
+        assert_eq!(p.ext, "mov");
+    }
+
+    #[test]
+    fn decide_compression_webm_uses_vp9() {
+        let p = decide_compression(
+            TargetFormat::Webm,
+            Some("vp9"),
+            Some("opus"),
+            CompressMode::Quality(50),
+            60_000,
+        );
+        assert!(p.args.iter().any(|a| a == "libvpx-vp9"));
+        assert_eq!(p.ext, "webm");
+    }
+
+    #[test]
+    fn decide_compression_image_targets_short_circuit() {
+        for t in [
+            TargetFormat::Png,
+            TargetFormat::Jpeg,
+            TargetFormat::Webp,
+            TargetFormat::Bmp,
+        ] {
+            let p = decide_compression(t, None, None, CompressMode::Quality(50), 0);
+            assert!(p.args.is_empty(), "expected empty plan for {t:?}");
+            assert_eq!(p.ext, t.extension());
+        }
+    }
+
+    #[test]
+    fn decide_compression_opus_uses_libopus() {
+        let p = decide_compression(
+            TargetFormat::Opus,
+            None,
+            Some("opus"),
+            CompressMode::Quality(50),
+            120_000,
+        );
+        assert!(p.args.iter().any(|a| a == "libopus"));
+        assert_eq!(p.ext, "opus");
+    }
+
+    #[test]
+    fn decide_compression_ogg_uses_libvorbis() {
+        let p = decide_compression(
+            TargetFormat::Ogg,
+            None,
+            Some("vorbis"),
+            CompressMode::Quality(50),
+            120_000,
+        );
+        assert!(p.args.iter().any(|a| a == "libvorbis"));
     }
 }

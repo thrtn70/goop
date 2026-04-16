@@ -72,14 +72,24 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         }
 
         let probe = FfmpegBackend::probe(self.resolver, &input).await?;
-        let plan = decide(
-            req.target,
-            probe.video_codec.as_deref(),
-            probe.audio_codec.as_deref(),
-            req.quality_preset,
-            req.resolution_cap,
-            req.gif_options.as_ref(),
-        );
+        let plan = if let Some(mode) = req.compress_mode {
+            crate::compat::decide_compression(
+                req.target,
+                probe.video_codec.as_deref(),
+                probe.audio_codec.as_deref(),
+                mode,
+                probe.duration_ms,
+            )
+        } else {
+            decide(
+                req.target,
+                probe.video_codec.as_deref(),
+                probe.audio_codec.as_deref(),
+                req.quality_preset,
+                req.resolution_cap,
+                req.gif_options.as_ref(),
+            )
+        };
 
         let output_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
 

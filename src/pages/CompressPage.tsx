@@ -1,10 +1,10 @@
 import { useCallback, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
-import FileRow from "@/features/convert/FileRow";
-import type { FileRowOptions } from "@/features/convert/FileRow";
-import ConvertActionBar from "@/features/convert/ConvertActionBar";
-import type { FileEntry } from "@/features/convert/ConvertActionBar";
+import CompressFileRow from "@/features/compress/CompressFileRow";
+import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
+import CompressActionBar from "@/features/compress/CompressActionBar";
+import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
 import type { TargetFormat } from "@/types";
 
 function dirname(p: string): string {
@@ -13,37 +13,61 @@ function dirname(p: string): string {
   return last > 0 ? normalized.slice(0, last) : ".";
 }
 
-export default function ConvertPage() {
-  const [files, setFiles] = useState<FileEntry[]>([]);
+/**
+ * Guess the target format from a file extension. Compress keeps the source
+ * format — this is just for the output filename. The backend verifies.
+ */
+function targetFromPath(path: string): TargetFormat {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, TargetFormat> = {
+    mp4: "mp4",
+    m4v: "mp4",
+    mkv: "mkv",
+    webm: "webm",
+    avi: "avi",
+    mov: "mov",
+    mp3: "mp3",
+    m4a: "m4a",
+    opus: "opus",
+    wav: "wav",
+    flac: "flac",
+    ogg: "ogg",
+    aac: "aac",
+    png: "png",
+    jpg: "jpeg",
+    jpeg: "jpeg",
+    webp: "webp",
+    bmp: "bmp",
+  };
+  return map[ext] ?? "mp4";
+}
+
+export default function CompressPage() {
+  const [files, setFiles] = useState<CompressFileEntry[]>([]);
 
   const addPaths = useCallback((paths: string[]) => {
     setFiles((prev) => {
       const existing = new Set(prev.map((f) => f.path));
-      const fresh: FileEntry[] = paths
+      const fresh: CompressFileEntry[] = paths
         .filter((p) => !existing.has(p))
         .map((p) => ({
           path: p,
-          target: "mp4" as TargetFormat,
+          target: targetFromPath(p),
           sourceDir: dirname(p),
-          gifOptions: null,
+          mode: { kind: "quality", value: 75 },
         }));
       return [...prev, ...fresh];
     });
   }, []);
 
-  const handleOptionsChange = useCallback((path: string, opts: FileRowOptions) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.path === path
-          ? {
-              ...f,
-              target: opts.target,
-              gifOptions: opts.gifOptions,
-            }
-          : f,
-      ),
-    );
-  }, []);
+  const handleOptionsChange = useCallback(
+    (path: string, opts: CompressRowOptions) => {
+      setFiles((prev) =>
+        prev.map((f) => (f.path === path ? { ...f, mode: opts.mode } : f)),
+      );
+    },
+    [],
+  );
 
   const handleRemove = useCallback((path: string) => {
     setFiles((prev) => prev.filter((f) => f.path !== path));
@@ -52,7 +76,7 @@ export default function ConvertPage() {
   const handleBrowse = async () => {
     const picked = await open({
       multiple: true,
-      title: "Select files to convert",
+      title: "Select files to compress",
     });
     if (picked) {
       const paths = Array.isArray(picked) ? picked : [picked];
@@ -67,8 +91,17 @@ export default function ConvertPage() {
       <DropZone onFiles={addPaths}>
         {!hasFiles && (
           <div className="enter-up flex flex-col items-center justify-center py-12 text-center">
-            <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">
-              <path d="M20 28V12M14 18l6-6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+            <svg
+              width="40"
+              height="40"
+              viewBox="0 0 40 40"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              className="text-fg-muted/30"
+            >
+              <path d="M14 22V14a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v8" strokeLinecap="round" />
+              <path d="M12 30h16" strokeLinecap="round" />
               <rect x="4" y="4" width="32" height="32" rx="6" strokeDasharray="4 3" />
             </svg>
             <p className="mt-3 text-sm text-fg-secondary">
@@ -82,7 +115,9 @@ export default function ConvertPage() {
               </button>
               .
             </p>
-            <p className="mt-1 text-xs text-fg-muted">Video, audio, and images. Goop picks the best format automatically.</p>
+            <p className="mt-1 text-xs text-fg-muted">
+              Video, audio, and images. Smaller files, same format.
+            </p>
           </div>
         )}
         {hasFiles && (
@@ -106,7 +141,7 @@ export default function ConvertPage() {
       {hasFiles && (
         <div className="mt-4 flex flex-1 flex-col gap-2 overflow-auto">
           {files.map((f, i) => (
-            <FileRow
+            <CompressFileRow
               key={f.path}
               path={f.path}
               index={i}
@@ -119,7 +154,7 @@ export default function ConvertPage() {
 
       {hasFiles && (
         <div className="mt-4 border-t border-subtle pt-4">
-          <ConvertActionBar
+          <CompressActionBar
             files={files}
             disabled={false}
             onEnqueued={() => setFiles([])}

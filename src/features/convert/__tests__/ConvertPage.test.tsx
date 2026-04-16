@@ -242,7 +242,7 @@ describe("ConvertPage", () => {
     expect(screen.queryByRole("button", { name: "MKV" })).toBeNull();
   });
 
-  it("shows compression presets for video targets", async () => {
+  it("does not show compression presets on Convert page (moved to Compress tab in v0.1.6)", async () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
@@ -252,12 +252,12 @@ describe("ConvertPage", () => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
     });
 
-    // Quality preset buttons should be visible
-    expect(screen.getByRole("button", { name: "Fast" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "Balanced" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "Small" })).toBeDefined();
-    // Resolution cap should be visible (1080p, 720p, 480p)
-    expect(screen.getByRole("button", { name: "1080p" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "720p" })).toBeDefined();
+    // Compression preset buttons should no longer appear on Convert.
+    expect(screen.queryByRole("button", { name: "Fast" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Balanced" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Small" })).toBeNull();
+    // Resolution cap buttons should also be gone.
+    expect(screen.queryByRole("button", { name: "1080p" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "720p" })).toBeNull();
   });
 });

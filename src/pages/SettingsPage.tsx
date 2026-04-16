@@ -88,7 +88,7 @@ export default function SettingsPage() {
           }
         />
       </Field>
-      <Field label="Simultaneous conversions" hint="How many files to convert at once. More uses extra CPU. Lower this if your computer gets hot or sluggish.">
+      <Field label="Simultaneous processing" hint="How many files to convert or compress at once. More uses extra CPU. Lower this if your computer gets hot or sluggish.">
         <input
           type="number"
           min={1}

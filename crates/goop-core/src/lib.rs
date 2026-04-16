@@ -5,8 +5,8 @@ pub mod job;
 pub mod path;
 
 pub use convert::{
-    ConvertRequest, ConvertResult, GifOptions, GifSizePreset, ProbeResult, QualityPreset,
-    ResolutionCap, SourceKind, TargetFormat,
+    CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, ProbeResult,
+    QualityPreset, ResolutionCap, SourceKind, TargetFormat,
 };
 pub use error::{GoopError, IpcError};
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};

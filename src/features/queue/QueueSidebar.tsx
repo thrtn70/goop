@@ -18,6 +18,8 @@ function isTerminal(s: JobState): boolean {
 
 export default function QueueSidebar() {
   const jobs = useAppStore((s) => s.jobs);
+  const unseen = useAppStore((s) => s.unseenCompletions);
+  const clearUnseen = useAppStore((s) => s.clearUnseen);
   const running = jobs.filter((j) => isRunning(j.state));
   const queued = jobs.filter((j) => isQueued(j.state));
   const done = jobs.filter((j) => isTerminal(j.state));
@@ -32,10 +34,33 @@ export default function QueueSidebar() {
   }
 
   return (
-    <aside className="w-72 overflow-auto border-l border-subtle bg-surface-1 p-3" aria-label="Job queue">
-      <h3 aria-live="polite" aria-atomic="true" className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted">
-        Queue ({running.length + queued.length})
-      </h3>
+    <aside
+      className="w-72 overflow-auto border-l border-subtle bg-surface-1 p-3"
+      aria-label="Job queue"
+    >
+      <button
+        type="button"
+        onClick={() => clearUnseen()}
+        aria-label={
+          unseen > 0
+            ? `Queue, ${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`
+            : "Queue header"
+        }
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <h3
+          aria-live="polite"
+          aria-atomic="true"
+          className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted"
+        >
+          Queue ({running.length + queued.length})
+        </h3>
+        {unseen > 0 && (
+          <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-accent-fg">
+            {unseen > 99 ? "99+" : unseen}
+          </span>
+        )}
+      </button>
       <div className="mt-2 space-y-1">
         {[...running, ...queued].map((j, i) => (
           <QueueRow key={jobIdKey(j.id)} job={j} index={i} />

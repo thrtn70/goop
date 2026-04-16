@@ -130,6 +130,26 @@ pub enum SourceKind {
 }
 
 // ---------------------------------------------------------------------------
+// Compression mode (v0.1.6 Compress tab)
+// ---------------------------------------------------------------------------
+
+/// How the Compress tab should reduce a file's size.
+///
+/// `Quality` maps a 1..=100 slider to codec-specific parameters (CRF, audio
+/// bitrate, JPEG/WebP quality). `LosslessReoptimize` is the PNG-only path
+/// that re-saves with max deflate. `TargetSizeBytes` asks for a specific
+/// output size in bytes (video/audio via bitrate math, images via iterative
+/// quality search).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum CompressMode {
+    Quality(u8),
+    LosslessReoptimize,
+    TargetSizeBytes(u64),
+}
+
+// ---------------------------------------------------------------------------
 // Request / Result / Probe
 // ---------------------------------------------------------------------------
 
@@ -142,6 +162,8 @@ pub struct ConvertRequest {
     pub quality_preset: Option<QualityPreset>,
     pub resolution_cap: Option<ResolutionCap>,
     pub gif_options: Option<GifOptions>,
+    pub compress_mode: Option<CompressMode>,
+    pub batch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
