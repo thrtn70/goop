@@ -26,7 +26,7 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Drag and drop files (or browse) onto the Convert page — video, audio, or images.
 - Per-file metadata probe with smart default target selection.
 - **Media formats**: MP4, MKV, WebM, GIF, AVI, MOV, MP3, M4A, Opus, WAV, FLAC, OGG, AAC, or extract audio with the original codec.
-- **Image formats** (v0.1.4): PNG, JPEG, WebP, BMP via bundled ImageMagick.
+- **Image formats** (v0.1.4): PNG, JPEG, WebP, BMP — built-in, no external tools needed.
 - **Compression presets** (v0.1.4): Original, Fast, Balanced, Small quality tiers with optional resolution cap (1080p, 720p, 480p).
 - **Video-to-GIF** (v0.1.4): three size presets (320/480/720px) with optional duration trim.
 - Automatic remux-vs-re-encode based on a built-in compatibility matrix.
@@ -39,7 +39,7 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 
 - **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
 - **macOS 13+** on Intel or Apple Silicon.
-- ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, ImageMagick, yt-dlp).
+- ~150 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp).
 - A working network connection *only* when downloading.
 
 ---

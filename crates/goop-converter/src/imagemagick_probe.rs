@@ -1,52 +1,35 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
+use std::path::Path;
 
-/// Parse the output of `magick identify -verbose <path>` into a [`ProbeResult`].
-///
-/// ImageMagick verbose output is a key-value-ish format with indented lines such as:
-///
-/// ```text
-///   Geometry: 1920x1080+0+0
-///   Colorspace: sRGB
-///   Mime type: image/png
-/// ```
-///
-/// The caller supplies the file size separately (from `std::fs::metadata`).
-pub fn parse_identify_output(raw: &str, file_size: u64) -> Result<ProbeResult, GoopError> {
-    let mut width: Option<u32> = None;
-    let mut height: Option<u32> = None;
-    let mut color_space: Option<String> = None;
-    let mut mime_type: Option<String> = None;
+/// Probe an image file using the `image` crate. Returns dimensions, format,
+/// and file size without needing an external binary.
+pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to open image: {e}"),
+        })?
+        .with_guessed_format()
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to detect image format: {e}"),
+        })?;
 
-    for line in raw.lines() {
-        let trimmed = line.trim();
+    let format = reader.format();
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to read image dimensions: {e}"),
+        })?;
 
-        if let Some(value) = trimmed.strip_prefix("Geometry:") {
-            let value = value.trim();
-            // Format: WxH+X+Y — take only the WxH part
-            if let Some(dims) = value.split('+').next() {
-                let parts: Vec<&str> = dims.split('x').collect();
-                if parts.len() == 2 {
-                    width = parts[0].trim().parse().ok();
-                    height = parts[1].trim().parse().ok();
-                }
-            }
-        } else if let Some(value) = trimmed.strip_prefix("Colorspace:") {
-            color_space = Some(value.trim().to_string());
-        } else if let Some(value) = trimmed.strip_prefix("Mime type:") {
-            mime_type = Some(value.trim().to_string());
-        }
-    }
-
-    // Derive image_format from the MIME type (e.g. "image/png" -> "png").
-    // Falls back to None when the Mime type line is absent.
-    let image_format = mime_type
-        .as_deref()
-        .and_then(|m| m.rsplit('/').next().map(|sub| sub.trim().to_lowercase()));
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let image_format = format.map(|f| format!("{f:?}"));
 
     Ok(ProbeResult {
         duration_ms: 0,
-        width,
-        height,
+        width: Some(width),
+        height: Some(height),
         video_codec: None,
         audio_codec: None,
         file_size,
@@ -54,7 +37,7 @@ pub fn parse_identify_output(raw: &str, file_size: u64) -> Result<ProbeResult, G
         has_video: false,
         has_audio: false,
         source_kind: SourceKind::Image,
-        color_space,
+        color_space: Some("sRGB".to_string()),
         image_format,
     })
 }
@@ -62,101 +45,63 @@ pub fn parse_identify_output(raw: &str, file_size: u64) -> Result<ProbeResult, G
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    const PNG_IDENTIFY: &str = r#"Image: test.png
-  Format: PNG (Portable Network Graphics)
-  Mime type: image/png
-  Class: DirectClass
-  Geometry: 1920x1080+0+0
-  Resolution: 72x72
-  Print size: 26.6667x15
-  Units: PixelsPerInch
-  Colorspace: sRGB
-  Type: TrueColorAlpha
-  Base type: Undefined
-  Endianness: Undefined
-  Depth: 8-bit
-  Channel depth:
-    red: 8-bit
-    green: 8-bit
-    blue: 8-bit
-    alpha: 1-bit
-"#;
+    fn write_test_png(path: &Path) {
+        use image::{ImageBuffer, Rgba};
+        let img = ImageBuffer::from_fn(8, 8, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255u8, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 255])
+            }
+        });
+        img.save(path).unwrap();
+    }
 
-    const JPEG_IDENTIFY: &str = r#"Image: photo.jpg
-  Format: JPEG (Joint Photographic Experts Group JFIF format)
-  Mime type: image/jpeg
-  Class: DirectClass
-  Geometry: 4032x3024+0+0
-  Resolution: 72x72
-  Print size: 56x42
-  Units: PixelsPerInch
-  Colorspace: sRGB
-  Type: TrueColor
-  Depth: 8-bit
-"#;
-
-    #[test]
-    fn parses_png_identify() {
-        let r = parse_identify_output(PNG_IDENTIFY, 524_288).unwrap();
-        assert_eq!(r.width, Some(1920));
-        assert_eq!(r.height, Some(1080));
-        assert_eq!(r.color_space.as_deref(), Some("sRGB"));
-        assert_eq!(r.image_format.as_deref(), Some("png"));
-        assert_eq!(r.file_size, 524_288);
-        assert_eq!(r.source_kind, SourceKind::Image);
-        assert!(!r.has_video);
-        assert!(!r.has_audio);
-        assert_eq!(r.duration_ms, 0);
+    fn write_test_jpeg(path: &Path) {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, _> =
+            ImageBuffer::from_fn(16, 16, |_, _| Rgb([128, 128, 128]));
+        img.save(path).unwrap();
     }
 
     #[test]
-    fn parses_jpeg_identify() {
-        let r = parse_identify_output(JPEG_IDENTIFY, 2_048_000).unwrap();
-        assert_eq!(r.width, Some(4032));
-        assert_eq!(r.height, Some(3024));
-        assert_eq!(r.color_space.as_deref(), Some("sRGB"));
-        assert_eq!(r.image_format.as_deref(), Some("jpeg"));
-        assert_eq!(r.file_size, 2_048_000);
-        assert_eq!(r.source_kind, SourceKind::Image);
+    fn probes_png_dimensions() {
+        let dir = std::env::temp_dir().join(format!("goop-img-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.png");
+        write_test_png(&path);
+
+        let result = probe_image(&path).unwrap();
+        assert_eq!(result.width, Some(8));
+        assert_eq!(result.height, Some(8));
+        assert_eq!(result.source_kind, SourceKind::Image);
+        assert!(!result.has_video);
+        assert!(!result.has_audio);
+        assert_eq!(result.duration_ms, 0);
+        assert!(result.file_size > 0);
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn handles_missing_geometry() {
-        let raw = "  Colorspace: Gray\n  Mime type: image/bmp\n";
-        let r = parse_identify_output(raw, 100).unwrap();
-        assert!(r.width.is_none());
-        assert!(r.height.is_none());
-        assert_eq!(r.color_space.as_deref(), Some("Gray"));
-        assert_eq!(r.image_format.as_deref(), Some("bmp"));
+    fn probes_jpeg_dimensions() {
+        let dir = std::env::temp_dir().join(format!("goop-img-probe-jpg-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.jpg");
+        write_test_jpeg(&path);
+
+        let result = probe_image(&path).unwrap();
+        assert_eq!(result.width, Some(16));
+        assert_eq!(result.height, Some(16));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn handles_missing_mime_type() {
-        let raw = "  Geometry: 640x480+0+0\n  Colorspace: CMYK\n";
-        let r = parse_identify_output(raw, 50).unwrap();
-        assert_eq!(r.width, Some(640));
-        assert_eq!(r.height, Some(480));
-        assert!(r.image_format.is_none());
-        assert_eq!(r.color_space.as_deref(), Some("CMYK"));
-    }
-
-    #[test]
-    fn handles_empty_input() {
-        let r = parse_identify_output("", 0).unwrap();
-        assert!(r.width.is_none());
-        assert!(r.height.is_none());
-        assert!(r.color_space.is_none());
-        assert!(r.image_format.is_none());
-        assert_eq!(r.source_kind, SourceKind::Image);
-    }
-
-    #[test]
-    fn geometry_without_offset() {
-        // Some older ImageMagick output may lack the +0+0 offset
-        let raw = "  Geometry: 800x600\n";
-        let r = parse_identify_output(raw, 0).unwrap();
-        assert_eq!(r.width, Some(800));
-        assert_eq!(r.height, Some(600));
+    fn fails_on_nonexistent_file() {
+        let result = probe_image(Path::new("/nonexistent/file.png"));
+        assert!(result.is_err());
     }
 }

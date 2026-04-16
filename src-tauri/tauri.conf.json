@@ -32,6 +32,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/magick", "bin/yt-dlp"]
+    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/yt-dlp"]
   }
 }
