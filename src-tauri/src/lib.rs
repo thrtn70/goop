@@ -4,7 +4,8 @@ pub mod state;
 
 use events::TauriSink;
 use goop_config as cfg;
-use goop_core::{path as gpath, EventSink, GoopError, JobResult};
+use goop_converter::Ffmpeg;
+use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult};
 use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
 use goop_queue::{QueueStore, Scheduler, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -56,12 +57,20 @@ pub fn run() {
                     })
                 })
             });
-            let noop_worker: WorkerFn = Arc::new(|_, _, _| {
-                Box::pin(async {
+            let r_for_convert = resolver.clone();
+            let sink_for_convert = sink.clone();
+            let convert_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+                let r = r_for_convert.clone();
+                let s = sink_for_convert.clone();
+                Box::pin(async move {
+                    let req: ConvertRequest = serde_json::from_value(payload)
+                        .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
+                    let ffmpeg = Ffmpeg::new(&r, s);
+                    let res = ffmpeg.convert(id, &req, cancel).await?;
                     Ok(JobResult {
-                        output_path: None,
-                        bytes: None,
-                        duration_ms: 0,
+                        output_path: Some(res.output_path),
+                        bytes: Some(res.bytes),
+                        duration_ms: res.duration_ms,
                     })
                 })
             });
@@ -72,7 +81,7 @@ pub fn run() {
                 settings.extract_concurrency,
                 settings.convert_concurrency,
                 extract_worker,
-                noop_worker,
+                convert_worker,
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
             // so spawn the worker loops on Tauri's own async runtime.
@@ -95,6 +104,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::convert::convert_probe,
+            commands::convert::convert_from_file,
             commands::extract::extract_probe,
             commands::extract::extract_from_url,
             commands::queue::queue_list,

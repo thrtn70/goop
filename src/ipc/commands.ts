@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ConvertRequest,
   ExtractRequest,
   Job,
   JobId,
+  ProbeResult,
   Settings,
   SettingsPatch,
   SidecarStatus,
@@ -11,6 +13,11 @@ import type {
 } from "@/types";
 
 export const api = {
+  convert: {
+    probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
+    fromFile: (req: ConvertRequest) =>
+      invoke<JobId>("convert_from_file", { req }),
+  },
   extract: {
     probe: (url: string) => invoke<UrlProbe>("extract_probe", { url }),
     fromUrl: (req: ExtractRequest) => invoke<JobId>("extract_from_url", { req }),

@@ -16,8 +16,17 @@ type PayloadShape = {
   readonly input_path?: string;
 };
 
-function shortUrl(job: Job): string {
+function basename(path: string): string {
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || path;
+}
+
+function shortLabel(job: Job): string {
   const payload = job.payload as PayloadShape | null;
+  if (job.kind === "convert") {
+    const name = payload?.input_path ? basename(payload.input_path) : "file";
+    return `Convert · ${name}`;
+  }
   const raw = payload?.url;
   if (!raw) return payload?.input_path ?? "job";
   try {
@@ -53,7 +62,7 @@ export default function QueueRow({ job }: { job: Job }) {
     <div className="rounded border border-neutral-800 bg-neutral-900 p-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className={clsx("truncate font-medium", name === "running" && "text-sky-400")}>
-          {stateGlyph(name)} {shortUrl(job)}
+          {stateGlyph(name)} {shortLabel(job)}
         </span>
         {name === "running" && (
           <button

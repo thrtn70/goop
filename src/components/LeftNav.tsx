@@ -3,6 +3,7 @@ import clsx from "clsx";
 
 const items = [
   { to: "/extract", label: "Extract" },
+  { to: "/convert", label: "Convert" },
   { to: "/history", label: "History" },
   { to: "/settings", label: "Settings" },
 ];

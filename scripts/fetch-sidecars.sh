@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: fetch-sidecars.sh <TARGET_TRIPLE>
-# Writes binaries to src-tauri/bin/{ffmpeg,yt-dlp}-<triple>[.exe]
+# Writes binaries to src-tauri/bin/{ffmpeg,ffprobe,yt-dlp}-<triple>[.exe]
 set -euo pipefail
 TARGET="${1:?target triple required}"
 OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
@@ -11,6 +11,7 @@ case "$TARGET" in
     # ffmpeg — Gyan essentials (LGPL)
     curl -L -o /tmp/ffmpeg.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
+    unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
     ;;
@@ -20,6 +21,11 @@ case "$TARGET" in
     unzip -o /tmp/ffmpeg.zip -d /tmp/
     mv /tmp/ffmpeg "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
+    # ffprobe — same source
+    curl -L -o /tmp/ffprobe.zip "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+    unzip -o /tmp/ffprobe.zip -d /tmp/
+    mv /tmp/ffprobe "$OUT_DIR/ffprobe-$TARGET"
+    chmod +x "$OUT_DIR/ffprobe-$TARGET"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
@@ -34,6 +40,10 @@ case "$TARGET" in
     [[ -n "$FFMPEG_BIN" ]] || { echo "ffmpeg binary not found in archive"; exit 1; }
     cp "$FFMPEG_BIN" "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
+    FFPROBE_BIN="$(find "$EXTRACT_DIR" -name 'ffprobe' -type f -perm -u+x 2>/dev/null | head -1)"
+    [[ -n "$FFPROBE_BIN" ]] || { echo "ffprobe binary not found in archive"; exit 1; }
+    cp "$FFPROBE_BIN" "$OUT_DIR/ffprobe-$TARGET"
+    chmod +x "$OUT_DIR/ffprobe-$TARGET"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"

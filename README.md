@@ -10,9 +10,9 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 
 ---
 
-## Features (v0.1)
+## Features
 
-**v0.1 is extract-only.** Convert / compress / edit features are planned for later releases — this initial release is just the download pipeline.
+### Extract (v0.1)
 
 - Paste a video or audio URL, probe it, pick a format, and download.
 - Queue sidebar with live progress, speed, and ETA; per-row cancel.
@@ -20,6 +20,15 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Persistent settings (download folder, theme, concurrency) in your OS config dir.
 - Light / dark / system theme.
 - Supported sites include YouTube, SoundCloud, TikTok, Instagram, Twitter/X, Vimeo, Reddit, and generic HTTP(S) media — anything `yt-dlp` handles.
+
+### Convert (v0.1.3)
+
+- Drag and drop files (or browse) onto the Convert page.
+- Per-file metadata probe (duration, resolution, codecs, size) with smart default target selection.
+- Output formats: MP4, MKV, WebM, MP3, M4A, Opus, WAV, or extract audio with the original codec.
+- Automatic remux-vs-re-encode based on a built-in compatibility matrix — fast stream-copy when possible, quality re-encode when not.
+- Single file: Save-As dialog for full control. Batch: outputs land next to each source file, or pick an override folder.
+- Live progress, speed, ETA, and per-job cancel in the shared queue sidebar.
 
 ---
 
@@ -74,8 +83,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1:
-- Convert / compress / edit operations (the other verbs in the name).
+Planned after v0.1.3:
+- Trim / in-out point editing.
+- Quality and bitrate controls (compression presets).
+- Hardware-accelerated encoding (VideoToolbox, NVENC, AMF).
+- History-to-Convert shortcut (right-click a completed download to send it to Convert).
 - Signed macOS builds and a code-signed Windows installer.
 - Auto-update for the app shell itself.
 - Multi-URL batch paste.

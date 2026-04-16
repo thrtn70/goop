@@ -83,6 +83,25 @@ export default function SettingsPage() {
           }
         />
       </Field>
+      <Field label="Convert concurrency">
+        <input
+          type="number"
+          min={1}
+          max={16}
+          className="w-24 rounded bg-neutral-800 p-2 text-sm"
+          value={s.convert_concurrency}
+          onChange={(e) => setS({ ...s, convert_concurrency: Number(e.target.value) })}
+          onBlur={(e) =>
+            void patch({
+              output_dir: null,
+              theme: null,
+              yt_dlp_last_update_ms: null,
+              extract_concurrency: null,
+              convert_concurrency: Number(e.target.value),
+            })
+          }
+        />
+      </Field>
       {err && <p className="text-sm text-red-400">{err}</p>}
     </div>
   );
