@@ -1,17 +1,35 @@
 import { useEffect, useState } from "react";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { ProbeResult, TargetFormat } from "@/types";
+import type { GifOptions, ProbeResult, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 import TargetPicker, { smartDefault } from "./TargetPicker";
+import CompressionPresets from "./CompressionPresets";
+import GifOptionsPanel from "./GifOptionsPanel";
+
+const IMAGE_TARGETS: TargetFormat[] = ["png", "jpeg", "webp", "bmp"];
 
 type FileState =
   | { phase: "probing" }
-  | { phase: "ready"; probe: ProbeResult; target: TargetFormat }
+  | {
+      phase: "ready";
+      probe: ProbeResult;
+      target: TargetFormat;
+      qualityPreset: QualityPreset;
+      resolutionCap: ResolutionCap;
+      gifOptions: GifOptions | null;
+    }
   | { phase: "error"; message: string };
+
+export interface FileRowOptions {
+  target: TargetFormat;
+  qualityPreset: QualityPreset;
+  resolutionCap: ResolutionCap;
+  gifOptions: GifOptions | null;
+}
 
 interface FileRowProps {
   path: string;
-  onTargetChange: (path: string, target: TargetFormat) => void;
+  onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onRemove: (path: string) => void;
 }
 
@@ -36,23 +54,33 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export default function FileRow({ path, onTargetChange, onRemove }: FileRowProps) {
+function defaultGifOptions(): GifOptions {
+  return { size_preset: "medium", trim_start_ms: null, trim_end_ms: null };
+}
+
+export default function FileRow({ path, onOptionsChange, onRemove }: FileRowProps) {
   const [state, setState] = useState<FileState>({ phase: "probing" });
 
-  const probe = async () => {
+  const doProbe = async () => {
     setState({ phase: "probing" });
     try {
       const result = await api.convert.probe(path);
       const target = smartDefault(result);
-      setState({ phase: "ready", probe: result, target });
-      onTargetChange(path, target);
+      const opts: FileRowOptions = {
+        target,
+        qualityPreset: "original",
+        resolutionCap: "original",
+        gifOptions: target === "gif" ? defaultGifOptions() : null,
+      };
+      setState({ phase: "ready", probe: result, ...opts });
+      onOptionsChange(path, opts);
     } catch (e) {
       setState({ phase: "error", message: formatError(e) });
     }
   };
 
   useEffect(() => {
-    void probe();
+    void doProbe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
@@ -71,7 +99,7 @@ export default function FileRow({ path, onTargetChange, onRemove }: FileRowProps
         <div className="flex items-center justify-between">
           <span className="truncate font-medium text-red-300">{basename(path)}</span>
           <div className="flex gap-2">
-            <button type="button" onClick={() => void probe()} className="text-xs text-sky-400 hover:text-sky-200">
+            <button type="button" onClick={() => void doProbe()} className="text-xs text-sky-400 hover:text-sky-200">
               Retry
             </button>
             <button type="button" onClick={() => onRemove(path)} className="text-xs text-red-400 hover:text-red-200">
@@ -84,12 +112,29 @@ export default function FileRow({ path, onTargetChange, onRemove }: FileRowProps
     );
   }
 
-  const { probe: p, target } = state;
+  const { probe: p, target, qualityPreset, resolutionCap, gifOptions } = state;
+
+  const update = (partial: Partial<FileRowOptions>) => {
+    const next = {
+      target: partial.target ?? target,
+      qualityPreset: partial.qualityPreset ?? qualityPreset,
+      resolutionCap: partial.resolutionCap ?? resolutionCap,
+      gifOptions: partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
+    };
+    setState({ ...state, ...next });
+    onOptionsChange(path, next);
+  };
+
+  const isImageTarget = IMAGE_TARGETS.includes(target);
+  const showCompression = !isImageTarget && p.source_kind !== "image";
+  const showGifOpts = target === "gif" && p.source_kind === "video";
+
   const meta: string[] = [];
   if (Number(p.duration_ms) > 0) meta.push(formatDuration(Number(p.duration_ms)));
   if (p.width && p.height) meta.push(`${p.width}×${p.height}`);
   if (p.video_codec) meta.push(p.video_codec);
   if (p.audio_codec) meta.push(p.audio_codec);
+  if (p.image_format) meta.push(p.image_format);
   if (Number(p.file_size) > 0) meta.push(formatSize(Number(p.file_size)));
 
   return (
@@ -105,12 +150,28 @@ export default function FileRow({ path, onTargetChange, onRemove }: FileRowProps
         <TargetPicker
           probe={p}
           selected={target}
-          onChange={(t) => {
-            setState({ ...state, target: t });
-            onTargetChange(path, t);
-          }}
+          onChange={(t) =>
+            update({
+              target: t,
+              gifOptions: t === "gif" ? (gifOptions ?? defaultGifOptions()) : null,
+            })
+          }
         />
       </div>
+      <CompressionPresets
+        qualityPreset={qualityPreset}
+        resolutionCap={resolutionCap}
+        onQualityChange={(q) => update({ qualityPreset: q })}
+        onResolutionChange={(r) => update({ resolutionCap: r })}
+        visible={showCompression}
+      />
+      {showGifOpts && gifOptions && (
+        <GifOptionsPanel
+          gifOptions={gifOptions}
+          onChange={(o) => update({ gifOptions: o })}
+          maxDurationMs={Number(p.duration_ms)}
+        />
+      )}
     </div>
   );
 }

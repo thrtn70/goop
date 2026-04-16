@@ -4,7 +4,7 @@ pub mod state;
 
 use events::TauriSink;
 use goop_config as cfg;
-use goop_converter::Ffmpeg;
+use goop_converter::{ConversionBackend, FfmpegBackend, ImageMagickBackend};
 use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult};
 use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
 use goop_queue::{QueueStore, Scheduler, WorkerFn};
@@ -65,8 +65,13 @@ pub fn run() {
                 Box::pin(async move {
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
-                    let ffmpeg = Ffmpeg::new(&r, s);
-                    let res = ffmpeg.convert(id, &req, cancel).await?;
+                    let res = if req.target.is_image() {
+                        let im = ImageMagickBackend::new(&r, s);
+                        im.convert(id, &req, cancel).await?
+                    } else {
+                        let ffmpeg = FfmpegBackend::new(&r, s);
+                        ffmpeg.convert(id, &req, cancel).await?
+                    };
                     Ok(JobResult {
                         output_path: Some(res.output_path),
                         bytes: Some(res.bytes),

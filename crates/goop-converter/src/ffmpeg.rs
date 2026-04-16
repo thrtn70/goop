@@ -1,3 +1,4 @@
+use crate::backend::ConversionBackend;
 use crate::compat::{decide, Plan};
 use crate::naming::{allocate_output_path, stem_of};
 use crate::probe_json::parse_probe_json;
@@ -14,18 +15,19 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
-pub struct Ffmpeg<'a> {
+pub struct FfmpegBackend<'a> {
     resolver: &'a BinaryResolver,
     sink: Arc<dyn EventSink>,
 }
 
-impl<'a> Ffmpeg<'a> {
+impl<'a> FfmpegBackend<'a> {
     pub fn new(resolver: &'a BinaryResolver, sink: Arc<dyn EventSink>) -> Self {
         Self { resolver, sink }
     }
+}
 
-    /// Probe a media file with ffprobe. Sinkless — callable standalone.
-    pub async fn probe(resolver: &BinaryResolver, path: &Path) -> Result<ProbeResult, GoopError> {
+impl<'a> ConversionBackend for FfmpegBackend<'a> {
+    async fn probe(resolver: &BinaryResolver, path: &Path) -> Result<ProbeResult, GoopError> {
         let bin = resolver.resolve("ffprobe")?;
         let out = Command::new(&bin.path)
             .args([
@@ -54,7 +56,7 @@ impl<'a> Ffmpeg<'a> {
         Ok(probe)
     }
 
-    pub async fn convert(
+    async fn convert(
         &self,
         job_id: JobId,
         req: &ConvertRequest,
@@ -69,21 +71,44 @@ impl<'a> Ffmpeg<'a> {
             });
         }
 
-        // Probe first to drive the compat matrix + progress duration.
-        let probe = Self::probe(self.resolver, &input).await?;
+        let probe = FfmpegBackend::probe(self.resolver, &input).await?;
         let plan = decide(
             req.target,
             probe.video_codec.as_deref(),
             probe.audio_codec.as_deref(),
+            req.quality_preset,
+            req.resolution_cap,
+            req.gif_options.as_ref(),
         );
 
         let output_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
 
         let mut cmd = Command::new(&bin.path);
-        cmd.arg("-y").arg("-i").arg(&input);
-        for a in &plan.args {
-            cmd.arg(a);
+        cmd.arg("-y");
+
+        // Some plans (e.g., GIF trim) have args that go before -i, separated
+        // by the "__INPUT__" sentinel. Split on it.
+        let input_idx = plan.args.iter().position(|a| a == "__INPUT__");
+        if let Some(idx) = input_idx {
+            for a in &plan.args[..idx] {
+                cmd.arg(a);
+            }
+            cmd.arg("-i").arg(&input);
+            for a in &plan.args[idx + 1..] {
+                cmd.arg(a);
+            }
+        } else {
+            cmd.arg("-i").arg(&input);
+            for a in &plan.args {
+                cmd.arg(a);
+            }
         }
+
+        // Apply video filters (-vf) if any.
+        if !plan.video_filters.is_empty() {
+            cmd.arg("-vf").arg(plan.video_filters.join(","));
+        }
+
         cmd.arg("-progress").arg("pipe:1").arg("-nostats");
         cmd.arg(&output_path);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -161,6 +186,9 @@ impl<'a> Ffmpeg<'a> {
     }
 }
 
+/// Backward-compat alias.
+pub type Ffmpeg<'a> = FfmpegBackend<'a>;
+
 fn resolve_output_path(
     input_path: &str,
     requested: &str,
@@ -181,7 +209,7 @@ fn resolve_output_path(
 }
 
 pub fn target_extension(target: TargetFormat, acodec: Option<&str>) -> &'static str {
-    decide(target, None, acodec).ext
+    decide(target, None, acodec, None, None, None).ext
 }
 
 #[cfg(test)]
@@ -193,7 +221,7 @@ mod tests {
     fn resolve_treats_dir_as_dir() {
         let dir = std::env::temp_dir().join(format!("goop-resolve-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let plan = decide(TargetFormat::Mp3, None, Some("aac"));
+        let plan = decide(TargetFormat::Mp3, None, Some("aac"), None, None, None);
         let out = resolve_output_path("/src/video.mp4", dir.to_str().unwrap(), &plan).unwrap();
         assert_eq!(out.file_name().unwrap(), "video.mp3");
         fs::remove_dir_all(&dir).ok();
@@ -201,7 +229,14 @@ mod tests {
 
     #[test]
     fn resolve_honors_full_file_path() {
-        let plan = decide(TargetFormat::Mp4, Some("h264"), Some("aac"));
+        let plan = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
         let target = std::env::temp_dir().join("goop-explicit.mp4");
         let out = resolve_output_path("/src/clip.mkv", target.to_str().unwrap(), &plan).unwrap();
         assert_eq!(out, target);

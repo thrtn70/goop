@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: fetch-sidecars.sh <TARGET_TRIPLE>
-# Writes binaries to src-tauri/bin/{ffmpeg,ffprobe,yt-dlp}-<triple>[.exe]
+# Writes binaries to src-tauri/bin/{ffmpeg,ffprobe,magick,yt-dlp}-<triple>[.exe]
 set -euo pipefail
 TARGET="${1:?target triple required}"
 OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
@@ -12,6 +12,10 @@ case "$TARGET" in
     curl -L -o /tmp/ffmpeg.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
+    # ImageMagick 7 — portable zip
+    IM_VER="7.1.1-47"
+    curl -L -o /tmp/magick.zip "https://imagemagick.org/archive/binaries/ImageMagick-${IM_VER}-portable-Q16-HDRI-x64.zip"
+    unzip -p /tmp/magick.zip 'magick.exe' > "$OUT_DIR/magick-$TARGET.exe"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
     ;;
@@ -26,6 +30,17 @@ case "$TARGET" in
     unzip -o /tmp/ffprobe.zip -d /tmp/
     mv /tmp/ffprobe "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
+    # ImageMagick 7 — Homebrew bottle binary
+    if command -v brew &>/dev/null; then
+      MAGICK_BIN="$(brew --prefix imagemagick 2>/dev/null)/bin/magick" || true
+    fi
+    if [[ -x "${MAGICK_BIN:-}" ]]; then
+      cp "$MAGICK_BIN" "$OUT_DIR/magick-$TARGET"
+    else
+      curl -L -o /tmp/magick.tar.gz "https://imagemagick.org/archive/binaries/magick"
+      cp /tmp/magick.tar.gz "$OUT_DIR/magick-$TARGET"
+    fi
+    chmod +x "$OUT_DIR/magick-$TARGET"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"

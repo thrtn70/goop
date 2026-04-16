@@ -51,6 +51,16 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         .iter()
         .find(|s| s.codec_type.as_deref() == Some("audio"));
 
+    let has_video = video.is_some();
+    let has_audio = audio.is_some();
+    let source_kind = if has_video {
+        goop_core::SourceKind::Video
+    } else if has_audio {
+        goop_core::SourceKind::Audio
+    } else {
+        goop_core::SourceKind::Video // fallback; image sources use a different probe
+    };
+
     Ok(ProbeResult {
         duration_ms,
         width: video.and_then(|s| s.width),
@@ -59,8 +69,11 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         audio_codec: audio.and_then(|s| s.codec_name.clone()),
         file_size,
         container,
-        has_video: video.is_some(),
-        has_audio: audio.is_some(),
+        has_video,
+        has_audio,
+        source_kind,
+        color_space: None,
+        image_format: None,
     })
 }
 

@@ -2,12 +2,15 @@ import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { TargetFormat } from "@/types";
+import type { GifOptions, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 
-interface FileEntry {
+export interface FileEntry {
   path: string;
   target: TargetFormat;
   sourceDir: string;
+  qualityPreset: QualityPreset;
+  resolutionCap: ResolutionCap;
+  gifOptions: GifOptions | null;
 }
 
 interface ConvertActionBarProps {
@@ -54,6 +57,9 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
           input_path: f.path,
           output_path: dest,
           target: f.target,
+          quality_preset: f.qualityPreset === "original" ? null : f.qualityPreset,
+          resolution_cap: f.resolutionCap === "original" ? null : f.resolutionCap,
+          gif_options: f.gifOptions,
         });
       } else {
         for (const f of files) {
@@ -62,6 +68,9 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
             input_path: f.path,
             output_path: outDir,
             target: f.target,
+            quality_preset: f.qualityPreset === "original" ? null : f.qualityPreset,
+            resolution_cap: f.resolutionCap === "original" ? null : f.resolutionCap,
+            gif_options: f.gifOptions,
           });
         }
       }
@@ -110,11 +119,21 @@ function extFor(target: TargetFormat): string {
     mp4: "mp4",
     mkv: "mkv",
     webm: "webm",
+    gif: "gif",
+    avi: "avi",
+    mov: "mov",
     mp3: "mp3",
     m4a: "m4a",
     opus: "opus",
     wav: "wav",
+    flac: "flac",
+    ogg: "ogg",
+    aac: "aac",
     extract_audio_keep_codec: "audio",
+    png: "png",
+    jpeg: "jpg",
+    webp: "webp",
+    bmp: "bmp",
   };
   return map[target];
 }

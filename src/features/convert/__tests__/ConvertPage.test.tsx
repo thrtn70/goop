@@ -48,6 +48,9 @@ const mp4Probe: ProbeResult = {
   container: "mov,mp4,m4a,3gp,3g2,mj2",
   has_video: true,
   has_audio: true,
+  source_kind: "video",
+  color_space: null,
+  image_format: null,
 };
 
 const audioOnlyProbe: ProbeResult = {
@@ -60,6 +63,24 @@ const audioOnlyProbe: ProbeResult = {
   container: "ogg",
   has_video: false,
   has_audio: true,
+  source_kind: "audio",
+  color_space: null,
+  image_format: null,
+};
+
+const imageProbe: ProbeResult = {
+  duration_ms: BigInt(0),
+  width: 1920,
+  height: 1080,
+  video_codec: null,
+  audio_codec: null,
+  file_size: BigInt(500_000),
+  container: null,
+  has_video: false,
+  has_audio: false,
+  source_kind: "image",
+  color_space: "sRGB",
+  image_format: "PNG",
 };
 
 function renderPage() {
@@ -127,7 +148,7 @@ describe("ConvertPage", () => {
     expect(mp4Btn.className).toContain("bg-sky-600");
   });
 
-  it("disables video targets for audio-only files", async () => {
+  it("hides video targets for audio-only files", async () => {
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
 
@@ -137,9 +158,10 @@ describe("ConvertPage", () => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
     });
 
-    const mp4Btn = screen.getByRole("button", { name: "MP4" });
-    expect(mp4Btn).toHaveProperty("disabled", true);
+    // Video targets should not be rendered for audio-only sources
+    expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
 
+    // Extract audio should be the smart default
     const extractBtn = screen.getByRole("button", { name: "Extract audio" });
     expect(extractBtn).toHaveProperty("disabled", false);
     expect(extractBtn.className).toContain("bg-sky-600");
@@ -199,5 +221,43 @@ describe("ConvertPage", () => {
     await waitFor(() => {
       expect(screen.queryByText("test-video.mp4")).toBeNull();
     });
+  });
+
+  it("shows image targets only for image sources", async () => {
+    mockProbe.mockResolvedValue(imageProbe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/browse/i));
+
+    await waitFor(() => {
+      expect(screen.getByText("test-video.mp4")).toBeDefined();
+    });
+
+    // Image targets should be visible
+    expect(screen.getByRole("button", { name: "PNG" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "JPEG" })).toBeDefined();
+
+    // Video targets should NOT be visible
+    expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "MKV" })).toBeNull();
+  });
+
+  it("shows compression presets for video targets", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/browse/i));
+
+    await waitFor(() => {
+      expect(screen.getByText("test-video.mp4")).toBeDefined();
+    });
+
+    // Quality preset buttons should be visible
+    expect(screen.getByRole("button", { name: "Fast" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Balanced" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Small" })).toBeDefined();
+    // Resolution cap should be visible (1080p, 720p, 480p)
+    expect(screen.getByRole("button", { name: "1080p" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "720p" })).toBeDefined();
   });
 });

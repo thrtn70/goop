@@ -2,14 +2,10 @@ import { useCallback, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import FileRow from "@/features/convert/FileRow";
+import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
+import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import type { TargetFormat } from "@/types";
-
-interface FileEntry {
-  path: string;
-  target: TargetFormat;
-  sourceDir: string;
-}
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -23,15 +19,34 @@ export default function ConvertPage() {
   const addPaths = useCallback((paths: string[]) => {
     setFiles((prev) => {
       const existing = new Set(prev.map((f) => f.path));
-      const fresh = paths
+      const fresh: FileEntry[] = paths
         .filter((p) => !existing.has(p))
-        .map((p) => ({ path: p, target: "mp4" as TargetFormat, sourceDir: dirname(p) }));
+        .map((p) => ({
+          path: p,
+          target: "mp4" as TargetFormat,
+          sourceDir: dirname(p),
+          qualityPreset: "original",
+          resolutionCap: "original",
+          gifOptions: null,
+        }));
       return [...prev, ...fresh];
     });
   }, []);
 
-  const handleTargetChange = useCallback((path: string, target: TargetFormat) => {
-    setFiles((prev) => prev.map((f) => (f.path === path ? { ...f, target } : f)));
+  const handleOptionsChange = useCallback((path: string, opts: FileRowOptions) => {
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.path === path
+          ? {
+              ...f,
+              target: opts.target,
+              qualityPreset: opts.qualityPreset,
+              resolutionCap: opts.resolutionCap,
+              gifOptions: opts.gifOptions,
+            }
+          : f,
+      ),
+    );
   }, []);
 
   const handleRemove = useCallback((path: string) => {
@@ -94,7 +109,7 @@ export default function ConvertPage() {
             <FileRow
               key={f.path}
               path={f.path}
-              onTargetChange={handleTargetChange}
+              onOptionsChange={handleOptionsChange}
               onRemove={handleRemove}
             />
           ))}

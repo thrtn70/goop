@@ -21,12 +21,15 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Light / dark / system theme.
 - Supported sites include YouTube, SoundCloud, TikTok, Instagram, Twitter/X, Vimeo, Reddit, and generic HTTP(S) media — anything `yt-dlp` handles.
 
-### Convert (v0.1.3)
+### Convert (v0.1.3+)
 
-- Drag and drop files (or browse) onto the Convert page.
-- Per-file metadata probe (duration, resolution, codecs, size) with smart default target selection.
-- Output formats: MP4, MKV, WebM, MP3, M4A, Opus, WAV, or extract audio with the original codec.
-- Automatic remux-vs-re-encode based on a built-in compatibility matrix — fast stream-copy when possible, quality re-encode when not.
+- Drag and drop files (or browse) onto the Convert page — video, audio, or images.
+- Per-file metadata probe with smart default target selection.
+- **Media formats**: MP4, MKV, WebM, GIF, AVI, MOV, MP3, M4A, Opus, WAV, FLAC, OGG, AAC, or extract audio with the original codec.
+- **Image formats** (v0.1.4): PNG, JPEG, WebP, BMP via bundled ImageMagick.
+- **Compression presets** (v0.1.4): Original, Fast, Balanced, Small quality tiers with optional resolution cap (1080p, 720p, 480p).
+- **Video-to-GIF** (v0.1.4): three size presets (320/480/720px) with optional duration trim.
+- Automatic remux-vs-re-encode based on a built-in compatibility matrix.
 - Single file: Save-As dialog for full control. Batch: outputs land next to each source file, or pick an override folder.
 - Live progress, speed, ETA, and per-job cancel in the shared queue sidebar.
 
@@ -36,7 +39,7 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 
 - **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
 - **macOS 13+** on Intel or Apple Silicon.
-- ~150 MB disk for the app + bundled sidecars.
+- ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, ImageMagick, yt-dlp).
 - A working network connection *only* when downloading.
 
 ---
@@ -83,9 +86,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1.3:
-- Trim / in-out point editing.
-- Quality and bitrate controls (compression presets).
+Planned after v0.1.4:
+- Document conversion (PPTX/DOCX to PDF via LibreOffice).
+- Image resize, quality slider, EXIF stripping.
 - Hardware-accelerated encoding (VideoToolbox, NVENC, AMF).
 - History-to-Convert shortcut (right-click a completed download to send it to Convert).
 - Signed macOS builds and a code-signed Windows installer.
