@@ -24,6 +24,27 @@ function dirname(p: string): string {
   return last > 0 ? normalized.slice(0, last) : ".";
 }
 
+/**
+ * Normalize a `CompressMode` for the IPC boundary.
+ *
+ * The ts-rs generated type has `value: bigint` for `TargetSizeBytes` because
+ * u64 in Rust maps to bigint. But Tauri's `invoke` JSON-serializes its
+ * payload, and `JSON.stringify` throws on BigInt. serde_json on the Rust
+ * side happily parses a plain JSON number into u64, and realistic
+ * compression targets (up to a few GB) are well within Number's safe
+ * integer range (2^53 bytes = ~9 PB), so we downgrade to Number here.
+ */
+function normalizeCompressMode(mode: CompressMode | null): CompressMode | null {
+  if (mode === null) return null;
+  if (mode.kind === "target_size_bytes") {
+    return {
+      kind: "target_size_bytes",
+      value: Number(mode.value) as unknown as bigint,
+    };
+  }
+  return mode;
+}
+
 function newBatchId(): string {
   try {
     return crypto.randomUUID();
@@ -106,7 +127,7 @@ export default function CompressActionBar({
           quality_preset: null,
           resolution_cap: null,
           gif_options: null,
-          compress_mode: f.mode,
+          compress_mode: normalizeCompressMode(f.mode),
           batch_id: null,
         });
       } else {
@@ -120,7 +141,7 @@ export default function CompressActionBar({
             quality_preset: null,
             resolution_cap: null,
             gif_options: null,
-            compress_mode: f.mode,
+            compress_mode: normalizeCompressMode(f.mode),
             batch_id: batchId,
           });
         }
