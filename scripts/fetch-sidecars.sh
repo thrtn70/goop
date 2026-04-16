@@ -12,10 +12,11 @@ case "$TARGET" in
     curl -L -o /tmp/ffmpeg.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
-    # ImageMagick 7 — portable zip from GitHub releases
+    # ImageMagick 7 — portable .7z from GitHub releases
     IM_VER="7.1.2-19"
-    curl -L -o /tmp/magick.zip "https://github.com/ImageMagick/ImageMagick/releases/download/${IM_VER}/ImageMagick-${IM_VER}-portable-Q16-HDRI-x64.zip"
-    unzip -p /tmp/magick.zip 'magick.exe' > "$OUT_DIR/magick-$TARGET.exe"
+    curl -L -o /tmp/magick.7z "https://github.com/ImageMagick/ImageMagick/releases/download/${IM_VER}/ImageMagick-${IM_VER}-portable-Q16-HDRI-x64.7z"
+    7z e -o/tmp/magick-extract /tmp/magick.7z magick.exe -r -y >/dev/null
+    cp /tmp/magick-extract/magick.exe "$OUT_DIR/magick-$TARGET.exe"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
     ;;
