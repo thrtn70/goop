@@ -12,9 +12,9 @@ case "$TARGET" in
     curl -L -o /tmp/ffmpeg.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
-    # ImageMagick 7 — portable zip
-    IM_VER="7.1.1-47"
-    curl -L -o /tmp/magick.zip "https://imagemagick.org/archive/binaries/ImageMagick-${IM_VER}-portable-Q16-HDRI-x64.zip"
+    # ImageMagick 7 — portable zip from GitHub releases
+    IM_VER="7.1.2-19"
+    curl -L -o /tmp/magick.zip "https://github.com/ImageMagick/ImageMagick/releases/download/${IM_VER}/ImageMagick-${IM_VER}-portable-Q16-HDRI-x64.zip"
     unzip -p /tmp/magick.zip 'magick.exe' > "$OUT_DIR/magick-$TARGET.exe"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
@@ -30,16 +30,15 @@ case "$TARGET" in
     unzip -o /tmp/ffprobe.zip -d /tmp/
     mv /tmp/ffprobe "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
-    # ImageMagick 7 — Homebrew bottle binary
-    if command -v brew &>/dev/null; then
-      MAGICK_BIN="$(brew --prefix imagemagick 2>/dev/null)/bin/magick" || true
+    # ImageMagick 7 — use Homebrew if available, otherwise install it
+    if ! command -v magick &>/dev/null; then
+      if command -v brew &>/dev/null; then
+        brew install --quiet imagemagick
+      else
+        echo "magick not found and brew unavailable"; exit 1
+      fi
     fi
-    if [[ -x "${MAGICK_BIN:-}" ]]; then
-      cp "$MAGICK_BIN" "$OUT_DIR/magick-$TARGET"
-    else
-      curl -L -o /tmp/magick.tar.gz "https://imagemagick.org/archive/binaries/magick"
-      cp /tmp/magick.tar.gz "$OUT_DIR/magick-$TARGET"
-    fi
+    cp "$(command -v magick)" "$OUT_DIR/magick-$TARGET"
     chmod +x "$OUT_DIR/magick-$TARGET"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
