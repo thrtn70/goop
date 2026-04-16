@@ -34,12 +34,15 @@ mod tests {
     }
 
     fn uuid_rand() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!("{n}")
+        let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{n}-{c}")
     }
 
     #[test]
