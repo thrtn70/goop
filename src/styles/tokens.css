@@ -1,0 +1,175 @@
+/*
+ * Goop Design Tokens
+ *
+ * All colors use OKLCH component triplets (lightness chroma hue)
+ * without the oklch() wrapper, so Tailwind can inject alpha values.
+ *
+ * Theme: dark is the default. Add .light class to <html> for light mode.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Dark theme (default)                                               */
+/* ------------------------------------------------------------------ */
+:root {
+  /* Surfaces — warm-tinted toward brand green (hue 160) */
+  --surface-0: 14% 0.008 160;
+  --surface-1: 18% 0.01 160;
+  --surface-2: 23% 0.012 160;
+  --surface-3: 28% 0.015 160;
+
+  /* Text / foreground */
+  --fg: 93% 0.005 160;
+  --fg-secondary: 68% 0.01 160;
+  --fg-muted: 48% 0.01 160;
+
+  /* Brand accent — warm teal-green */
+  --accent: 68% 0.14 160;
+  --accent-hover: 74% 0.15 160;
+  --accent-subtle: 24% 0.05 160;
+  --accent-fg: 98% 0.005 160;
+
+  /* Borders */
+  --border: 28% 0.01 160;
+  --border-subtle: 22% 0.008 160;
+
+  /* Semantic */
+  --success: 72% 0.14 145;
+  --success-subtle: 22% 0.04 145;
+  --error: 65% 0.18 20;
+  --error-subtle: 22% 0.05 20;
+  --warning: 78% 0.14 80;
+  --warning-subtle: 24% 0.05 80;
+
+  /* Spacing (4pt scale) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+
+  /* Typography scale (fixed rem for app UI) */
+  --text-xs: 0.6875rem;   /* 11px */
+  --text-sm: 0.8125rem;   /* 13px */
+  --text-base: 0.9375rem; /* 15px */
+  --text-lg: 1.125rem;    /* 18px */
+  --text-xl: 1.5rem;      /* 24px */
+  --text-2xl: 2rem;       /* 32px */
+
+  /* Line heights — darker bg needs more breathing room */
+  --leading-tight: 1.3;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.7;
+
+  /* Font families */
+  --font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Figtree', ui-sans-serif, system-ui, sans-serif;
+
+  /* Motion */
+  --duration-instant: 100ms;
+  --duration-fast: 200ms;
+  --duration-normal: 300ms;
+  --duration-slow: 500ms;
+  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 9999px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Light theme                                                        */
+/* ------------------------------------------------------------------ */
+:root.light {
+  /* Surfaces */
+  --surface-0: 98% 0.005 160;
+  --surface-1: 95% 0.008 160;
+  --surface-2: 91% 0.012 160;
+  --surface-3: 87% 0.018 160;
+
+  /* Text / foreground */
+  --fg: 17% 0.01 160;
+  --fg-secondary: 38% 0.015 160;
+  --fg-muted: 55% 0.01 160;
+
+  /* Accent — darker for contrast on light bg */
+  --accent: 42% 0.14 160;
+  --accent-hover: 36% 0.15 160;
+  --accent-subtle: 92% 0.04 160;
+  --accent-fg: 98% 0.005 160;
+
+  /* Borders */
+  --border: 85% 0.012 160;
+  --border-subtle: 90% 0.008 160;
+
+  /* Semantic */
+  --success: 45% 0.14 145;
+  --success-subtle: 93% 0.03 145;
+  --error: 48% 0.18 20;
+  --error-subtle: 94% 0.04 20;
+  --warning: 52% 0.14 80;
+  --warning-subtle: 94% 0.04 80;
+
+  /* Line heights — less compensation needed on light bg */
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+}
+
+/* ------------------------------------------------------------------ */
+/* System theme: follow OS preference                                 */
+/* ------------------------------------------------------------------ */
+:root.system {
+  /* Default dark — handled by :root above */
+}
+
+@media (prefers-color-scheme: light) {
+  :root.system {
+    --surface-0: 98% 0.005 160;
+    --surface-1: 95% 0.008 160;
+    --surface-2: 91% 0.012 160;
+    --surface-3: 87% 0.018 160;
+
+    --fg: 17% 0.01 160;
+    --fg-secondary: 38% 0.015 160;
+    --fg-muted: 55% 0.01 160;
+
+    --accent: 42% 0.14 160;
+    --accent-hover: 36% 0.15 160;
+    --accent-subtle: 92% 0.04 160;
+    --accent-fg: 98% 0.005 160;
+
+    --border: 85% 0.012 160;
+    --border-subtle: 90% 0.008 160;
+
+    --success: 45% 0.14 145;
+    --success-subtle: 93% 0.03 145;
+    --error: 48% 0.18 20;
+    --error-subtle: 94% 0.04 20;
+    --warning: 52% 0.14 80;
+    --warning-subtle: 94% 0.04 80;
+
+    --leading-tight: 1.25;
+    --leading-normal: 1.5;
+    --leading-relaxed: 1.65;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion                                                     */
+/* ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-instant: 0ms;
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+    --duration-slow: 0ms;
+  }
+}

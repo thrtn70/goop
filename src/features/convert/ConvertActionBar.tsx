@@ -89,21 +89,21 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
         type="button"
         disabled={disabled || busy || count === 0}
         onClick={() => void handleConvert()}
-        className="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white transition
-          enabled:hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+        className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out
+          enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {busy ? "Enqueuing…" : `Convert ${count} file${count !== 1 ? "s" : ""}`}
+        {busy ? "Enqueuing..." : `Convert ${count} file${count !== 1 ? "s" : ""}`}
       </button>
       {count > 1 && (
         <button
           type="button"
           onClick={() => void pickOverrideDir()}
-          className="text-xs text-neutral-400 hover:text-sky-400"
+          className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          {overrideDir ? `→ ${shortenPath(overrideDir)}` : "Change output folder…"}
+          {overrideDir ? `\u2192 ${shortenPath(overrideDir)}` : "Change output folder..."}
         </button>
       )}
-      {error && <span className="text-xs text-red-400">{error}</span>}
+      {error && <span className="text-xs text-error">{error}</span>}
     </div>
   );
 }
@@ -140,5 +140,5 @@ function extFor(target: TargetFormat): string {
 
 function shortenPath(p: string): string {
   const parts = p.replace(/\\/g, "/").split("/");
-  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : p;
+  return parts.length > 2 ? `\u2026/${parts.slice(-2).join("/")}` : p;
 }

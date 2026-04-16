@@ -32,32 +32,32 @@ export default function QueueSidebar() {
   }
 
   return (
-    <aside className="w-72 overflow-auto border-l border-neutral-800 bg-neutral-950 p-3">
-      <h3 className="text-xs font-semibold uppercase text-neutral-500">
+    <aside className="w-72 overflow-auto border-l border-subtle bg-surface-1 p-3" aria-label="Job queue">
+      <h3 aria-live="polite" aria-atomic="true" className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted">
         Queue ({running.length + queued.length})
       </h3>
       <div className="mt-2 space-y-1">
-        {[...running, ...queued].map((j) => (
-          <QueueRow key={jobIdKey(j.id)} job={j} />
+        {[...running, ...queued].map((j, i) => (
+          <QueueRow key={jobIdKey(j.id)} job={j} index={i} />
         ))}
       </div>
       {done.length > 0 && (
         <>
-          <div className="mt-4 flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase text-neutral-500">
+          <div className="mt-6 flex items-center justify-between">
+            <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted">
               Done ({done.length})
             </h3>
             <button
               type="button"
-              className="text-[10px] text-neutral-500 hover:text-white"
+              className="btn-press text-xs text-fg-muted transition duration-fast ease-out hover:text-fg"
               onClick={() => void handleClear()}
             >
               clear
             </button>
           </div>
           <div className="mt-2 space-y-1">
-            {done.map((j) => (
-              <QueueRow key={jobIdKey(j.id)} job={j} />
+            {done.map((j, i) => (
+              <QueueRow key={jobIdKey(j.id)} job={j} index={i} />
             ))}
           </div>
         </>

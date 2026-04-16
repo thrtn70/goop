@@ -70,33 +70,37 @@ export default function ConvertPage() {
     <div className="flex h-full flex-col p-6">
       <DropZone onFiles={addPaths}>
         {!hasFiles && (
-          <div className="flex flex-col items-center justify-center py-10 text-center text-neutral-500">
-            <div className="text-4xl">↻</div>
-            <p className="mt-2">
-              Drop files here to convert, or{" "}
+          <div className="enter-up flex flex-col items-center justify-center py-12 text-center">
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">
+              <path d="M20 28V12M14 18l6-6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+              <rect x="4" y="4" width="32" height="32" rx="6" strokeDasharray="4 3" />
+            </svg>
+            <p className="mt-3 text-sm text-fg-secondary">
+              Drop files here, or{" "}
               <button
                 type="button"
                 onClick={() => void handleBrowse()}
-                className="text-sky-400 underline hover:text-sky-300"
+                className="text-accent transition duration-fast ease-out hover:text-accent-hover"
               >
-                browse
+                pick from your computer
               </button>
               .
             </p>
+            <p className="mt-1 text-xs text-fg-muted">Video, audio, and images. Goop picks the best format automatically.</p>
           </div>
         )}
         {hasFiles && (
           <div className="p-3">
             <div className="mb-3 flex items-center justify-between">
-              <span className="text-xs text-neutral-400">
+              <span className="text-xs text-fg-muted">
                 {files.length} file{files.length !== 1 ? "s" : ""}
               </span>
               <button
                 type="button"
                 onClick={() => void handleBrowse()}
-                className="text-xs text-sky-400 hover:text-sky-300"
+                className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
               >
-                Add more…
+                Add more...
               </button>
             </div>
           </div>
@@ -105,10 +109,11 @@ export default function ConvertPage() {
 
       {hasFiles && (
         <div className="mt-4 flex flex-1 flex-col gap-2 overflow-auto">
-          {files.map((f) => (
+          {files.map((f, i) => (
             <FileRow
               key={f.path}
               path={f.path}
+              index={i}
               onOptionsChange={handleOptionsChange}
               onRemove={handleRemove}
             />
@@ -117,7 +122,7 @@ export default function ConvertPage() {
       )}
 
       {hasFiles && (
-        <div className="mt-4 border-t border-neutral-800 pt-4">
+        <div className="mt-4 border-t border-subtle pt-4">
           <ConvertActionBar
             files={files}
             disabled={false}

@@ -1,6 +1,147 @@
+@import "./tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root { height: 100%; }
-body { @apply bg-neutral-950 text-neutral-100 antialiased; font-family: ui-sans-serif, system-ui; }
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background-color: oklch(var(--surface-0));
+  color: oklch(var(--fg));
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-kerning: normal;
+}
+
+/* Tabular numbers for data-heavy contexts */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Focus-visible ring for keyboard navigation */
+:focus-visible {
+  outline: 2px solid oklch(var(--accent));
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Selection color */
+::selection {
+  background-color: oklch(var(--accent) / 0.3);
+  color: oklch(var(--fg));
+}
+
+/* Scrollbar styling for WebKit (Tauri uses WebKit/Chromium) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(var(--border));
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(var(--fg-muted));
+}
+
+/* ------------------------------------------------------------------ */
+/* Motion: Keyframes                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Entrance: fade + slide up from 8px below */
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Entrance: fade only (for reduced motion) */
+@keyframes enter-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Subtle breathing pulse for running state */
+@keyframes pulse-running {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Motion: Utility classes                                            */
+/* ------------------------------------------------------------------ */
+
+/* Staggered entrance — set --i on the element (0-based index) */
+.enter-stagger {
+  animation: enter-up var(--duration-normal) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 50ms);
+}
+
+/* Single entrance (no stagger) */
+.enter-up {
+  animation: enter-up var(--duration-normal) var(--ease-out) both;
+}
+
+/* Running pulse */
+.pulse-running {
+  animation: pulse-running 2s ease-in-out infinite;
+}
+
+/* Button press — scale down on active, spring back */
+.btn-press {
+  transition: transform var(--duration-instant) var(--ease-out);
+}
+
+.btn-press:active {
+  transform: scale(0.96);
+}
+
+/* Hover lift — subtle upward shift on hover */
+.hover-lift {
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.hover-lift:hover {
+  transform: translateY(-1px);
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion: respect accessibility                              */
+/* ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .enter-stagger,
+  .enter-up {
+    animation-name: enter-fade;
+    animation-duration: var(--duration-fast);
+    animation-delay: 0ms !important;
+  }
+
+  .pulse-running {
+    animation: none;
+  }
+
+  .hover-lift:hover {
+    transform: none;
+  }
+
+  .btn-press:active {
+    transform: none;
+  }
+}

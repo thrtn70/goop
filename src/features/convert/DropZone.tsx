@@ -35,15 +35,15 @@ export default function DropZone({ onFiles, children }: DropZoneProps) {
       mounted = false;
       void unlistenPromise.then((u) => u());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- subscribe once on mount; onFiles is stable via useCallback in parent
   }, []);
 
   return (
     <div
-      className={`min-h-[120px] rounded-lg border-2 border-dashed transition ${
+      className={`min-h-[120px] rounded-lg border-2 border-dashed transition duration-fast ease-out ${
         hovering
-          ? "border-sky-400 bg-sky-950/30"
-          : "border-neutral-700 bg-neutral-900/50"
+          ? "border-accent bg-accent-subtle"
+          : "border-border bg-surface-1/50"
       }`}
     >
       {children}

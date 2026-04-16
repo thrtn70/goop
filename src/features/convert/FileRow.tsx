@@ -29,6 +29,7 @@ export interface FileRowOptions {
 
 interface FileRowProps {
   path: string;
+  index?: number;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onRemove: (path: string) => void;
 }
@@ -58,7 +59,7 @@ function defaultGifOptions(): GifOptions {
   return { size_preset: "medium", trim_start_ms: null, trim_end_ms: null };
 }
 
-export default function FileRow({ path, onOptionsChange, onRemove }: FileRowProps) {
+export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: FileRowProps) {
   const [state, setState] = useState<FileState>({ phase: "probing" });
 
   const doProbe = async () => {
@@ -81,33 +82,35 @@ export default function FileRow({ path, onOptionsChange, onRemove }: FileRowProp
 
   useEffect(() => {
     void doProbe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- doProbe depends on path via closure; including it causes infinite re-probe loops
   }, [path]);
 
   if (state.phase === "probing") {
     return (
-      <div className="animate-pulse rounded border border-neutral-800 bg-neutral-900 p-3">
-        <div className="h-4 w-48 rounded bg-neutral-800" />
-        <div className="mt-2 h-3 w-32 rounded bg-neutral-800" />
+      <div className="enter-stagger animate-pulse rounded-lg bg-surface-1 p-3" style={{ "--i": index } as React.CSSProperties}>
+        <div className="h-4 w-48 rounded bg-surface-3" />
+        <div className="mt-2 h-3 w-32 rounded bg-surface-2" />
       </div>
     );
   }
 
   if (state.phase === "error") {
     return (
-      <div className="rounded border border-red-800 bg-red-950 p-3 text-sm">
+      <div className="enter-stagger rounded-lg bg-error-subtle p-3" style={{ "--i": index } as React.CSSProperties}>
         <div className="flex items-center justify-between">
-          <span className="truncate font-medium text-red-300">{basename(path)}</span>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => void doProbe()} className="text-xs text-sky-400 hover:text-sky-200">
-              Retry
-            </button>
-            <button type="button" onClick={() => onRemove(path)} className="text-xs text-red-400 hover:text-red-200">
-              Remove
-            </button>
-          </div>
+          <span className="truncate text-sm font-medium text-error">{basename(path)}</span>
+          <button type="button" onClick={() => onRemove(path)} className="btn-press shrink-0 text-xs text-fg-muted transition duration-fast ease-out hover:text-error">
+            Remove
+          </button>
         </div>
-        <p className="mt-1 text-xs text-red-400">{state.message}</p>
+        <p className="mt-1 text-xs text-error/80">{state.message}</p>
+        <button
+          type="button"
+          onClick={() => void doProbe()}
+          className="btn-press mt-2 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+        >
+          Try again
+        </button>
       </div>
     );
   }
@@ -138,14 +141,18 @@ export default function FileRow({ path, onOptionsChange, onRemove }: FileRowProp
   if (Number(p.file_size) > 0) meta.push(formatSize(Number(p.file_size)));
 
   return (
-    <div className="rounded border border-neutral-800 bg-neutral-900 p-3">
+    <div className="enter-stagger hover-lift rounded-lg bg-surface-1 p-3" style={{ "--i": index } as React.CSSProperties}>
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-sm font-medium text-neutral-200">{basename(path)}</span>
-        <button type="button" onClick={() => onRemove(path)} className="text-xs text-neutral-500 hover:text-red-400">
+        <span className="truncate text-sm font-medium text-fg">{basename(path)}</span>
+        <button
+          type="button"
+          onClick={() => onRemove(path)}
+          className="text-xs text-fg-muted transition duration-fast ease-out hover:text-error"
+        >
           Remove
         </button>
       </div>
-      <p className="mt-1 text-xs text-neutral-500">{meta.join(" · ")}</p>
+      <p className="mt-1 text-xs tabular-nums text-fg-muted">{meta.join(" · ")}</p>
       <div className="mt-2">
         <TargetPicker
           probe={p}

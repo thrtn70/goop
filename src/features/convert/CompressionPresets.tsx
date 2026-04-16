@@ -1,18 +1,18 @@
 import clsx from "clsx";
 import type { QualityPreset, ResolutionCap } from "@/types";
 
-const QUALITY_OPTIONS: { value: QualityPreset; label: string }[] = [
-  { value: "original", label: "Original" },
-  { value: "fast", label: "Fast" },
-  { value: "balanced", label: "Balanced" },
-  { value: "small", label: "Small" },
+const QUALITY_OPTIONS: { value: QualityPreset; label: string; hint: string }[] = [
+  { value: "original", label: "Original", hint: "Keep as-is, no re-encoding" },
+  { value: "fast", label: "Fast", hint: "Quick export, good quality" },
+  { value: "balanced", label: "Balanced", hint: "Smaller file, takes a bit longer" },
+  { value: "small", label: "Small", hint: "Smallest file, slowest export" },
 ];
 
-const RESOLUTION_OPTIONS: { value: ResolutionCap; label: string }[] = [
-  { value: "original", label: "Original" },
-  { value: "r1080p", label: "1080p" },
-  { value: "r720p", label: "720p" },
-  { value: "r480p", label: "480p" },
+const RESOLUTION_OPTIONS: { value: ResolutionCap; label: string; hint: string }[] = [
+  { value: "original", label: "Original", hint: "Keep the source resolution" },
+  { value: "r1080p", label: "1080p", hint: "Full HD" },
+  { value: "r720p", label: "720p", hint: "HD, good for sharing" },
+  { value: "r480p", label: "480p", hint: "SD, small files" },
 ];
 
 interface CompressionPresetsProps {
@@ -33,20 +33,21 @@ export default function CompressionPresets({
   if (!visible) return null;
 
   return (
-    <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-neutral-950 p-3">
+    <div className="mt-3 space-y-2 rounded-md bg-surface-0 p-3">
       <div>
-        <span className="mb-1 block text-[10px] uppercase text-neutral-500">Quality</span>
+        <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">Quality</span>
         <div className="flex gap-1.5">
           {QUALITY_OPTIONS.map((o) => (
             <button
               key={o.value}
               type="button"
+              title={o.hint}
               onClick={() => onQualityChange(o.value)}
               className={clsx(
-                "rounded px-2.5 py-1 text-xs font-medium transition",
+                "btn-press rounded-md px-2.5 py-1 text-xs font-medium transition duration-fast ease-out",
                 qualityPreset === o.value
-                  ? "bg-sky-600 text-white"
-                  : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700",
+                  ? "bg-accent text-accent-fg"
+                  : "bg-surface-2 text-fg-secondary hover:bg-surface-3",
               )}
             >
               {o.label}
@@ -55,18 +56,19 @@ export default function CompressionPresets({
         </div>
       </div>
       <div>
-        <span className="mb-1 block text-[10px] uppercase text-neutral-500">Max resolution</span>
+        <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">Max resolution</span>
         <div className="flex gap-1.5">
           {RESOLUTION_OPTIONS.map((o) => (
             <button
               key={o.value}
               type="button"
+              title={o.hint}
               onClick={() => onResolutionChange(o.value)}
               className={clsx(
-                "rounded px-2.5 py-1 text-xs font-medium transition",
+                "btn-press rounded-md px-2.5 py-1 text-xs font-medium transition duration-fast ease-out",
                 resolutionCap === o.value
-                  ? "bg-sky-600 text-white"
-                  : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700",
+                  ? "bg-accent text-accent-fg"
+                  : "bg-surface-2 text-fg-secondary hover:bg-surface-3",
               )}
             >
               {o.label}

@@ -105,14 +105,14 @@ describe("ConvertPage", () => {
   it("renders the empty drop zone with browse link", () => {
     renderPage();
     expect(screen.getByText(/drop files here/i)).toBeDefined();
-    expect(screen.getByText(/browse/i)).toBeDefined();
+    expect(screen.getByText(/pick from your computer/i)).toBeDefined();
   });
 
   it("shows file row after browse + probe", async () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -125,7 +125,7 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -138,21 +138,21 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
     });
 
     const mp4Btn = screen.getByRole("button", { name: "MP4" });
-    expect(mp4Btn.className).toContain("bg-sky-600");
+    expect(mp4Btn.className).toContain("bg-accent");
   });
 
   it("hides video targets for audio-only files", async () => {
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -164,17 +164,17 @@ describe("ConvertPage", () => {
     // Extract audio should be the smart default
     const extractBtn = screen.getByRole("button", { name: "Extract audio" });
     expect(extractBtn).toHaveProperty("disabled", false);
-    expect(extractBtn.className).toContain("bg-sky-600");
+    expect(extractBtn.className).toContain("bg-accent");
   });
 
   it("shows error state with retry on probe failure", async () => {
     mockProbe.mockRejectedValue({ code: "sidecar_missing", message: "ffprobe" });
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
-      expect(screen.getByText(/retry/i)).toBeDefined();
+      expect(screen.getByText(/try again/i)).toBeDefined();
     });
 
     expect(screen.getByText(/remove/i)).toBeDefined();
@@ -185,7 +185,7 @@ describe("ConvertPage", () => {
     mockFromFile.mockResolvedValue("job-id-1");
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -210,7 +210,7 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -227,7 +227,7 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(imageProbe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();
@@ -246,7 +246,7 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
-    await userEvent.click(screen.getByText(/browse/i));
+    await userEvent.click(screen.getByText(/pick from your computer/i));
 
     await waitFor(() => {
       expect(screen.getByText("test-video.mp4")).toBeDefined();

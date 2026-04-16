@@ -35,9 +35,9 @@ export default function GifOptionsPanel({
   maxDurationMs,
 }: GifOptionsPanelProps) {
   return (
-    <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-neutral-950 p-3">
+    <div className="mt-3 space-y-2 rounded-md bg-surface-0 p-3">
       <div>
-        <span className="mb-1 block text-[10px] uppercase text-neutral-500">GIF size</span>
+        <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">GIF size</span>
         <div className="flex gap-1.5">
           {SIZE_OPTIONS.map((o) => (
             <button
@@ -45,10 +45,10 @@ export default function GifOptionsPanel({
               type="button"
               onClick={() => onChange({ ...gifOptions, size_preset: o.value })}
               className={clsx(
-                "rounded px-2.5 py-1 text-xs font-medium transition",
+                "rounded-md px-2.5 py-1 text-xs font-medium transition duration-fast ease-out",
                 gifOptions.size_preset === o.value
-                  ? "bg-sky-600 text-white"
-                  : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700",
+                  ? "bg-accent text-accent-fg"
+                  : "bg-surface-2 text-fg-secondary hover:bg-surface-3",
               )}
             >
               {o.label} ({o.px}px)
@@ -57,16 +57,16 @@ export default function GifOptionsPanel({
         </div>
       </div>
       <div>
-        <span className="mb-1 block text-[10px] uppercase text-neutral-500">
+        <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
           Trim (optional) — source: {msToMmSs(maxDurationMs)}
         </span>
         <div className="flex items-center gap-2 text-xs">
-          <label className="flex items-center gap-1 text-neutral-400">
+          <label className="flex items-center gap-1 text-fg-secondary">
             Start
             <input
               type="text"
               placeholder="00:00"
-              className="w-16 rounded bg-neutral-800 px-2 py-1 text-neutral-200"
+              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
               defaultValue={
                 gifOptions.trim_start_ms != null
                   ? msToMmSs(Number(gifOptions.trim_start_ms))
@@ -78,12 +78,12 @@ export default function GifOptionsPanel({
               }}
             />
           </label>
-          <label className="flex items-center gap-1 text-neutral-400">
+          <label className="flex items-center gap-1 text-fg-secondary">
             End
             <input
               type="text"
               placeholder={msToMmSs(maxDurationMs)}
-              className="w-16 rounded bg-neutral-800 px-2 py-1 text-neutral-200"
+              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
               defaultValue={
                 gifOptions.trim_end_ms != null
                   ? msToMmSs(Number(gifOptions.trim_end_ms))

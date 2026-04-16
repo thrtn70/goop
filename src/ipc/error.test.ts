@@ -10,9 +10,13 @@ describe("formatError", () => {
     expect(formatError("already a string")).toBe("already a string");
   });
 
-  it("combines IpcError code + message", () => {
+  it("returns friendly message for known error codes", () => {
     expect(formatError({ code: "sidecar_missing", message: "yt-dlp" }))
-      .toBe("sidecar_missing: yt-dlp");
+      .toBe("A required helper tool is missing. Try reinstalling Goop.");
+  });
+
+  it("falls back to raw message for unknown codes", () => {
+    expect(formatError({ code: "cancelled", message: "user cancelled" })).toBe("user cancelled");
   });
 
   it("falls back to code-only when message missing", () => {

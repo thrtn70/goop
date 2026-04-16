@@ -3,6 +3,6 @@ import type { JobId } from "./JobId";
 import type { JobKind } from "./JobKind";
 import type { JobResult } from "./JobResult";
 import type { JobState } from "./JobState";
-import type { JsonValue } from "./serde_json/JsonValue";
+import type { JsonValue } from "../../crates/goop-core/serde_json/JsonValue";
 
 export type Job = { id: JobId, kind: JobKind, state: JobState, payload: JsonValue, result: JobResult | null, priority: number, attempts: number, created_at: bigint, started_at: bigint | null, finished_at: bigint | null, };
