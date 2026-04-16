@@ -33,6 +33,12 @@ pub fn config_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("settings.json"))
 }
 
+pub fn presets_file() -> PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("goop").join("presets.json"))
+        .unwrap_or_else(|| PathBuf::from("presets.json"))
+}
+
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("goop"))

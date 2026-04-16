@@ -21,6 +21,14 @@ pub struct Settings {
     pub yt_dlp_last_update_ms: Option<i64>,
     pub extract_concurrency: usize,
     pub convert_concurrency: usize,
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
+    #[serde(default)]
+    pub dismissed_update_version: Option<String>,
+}
+
+fn default_auto_check_updates() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -33,6 +41,8 @@ impl Default for Settings {
             yt_dlp_last_update_ms: None,
             extract_concurrency: (num_cpus::get() / 2).max(2),
             convert_concurrency: (num_cpus::get() / 4).max(1),
+            auto_check_updates: true,
+            dismissed_update_version: None,
         }
     }
 }
@@ -45,6 +55,8 @@ pub struct SettingsPatch {
     pub yt_dlp_last_update_ms: Option<i64>,
     pub extract_concurrency: Option<usize>,
     pub convert_concurrency: Option<usize>,
+    pub auto_check_updates: Option<bool>,
+    pub dismissed_update_version: Option<String>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -80,6 +92,12 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.convert_concurrency {
         next.convert_concurrency = v.max(1);
+    }
+    if let Some(v) = patch.auto_check_updates {
+        next.auto_check_updates = v;
+    }
+    if let Some(v) = patch.dismissed_update_version {
+        next.dismissed_update_version = Some(v);
     }
     next
 }

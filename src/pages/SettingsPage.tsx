@@ -46,6 +46,8 @@ export default function SettingsPage() {
               yt_dlp_last_update_ms: null,
               extract_concurrency: null,
               convert_concurrency: null,
+              auto_check_updates: null,
+              dismissed_update_version: null,
             })
           }
         />
@@ -61,6 +63,8 @@ export default function SettingsPage() {
               yt_dlp_last_update_ms: null,
               extract_concurrency: null,
               convert_concurrency: null,
+              auto_check_updates: null,
+              dismissed_update_version: null,
             })
           }
         >
@@ -84,6 +88,8 @@ export default function SettingsPage() {
               yt_dlp_last_update_ms: null,
               extract_concurrency: Number(e.target.value),
               convert_concurrency: null,
+              auto_check_updates: null,
+              dismissed_update_version: null,
             })
           }
         />
@@ -103,6 +109,8 @@ export default function SettingsPage() {
               yt_dlp_last_update_ms: null,
               extract_concurrency: null,
               convert_concurrency: Number(e.target.value),
+              auto_check_updates: null,
+              dismissed_update_version: null,
             })
           }
         />
