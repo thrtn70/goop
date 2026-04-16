@@ -1,10 +1,11 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ProgressEvent, QueueEvent, SidecarEvent } from "@/types";
+import type { ProgressEvent, QueueEvent, SidecarEvent, UpdateProgress } from "@/types";
 
 type Handlers = {
   onProgress?: (e: ProgressEvent) => void;
   onQueue?: (e: QueueEvent) => void;
   onSidecar?: (e: SidecarEvent) => void;
+  onUpdateProgress?: (e: UpdateProgress) => void;
 };
 
 export async function subscribeAll(h: Handlers): Promise<UnlistenFn> {
@@ -27,6 +28,13 @@ export async function subscribeAll(h: Handlers): Promise<UnlistenFn> {
     );
     unlisteners.push(
       await listen<SidecarEvent>("goop://sidecar/warning", (e) => h.onSidecar!(e.payload)),
+    );
+  }
+  if (h.onUpdateProgress) {
+    unlisteners.push(
+      await listen<UpdateProgress>("goop://update/progress", (e) =>
+        h.onUpdateProgress!(e.payload),
+      ),
     );
   }
   return () => unlisteners.forEach((u) => u());

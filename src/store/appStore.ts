@@ -1,5 +1,14 @@
 import { create } from "zustand";
-import type { Job, JobId, ProgressEvent, QueueEvent, Settings } from "@/types";
+import type {
+  Job,
+  JobId,
+  Preset,
+  ProgressEvent,
+  QueueEvent,
+  Settings,
+  SettingsPatch,
+  UpdateInfo,
+} from "@/types";
 import { api } from "@/ipc/commands";
 import { subscribeAll } from "@/ipc/events";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -25,6 +34,12 @@ export interface Toast {
   createdAt: number;
 }
 
+export type UpdateDownloadState = {
+  downloaded: number;
+  total: number;
+  active: boolean;
+};
+
 type AppStoreState = {
   settings: Settings | null;
   jobs: Job[];
@@ -32,6 +47,9 @@ type AppStoreState = {
   toasts: Toast[];
   /** Jobs finished while user was on a different page — clears on queue-focus. */
   unseenCompletions: number;
+  presets: Preset[];
+  updateInfo: UpdateInfo | null;
+  updateDownload: UpdateDownloadState | null;
   loadAll: () => Promise<void>;
   applyProgress: (e: ProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
@@ -40,6 +58,19 @@ type AppStoreState = {
   dismissToast: (id: string) => void;
   incrementUnseen: () => void;
   clearUnseen: () => void;
+  /**
+   * Fills the boilerplate `null` fields on `SettingsPatch` so callers can
+   * patch any subset of settings, and keeps the in-store `settings` fresh
+   * with the Rust-side result.
+   */
+  patchSettings: (partial: Partial<Settings>) => Promise<void>;
+  loadPresets: () => Promise<void>;
+  savePreset: (p: Preset) => Promise<void>;
+  deletePreset: (id: string) => Promise<void>;
+  checkForUpdate: () => Promise<void>;
+  dismissUpdate: (version: string) => Promise<void>;
+  applyUpdateProgress: (downloaded: number, total: number) => void;
+  startUpdateDownload: (url: string, total: number) => Promise<void>;
 };
 
 /**
@@ -67,12 +98,27 @@ function newToastId(): string {
   }
 }
 
-export const useAppStore = create<AppStoreState>((set) => ({
+function emptyPatch(): SettingsPatch {
+  return {
+    output_dir: null,
+    theme: null,
+    yt_dlp_last_update_ms: null,
+    extract_concurrency: null,
+    convert_concurrency: null,
+    auto_check_updates: null,
+    dismissed_update_version: null,
+  };
+}
+
+export const useAppStore = create<AppStoreState>((set, get) => ({
   settings: null,
   jobs: [],
   progressById: {},
   toasts: [],
   unseenCompletions: 0,
+  presets: [],
+  updateInfo: null,
+  updateDownload: null,
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
@@ -129,6 +175,49 @@ export const useAppStore = create<AppStoreState>((set) => ({
   clearUnseen() {
     set({ unseenCompletions: 0 });
   },
+  async patchSettings(partial) {
+    const patch: SettingsPatch = { ...emptyPatch(), ...partial } as SettingsPatch;
+    const next = await api.settings.set(patch);
+    set({ settings: next });
+  },
+  async loadPresets() {
+    const presets = await api.preset.list();
+    set({ presets });
+  },
+  async savePreset(p) {
+    const saved = await api.preset.save(p);
+    set((s) => {
+      const idx = s.presets.findIndex((x) => x.id === saved.id);
+      if (idx < 0) return { presets: [...s.presets, saved] };
+      const next = [...s.presets];
+      next[idx] = saved;
+      return { presets: next };
+    });
+  },
+  async deletePreset(id) {
+    await api.preset.delete(id);
+    set((s) => ({ presets: s.presets.filter((p) => p.id !== id) }));
+  },
+  async checkForUpdate() {
+    const info = await api.update.check();
+    set({ updateInfo: info });
+  },
+  async dismissUpdate(version) {
+    await get().patchSettings({ dismissed_update_version: version });
+  },
+  applyUpdateProgress(downloaded, total) {
+    set({ updateDownload: { downloaded, total, active: true } });
+  },
+  async startUpdateDownload(url, total) {
+    set({ updateDownload: { downloaded: 0, total, active: true } });
+    try {
+      await api.update.download(url);
+      set({ updateDownload: { downloaded: total, total, active: false } });
+    } catch (e) {
+      set({ updateDownload: null });
+      throw e;
+    }
+  },
 }));
 
 /**
@@ -142,6 +231,19 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
     await useAppStore.getState().loadAll();
   } catch {
     /* Tauri not available or backend not ready — continue with empty state. */
+  }
+  try {
+    await useAppStore.getState().loadPresets();
+  } catch {
+    /* presets unavailable — chips will render empty until a reload */
+  }
+  try {
+    const settings = useAppStore.getState().settings;
+    if (settings?.auto_check_updates) {
+      await useAppStore.getState().checkForUpdate();
+    }
+  } catch {
+    /* update check is opportunistic; offline is fine */
   }
 
   const refresh = async (): Promise<void> => {
@@ -163,6 +265,8 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
       onSidecar: () => {
         /* reserved for future sidecar-driven UI state */
       },
+      onUpdateProgress: (e) =>
+        useAppStore.getState().applyUpdateProgress(Number(e.downloaded), Number(e.total)),
     });
     return unlisten;
   } catch {
