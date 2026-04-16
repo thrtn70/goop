@@ -5,7 +5,8 @@ import FileRow from "@/features/convert/FileRow";
 import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
-import type { TargetFormat } from "@/types";
+import PresetChips from "@/features/presets/PresetChips";
+import type { Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -47,6 +48,15 @@ export default function ConvertPage() {
 
   const handleRemove = useCallback((path: string) => {
     setFiles((prev) => prev.filter((f) => f.path !== path));
+  }, []);
+
+  const applyPreset = useCallback((preset: Preset) => {
+    setFiles((prev) =>
+      prev.map((f) => ({
+        ...f,
+        target: preset.target,
+      })),
+    );
   }, []);
 
   const handleBrowse = async () => {
@@ -104,7 +114,13 @@ export default function ConvertPage() {
       </DropZone>
 
       {hasFiles && (
-        <div className="mt-4 flex flex-1 flex-col gap-2 overflow-auto">
+        <div className="mt-3">
+          <PresetChips kind="convert" onApply={applyPreset} />
+        </div>
+      )}
+
+      {hasFiles && (
+        <div className="mt-2 flex flex-1 flex-col gap-2 overflow-auto">
           {files.map((f, i) => (
             <FileRow
               key={f.path}

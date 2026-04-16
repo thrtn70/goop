@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
+import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import type { GifOptions, TargetFormat } from "@/types";
 
 export interface FileEntry {
@@ -35,6 +36,7 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
   const [overrideDir, setOverrideDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
 
   async function pickOverrideDir() {
@@ -117,7 +119,21 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
           {overrideDir ? `\u2192 ${shortenPath(overrideDir)}` : "Change output folder..."}
         </button>
       )}
+      {count > 0 && (
+        <button
+          type="button"
+          onClick={() => setSaveOpen(true)}
+          className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
+        >
+          Save as preset
+        </button>
+      )}
       {error && <span className="text-xs text-error">{error}</span>}
+      <PresetSaveDialog
+        open={saveOpen}
+        onClose={() => setSaveOpen(false)}
+        snapshot={{ target: files[0]?.target ?? "mp4" }}
+      />
     </div>
   );
 }

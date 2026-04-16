@@ -5,7 +5,8 @@ import CompressFileRow from "@/features/compress/CompressFileRow";
 import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
 import CompressActionBar from "@/features/compress/CompressActionBar";
 import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
-import type { TargetFormat } from "@/types";
+import PresetChips from "@/features/presets/PresetChips";
+import type { Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -71,6 +72,12 @@ export default function CompressPage() {
 
   const handleRemove = useCallback((path: string) => {
     setFiles((prev) => prev.filter((f) => f.path !== path));
+  }, []);
+
+  const applyPreset = useCallback((preset: Preset) => {
+    if (!preset.compress_mode) return;
+    const mode = preset.compress_mode;
+    setFiles((prev) => prev.map((f) => ({ ...f, mode })));
   }, []);
 
   const handleBrowse = async () => {
@@ -139,7 +146,13 @@ export default function CompressPage() {
       </DropZone>
 
       {hasFiles && (
-        <div className="mt-4 flex flex-1 flex-col gap-2 overflow-auto">
+        <div className="mt-3">
+          <PresetChips kind="compress" onApply={applyPreset} />
+        </div>
+      )}
+
+      {hasFiles && (
+        <div className="mt-2 flex flex-1 flex-col gap-2 overflow-auto">
           {files.map((f, i) => (
             <CompressFileRow
               key={f.path}

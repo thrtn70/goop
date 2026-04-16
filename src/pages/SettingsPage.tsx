@@ -1,16 +1,25 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { formatError } from "@/ipc/error";
+import { api } from "@/ipc/commands";
 import type { Theme } from "@/types";
 import { useAppStore } from "@/store/appStore";
+import SettingsSection from "@/components/SettingsSection";
+import PresetManager from "@/features/presets/PresetManager";
+import { useAppVersion } from "@/hooks/useAppVersion";
 
 export default function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const patchSettings = useAppStore((s) => s.patchSettings);
+  const updateInfo = useAppStore((s) => s.updateInfo);
+  const checkForUpdate = useAppStore((s) => s.checkForUpdate);
+  const version = useAppVersion();
   const [err, setErr] = useState<string | null>(null);
+  const [checkingForUpdate, setCheckingForUpdate] = useState(false);
+  const [ytDlpUpdateMsg, setYtDlpUpdateMsg] = useState<string | null>(null);
+  const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
 
   useEffect(() => {
-    // Apply theme to document root whenever settings change.
     if (settings?.theme) {
       document.documentElement.className = settings.theme === "dark" ? "" : settings.theme;
     }
@@ -24,6 +33,39 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleCheckNow() {
+    setCheckingForUpdate(true);
+    setErr(null);
+    try {
+      await checkForUpdate();
+    } catch (e) {
+      setErr(formatError(e));
+    } finally {
+      setCheckingForUpdate(false);
+    }
+  }
+
+  async function handleYtDlpUpdate() {
+    setYtDlpUpdating(true);
+    setYtDlpUpdateMsg(null);
+    try {
+      const status = await api.sidecar.updateYtDlp();
+      setYtDlpUpdateMsg(status.message || "yt-dlp is up to date.");
+    } catch (e) {
+      setYtDlpUpdateMsg(formatError(e));
+    } finally {
+      setYtDlpUpdating(false);
+    }
+  }
+
+  async function handleOpenReleases() {
+    try {
+      await api.update.openReleasesPage();
+    } catch (e) {
+      setErr(formatError(e));
+    }
+  }
+
   if (!settings)
     return (
       <div className="p-6 text-fg-muted" role="status" aria-live="polite">
@@ -32,58 +74,124 @@ export default function SettingsPage() {
     );
 
   return (
-    <div className="max-w-xl space-y-6 p-6">
+    <div className="mx-auto max-w-2xl space-y-4 p-6">
       <h2 className="font-display text-lg font-semibold text-fg">Settings</h2>
-      <Field
-        label="Output folder"
-        hint="Where finished downloads land. Drag-and-drop conversions save next to the source file unless you override here."
-      >
-        <input
-          className="w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-          defaultValue={settings.output_dir}
-          key={settings.output_dir}
-          onBlur={(e) => void patch({ output_dir: e.target.value })}
-        />
-      </Field>
-      <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
-        <select
-          className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-          value={settings.theme}
-          onChange={(e) => void patch({ theme: e.target.value as Theme })}
+
+      <SettingsSection title="General" description="Where things land and how many run at once.">
+        <Field
+          label="Output folder"
+          hint="Where finished downloads land. Drag-and-drop conversions save next to the source file unless you override here."
         >
-          <option value="system">System</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </Field>
-      <Field
-        label="Simultaneous downloads"
-        hint="How many URLs to download at once. Higher is faster but uses more bandwidth. Try 2-4 if things slow down."
-      >
-        <input
-          type="number"
-          min={1}
-          max={16}
-          className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-          defaultValue={settings.extract_concurrency}
-          key={`ec-${settings.extract_concurrency}`}
-          onBlur={(e) => void patch({ extract_concurrency: Number(e.target.value) })}
-        />
-      </Field>
-      <Field
-        label="Simultaneous processing"
-        hint="How many files to convert or compress at once. More uses extra CPU. Lower this if your computer gets hot or sluggish."
-      >
-        <input
-          type="number"
-          min={1}
-          max={16}
-          className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-          defaultValue={settings.convert_concurrency}
-          key={`cc-${settings.convert_concurrency}`}
-          onBlur={(e) => void patch({ convert_concurrency: Number(e.target.value) })}
-        />
-      </Field>
+          <input
+            className="w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            defaultValue={settings.output_dir}
+            key={settings.output_dir}
+            onBlur={(e) => void patch({ output_dir: e.target.value })}
+          />
+        </Field>
+        <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
+          <select
+            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            value={settings.theme}
+            onChange={(e) => void patch({ theme: e.target.value as Theme })}
+          >
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </Field>
+        <Field
+          label="Simultaneous downloads"
+          hint="How many URLs to download at once. Higher is faster but uses more bandwidth."
+        >
+          <input
+            type="number"
+            min={1}
+            max={16}
+            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            defaultValue={settings.extract_concurrency}
+            key={`ec-${settings.extract_concurrency}`}
+            onBlur={(e) => void patch({ extract_concurrency: Number(e.target.value) })}
+          />
+        </Field>
+        <Field
+          label="Simultaneous processing"
+          hint="How many files to convert or compress at once. Lower this if your computer gets hot or sluggish."
+        >
+          <input
+            type="number"
+            min={1}
+            max={16}
+            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            defaultValue={settings.convert_concurrency}
+            key={`cc-${settings.convert_concurrency}`}
+            onBlur={(e) => void patch({ convert_concurrency: Number(e.target.value) })}
+          />
+        </Field>
+      </SettingsSection>
+
+      <SettingsSection title="Updates" description="Keep Goop and its sidecars current.">
+        <label className="flex items-center gap-2 text-sm text-fg">
+          <input
+            type="checkbox"
+            checked={settings.auto_check_updates}
+            onChange={(e) => void patch({ auto_check_updates: e.target.checked })}
+            className="h-4 w-4 rounded border-subtle bg-surface-2 accent-accent"
+          />
+          <span>Check for updates on launch</span>
+        </label>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void handleCheckNow()}
+            disabled={checkingForUpdate}
+            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {checkingForUpdate ? "Checking..." : "Check for updates now"}
+          </button>
+          <span className="text-xs text-fg-muted">
+            {updateInfo
+              ? `Goop v${updateInfo.latest_version} is available`
+              : "You're running the latest version."}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 pt-2">
+          <button
+            type="button"
+            onClick={() => void handleYtDlpUpdate()}
+            disabled={ytDlpUpdating}
+            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {ytDlpUpdating ? "Updating..." : "Update yt-dlp"}
+          </button>
+          {ytDlpUpdateMsg && <span className="text-xs text-fg-muted">{ytDlpUpdateMsg}</span>}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="Presets" description="Named format + quality combinations for Convert and Compress.">
+        <PresetManager />
+      </SettingsSection>
+
+      <SettingsSection title="About">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-xs">
+          <dt className="text-fg-muted">Goop</dt>
+          <dd className="text-fg tabular-nums">{version.goop}</dd>
+          <dt className="text-fg-muted">yt-dlp</dt>
+          <dd className="text-fg tabular-nums">{version.ytDlp ?? "-"}</dd>
+          <dt className="text-fg-muted">ffmpeg</dt>
+          <dd className="text-fg">{version.ffmpeg ?? "-"}</dd>
+          <dt className="text-fg-muted">Platform</dt>
+          <dd className="text-fg">{version.os}</dd>
+        </dl>
+        <button
+          type="button"
+          onClick={() => void handleOpenReleases()}
+          className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+        >
+          View releases on GitHub →
+        </button>
+      </SettingsSection>
+
       {err && <p className="text-sm text-error">{err}</p>}
     </div>
   );
