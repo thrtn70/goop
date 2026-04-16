@@ -28,6 +28,7 @@ export * from './SourceKind';
 export * from './TargetFormat';
 export * from './Theme';
 export * from './UpdateInfo';
+export * from './UpdateProgress';
 export * from './UpdateStatus';
 export * from './UrlProbe';
 export * from './serde_json/JsonValue';

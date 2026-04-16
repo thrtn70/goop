@@ -43,3 +43,27 @@ pub async fn sidecar_update_yt_dlp(state: State<'_, AppState>) -> Result<UpdateS
     let checker = UpdateChecker::new(&state.resolver);
     checker.update_in_place().await.map_err(Into::into)
 }
+
+/// Run `yt-dlp --version` and return the trimmed stdout. Used by the
+/// Settings → About section; cheap enough to call on demand.
+#[tauri::command]
+pub async fn sidecar_yt_dlp_version(state: State<'_, AppState>) -> Result<String, IpcError> {
+    let checker = UpdateChecker::new(&state.resolver);
+    checker.current_version().await.map_err(Into::into)
+}
+
+/// Run `ffmpeg -version` and return the first line (contains the version).
+#[tauri::command]
+pub async fn sidecar_ffmpeg_version(state: State<'_, AppState>) -> Result<String, IpcError> {
+    let bin = state
+        .resolver
+        .resolve("ffmpeg")
+        .map_err(goop_core::IpcError::from)?;
+    let out = tokio::process::Command::new(&bin.path)
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| goop_core::IpcError::Unknown(format!("ffmpeg -version: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(stdout.lines().next().unwrap_or_default().trim().to_string())
+}

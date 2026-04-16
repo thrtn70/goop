@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod commands;
 pub mod events;
 pub mod state;
@@ -119,8 +120,16 @@ pub fn run() {
             commands::queue::queue_reveal,
             commands::sidecar::sidecar_status,
             commands::sidecar::sidecar_update_yt_dlp,
+            commands::sidecar::sidecar_yt_dlp_version,
+            commands::sidecar::sidecar_ffmpeg_version,
             commands::settings::settings_get,
             commands::settings::settings_set,
+            commands::preset::preset_list,
+            commands::preset::preset_save,
+            commands::preset::preset_delete,
+            commands::update::check_for_update,
+            commands::update::download_update,
+            commands::update::open_releases_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
