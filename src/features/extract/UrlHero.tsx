@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import type { UrlProbe, FormatOption } from "@/types";
@@ -56,10 +56,29 @@ export default function UrlHero({ url }: { url?: string }) {
     }
   }
 
-  // Auto-probe when a URL arrives via querystring
-  if (url && !probe && !loading && !error) {
-    void handleProbe(url);
-  }
+  useEffect(() => {
+    if (!url) return;
+    let cancelled = false;
+    (async () => {
+      cancelledRef.current = false;
+      setLoading(true);
+      setError(null);
+      setProbe(null);
+      setLastUrl(url);
+      try {
+        const result = await api.extract.probe(url);
+        if (!cancelled && !cancelledRef.current) setProbe(result);
+      } catch (e) {
+        if (!cancelled && !cancelledRef.current) setError(formatError(e));
+      } finally {
+        if (!cancelled && !cancelledRef.current) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      cancelledRef.current = true;
+    };
+  }, [url]);
 
   return (
     <div className="p-6">

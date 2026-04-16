@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
@@ -122,12 +122,14 @@ impl<'a> YtDlp<'a> {
 
         let mut output_path: Option<String> = None;
         let mut stderr_tail = String::new();
+        let mut last_progress_line: Option<String> = None;
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
+                    cleanup_partials(&req.output_dir, last_progress_line.as_deref());
                     return Err(GoopError::Cancelled);
                 }
                 line = out_reader.next_line() => {
@@ -135,6 +137,7 @@ impl<'a> YtDlp<'a> {
                         Some(l) => {
                             if let Some(ev) = parse_progress(job_id, &l) {
                                 self.sink.emit_progress(ev);
+                                last_progress_line = Some(l);
                             } else if !l.starts_with('[') && PathBuf::from(&l).exists() {
                                 output_path = Some(l);
                             }
@@ -146,6 +149,10 @@ impl<'a> YtDlp<'a> {
                     if let Ok(Some(l)) = line {
                         stderr_tail.push_str(&l);
                         stderr_tail.push('\n');
+                        if stderr_tail.len() > 8192 {
+                            let drop_to = stderr_tail.len() - 4096;
+                            stderr_tail = stderr_tail[drop_to..].to_string();
+                        }
                     }
                 }
             }
@@ -186,15 +193,24 @@ fn parse_format(v: &serde_json::Value) -> Option<FormatOption> {
     })
 }
 
+fn progress_regexes() -> &'static (Regex, Regex, Regex) {
+    static REGEXES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    REGEXES.get_or_init(|| {
+        (
+            Regex::new(r"(\d+\.\d+)%").expect("pct regex"),
+            Regex::new(r"at\s+([\d.]+\s*[KMG]?i?B/s)").expect("speed regex"),
+            Regex::new(r"ETA\s+(\d{2}:\d{2}(:\d{2})?)").expect("eta regex"),
+        )
+    })
+}
+
 /// Parse yt-dlp's `--newline` progress line, e.g.
 /// `[download]  42.3% of ~1.23MiB at 1.20MiB/s ETA 00:10`
 fn parse_progress(job_id: JobId, line: &str) -> Option<ProgressEvent> {
     if !line.starts_with("[download]") {
         return None;
     }
-    let pct_re = Regex::new(r"(\d+\.\d+)%").ok()?;
-    let speed_re = Regex::new(r"at\s+([\d.]+\s*[KMG]?i?B/s)").ok()?;
-    let eta_re = Regex::new(r"ETA\s+(\d{2}:\d{2}(:\d{2})?)").ok()?;
+    let (pct_re, speed_re, eta_re) = progress_regexes();
     let pct = pct_re
         .captures(line)?
         .get(1)?
@@ -216,6 +232,39 @@ fn parse_progress(job_id: JobId, line: &str) -> Option<ProgressEvent> {
         speed_hr: speed,
         stage: "downloading".into(),
     })
+}
+
+/// Best-effort removal of yt-dlp's `.part` / `.ytdl` partial files on cancel.
+/// yt-dlp doesn't emit the target filename until the move step, so we scan
+/// the output directory for recently-modified `.part` / `.ytdl` files. This
+/// is a best-effort cleanup — failures are silent by design (logged at debug).
+fn cleanup_partials(output_dir: &str, _last_progress_line: Option<&str>) {
+    let Ok(entries) = std::fs::read_dir(output_dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_partial = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e == "part" || e == "ytdl");
+        if !is_partial {
+            continue;
+        }
+        let recent = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m >= cutoff)
+            .unwrap_or(false);
+        if recent {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::debug!(path = %path.display(), error = %e, "failed to remove partial file");
+            }
+        }
+    }
 }
 
 fn parse_eta(s: &str) -> Option<u64> {

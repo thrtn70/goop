@@ -73,19 +73,20 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
         // Tag every enqueue in this batch with a shared id so toast
         // grouping can collapse them into a single summary notification.
         const batchId = newBatchId();
-        for (const f of files) {
-          const outDir = overrideDir ?? dirname(f.path);
-          await api.convert.fromFile({
-            input_path: f.path,
-            output_path: outDir,
-            target: f.target,
-            quality_preset: null,
-            resolution_cap: null,
-            gif_options: f.gifOptions,
-            compress_mode: null,
-            batch_id: batchId,
-          });
-        }
+        await Promise.all(
+          files.map((f) =>
+            api.convert.fromFile({
+              input_path: f.path,
+              output_path: overrideDir ?? dirname(f.path),
+              target: f.target,
+              quality_preset: null,
+              resolution_cap: null,
+              gif_options: f.gifOptions,
+              compress_mode: null,
+              batch_id: batchId,
+            }),
+          ),
+        );
       }
       setOverrideDir(null);
       onEnqueued();

@@ -38,16 +38,7 @@ export default function QueueSidebar() {
       className="w-72 overflow-auto border-l border-subtle bg-surface-1 p-3"
       aria-label="Job queue"
     >
-      <button
-        type="button"
-        onClick={() => clearUnseen()}
-        aria-label={
-          unseen > 0
-            ? `Queue, ${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`
-            : "Queue header"
-        }
-        className="flex w-full items-center gap-2 text-left"
-      >
+      <div className="flex w-full items-center gap-2">
         <h3
           aria-live="polite"
           aria-atomic="true"
@@ -56,11 +47,16 @@ export default function QueueSidebar() {
           Queue ({running.length + queued.length})
         </h3>
         {unseen > 0 && (
-          <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-accent-fg">
+          <button
+            type="button"
+            onClick={() => clearUnseen()}
+            aria-label={`${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`}
+            className="btn-press inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+          >
             {unseen > 99 ? "99+" : unseen}
-          </span>
+          </button>
         )}
-      </button>
+      </div>
       <div className="mt-2 space-y-1">
         {[...running, ...queued].map((j, i) => (
           <QueueRow key={jobIdKey(j.id)} job={j} index={i} />

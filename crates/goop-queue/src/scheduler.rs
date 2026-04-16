@@ -85,9 +85,12 @@ impl Scheduler {
             };
             let cancel = CancellationToken::new();
             self.cancels.insert(job.id, cancel.clone());
-            let _ = self
+            if let Err(e) = self
                 .store
-                .update_state(job.id, &JobState::Running, None, now_ms());
+                .update_state(job.id, &JobState::Running, None, now_ms())
+            {
+                tracing::warn!(?job.id, error = %e, "failed to persist Running state; in-memory event still emitted");
+            }
             self.sink.emit_queue(QueueEvent {
                 job_id: job.id,
                 state: JobState::Running,
@@ -109,7 +112,9 @@ impl Scheduler {
                         None,
                     ),
                 };
-                let _ = store.update_state(job.id, &state, result.as_ref(), now_ms());
+                if let Err(e) = store.update_state(job.id, &state, result.as_ref(), now_ms()) {
+                    tracing::warn!(?job.id, ?state, error = %e, "failed to persist terminal state; in-memory event still emitted");
+                }
                 sink.emit_queue(QueueEvent {
                     job_id: job.id,
                     state,

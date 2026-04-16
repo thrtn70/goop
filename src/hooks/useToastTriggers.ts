@@ -51,10 +51,16 @@ export function useToastTriggers(): void {
   const location = useLocation();
   const previousStatesRef = useRef<Map<string, string>>(new Map());
   const batchesRef = useRef<Map<string, Batch>>(new Map());
+  const pathRef = useRef(location.pathname);
+
+  // Keep pathRef in sync without re-subscribing to the store on every
+  // navigation. The subscription below reads pathRef.current inside the
+  // callback so it always sees the latest path.
+  useEffect(() => {
+    pathRef.current = location.pathname;
+  }, [location.pathname]);
 
   useEffect(() => {
-    // Subscribe to store changes; on every update, walk through jobs and
-    // compare prior vs current terminal state.
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
       if (state.jobs === prevState.jobs) return;
 
@@ -67,7 +73,6 @@ export function useToastTriggers(): void {
         const prevTerm = prev.get(key) ?? null;
 
         if (currentTerm && currentTerm !== prevTerm) {
-          // Transitioned into a terminal state.
           prev.set(key, currentTerm);
 
           const payload = job.payload as { batch_id?: string; input_path?: string; url?: string } | null;
@@ -92,10 +97,6 @@ export function useToastTriggers(): void {
             batch.kind = job.kind;
             batchesRef.current.set(batchId, batch);
 
-            // The batch is considered "settled" when the number of seen
-            // terminals equals the number of jobs with that batch_id. We
-            // don't know the batch total up-front, so we settle when there
-            // are no more running/queued jobs tagged with this batch.
             const stillOpen = state.jobs.some((j) => {
               const p = j.payload as { batch_id?: string } | null;
               return p?.batch_id === batchId && terminalName(j.state) === null;
@@ -108,11 +109,9 @@ export function useToastTriggers(): void {
             emitIndividualToast(enqueueToast, job.kind, currentTerm, sourceLabel, outputPath, errorMessage(job.state));
           }
 
-          // Increment unseen-completions counter if the user isn't on a
-          // page that corresponds to this job.
           if (currentTerm === "done") {
             const relevantPage = pageForKind(job.kind);
-            const path = location.pathname;
+            const path = pathRef.current;
             const onRelevantPage =
               path === relevantPage ||
               path === "/history" ||
@@ -125,7 +124,7 @@ export function useToastTriggers(): void {
       }
     });
     return () => unsubscribe();
-  }, [location.pathname]);
+  }, []);
 }
 
 function jobLabel(

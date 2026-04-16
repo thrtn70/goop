@@ -23,40 +23,34 @@ pub fn decide(
     res_cap: Option<ResolutionCap>,
     gif_opts: Option<&GifOptions>,
 ) -> Plan {
-    let force_reencode = matches!(
-        quality,
-        Some(QualityPreset::Fast) | Some(QualityPreset::Balanced) | Some(QualityPreset::Small)
-    );
+    // `force_preset` is `Some(q)` when the caller asked for a re-encoding
+    // preset. Binding the preset here (rather than using a parallel `bool`
+    // flag) lets the branches below destructure it without panicking if a
+    // new variant is added in future.
+    let force_preset = match quality {
+        Some(q @ (QualityPreset::Fast | QualityPreset::Balanced | QualityPreset::Small)) => Some(q),
+        _ => None,
+    };
 
     let mut plan = match target {
-        TargetFormat::Mp4 => {
-            if force_reencode {
-                plan_mp4_encode(quality.unwrap())
-            } else {
-                plan_mp4(vcodec, acodec)
-            }
-        }
-        TargetFormat::Mkv => {
-            if force_reencode {
-                plan_mkv_encode(quality.unwrap())
-            } else {
-                remux("mkv")
-            }
-        }
-        TargetFormat::Webm => {
-            if force_reencode {
-                plan_webm_encode(quality.unwrap())
-            } else {
-                plan_webm(vcodec, acodec)
-            }
-        }
+        TargetFormat::Mp4 => match force_preset {
+            Some(q) => plan_mp4_encode(q),
+            None => plan_mp4(vcodec, acodec),
+        },
+        TargetFormat::Mkv => match force_preset {
+            Some(q) => plan_mkv_encode(q),
+            None => remux("mkv"),
+        },
+        TargetFormat::Webm => match force_preset {
+            Some(q) => plan_webm_encode(q),
+            None => plan_webm(vcodec, acodec),
+        },
         TargetFormat::Gif => plan_gif(gif_opts),
         TargetFormat::Avi => plan_avi(vcodec, acodec),
         TargetFormat::Mov => {
-            let mut p = if force_reencode {
-                plan_mp4_encode(quality.unwrap())
-            } else {
-                plan_mp4(vcodec, acodec)
+            let mut p = match force_preset {
+                Some(q) => plan_mp4_encode(q),
+                None => plan_mp4(vcodec, acodec),
             };
             p.ext = "mov";
             p

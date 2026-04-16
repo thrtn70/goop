@@ -12,10 +12,25 @@ import type {
   UrlProbe,
 } from "@/types";
 
+// The ts-rs-generated `CompressMode` declares `value: bigint` for
+// `target_size_bytes` because u64 round-trips as bigint in JS. But Tauri
+// serializes IPC payloads via JSON.stringify, which throws on bigint. The
+// Rust side deserializes a plain JSON number into u64 fine, so the wire
+// type uses number. Callers normalize at the boundary and `api.convert.fromFile`
+// accepts the wire shape.
+export type IpcCompressMode =
+  | { kind: "quality"; value: number }
+  | { kind: "lossless_reoptimize" }
+  | { kind: "target_size_bytes"; value: number };
+
+export type IpcConvertRequest = Omit<ConvertRequest, "compress_mode"> & {
+  compress_mode: IpcCompressMode | null;
+};
+
 export const api = {
   convert: {
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
-    fromFile: (req: ConvertRequest) =>
+    fromFile: (req: IpcConvertRequest) =>
       invoke<JobId>("convert_from_file", { req }),
   },
   extract: {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api } from "@/ipc/commands";
+import { api, type IpcCompressMode } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import type { CompressMode, TargetFormat } from "@/types";
 
@@ -24,23 +24,10 @@ function dirname(p: string): string {
   return last > 0 ? normalized.slice(0, last) : ".";
 }
 
-/**
- * Normalize a `CompressMode` for the IPC boundary.
- *
- * The ts-rs generated type has `value: bigint` for `TargetSizeBytes` because
- * u64 in Rust maps to bigint. But Tauri's `invoke` JSON-serializes its
- * payload, and `JSON.stringify` throws on BigInt. serde_json on the Rust
- * side happily parses a plain JSON number into u64, and realistic
- * compression targets (up to a few GB) are well within Number's safe
- * integer range (2^53 bytes = ~9 PB), so we downgrade to Number here.
- */
-function normalizeCompressMode(mode: CompressMode | null): CompressMode | null {
+function normalizeCompressMode(mode: CompressMode | null): IpcCompressMode | null {
   if (mode === null) return null;
   if (mode.kind === "target_size_bytes") {
-    return {
-      kind: "target_size_bytes",
-      value: Number(mode.value) as unknown as bigint,
-    };
+    return { kind: "target_size_bytes", value: Number(mode.value) };
   }
   return mode;
 }
@@ -132,19 +119,20 @@ export default function CompressActionBar({
         });
       } else {
         const batchId = newBatchId();
-        for (const f of files) {
-          const outDir = overrideDir ?? dirname(f.path);
-          await api.convert.fromFile({
-            input_path: f.path,
-            output_path: outDir,
-            target: f.target,
-            quality_preset: null,
-            resolution_cap: null,
-            gif_options: null,
-            compress_mode: normalizeCompressMode(f.mode),
-            batch_id: batchId,
-          });
-        }
+        await Promise.all(
+          files.map((f) =>
+            api.convert.fromFile({
+              input_path: f.path,
+              output_path: overrideDir ?? dirname(f.path),
+              target: f.target,
+              quality_preset: null,
+              resolution_cap: null,
+              gif_options: null,
+              compress_mode: normalizeCompressMode(f.mode),
+              batch_id: batchId,
+            }),
+          ),
+        );
       }
       setOverrideDir(null);
       onEnqueued();
