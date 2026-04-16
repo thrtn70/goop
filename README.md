@@ -44,6 +44,13 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Toast notifications fire when jobs finish, fail, or cancel. Single-file jobs get per-file toasts; batch jobs get one summary toast when the batch settles.
 - Queue badge shows a count of completed jobs finished while you were on a different page. Click the queue header to clear.
 
+### Auto-update + saved presets (v0.1.7)
+
+- Checks GitHub for newer releases on launch (toggle in Settings). When an update is available, a banner lets you download and open the installer in one click — no separate browser trip.
+- Named presets remember your favourite target + quality + size combinations. Ships with four built-ins (YouTube Upload, Twitter/X Video, Podcast MP3, Web Image); save your own from the Convert or Compress page and apply them as chips.
+- Settings page regrouped into General, Updates, Presets, and About sections. About shows the current Goop / yt-dlp / ffmpeg versions.
+- One-click "Update yt-dlp" moved into Settings → Updates.
+
 ---
 
 ## Requirements
@@ -98,14 +105,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1.4:
-- Document conversion (PPTX/DOCX to PDF via LibreOffice).
-- Image resize, quality slider, EXIF stripping.
-- Hardware-accelerated encoding (VideoToolbox, NVENC, AMF).
-- History-to-Convert shortcut (right-click a completed download to send it to Convert).
+Planned after v0.1.7:
+- PDF tools (merge / split / compress).
+- Output previews + space-bar Quick View from History.
+- Hardware-accelerated encoding (VideoToolbox, NVENC, AMF, QSV).
+- Queue management (drag to reorder, pause/resume, batch cancel).
+- Keyboard shortcuts and command palette.
+- First-run onboarding and accessibility polish.
 - Signed macOS builds and a code-signed Windows installer.
-- Auto-update for the app shell itself.
-- Multi-URL batch paste.
 
 ## License
 

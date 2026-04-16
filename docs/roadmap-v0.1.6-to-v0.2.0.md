@@ -4,7 +4,7 @@
 > It is the source of truth for scope, priorities, and release boundaries.
 >
 > Last updated: 2026-04-16
-> Current version: v0.1.5
+> Current version: v0.1.7
 
 ---
 
@@ -32,7 +32,7 @@ app broader, deeper, AND more delightful simultaneously.
 
 ---
 
-## Current state (v0.1.5)
+## Current state (v0.1.7)
 
 ### What exists
 
@@ -40,18 +40,17 @@ app broader, deeper, AND more delightful simultaneously.
 |---|---|
 | **Extract** | Paste URL → probe → pick format → download via yt-dlp |
 | **Convert** | Drag-drop → probe → pick target → format swap. 18 targets (video/audio/image). Compat matrix with auto remux-vs-reencode. |
-| **Compress** | Compression presets (Original/Fast/Balanced/Small) + resolution cap live inside the Convert page |
+| **Compress** | Dedicated tab (v0.1.6) with Quality slider + Target-size mode for video, audio, image |
 | **Queue** | Sidebar with live progress, speed, ETA, cancel, reveal. Shared by extract + convert jobs |
 | **History** | Basic table of completed jobs (kind, output, size, duration) |
-| **Settings** | Output folder, theme (light/dark/system), extract + convert concurrency |
+| **Settings** | Grouped sections (v0.1.7): General, Updates, Presets, About |
+| **Toasts** | (v0.1.6) Per-job and batch summary notifications |
+| **Auto-update** | (v0.1.7) GitHub-backed check on launch, streaming download, auto-open installer |
+| **Presets** | (v0.1.7) Named format+quality combinations with 4 built-ins, chip picker on Convert+Compress |
 | **Design system** | OKLCH tokens, custom typography, motion primitives, light/dark/system theme, ErrorBoundary |
 
-### What's missing
+### What's missing (post-v0.1.7)
 
-- No toast/notification feedback when jobs complete
-- No dedicated compression UI (compression is embedded in Convert)
-- No auto-update / version checking
-- No saved presets / profiles
 - No PDF support
 - No output previews
 - No keyboard shortcuts (useHotkeys is a placeholder)
@@ -59,6 +58,7 @@ app broader, deeper, AND more delightful simultaneously.
 - History is minimal (no search, sort, filter, preview)
 - Queue has no reorder, pause/resume, or priority
 - No hardware-accelerated encoding
+- No preset import/export or sharing
 
 ---
 
