@@ -58,16 +58,17 @@ Grab the build for your OS from the [Releases page](https://github.com/thrtn70/g
 2. Open the DMG and drag **Goop.app** into `/Applications`.
 3. **Run once in Terminal** to clear the Gatekeeper quarantine flag:
    ```bash
-   xattr -cr /Applications/Goop.app
+   sudo xattr -cr /Applications/Goop.app
    ```
-   Goop is not signed with an Apple Developer ID, so macOS will otherwise refuse to launch it.
+   `sudo` is required because some bundled binaries have restricted permissions. Goop is not signed with an Apple Developer ID, so macOS will otherwise refuse to launch it.
 4. Open Goop from Launchpad or Spotlight.
 
 ---
 
 ## Tips & Troubleshooting
 
-- **"Goop.app can't be opened because Apple cannot check it for malicious software" (macOS).** Run the `xattr -cr` command in the installation section above.
+- **"Goop.app can't be opened because Apple cannot check it for malicious software" (macOS).** Run the `sudo xattr -cr` command in the installation section above.
+- **"Permission denied" when running `xattr -cr` (macOS).** Use `sudo xattr -cr /Applications/Goop.app` instead — some bundled binaries require elevated permissions to clear the quarantine flag.
 - **First download is slow or fails immediately.** Goop bundles `yt-dlp` but some sites change their internal APIs frequently. Open **Settings → Check for updates** to self-update the bundled `yt-dlp` to the latest release.
 - **Downloads stall or fail with "HTTP 403".** Usually means `yt-dlp` needs an update — same fix as above. If that doesn't help, the host may be blocking data-center IPs or require sign-in (Goop doesn't support authenticated sessions in v0.1).
 - **The audio-only checkbox produces video anyway.** Make sure the selected format row has `audio only` in the dropdown, or toggle the "audio only" checkbox and pick "Best (auto)".
