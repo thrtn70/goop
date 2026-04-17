@@ -43,13 +43,19 @@ pub enum ThumbError {
 #[derive(Clone)]
 pub struct ThumbnailService {
     data_dir: PathBuf,
+    /// Path to the bundled Ghostscript resource tree (Resource/, lib/,
+    /// iccprofiles/). Set at startup from Tauri's `resource_dir()`. The
+    /// gs invocations export this as `GS_LIB`. `None` means we assume gs
+    /// has its own resource-path baked in (dev builds where gs is on PATH).
+    gs_resource_dir: Option<PathBuf>,
     locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl ThumbnailService {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, gs_resource_dir: Option<PathBuf>) -> Self {
         Self {
             data_dir,
+            gs_resource_dir,
             locks: Arc::new(DashMap::new()),
         }
     }
@@ -104,7 +110,15 @@ impl ThumbnailService {
         match source_kind {
             SourceKind::Video => generate_video(resolver, output_path, &cached).await?,
             SourceKind::Image => generate_image(output_path, &cached)?,
-            SourceKind::Pdf => generate_pdf(resolver, output_path, &cached).await?,
+            SourceKind::Pdf => {
+                generate_pdf(
+                    resolver,
+                    self.gs_resource_dir.as_deref(),
+                    output_path,
+                    &cached,
+                )
+                .await?
+            }
             SourceKind::Audio => unreachable!("audio short-circuited above"),
         }
 
@@ -199,13 +213,19 @@ fn generate_image(input: &Path, output: &Path) -> Result<(), ThumbError> {
 
 async fn generate_pdf(
     resolver: &BinaryResolver,
+    gs_resource_dir: Option<&Path>,
     input: &Path,
     output: &Path,
 ) -> Result<(), ThumbError> {
     let bin = resolver
         .resolve("gs")
         .map_err(|e| ThumbError::SidecarMissing(e.to_string()))?;
-    let status = tokio::process::Command::new(&bin.path)
+    let mut cmd = tokio::process::Command::new(&bin.path);
+    if let Some(dir) = gs_resource_dir {
+        // Gs searches these dirs for Resource/, lib/, iccprofiles/.
+        cmd.env("GS_LIB", dir);
+    }
+    let status = cmd
         .arg("-sDEVICE=pngalpha")
         .arg("-r72")
         .arg("-dFirstPage=1")
@@ -234,7 +254,7 @@ mod tests {
     #[test]
     fn cache_path_uses_job_id_uuid() {
         let dir = tempdir().unwrap();
-        let svc = ThumbnailService::new(dir.path().to_path_buf());
+        let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
         let id = JobId::new();
         let p = svc.cache_path(&id);
         assert!(p.to_string_lossy().contains(&id.0.to_string()));
@@ -244,7 +264,7 @@ mod tests {
     #[test]
     fn evict_removes_tracked_thumb() {
         let dir = tempdir().unwrap();
-        let svc = ThumbnailService::new(dir.path().to_path_buf());
+        let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
         std::fs::create_dir_all(svc.cache_dir()).unwrap();
         let id = JobId::new();
         let p = svc.cache_path(&id);
@@ -257,7 +277,7 @@ mod tests {
     #[test]
     fn eviction_keeps_cache_under_budget() {
         let dir = tempdir().unwrap();
-        let svc = ThumbnailService::new(dir.path().to_path_buf());
+        let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
         std::fs::create_dir_all(svc.cache_dir()).unwrap();
         // Write three large-ish files whose total exceeds the budget.
         // Using a temporary smaller budget is awkward because it's a const;
@@ -275,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn audio_kind_returns_no_thumbnail_error() {
         let dir = tempdir().unwrap();
-        let svc = ThumbnailService::new(dir.path().to_path_buf());
+        let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
         let resolver = BinaryResolver::new(dir.path().to_path_buf());
         let err = svc
             .get(

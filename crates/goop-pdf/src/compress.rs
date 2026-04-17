@@ -18,11 +18,17 @@ fn pdf_settings_flag(q: PdfQuality) -> &'static str {
 /// The `resolver` must be able to locate the bundled `gs` binary (same
 /// pattern used for ffmpeg/yt-dlp).
 ///
+/// `gs_resource_dir` points at the bundled Resource/lib/iccprofiles tree
+/// and is exported as the `GS_LIB` env var so gs can find its init
+/// scripts. `None` is acceptable for dev environments where gs is on
+/// PATH with its compile-time resource dir intact.
+///
 /// Ghostscript writes everything to a single output file — no incremental
 /// output, so no streamed progress is available. We emit a cancellation
 /// check only at start/end for this reason.
 pub async fn compress(
     resolver: &BinaryResolver,
+    gs_resource_dir: Option<&Path>,
     input: &Path,
     output: &Path,
     quality: PdfQuality,
@@ -41,6 +47,9 @@ pub async fn compress(
     }
 
     let mut cmd = Command::new(&bin.path);
+    if let Some(dir) = gs_resource_dir {
+        cmd.env("GS_LIB", dir);
+    }
     cmd.arg("-sDEVICE=pdfwrite")
         .arg("-dCompatibilityLevel=1.4")
         .arg(format!("-dPDFSETTINGS={}", pdf_settings_flag(quality)))
@@ -132,6 +141,7 @@ mod tests {
         let resolver = BinaryResolver::new(std::env::current_dir().unwrap());
         compress(
             &resolver,
+            None,
             &source,
             &output,
             PdfQuality::Screen,

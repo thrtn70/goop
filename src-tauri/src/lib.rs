@@ -37,6 +37,17 @@ pub fn run() {
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             let resolver = Arc::new(BinaryResolver::new(sidecar_dir));
+
+            // Ghostscript ships its Resource/lib/iccprofiles tree via
+            // `bundle.resources` in tauri.conf.json. Resolve the runtime
+            // path so the gs invocations can export GS_LIB. `None` in dev
+            // builds falls back to gs's compile-time defaults.
+            let gs_resource_dir: Option<PathBuf> = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join("gs-resources"))
+                .filter(|p| p.exists());
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
             let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
@@ -91,8 +102,10 @@ pub fn run() {
             // points at the output directory since there are N files rather
             // than one — the UI formats the directory reveal-in-OS that way.
             let r_for_pdf = resolver.clone();
+            let gs_dir_for_pdf = gs_resource_dir.clone();
             let pdf_worker: WorkerFn = Arc::new(move |_id, payload, cancel| {
                 let r = r_for_pdf.clone();
+                let gs_dir = gs_dir_for_pdf.clone();
                 Box::pin(async move {
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
@@ -146,9 +159,16 @@ pub fn run() {
                         } => {
                             let in_path = PathBuf::from(input);
                             let out = PathBuf::from(output_path);
-                            pdf_compress::compress(&r, &in_path, &out, quality, cancel)
-                                .await
-                                .map_err(GoopError::from)?;
+                            pdf_compress::compress(
+                                &r,
+                                gs_dir.as_deref(),
+                                &in_path,
+                                &out,
+                                quality,
+                                cancel,
+                            )
+                            .await
+                            .map_err(GoopError::from)?;
                             let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
                             (Some(out.to_string_lossy().into_owned()), bytes)
                         }
@@ -186,7 +206,7 @@ pub fn run() {
                 async move { s_pdf.run_kind(goop_core::JobKind::Pdf).await },
             );
 
-            let thumbs = ThumbnailService::new(gpath::data_dir());
+            let thumbs = ThumbnailService::new(gpath::data_dir(), gs_resource_dir.clone());
             app.manage(AppState {
                 resolver,
                 store,
