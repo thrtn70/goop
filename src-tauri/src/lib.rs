@@ -2,17 +2,21 @@ pub mod app_update;
 pub mod commands;
 pub mod events;
 pub mod state;
+pub mod thumbnail;
 
 use events::TauriSink;
 use goop_config as cfg;
 use goop_converter::{ConversionBackend, FfmpegBackend, ImageMagickBackend};
-use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult};
+use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation};
 use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
+use goop_pdf::{compress as pdf_compress, merge as pdf_merge, split as pdf_split};
 use goop_queue::{QueueStore, Scheduler, WorkerFn};
 use goop_sidecar::BinaryResolver;
 use state::AppState;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
+use thumbnail::ThumbnailService;
 
 pub fn run() {
     tracing_subscriber::fmt()
@@ -81,12 +85,79 @@ pub fn run() {
                 })
             });
 
-            // Phase A stub — replaced with the real goop-pdf worker in Phase B.
-            let pdf_worker: WorkerFn = Arc::new(|_id, _payload, _cancel| {
+            // Real PDF worker: deserialize the op, run merge/split on a
+            // blocking thread (lopdf is sync), or dispatch compress to the
+            // async Ghostscript helper. `JobResult.output_path` for Split
+            // points at the output directory since there are N files rather
+            // than one — the UI formats the directory reveal-in-OS that way.
+            let r_for_pdf = resolver.clone();
+            let pdf_worker: WorkerFn = Arc::new(move |_id, payload, cancel| {
+                let r = r_for_pdf.clone();
                 Box::pin(async move {
-                    Err(GoopError::Queue(
-                        "PDF backend not yet implemented (arriving in v0.1.8 phase B)".into(),
-                    ))
+                    let op: PdfOperation = serde_json::from_value(payload)
+                        .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
+                    let started = std::time::Instant::now();
+                    let (output_path, bytes) = match op {
+                        PdfOperation::Merge {
+                            inputs,
+                            output_path,
+                        } => {
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let input_paths: Vec<PathBuf> =
+                                    inputs.into_iter().map(PathBuf::from).collect();
+                                let input_refs: Vec<&std::path::Path> =
+                                    input_paths.iter().map(|p| p.as_path()).collect();
+                                pdf_merge::merge(&input_refs, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
+                        }
+                        PdfOperation::Split {
+                            input,
+                            ranges,
+                            output_dir,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let dir = PathBuf::from(output_dir);
+                            let dir_for_task = dir.clone();
+                            let outputs = tokio::task::spawn_blocking(move || {
+                                pdf_split::split(&in_path, &ranges, &dir_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes: u64 = outputs
+                                .iter()
+                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                                .sum();
+                            // Report the output directory — the UI reveals
+                            // the folder so users see every file produced.
+                            (Some(dir.to_string_lossy().into_owned()), Some(bytes))
+                        }
+                        PdfOperation::Compress {
+                            input,
+                            output_path,
+                            quality,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            pdf_compress::compress(&r, &in_path, &out, quality, cancel)
+                                .await
+                                .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
+                        }
+                    };
+                    Ok(JobResult {
+                        output_path,
+                        bytes,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    })
                 })
             });
 
@@ -115,12 +186,14 @@ pub fn run() {
                 async move { s_pdf.run_kind(goop_core::JobKind::Pdf).await },
             );
 
+            let thumbs = ThumbnailService::new(gpath::data_dir());
             app.manage(AppState {
                 resolver,
                 store,
                 scheduler,
                 settings: parking_lot::RwLock::new(settings),
                 settings_path,
+                thumbs,
             });
             Ok(())
         })
@@ -145,6 +218,14 @@ pub fn run() {
             commands::update::check_for_update,
             commands::update::download_update,
             commands::update::open_releases_page,
+            commands::pdf::pdf_probe,
+            commands::pdf::pdf_run,
+            commands::history::history_list,
+            commands::history::history_counts,
+            commands::thumbnail::thumbnail_get,
+            commands::file::file_move_to_trash,
+            commands::file::job_forget,
+            commands::file::job_forget_many,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

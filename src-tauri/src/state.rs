@@ -1,3 +1,4 @@
+use crate::thumbnail::ThumbnailService;
 use goop_config::Settings;
 use goop_queue::{QueueStore, Scheduler};
 use goop_sidecar::BinaryResolver;
@@ -11,4 +12,5 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub settings: RwLock<Settings>,
     pub settings_path: PathBuf,
+    pub thumbs: ThumbnailService,
 }

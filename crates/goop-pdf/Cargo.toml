@@ -1,0 +1,19 @@
+[package]
+name = "goop-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+goop-core = { path = "../goop-core" }
+goop-sidecar = { path = "../goop-sidecar" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+lopdf = { version = "0.34", default-features = false, features = ["nom_parser", "rayon"] }
+
+[dev-dependencies]
+tempfile = "3"
