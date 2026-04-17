@@ -2,8 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
   ExtractRequest,
+  HistoryCounts,
+  HistoryFilter,
   Job,
   JobId,
+  PageRange,
+  PdfOperation,
+  PdfProbeResult,
+  PdfQuality,
   Preset,
   ProbeResult,
   Settings,
@@ -86,4 +92,44 @@ export const api = {
     download: (url: string) => invoke<void>("download_update", { url }),
     openReleasesPage: () => invoke<void>("open_releases_page"),
   },
+  pdf: {
+    probe: (path: string) => invoke<PdfProbeResult>("pdf_probe", { path }),
+    run: (op: PdfOperation) => invoke<JobId>("pdf_run", { op }),
+  },
+  history: {
+    list: (filter: HistoryFilter) => invoke<Job[]>("history_list", { filter }),
+    counts: () => invoke<HistoryCounts>("history_counts"),
+  },
+  thumbnail: {
+    get: (jobId: JobId) => invoke<string>("thumbnail_get", { jobId }),
+  },
+  file: {
+    moveToTrash: (path: string) => invoke<void>("file_move_to_trash", { path }),
+  },
+  job: {
+    forget: (jobId: JobId) => invoke<void>("job_forget", { jobId }),
+    forgetMany: (ids: JobId[]) => invoke<number>("job_forget_many", { ids }),
+  },
 } as const;
+
+// Helper: build a merge PdfOperation. Convenience for the frontend since
+// PdfOperation is a discriminated union and inline construction is wordy.
+export function pdfMerge(inputs: string[], outputPath: string): PdfOperation {
+  return { kind: "merge", inputs, output_path: outputPath };
+}
+
+export function pdfSplit(
+  input: string,
+  ranges: PageRange[],
+  outputDir: string,
+): PdfOperation {
+  return { kind: "split", input, ranges, output_dir: outputDir };
+}
+
+export function pdfCompress(
+  input: string,
+  outputPath: string,
+  quality: PdfQuality,
+): PdfOperation {
+  return { kind: "compress", input, output_path: outputPath, quality };
+}

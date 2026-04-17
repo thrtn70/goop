@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import type {
+  HistoryCounts,
+  HistoryFilter,
+  HistorySort,
+  HistoryViewMode,
   Job,
   JobId,
+  JobKind,
   Preset,
   ProgressEvent,
   QueueEvent,
@@ -40,6 +45,19 @@ export type UpdateDownloadState = {
   active: boolean;
 };
 
+export interface HistoryState {
+  search: string;
+  kind: JobKind | null;
+  sort: HistorySort;
+  descending: boolean;
+  viewMode: HistoryViewMode;
+  jobs: Job[];
+  counts: HistoryCounts | null;
+  /** String keys for selected rows (from `jobIdKey`). Used for batch actions. */
+  selectedIds: Set<string>;
+  previewSelectedId: string | null;
+}
+
 type AppStoreState = {
   settings: Settings | null;
   jobs: Job[];
@@ -50,6 +68,9 @@ type AppStoreState = {
   presets: Preset[];
   updateInfo: UpdateInfo | null;
   updateDownload: UpdateDownloadState | null;
+  history: HistoryState;
+  /** `job_id` (as a string key) -> filesystem path to cached thumbnail PNG. */
+  thumbnailsById: Record<string, string>;
   loadAll: () => Promise<void>;
   applyProgress: (e: ProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
@@ -71,6 +92,18 @@ type AppStoreState = {
   dismissUpdate: (version: string) => Promise<void>;
   applyUpdateProgress: (downloaded: number, total: number) => void;
   startUpdateDownload: (url: string, total: number) => Promise<void>;
+  /** Fetch the terminal-state job list + per-kind counts. */
+  loadHistory: () => Promise<void>;
+  setHistorySearch: (search: string) => void;
+  setHistoryKind: (kind: JobKind | null) => void;
+  setHistorySort: (sort: HistorySort, descending?: boolean) => void;
+  toggleHistoryViewMode: () => Promise<void>;
+  toggleHistorySelection: (jobId: JobId) => void;
+  clearHistorySelection: () => void;
+  setHistoryPreview: (jobId: JobId | null) => void;
+  forgetJobs: (ids: JobId[]) => Promise<void>;
+  trashJobs: (jobs: { id: JobId; path: string }[]) => Promise<void>;
+  loadThumbnail: (jobId: JobId) => Promise<string | null>;
 };
 
 /**
@@ -111,6 +144,27 @@ function emptyPatch(): SettingsPatch {
   };
 }
 
+const emptyHistory: HistoryState = {
+  search: "",
+  kind: null,
+  sort: "date",
+  descending: true,
+  viewMode: "list",
+  jobs: [],
+  counts: null,
+  selectedIds: new Set(),
+  previewSelectedId: null,
+};
+
+function currentFilter(h: HistoryState): HistoryFilter {
+  return {
+    search: h.search.trim() === "" ? null : h.search,
+    kind: h.kind,
+    sort: h.sort,
+    descending: h.descending,
+  };
+}
+
 export const useAppStore = create<AppStoreState>((set, get) => ({
   settings: null,
   jobs: [],
@@ -120,6 +174,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   presets: [],
   updateInfo: null,
   updateDownload: null,
+  history: emptyHistory,
+  thumbnailsById: {},
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
@@ -219,6 +275,113 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       throw e;
     }
   },
+  async loadHistory() {
+    const { history } = get();
+    const filter = currentFilter(history);
+    const [jobs, counts] = await Promise.all([
+      api.history.list(filter),
+      api.history.counts(),
+    ]);
+    set((s) => ({
+      history: {
+        ...s.history,
+        jobs,
+        counts,
+        // Prune any selections that point to rows no longer in the list.
+        selectedIds: new Set(
+          [...s.history.selectedIds].filter((id) =>
+            jobs.some((j) => jobIdKey(j.id) === id),
+          ),
+        ),
+      },
+    }));
+  },
+  setHistorySearch(search) {
+    set((s) => ({ history: { ...s.history, search } }));
+    void get().loadHistory();
+  },
+  setHistoryKind(kind) {
+    set((s) => ({ history: { ...s.history, kind } }));
+    void get().loadHistory();
+  },
+  setHistorySort(sort, descending) {
+    set((s) => ({
+      history: {
+        ...s.history,
+        sort,
+        descending:
+          descending ?? (s.history.sort === sort ? !s.history.descending : true),
+      },
+    }));
+    void get().loadHistory();
+  },
+  async toggleHistoryViewMode() {
+    const s = get();
+    const next = s.history.viewMode === "list" ? "grid" : "list";
+    set({ history: { ...s.history, viewMode: next } });
+    try {
+      await get().patchSettings({ history_view_mode: next });
+    } catch {
+      /* persist failure is non-fatal — the toggle still works for this session */
+    }
+  },
+  toggleHistorySelection(jobId) {
+    const key = jobIdKey(jobId);
+    set((s) => {
+      const ids = new Set(s.history.selectedIds);
+      if (ids.has(key)) ids.delete(key);
+      else ids.add(key);
+      return { history: { ...s.history, selectedIds: ids } };
+    });
+  },
+  clearHistorySelection() {
+    set((s) => ({ history: { ...s.history, selectedIds: new Set() } }));
+  },
+  setHistoryPreview(jobId) {
+    set((s) => ({
+      history: {
+        ...s.history,
+        previewSelectedId: jobId ? jobIdKey(jobId) : null,
+      },
+    }));
+  },
+  async forgetJobs(ids) {
+    if (ids.length === 0) return;
+    if (ids.length === 1) await api.job.forget(ids[0]);
+    else await api.job.forgetMany(ids);
+    // Drop cached thumbnails from the map so a future get doesn't serve the
+    // deleted path (backend removed the PNG).
+    set((s) => {
+      const thumbs = { ...s.thumbnailsById };
+      for (const id of ids) delete thumbs[jobIdKey(id)];
+      return { thumbnailsById: thumbs };
+    });
+    await get().loadHistory();
+  },
+  async trashJobs(jobs) {
+    for (const { path } of jobs) {
+      try {
+        await api.file.moveToTrash(path);
+      } catch (e) {
+        // Continue with the remaining jobs; surface the last error if every
+        // path failed. The UI shows a toast on rejection.
+        console.warn("trash failed for", path, e);
+      }
+    }
+    await get().forgetJobs(jobs.map((j) => j.id));
+  },
+  async loadThumbnail(jobId) {
+    const key = jobIdKey(jobId);
+    const existing = get().thumbnailsById[key];
+    if (existing) return existing;
+    try {
+      const path = await api.thumbnail.get(jobId);
+      set((s) => ({ thumbnailsById: { ...s.thumbnailsById, [key]: path } }));
+      return path;
+    } catch {
+      return null;
+    }
+  },
 }));
 
 /**
@@ -233,10 +396,23 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
   } catch {
     /* Tauri not available or backend not ready — continue with empty state. */
   }
+  // Hydrate history view mode from settings so a List/Grid toggle choice
+  // survives app restarts (the setting is persisted backend-side).
+  const bootSettings = useAppStore.getState().settings;
+  if (bootSettings) {
+    useAppStore.setState((s) => ({
+      history: { ...s.history, viewMode: bootSettings.history_view_mode },
+    }));
+  }
   try {
     await useAppStore.getState().loadPresets();
   } catch {
     /* presets unavailable — chips will render empty until a reload */
+  }
+  try {
+    await useAppStore.getState().loadHistory();
+  } catch {
+    /* history unavailable (Tauri mock or first-launch with fresh DB) */
   }
   try {
     const settings = useAppStore.getState().settings;
@@ -256,12 +432,29 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
     }
   };
 
+  // When a job transitions (most commonly to a terminal state), the History
+  // page's list view can go stale. Reload lazily — single SQL query, cheap.
+  const refreshHistory = async (): Promise<void> => {
+    try {
+      await useAppStore.getState().loadHistory();
+    } catch {
+      /* transient */
+    }
+  };
+
   try {
     const unlisten = await subscribeAll({
       onProgress: (e) => useAppStore.getState().applyProgress(e),
       onQueue: (e) => {
         useAppStore.getState().applyQueue(e);
         void refresh();
+        // Terminal transitions affect the History page; keep it in sync.
+        const term = e.state;
+        const isTerminal =
+          typeof term === "string"
+            ? term === "done" || term === "cancelled"
+            : "error" in term;
+        if (isTerminal) void refreshHistory();
       },
       onSidecar: () => {
         /* reserved for future sidecar-driven UI state */
