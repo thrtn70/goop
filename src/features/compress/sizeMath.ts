@@ -42,7 +42,7 @@ export function adviseTargetSize(
   targetBytes: number,
   sourceBytes: number,
   durationMs: number,
-  sourceKind: "video" | "audio" | "image",
+  sourceKind: "video" | "audio" | "image" | "pdf",
 ): TargetSizeAdvice {
   if (targetBytes <= 0) {
     return { level: "error", message: "Enter a size greater than zero." };
@@ -53,7 +53,10 @@ export function adviseTargetSize(
       message: "Target is larger than the source. Compression won't save space.",
     };
   }
-  if (sourceKind === "image") return { level: "ok", message: null };
+  // PDFs and images skip the duration-based bitrate advice — they don't
+  // have a duration. CompressControls shouldn't render for PDFs in v0.1.8
+  // (PdfOperationPicker handles that flow), but widen here defensively.
+  if (sourceKind === "image" || sourceKind === "pdf") return { level: "ok", message: null };
 
   if (durationMs > 0) {
     const kbps = (targetBytes * 8) / 1000 / (durationMs / 1000);

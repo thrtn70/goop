@@ -1,4 +1,4 @@
-use goop_core::{path::expand, GoopError};
+use goop_core::{path::expand, GoopError, HistoryViewMode};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ts_rs::TS;
@@ -25,6 +25,8 @@ pub struct Settings {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub dismissed_update_version: Option<String>,
+    #[serde(default)]
+    pub history_view_mode: HistoryViewMode,
 }
 
 fn default_auto_check_updates() -> bool {
@@ -43,6 +45,7 @@ impl Default for Settings {
             convert_concurrency: (num_cpus::get() / 4).max(1),
             auto_check_updates: true,
             dismissed_update_version: None,
+            history_view_mode: HistoryViewMode::default(),
         }
     }
 }
@@ -57,6 +60,7 @@ pub struct SettingsPatch {
     pub convert_concurrency: Option<usize>,
     pub auto_check_updates: Option<bool>,
     pub dismissed_update_version: Option<String>,
+    pub history_view_mode: Option<HistoryViewMode>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -98,6 +102,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.dismissed_update_version {
         next.dismissed_update_version = Some(v);
+    }
+    if let Some(v) = patch.history_view_mode {
+        next.history_view_mode = v;
     }
     next
 }

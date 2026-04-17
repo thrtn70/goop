@@ -44,7 +44,7 @@ function availabilityFor(probe: ProbeResult): Availability {
   return { quality: true, targetSize: true, lossless: false, hint: null };
 }
 
-function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" {
+function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf" {
   return probe.source_kind;
 }
 

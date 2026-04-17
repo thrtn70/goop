@@ -165,6 +165,7 @@ describe("UpdateBanner", () => {
     convert_concurrency: 2,
     auto_check_updates: true,
     dismissed_update_version: null,
+    history_view_mode: "list",
   };
 
   it("renders nothing when no update is available", () => {

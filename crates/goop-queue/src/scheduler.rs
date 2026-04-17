@@ -23,27 +23,34 @@ pub struct Scheduler {
     sink: Arc<dyn EventSink>,
     extract_sem: Arc<Semaphore>,
     convert_sem: Arc<Semaphore>,
+    pdf_sem: Arc<Semaphore>,
     extract_worker: WorkerFn,
     convert_worker: WorkerFn,
+    pdf_worker: WorkerFn,
     cancels: Arc<DashMap<JobId, CancellationToken>>,
 }
 
 impl Scheduler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: QueueStore,
         sink: Arc<dyn EventSink>,
         extract_concurrency: usize,
         convert_concurrency: usize,
+        pdf_concurrency: usize,
         extract_worker: WorkerFn,
         convert_worker: WorkerFn,
+        pdf_worker: WorkerFn,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             sink,
             extract_sem: Arc::new(Semaphore::new(extract_concurrency.max(1))),
             convert_sem: Arc::new(Semaphore::new(convert_concurrency.max(1))),
+            pdf_sem: Arc::new(Semaphore::new(pdf_concurrency.max(1))),
             extract_worker,
             convert_worker,
+            pdf_worker,
             cancels: Arc::new(DashMap::new()),
         })
     }
@@ -56,6 +63,8 @@ impl Scheduler {
         tokio::spawn(async move { s1.run_kind(JobKind::Extract).await });
         let s2 = self.clone();
         tokio::spawn(async move { s2.run_kind(JobKind::Convert).await });
+        let s3 = self.clone();
+        tokio::spawn(async move { s3.run_kind(JobKind::Pdf).await });
     }
 
     /// One worker loop for a given kind. Public so callers that aren't inside a
@@ -65,10 +74,12 @@ impl Scheduler {
         let sem = match kind {
             JobKind::Extract => self.extract_sem.clone(),
             JobKind::Convert => self.convert_sem.clone(),
+            JobKind::Pdf => self.pdf_sem.clone(),
         };
         let worker = match kind {
             JobKind::Extract => self.extract_worker.clone(),
             JobKind::Convert => self.convert_worker.clone(),
+            JobKind::Pdf => self.pdf_worker.clone(),
         };
         loop {
             let Ok(permit) = sem.clone().acquire_owned().await else {
@@ -171,7 +182,16 @@ mod tests {
             })
         });
 
-        let s = Scheduler::new(store.clone(), sink.clone(), 1, 1, extract_worker, noop);
+        let s = Scheduler::new(
+            store.clone(),
+            sink.clone(),
+            1,
+            1,
+            1,
+            extract_worker,
+            noop.clone(),
+            noop,
+        );
         s.clone().run_forever();
 
         let j = Job::new(JobKind::Extract, serde_json::Value::Null);

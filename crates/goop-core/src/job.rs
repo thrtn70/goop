@@ -29,6 +29,7 @@ impl Default for JobId {
 pub enum JobKind {
     Extract,
     Convert,
+    Pdf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

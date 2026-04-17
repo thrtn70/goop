@@ -81,13 +81,24 @@ pub fn run() {
                 })
             });
 
+            // Phase A stub — replaced with the real goop-pdf worker in Phase B.
+            let pdf_worker: WorkerFn = Arc::new(|_id, _payload, _cancel| {
+                Box::pin(async move {
+                    Err(GoopError::Queue(
+                        "PDF backend not yet implemented (arriving in v0.1.8 phase B)".into(),
+                    ))
+                })
+            });
+
             let scheduler = Scheduler::new(
                 store.clone(),
                 sink,
                 settings.extract_concurrency,
                 settings.convert_concurrency,
+                1,
                 extract_worker,
                 convert_worker,
+                pdf_worker,
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
             // so spawn the worker loops on Tauri's own async runtime.
@@ -99,6 +110,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 s_convert.run_kind(goop_core::JobKind::Convert).await
             });
+            let s_pdf = scheduler.clone();
+            tauri::async_runtime::spawn(
+                async move { s_pdf.run_kind(goop_core::JobKind::Pdf).await },
+            );
 
             app.manage(AppState {
                 resolver,

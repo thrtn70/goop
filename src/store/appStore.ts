@@ -107,6 +107,7 @@ function emptyPatch(): SettingsPatch {
     convert_concurrency: null,
     auto_check_updates: null,
     dismissed_update_version: null,
+    history_view_mode: null,
   };
 }
 
