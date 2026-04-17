@@ -51,6 +51,22 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Settings page regrouped into General, Updates, Presets, and About sections. About shows the current Goop / yt-dlp / ffmpeg versions.
 - One-click "Update yt-dlp" moved into Settings → Updates.
 
+### PDF tools (v0.1.8)
+
+- Drop PDFs on the Convert page to switch into PDF mode — **Merge**, **Split**, or **Compress**. Merge supports drag-to-reorder; Split takes a range string like `1-3, 7-10`; Compress runs the file through a bundled Ghostscript sidecar with three quality presets (Screen / Ebook / Printer).
+- Everything is local — no cloud calls, no file uploads.
+
+### Output preview + Quick View (v0.1.8)
+
+- Click a completed job in **History** to open a slide-out preview panel with a thumbnail, metadata, and quick actions: **Reveal in Finder**, **Convert again** (pre-fills the Convert page with the output), and a **Delete ▾** menu that separates "Remove from history" (DB only) from "Move to Trash" (OS trash + DB).
+- Focus a row and press **Space** for Quick View — a larger centered overlay. ← and → cycle through the filtered list; Space, Escape, or clicking outside closes.
+
+### History redesign (v0.1.8)
+
+- Search by filename (150ms debounce), filter chips for Extract / Convert / PDF with live counts, sortable column headers for date / size / name.
+- List view or grid view (persists across restarts). Grid lazy-loads thumbnails as cards scroll into view.
+- Multi-select rows with checkboxes → batch **Reveal all**, **Remove from history**, or **Move to Trash**.
+
 ---
 
 ## Requirements
@@ -105,13 +121,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1.7:
-- PDF tools (merge / split / compress).
-- Output previews + space-bar Quick View from History.
+Planned after v0.1.8:
 - Hardware-accelerated encoding (VideoToolbox, NVENC, AMF, QSV).
 - Queue management (drag to reorder, pause/resume, batch cancel).
 - Keyboard shortcuts and command palette.
 - First-run onboarding and accessibility polish.
+- Audio waveform thumbnails.
+- Preset import/export and shared presets.
 - Signed macOS builds and a code-signed Windows installer.
 
 ## License

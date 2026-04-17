@@ -3,8 +3,8 @@
 > Load this file at the start of any new session working toward v0.2.0.
 > It is the source of truth for scope, priorities, and release boundaries.
 >
-> Last updated: 2026-04-16
-> Current version: v0.1.7
+> Last updated: 2026-04-17
+> Current version: v0.1.8 (local, not yet published)
 
 ---
 
@@ -32,7 +32,7 @@ app broader, deeper, AND more delightful simultaneously.
 
 ---
 
-## Current state (v0.1.7)
+## Current state (v0.1.8, local)
 
 ### What exists
 
@@ -41,24 +41,27 @@ app broader, deeper, AND more delightful simultaneously.
 | **Extract** | Paste URL → probe → pick format → download via yt-dlp |
 | **Convert** | Drag-drop → probe → pick target → format swap. 18 targets (video/audio/image). Compat matrix with auto remux-vs-reencode. |
 | **Compress** | Dedicated tab (v0.1.6) with Quality slider + Target-size mode for video, audio, image |
-| **Queue** | Sidebar with live progress, speed, ETA, cancel, reveal. Shared by extract + convert jobs |
-| **History** | Basic table of completed jobs (kind, output, size, duration) |
+| **PDF** | (v0.1.8) Merge (lopdf) / Split (lopdf) / Compress (Ghostscript sidecar) |
+| **Queue** | Sidebar with live progress, speed, ETA, cancel, reveal. Shared by extract + convert + pdf jobs |
+| **History** | (v0.1.8) Search / filter chips / sort / List-or-Grid / batch select / slide-out preview / Quick View modal |
 | **Settings** | Grouped sections (v0.1.7): General, Updates, Presets, About |
 | **Toasts** | (v0.1.6) Per-job and batch summary notifications |
 | **Auto-update** | (v0.1.7) GitHub-backed check on launch, streaming download, auto-open installer |
 | **Presets** | (v0.1.7) Named format+quality combinations with 4 built-ins, chip picker on Convert+Compress |
+| **Thumbnails** | (v0.1.8) Lazy on-demand; cached at `data_dir/thumbs/<job-id>.png`; 500 MB LRU budget |
+| **Trash** | (v0.1.8) OS-native via `trash` crate; two-step delete UX (remove vs trash) |
 | **Design system** | OKLCH tokens, custom typography, motion primitives, light/dark/system theme, ErrorBoundary |
 
-### What's missing (post-v0.1.7)
+### What's missing (post-v0.1.8)
 
-- No PDF support
-- No output previews
 - No keyboard shortcuts (useHotkeys is a placeholder)
 - No onboarding
-- History is minimal (no search, sort, filter, preview)
 - Queue has no reorder, pause/resume, or priority
 - No hardware-accelerated encoding
+- No audio waveform thumbnails
 - No preset import/export or sharing
+- No PDF password/encryption handling
+- No SHA verification of downloaded update assets
 
 ---
 
