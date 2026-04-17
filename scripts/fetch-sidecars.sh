@@ -21,7 +21,10 @@ case "$TARGET" in
     curl -L -o /tmp/gs.exe \
       "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs${GS_VER_NODOT}/gs${GS_VER_NODOT}w64.exe"
     rm -rf /tmp/gs_extract
-    7z x /tmp/gs.exe -o/tmp/gs_extract > /dev/null
+    # 7z isn't on Git Bash's PATH by default; use the absolute path the
+    # windows-latest runner ships with.
+    SEVENZIP="/c/Program Files/7-Zip/7z.exe"
+    "$SEVENZIP" x /tmp/gs.exe -o/tmp/gs_extract -y > /dev/null
     # Layout inside the extract: bin/gswin64c.exe + Resource/ + lib/ at root.
     cp "/tmp/gs_extract/bin/gswin64c.exe" "$OUT_DIR/gs-$TARGET.exe"
     rm -rf "$OUT_DIR/gs-resources"
@@ -65,9 +68,14 @@ case "$TARGET" in
       GS_BREW=/usr/local/bin/brew
       GS_ARCH=x86_64
     fi
+    # macos-14 ships with arm64 Homebrew only. For x86_64 builds, install
+    # Intel Homebrew on demand (~30s) so we can fetch the x64 ghostscript
+    # bottle. The Homebrew installer is idempotent and NONINTERACTIVE=1
+    # keeps it from prompting.
     if [ ! -x "$GS_BREW" ]; then
-      echo "Homebrew not found at $GS_BREW — required for ghostscript on $TARGET" >&2
-      exit 1
+      echo "$GS_BREW not found — installing Intel Homebrew for $TARGET"
+      NONINTERACTIVE=1 arch -$GS_ARCH /bin/bash -c \
+        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
     arch -$GS_ARCH "$GS_BREW" install --quiet ghostscript || true
     GS_PREFIX="$(arch -$GS_ARCH "$GS_BREW" --prefix ghostscript)"
