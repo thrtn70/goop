@@ -43,7 +43,7 @@ struct GhAsset {
 /// `Ok(None)` when the current version is already >= the latest, or when no
 /// asset exists for the running platform.
 pub async fn check(current_version: &str) -> anyhow::Result<Option<UpdateInfo>> {
-    let client = build_client(current_version)?;
+    let client = build_check_client(current_version)?;
     let release: GhRelease = client
         .get(GITHUB_LATEST_RELEASE_URL)
         .send()
@@ -87,7 +87,7 @@ pub async fn download<F>(
 where
     F: Fn(u64, u64) + Send + Sync,
 {
-    let client = build_client(current_version)?;
+    let client = build_download_client(current_version)?;
     let resp = client.get(url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
 
@@ -110,10 +110,25 @@ pub fn releases_page_url() -> &'static str {
     GITHUB_RELEASES_PAGE_URL
 }
 
-fn build_client(current_version: &str) -> anyhow::Result<Client> {
+/// Client for the GitHub JSON metadata call. 15s total-request timeout is
+/// fine here — the response is a few KB.
+fn build_check_client(current_version: &str) -> anyhow::Result<Client> {
     Ok(Client::builder()
         .user_agent(format!("goop-updater/{current_version}"))
         .timeout(Duration::from_secs(15))
+        .build()?)
+}
+
+/// Client for streaming the installer payload. A total-request timeout
+/// would abort mid-download for large assets (a 110 MB .dmg can't finish
+/// in 15s on most connections), so we only bound the connection phase
+/// and the per-read idle window. The stream itself can run as long as
+/// it needs.
+fn build_download_client(current_version: &str) -> anyhow::Result<Client> {
+    Ok(Client::builder()
+        .user_agent(format!("goop-updater/{current_version}"))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(60))
         .build()?)
 }
 
