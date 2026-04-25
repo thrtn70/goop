@@ -1,5 +1,5 @@
 import { Component } from "react";
-import type { ReactNode, ErrorInfo } from "react";
+import type { ReactNode } from "react";
 
 interface Props {
   children: ReactNode;
@@ -18,12 +18,6 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   static getDerivedStateFromError(error: Error): State {
     return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, info: ErrorInfo): void {
-    // Intentional: console is not visible to end users in the Tauri desktop shell.
-    // Useful for debugging during development via the WebView inspector.
-    console.error("Goop caught an unexpected error:", error, info.componentStack);
   }
 
   render(): ReactNode {

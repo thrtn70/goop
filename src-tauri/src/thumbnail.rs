@@ -233,7 +233,7 @@ async fn generate_pdf(
         .arg("-dNOPAUSE")
         .arg("-dBATCH")
         .arg("-dQUIET")
-        .arg(format!("-sOutputFile={}", output.display()))
+        .arg(gs_output_arg(output))
         .arg(input)
         .output()
         .await
@@ -244,6 +244,11 @@ async fn generate_pdf(
         ));
     }
     Ok(())
+}
+
+fn gs_output_arg(output: &Path) -> String {
+    let escaped = output.display().to_string().replace('%', "%%");
+    format!("-sOutputFile={escaped}")
 }
 
 #[cfg(test)]
@@ -259,6 +264,15 @@ mod tests {
         let p = svc.cache_path(&id);
         assert!(p.to_string_lossy().contains(&id.0.to_string()));
         assert!(p.extension().is_some_and(|e| e == "png"));
+    }
+
+    #[test]
+    fn output_arg_escapes_percent_for_ghostscript() {
+        let path = Path::new("/tmp/goop 100%/thumb.png");
+        assert_eq!(
+            gs_output_arg(path),
+            "-sOutputFile=/tmp/goop 100%%/thumb.png"
+        );
     }
 
     #[test]

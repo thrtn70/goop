@@ -3,10 +3,12 @@ import LeftNav from "./LeftNav";
 import TopBar from "./TopBar";
 import QueueSidebar from "@/features/queue/QueueSidebar";
 import { useTheme } from "@/hooks/useTheme";
+import { useQueueHotkey } from "@/hooks/useQueueHotkey";
 
 export default function Layout() {
   const nav = useNavigate();
   useTheme();
+  useQueueHotkey();
   return (
     <div className="flex h-screen flex-col bg-surface-0 text-fg">
       <h1 className="sr-only">Goop</h1>

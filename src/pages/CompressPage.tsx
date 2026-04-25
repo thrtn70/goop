@@ -80,6 +80,14 @@ export default function CompressPage() {
     setFiles((prev) => prev.map((f) => ({ ...f, mode })));
   }, []);
 
+  const applyFirstToAll = useCallback(() => {
+    setFiles((prev) => {
+      if (prev.length < 2) return prev;
+      const headMode = prev[0].mode;
+      return prev.map((f, i) => (i === 0 ? f : { ...f, mode: headMode }));
+    });
+  }, []);
+
   const handleBrowse = async () => {
     const picked = await open({
       multiple: true,
@@ -171,6 +179,7 @@ export default function CompressPage() {
             files={files}
             disabled={false}
             onEnqueued={() => setFiles([])}
+            onApplyToAll={applyFirstToAll}
           />
         </div>
       )}

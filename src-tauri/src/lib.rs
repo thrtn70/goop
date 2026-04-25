@@ -6,7 +6,7 @@ pub mod thumbnail;
 
 use events::TauriSink;
 use goop_config as cfg;
-use goop_converter::{ConversionBackend, FfmpegBackend, ImageMagickBackend};
+use goop_converter::{detect_encoders, ConversionBackend, FfmpegBackend, ImageMagickBackend};
 use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation};
 use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
 use goop_pdf::{compress as pdf_compress, merge as pdf_merge, split as pdf_split};
@@ -14,6 +14,7 @@ use goop_queue::{QueueStore, Scheduler, WorkerFn};
 use goop_sidecar::BinaryResolver;
 use state::AppState;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 use thumbnail::ThumbnailService;
@@ -22,7 +23,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter("goop=info,warn")
         .init();
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -73,11 +74,21 @@ pub fn run() {
                     })
                 })
             });
+            // Detect HW encoders once at startup. Result is shared with the
+            // convert worker (read on every job) and AppState (so the
+            // Settings UI can show what's available).
+            let encoders = Arc::new(tauri::async_runtime::block_on(detect_encoders(&resolver)));
+            let hw_enabled = Arc::new(AtomicBool::new(settings.hw_acceleration_enabled));
+
             let r_for_convert = resolver.clone();
             let sink_for_convert = sink.clone();
+            let encoders_for_convert = encoders.clone();
+            let hw_enabled_for_convert = hw_enabled.clone();
             let convert_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
                 let r = r_for_convert.clone();
                 let s = sink_for_convert.clone();
+                let enc = encoders_for_convert.clone();
+                let hw = hw_enabled_for_convert.load(Ordering::Relaxed);
                 Box::pin(async move {
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
@@ -85,7 +96,7 @@ pub fn run() {
                         let im = ImageMagickBackend::new(&r, s);
                         im.convert(id, &req, cancel).await?
                     } else {
-                        let ffmpeg = FfmpegBackend::new(&r, s);
+                        let ffmpeg = FfmpegBackend::new(&r, s).with_encoders(enc, hw);
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
@@ -214,6 +225,8 @@ pub fn run() {
                 settings: parking_lot::RwLock::new(settings),
                 settings_path,
                 thumbs,
+                encoders,
+                hw_enabled,
             });
             Ok(())
         })
@@ -224,7 +237,11 @@ pub fn run() {
             commands::extract::extract_from_url,
             commands::queue::queue_list,
             commands::queue::queue_cancel,
+            commands::queue::queue_cancel_many,
+            commands::queue::queue_reorder,
+            commands::queue::queue_move_to_top,
             commands::queue::queue_clear_completed,
+            commands::queue::queue_completed_since,
             commands::queue::queue_reveal,
             commands::sidecar::sidecar_status,
             commands::sidecar::sidecar_update_yt_dlp,
@@ -247,6 +264,8 @@ pub fn run() {
             commands::file::job_forget,
             commands::file::job_forget_many,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        eprintln!("error while running tauri application: {error}");
+    }
 }

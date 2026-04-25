@@ -23,6 +23,17 @@ impl QueueStore {
         let conn = Connection::open(path).map_err(|e| GoopError::Queue(e.to_string()))?;
         conn.execute_batch(MIGRATION_0001)
             .map_err(|e| GoopError::Queue(e.to_string()))?;
+        // Migration 0002 (v0.1.9): add `hidden_from_queue` to support
+        // soft-clearing finished jobs from the queue tab without nuking
+        // them from History. SQLite's ALTER TABLE has no IF NOT EXISTS so
+        // we check `pragma_table_info` first; that keeps re-opens of an
+        // already-migrated DB silent.
+        ensure_column(
+            &conn,
+            "jobs",
+            "hidden_from_queue",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -90,10 +101,14 @@ impl QueueStore {
 
     pub fn list(&self) -> Result<Vec<Job>, GoopError> {
         let c = self.conn.lock();
+        // `hidden_from_queue = 0` excludes finished jobs that the user
+        // cleared from the queue tab. History (`list_terminal`) ignores
+        // the flag so cleared jobs still show up there.
         let mut stmt = c
             .prepare(
                 "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
-                 FROM jobs ORDER BY priority DESC, created_at ASC",
+                 FROM jobs WHERE hidden_from_queue = 0
+                 ORDER BY priority DESC, created_at ASC",
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         let rows = stmt
@@ -104,6 +119,39 @@ impl QueueStore {
             out.push(r.map_err(|e| GoopError::Queue(e.to_string()))?);
         }
         Ok(out)
+    }
+
+    /// Reorder a list of queued jobs. Assigns priority values so the given
+    /// IDs come out in the same order from `next_queued` / `list`. Jobs not
+    /// in `ordered_ids` are unaffected; if any ID isn't in the queued state,
+    /// it's silently skipped (so a race with the scheduler picking one up
+    /// doesn't fail the whole batch). Returns the number of rows updated.
+    ///
+    /// Priority assignment: starts at `priority_base` (10 * len) and
+    /// decrements by 10 per step, leaving room for future "move between"
+    /// inserts without renumbering everything.
+    pub fn reorder_queued(&self, ordered_ids: &[JobId]) -> Result<usize, GoopError> {
+        if ordered_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut c = self.conn.lock();
+        let tx = c
+            .transaction()
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let len = ordered_ids.len() as i32;
+        let mut updated = 0usize;
+        for (i, id) in ordered_ids.iter().enumerate() {
+            let priority = (len - i as i32) * 10;
+            let n = tx
+                .execute(
+                    "UPDATE jobs SET priority = ?1 WHERE id = ?2 AND state = 'queued'",
+                    params![priority, id.0.to_string()],
+                )
+                .map_err(|e| GoopError::Queue(e.to_string()))?;
+            updated += n;
+        }
+        tx.commit().map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(updated)
     }
 
     pub fn next_queued(&self, kind: &JobKind) -> Result<Option<Job>, GoopError> {
@@ -142,10 +190,20 @@ impl QueueStore {
         Ok(n)
     }
 
+    /// Soft-hide finished/cancelled/errored jobs from the queue tab. The
+    /// rows stay in the database so the History page still lists them; only
+    /// the queue's `list()` filter excludes them.
+    ///
+    /// Use `forget` / `forget_many` for actual deletion when the user
+    /// removes a job from History.
     pub fn clear_completed(&self) -> Result<usize, GoopError> {
         let c = self.conn.lock();
         let n = c
-            .execute("DELETE FROM jobs WHERE state IN ('done', 'cancelled')", [])
+            .execute(
+                "UPDATE jobs SET hidden_from_queue = 1
+                 WHERE state = 'done' OR state = 'cancelled' OR state LIKE 'error:%'",
+                [],
+            )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         Ok(n)
     }
@@ -249,6 +307,24 @@ impl QueueStore {
             counts.all += count;
         }
         Ok(counts)
+    }
+
+    /// Count jobs that reached a terminal state at or after `since_ms`. Used
+    /// by the queue header to show "X done today" — caller computes the
+    /// midnight boundary.
+    pub fn completed_since(&self, since_ms: i64) -> Result<u32, GoopError> {
+        let c = self.conn.lock();
+        let mut stmt = c
+            .prepare(
+                "SELECT COUNT(*) FROM jobs
+                 WHERE (state = 'done' OR state = 'cancelled' OR state LIKE 'error:%')
+                 AND finished_at IS NOT NULL AND finished_at >= ?1",
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let count: u32 = stmt
+            .query_row(params![since_ms], |row| row.get(0))
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(count)
     }
 
     /// Delete a single job row. Returns the number of rows deleted (0 or 1).
@@ -361,6 +437,30 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Idempotent ALTER TABLE ADD COLUMN. SQLite has no `IF NOT EXISTS` for
+/// columns, so we look for it in the table's metadata and only emit the
+/// ALTER when it's missing. Lets `QueueStore::open` run safely against
+/// both fresh DBs and DBs from older app versions.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), GoopError> {
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    let exists = stmt
+        .exists(params![table, column])
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    if !exists {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+        conn.execute(&sql, [])
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +493,97 @@ mod tests {
         s.insert(&b).unwrap();
         let n = s.next_queued(&JobKind::Extract).unwrap().unwrap();
         assert_eq!(n.id, b.id);
+    }
+
+    #[test]
+    fn reorder_queued_promotes_listed_jobs_to_top() {
+        let (s, _tmp) = temp_store();
+        let a = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let b = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let c = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&a).unwrap();
+        s.insert(&b).unwrap();
+        s.insert(&c).unwrap();
+
+        // Move c to top, then a, then b.
+        let n = s.reorder_queued(&[c.id, a.id, b.id]).unwrap();
+        assert_eq!(n, 3);
+        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        assert_eq!(next.id, c.id);
+    }
+
+    #[test]
+    fn clear_completed_hides_terminal_jobs_from_queue_but_keeps_them_in_history() {
+        let (s, _tmp) = temp_store();
+        let mut done = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut cancelled = Job::new(JobKind::Convert, serde_json::Value::Null);
+        let mut errored = Job::new(JobKind::Convert, serde_json::Value::Null);
+        let running = Job::new(JobKind::Extract, serde_json::Value::Null);
+        done.state = JobState::Done;
+        cancelled.state = JobState::Cancelled;
+        errored.state = JobState::Error {
+            message: "boom".into(),
+        };
+        s.insert(&done).unwrap();
+        s.insert(&cancelled).unwrap();
+        s.insert(&errored).unwrap();
+        s.insert(&running).unwrap();
+
+        let hidden = s.clear_completed().unwrap();
+        assert_eq!(hidden, 3, "all three terminal jobs should be hidden");
+
+        let queue = s.list().unwrap();
+        let ids: Vec<_> = queue.iter().map(|j| j.id).collect();
+        assert_eq!(
+            queue.len(),
+            1,
+            "only the running job should remain in queue list, got {ids:?}"
+        );
+        assert_eq!(queue[0].id, running.id);
+
+        let history = s
+            .list_terminal(&HistoryFilter {
+                kind: None,
+                search: None,
+                sort: HistorySort::Date,
+                descending: true,
+            })
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            3,
+            "history must still see all three terminal jobs"
+        );
+    }
+
+    #[test]
+    fn ensure_column_is_idempotent() {
+        // Open creates fresh DB + runs migrations. Open again on the same
+        // path should succeed without error (column already there).
+        let d = tempdir().unwrap();
+        let path = d.path().join("q.db");
+        let _s = QueueStore::open(&path).unwrap();
+        let _s2 = QueueStore::open(&path).unwrap();
+    }
+
+    #[test]
+    fn reorder_queued_skips_non_queued_jobs() {
+        let (s, _tmp) = temp_store();
+        let mut a = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let b = Job::new(JobKind::Extract, serde_json::Value::Null);
+        a.state = JobState::Running;
+        s.insert(&a).unwrap();
+        s.insert(&b).unwrap();
+
+        // Try to reorder a (running) and b (queued); only b should update.
+        let n = s.reorder_queued(&[a.id, b.id]).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn reorder_queued_empty_input_is_noop() {
+        let (s, _tmp) = temp_store();
+        assert_eq!(s.reorder_queued(&[]).unwrap(), 0);
     }
 
     #[test]

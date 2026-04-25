@@ -10,6 +10,12 @@ pub struct ProgressEvent {
     pub eta_secs: Option<u64>,
     pub speed_hr: Option<String>,
     pub stage: String,
+    /// Name of the active encoder, when known. Set for ffmpeg jobs that go
+    /// through a hardware encoder (e.g. `h264_videotoolbox`) so the UI can
+    /// show a "HW" badge. `None` for software encodes, remuxes, downloads,
+    /// and PDF jobs.
+    #[serde(default)]
+    pub encoder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -44,9 +50,9 @@ pub trait EventSink: Send + Sync + 'static {
 /// Test/no-op sink that records all emitted events in a Vec.
 #[cfg(any(test, feature = "test-util"))]
 pub struct RecordingSink {
-    pub progress: std::sync::Mutex<Vec<ProgressEvent>>,
-    pub queue: std::sync::Mutex<Vec<QueueEvent>>,
-    pub sidecar: std::sync::Mutex<Vec<SidecarEvent>>,
+    pub progress: parking_lot::Mutex<Vec<ProgressEvent>>,
+    pub queue: parking_lot::Mutex<Vec<QueueEvent>>,
+    pub sidecar: parking_lot::Mutex<Vec<SidecarEvent>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -70,13 +76,13 @@ impl Default for RecordingSink {
 #[cfg(any(test, feature = "test-util"))]
 impl EventSink for RecordingSink {
     fn emit_progress(&self, e: ProgressEvent) {
-        self.progress.lock().unwrap().push(e);
+        self.progress.lock().push(e);
     }
     fn emit_queue(&self, e: QueueEvent) {
-        self.queue.lock().unwrap().push(e);
+        self.queue.lock().push(e);
     }
     fn emit_sidecar(&self, e: SidecarEvent) {
-        self.sidecar.lock().unwrap().push(e);
+        self.sidecar.lock().push(e);
     }
 }
 
@@ -94,7 +100,8 @@ mod tests {
             eta_secs: Some(10),
             speed_hr: Some("1.2MB/s".into()),
             stage: "downloading".into(),
+            encoder: None,
         });
-        assert_eq!(sink.progress.lock().unwrap().len(), 1);
+        assert_eq!(sink.progress.lock().len(), 1);
     }
 }

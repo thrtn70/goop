@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatError } from "./error";
+import { formatError, parseIpcError } from "./error";
 
 describe("formatError", () => {
   it("unwraps Error instances", () => {
@@ -15,12 +15,21 @@ describe("formatError", () => {
       .toBe("A required helper tool is missing. Try reinstalling Goop.");
   });
 
-  it("falls back to raw message for unknown codes", () => {
-    expect(formatError({ code: "cancelled", message: "user cancelled" })).toBe("user cancelled");
+  it("formats subprocess failures from structured IPC errors", () => {
+    expect(formatError({ code: "subprocess_failed", message: "ffmpeg: bad input" })).toBe(
+      "ffmpeg: bad input",
+    );
   });
 
-  it("falls back to code-only when message missing", () => {
+  it("formats cancellation without a message", () => {
     expect(formatError({ code: "cancelled" })).toBe("cancelled");
+  });
+
+  it("maps unrecognized structured codes to the unknown variant", () => {
+    expect(parseIpcError({ code: "future_error", message: "new shape" })).toEqual({
+      code: "unknown",
+      message: "new shape",
+    });
   });
 
   it("falls back to JSON for unknown object shapes", () => {

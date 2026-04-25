@@ -17,7 +17,7 @@ jobs:
     outputs:
       release_id: ${{ steps.upsert.outputs.result }}
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         id: upsert
         with:
           result-encoding: string
@@ -57,17 +57,17 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, bundle: "nsis,msi" }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { targets: "${{ matrix.target }}" }
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: "20", cache: "npm" }
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
       - run: npm ci
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

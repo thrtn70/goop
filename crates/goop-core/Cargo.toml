@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 dirs = "5.0"
+parking_lot = "0.12"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

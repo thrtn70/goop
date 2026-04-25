@@ -2,4 +2,11 @@
 import type { HistoryViewMode } from "./HistoryViewMode";
 import type { Theme } from "./Theme";
 
-export type Settings = { output_dir: string, theme: Theme, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number, convert_concurrency: number, auto_check_updates: boolean, dismissed_update_version: string | null, history_view_mode: HistoryViewMode, };
+export type Settings = { output_dir: string, theme: Theme, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number, convert_concurrency: number, auto_check_updates: boolean, dismissed_update_version: string | null, history_view_mode: HistoryViewMode, queue_sidebar_width: number, hw_acceleration_enabled: boolean, 
+/**
+ * When set, every yt-dlp spawn (probe + download) is invoked with
+ * `--cookies-from-browser <name>`. Lets users download videos from
+ * sites that require login (Twitter, Instagram, etc.) by reusing
+ * their existing browser session. `None` = no cookies passed.
+ */
+cookies_from_browser: string | null, };

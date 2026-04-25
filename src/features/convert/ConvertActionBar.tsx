@@ -16,6 +16,8 @@ interface ConvertActionBarProps {
   files: FileEntry[];
   disabled: boolean;
   onEnqueued: () => void;
+  /** Optional: copies the first file's per-row settings to every other staged file. */
+  onApplyToAll?: () => void;
 }
 
 function dirname(p: string): string {
@@ -32,7 +34,12 @@ function newBatchId(): string {
   }
 }
 
-export default function ConvertActionBar({ files, disabled, onEnqueued }: ConvertActionBarProps) {
+export default function ConvertActionBar({
+  files,
+  disabled,
+  onEnqueued,
+  onApplyToAll,
+}: ConvertActionBarProps) {
   const [overrideDir, setOverrideDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -117,6 +124,16 @@ export default function ConvertActionBar({ files, disabled, onEnqueued }: Conver
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
           {overrideDir ? `\u2192 ${shortenPath(overrideDir)}` : "Change output folder..."}
+        </button>
+      )}
+      {count > 1 && onApplyToAll && (
+        <button
+          type="button"
+          onClick={onApplyToAll}
+          title="Copy the first file's settings to every other file"
+          className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
+        >
+          Apply to all
         </button>
       )}
       {count > 0 && (

@@ -128,6 +128,44 @@ export default function SettingsPage() {
             onBlur={(e) => void patch({ convert_concurrency: Number(e.target.value) })}
           />
         </Field>
+        <Field
+          label="Hardware acceleration"
+          hint="Use your GPU's video encoder when available (VideoToolbox on Mac, NVENC/QSV/AMF on Windows). Falls back to software automatically if the GPU encode fails."
+        >
+          <label className="flex items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              checked={settings.hw_acceleration_enabled}
+              onChange={(e) => void patch({ hw_acceleration_enabled: e.target.checked })}
+              className="h-4 w-4 rounded border-subtle bg-surface-2 accent-accent"
+            />
+            <span>Use hardware acceleration when available</span>
+          </label>
+        </Field>
+        <Field
+          label="Cookies from browser"
+          hint="Use cookies from a logged-in browser to download videos from sites that require an account (Twitter/X, Instagram, etc.). Cookies are read locally and never leave your machine."
+        >
+          <select
+            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            value={settings.cookies_from_browser ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              void patch({ cookies_from_browser: v === "" ? null : v });
+            }}
+          >
+            <option value="">None (off)</option>
+            <option value="brave">Brave</option>
+            <option value="chrome">Chrome</option>
+            <option value="chromium">Chromium</option>
+            <option value="edge">Edge</option>
+            <option value="firefox">Firefox</option>
+            <option value="opera">Opera</option>
+            <option value="safari">Safari</option>
+            <option value="vivaldi">Vivaldi</option>
+            <option value="whale">Whale</option>
+          </select>
+        </Field>
       </SettingsSection>
 
       <SettingsSection title="Updates" description="Keep Goop and its sidecars current.">

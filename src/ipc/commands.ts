@@ -35,6 +35,10 @@ export type IpcConvertRequest = Omit<ConvertRequest, "compress_mode"> & {
   compress_mode: IpcCompressMode | null;
 };
 
+export type IpcExtractRequest = ExtractRequest & {
+  cookies_from_browser?: string | null;
+};
+
 // Same bigint-at-boundary story as IpcCompressMode: Preset.created_at is i64
 // in Rust (bigint in generated TS) but flows through JSON as a plain number.
 export type IpcPreset = Omit<Preset, "created_at" | "compress_mode"> & {
@@ -63,12 +67,17 @@ export const api = {
   },
   extract: {
     probe: (url: string) => invoke<UrlProbe>("extract_probe", { url }),
-    fromUrl: (req: ExtractRequest) => invoke<JobId>("extract_from_url", { req }),
+    fromUrl: (req: IpcExtractRequest) => invoke<JobId>("extract_from_url", { req }),
   },
   queue: {
     list: () => invoke<Job[]>("queue_list"),
     cancel: (jobId: JobId) => invoke<void>("queue_cancel", { jobId }),
+    cancelMany: (jobIds: JobId[]) => invoke<number>("queue_cancel_many", { jobIds }),
+    reorder: (orderedIds: JobId[]) => invoke<number>("queue_reorder", { orderedIds }),
+    moveToTop: (jobId: JobId) => invoke<number>("queue_move_to_top", { jobId }),
     clearCompleted: () => invoke<number>("queue_clear_completed"),
+    completedSince: (sinceMs: number) =>
+      invoke<number>("queue_completed_since", { sinceMs }),
     reveal: (path: string) => invoke<void>("queue_reveal", { path }),
   },
   sidecar: {
