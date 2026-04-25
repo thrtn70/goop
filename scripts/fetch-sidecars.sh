@@ -101,7 +101,11 @@ case "$TARGET" in
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for
-    # local dev only. No Ghostscript here.
+    # local dev / CI clippy + test only. We don't ship Ghostscript on
+    # Linux because we don't ship Linux. Tauri's build script still
+    # insists every `externalBin` listed in tauri.conf.json exists for
+    # the active target, so we drop a stub `gs` placeholder. The audit
+    # job never runs the binary — it only needs the file to exist.
     EXTRACT_DIR="$(mktemp -d)"
     trap 'rm -rf "$EXTRACT_DIR"' EXIT
     curl -L -o "$EXTRACT_DIR/ffmpeg.tar.xz" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
@@ -117,6 +121,10 @@ case "$TARGET" in
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
+    # gs stub — empty executable file. Satisfies Tauri's externalBin
+    # existence check without shipping Ghostscript on Linux.
+    printf '#!/bin/sh\necho "gs is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/gs-$TARGET"
+    chmod +x "$OUT_DIR/gs-$TARGET"
     ;;
   *)
     echo "unsupported target: $TARGET"
