@@ -184,6 +184,13 @@ fn current_platform() -> Platform {
     {
         Platform::Windows
     }
+    // Linux is not a release target; we still need *some* return value so
+    // the audit job's clippy compile passes. The updater is never invoked
+    // on Linux in practice (the in-app updater UI is hidden by the build).
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Platform::MacAarch64
+    }
 }
 
 fn pick_asset(assets: &[GhAsset], platform: Platform) -> Option<&GhAsset> {
