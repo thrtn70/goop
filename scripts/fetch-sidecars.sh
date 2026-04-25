@@ -125,6 +125,18 @@ case "$TARGET" in
     # existence check without shipping Ghostscript on Linux.
     printf '#!/bin/sh\necho "gs is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/gs-$TARGET"
     chmod +x "$OUT_DIR/gs-$TARGET"
+    # gs-resources stubs — Tauri's `resources` config in tauri.conf.json
+    # references three subdirectories of the Ghostscript Resource tree.
+    # Empty dirs are enough; the Linux build never invokes gs.
+    rm -rf "$OUT_DIR/gs-resources"
+    mkdir -p "$OUT_DIR/gs-resources/Resource" \
+             "$OUT_DIR/gs-resources/lib" \
+             "$OUT_DIR/gs-resources/iccprofiles"
+    # Tauri's resource glob may reject completely empty dirs on some
+    # platforms; drop a placeholder so each path has at least one file.
+    touch "$OUT_DIR/gs-resources/Resource/.placeholder" \
+          "$OUT_DIR/gs-resources/lib/.placeholder" \
+          "$OUT_DIR/gs-resources/iccprofiles/.placeholder"
     ;;
   *)
     echo "unsupported target: $TARGET"
