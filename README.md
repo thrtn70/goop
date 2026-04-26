@@ -91,6 +91,45 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Preview thumbnails regenerate automatically when the on-disk cache is stale instead of showing a broken-image icon.
 - "Clear" in the queue's Done section now soft-hides finished jobs from the queue tab only — they remain in History.
 
+### Pause / resume running jobs (v0.2.0)
+
+- A **Pause** button on running ffmpeg conversions and Ghostscript PDF compress jobs freezes the work in place — CPU drops to ~0, partial output stays on disk untouched. Click **Resume** to continue from exactly where you stopped.
+- Cancel still works on a paused job — the underlying process is killed cleanly and the partial file is removed.
+- If the app exits (or crashes) while a job is paused, the job silently re-queues from scratch on next launch.
+- Cross-platform: SIGSTOP / SIGCONT on macOS, NtSuspendProcess / NtResumeProcess on Windows. Image conversions and yt-dlp downloads are intentionally out of scope.
+
+### Command palette + keyboard shortcuts (v0.2.0)
+
+- **`⌘K` / `Ctrl+K`** opens a fuzzy-searchable command palette. Navigate to any page, paste a URL, open the file picker, toggle the queue sidebar, or check for updates without leaving the keyboard.
+- **`⌘1`–`⌘5`** jump to Extract / Convert / Compress / History / Settings. The left nav shows the matching `⌘` badge so the shortcuts are discoverable.
+- **`⌘N`** focuses the URL input on Extract from anywhere. **`⌘O`** opens the file picker on Convert / Compress. **`⌘,`** lands on Settings. **`⌘⇧Q`** still toggles the queue sidebar; **Space** still opens Quick View on a focused History row.
+
+### First-run onboarding (v0.2.0)
+
+- On first launch, a three-step welcome walks new users through the pitch, the default download folder, and a quick tips card. Each step is skippable.
+- Re-accessible anytime from **Settings → About → Show welcome screen**.
+
+### Audio waveform thumbnails (v0.2.0)
+
+- Audio files in **History** now show an RMS waveform instead of a generic ♫ badge. ffmpeg's `showwavespic` filter renders them once per job into the same on-disk cache the rest of the thumbnails use.
+- The ♫ badge is the graceful fallback if waveform generation fails (e.g., a corrupted source).
+
+### Preset import / export (v0.2.0)
+
+- **Settings → Presets → Import…** / **Export…** moves your saved configurations between machines as a JSON bundle (`goop-presets-<date>.json`).
+- Built-in presets are excluded from export (re-created on every fresh install). Name collisions on import use `(imported)` first, then `(imported 2)` / `(imported 3)` so re-importing the same file stays readable.
+- The bundle format is versioned, so future preset shape changes won't break older files.
+
+### Accessibility polish (v0.2.0)
+
+- WCAG 2.1 AA audit: visible focus rings on every interactive element, full keyboard navigation, screen-reader announcements for job state changes (Done / Cancelled / Error), variant-aware ARIA roles on toasts (errors are assertive), focus trap inside modals, `prefers-reduced-motion` respected on every animation.
+- A "Skip to main content" anchor appears on the first Tab press for keyboard-only users.
+
+### Performance (v0.2.0)
+
+- Lazy-loaded route chunks: cold-start payload dropped ~16 % gzipped. Each non-default page (Convert / Compress / History / Settings) streams in on demand.
+- Thumbnail generation is now bounded — at most four ffmpeg / Ghostscript / image-decode workers run at once, so scrolling a History grid of hundreds of files no longer burst-spawns processes.
+
 ---
 
 ## Requirements
@@ -145,15 +184,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1.9:
-- Pause / resume running jobs (macOS first, Windows after).
-- Right-click context menu on queue rows ("Move to top", "Cancel").
-- Cobalt fallback extractor for Twitter / Instagram / TikTok URLs that yt-dlp can't reach.
-- Keyboard shortcuts and command palette.
-- First-run onboarding and accessibility polish.
-- Audio waveform thumbnails.
-- Preset import/export and shared presets.
-- Signed macOS builds and a code-signed Windows installer.
+Planned after v0.2.0:
+- **Cobalt fallback extractor** for Twitter / Instagram / TikTok URLs that yt-dlp can't reach.
+- **Signed macOS builds and a code-signed Windows installer** — eliminates the `sudo xattr -cr` step on macOS and the SmartScreen warning on Windows.
 
 ## License
 

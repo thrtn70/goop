@@ -39,6 +39,17 @@ export type IpcExtractRequest = ExtractRequest & {
   cookies_from_browser?: string | null;
 };
 
+/** Allowlisted targets for `update.openAboutLink` — keep in sync with the
+ *  match arms in `src-tauri/src/commands/update.rs::open_about_link`. */
+export type AboutLinkTarget =
+  | "repo"
+  | "issues"
+  | "license"
+  | "yt-dlp"
+  | "ffmpeg"
+  | "ghostscript"
+  | "tauri";
+
 // Same bigint-at-boundary story as IpcCompressMode: Preset.created_at is i64
 // in Rust (bigint in generated TS) but flows through JSON as a plain number.
 export type IpcPreset = Omit<Preset, "created_at" | "compress_mode"> & {
@@ -102,6 +113,8 @@ export const api = {
     check: () => invoke<UpdateInfo | null>("check_for_update"),
     download: (url: string) => invoke<void>("download_update", { url }),
     openReleasesPage: () => invoke<void>("open_releases_page"),
+    openAboutLink: (target: AboutLinkTarget) =>
+      invoke<void>("open_about_link", { target }),
   },
   pdf: {
     probe: (path: string) => invoke<PdfProbeResult>("pdf_probe", { path }),
