@@ -8,6 +8,7 @@ import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
+import { useAppStore } from "@/store/appStore";
 import type { Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
@@ -115,7 +116,7 @@ export default function ConvertPage() {
     });
   }, []);
 
-  const handleBrowse = async () => {
+  const handleBrowse = useCallback(async () => {
     const picked = await open({
       multiple: true,
       title: "Select files to convert",
@@ -124,7 +125,18 @@ export default function ConvertPage() {
       const paths = Array.isArray(picked) ? picked : [picked];
       addPaths(paths.filter((p): p is string => typeof p === "string"));
     }
-  };
+  }, [addPaths]);
+
+  // Phase H: Cmd+O increments `pendingFilePicker`. Only fire when this
+  // page is the active route — the location guard prevents both Convert
+  // and Compress from triggering simultaneously if a future animated
+  // route transition keeps both mounted briefly.
+  const pickerToken = useAppStore((s) => s.pendingFilePicker);
+  useEffect(() => {
+    if (pickerToken > 0 && location.pathname.startsWith("/convert")) {
+      void handleBrowse();
+    }
+  }, [pickerToken, handleBrowse, location.pathname]);
 
   const hasMedia = files.length > 0;
   const hasPdfs = pdfs.length > 0;
