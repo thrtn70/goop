@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import clsx from "clsx";
 import { useAppStore } from "@/store/appStore";
@@ -36,6 +36,24 @@ export default function Onboarding() {
 
   const visible = Boolean(settings && !settings.has_seen_onboarding);
 
+  const finish = useCallback(async (): Promise<void> => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
+    setBusy(true);
+    try {
+      await patchSettings({ has_seen_onboarding: true });
+    } catch (e) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't save",
+        detail: formatError(e),
+      });
+    } finally {
+      inflightRef.current = false;
+      setBusy(false);
+    }
+  }, [patchSettings, enqueueToast]);
+
   // Move focus to the primary action whenever the dialog opens or the
   // step changes. WCAG 2.4.3: keyboard focus must move into the dialog
   // when it appears.
@@ -44,12 +62,17 @@ export default function Onboarding() {
     primaryButtonRef.current?.focus();
   }, [visible, stepIndex]);
 
-  // Focus trap: keep Tab / Shift+Tab cycling inside the dialog while it
-  // is open. Without this, keyboard users can Tab into the obscured
-  // LeftNav / pages behind the backdrop.
+  // Focus trap + Escape dismiss. Tab/Shift+Tab cycle inside the dialog
+  // so keyboard users can't fall into the obscured LeftNav. Escape
+  // matches the WCAG 2.1 APG modal-dialog pattern.
   useEffect(() => {
     if (!visible) return;
     function handleKeyDown(e: KeyboardEvent): void {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        void finish();
+        return;
+      }
       if (e.key !== "Tab") return;
       const root = dialogRef.current;
       if (!root) return;
@@ -70,29 +93,11 @@ export default function Onboarding() {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [visible]);
+  }, [visible, finish]);
 
   if (!visible || !settings) return null;
 
   const step = STEPS[stepIndex];
-
-  async function finish(): Promise<void> {
-    if (inflightRef.current) return;
-    inflightRef.current = true;
-    setBusy(true);
-    try {
-      await patchSettings({ has_seen_onboarding: true });
-    } catch (e) {
-      enqueueToast({
-        variant: "error",
-        title: "Couldn't save",
-        detail: formatError(e),
-      });
-    } finally {
-      inflightRef.current = false;
-      setBusy(false);
-    }
-  }
 
   function next(): void {
     if (stepIndex < STEPS.length - 1) {

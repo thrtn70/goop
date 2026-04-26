@@ -32,5 +32,8 @@ export function withViewTransition(update: () => void | Promise<void>): void {
     void update();
     return;
   }
-  start(() => Promise.resolve(update()));
+  const transition = start(() => Promise.resolve(update()));
+  // Interrupted transitions reject `.finished`. Swallow so we don't
+  // surface an unhandled-rejection in the console for a cosmetic morph.
+  transition.finished.catch(() => {});
 }
