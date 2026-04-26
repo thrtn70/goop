@@ -1,8 +1,9 @@
 use crate::PdfError;
-use goop_core::PdfQuality;
+use goop_core::{JobId, PdfQuality, PidGuard, PidRegistry};
 use goop_sidecar::BinaryResolver;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -23,9 +24,15 @@ fn pdf_settings_flag(q: PdfQuality) -> &'static str {
 /// scripts. `None` is acceptable for dev environments where gs is on
 /// PATH with its compile-time resource dir intact.
 ///
+/// `pids` and `job_id` together enable v0.2.0 pause/resume: when both are
+/// `Some`, the spawned gs PID is registered for the duration of the call
+/// via an RAII guard. Pass `None` for either to disable pause support
+/// (e.g. tests, or call sites that don't go through the queue).
+///
 /// Ghostscript writes everything to a single output file — no incremental
 /// output, so no streamed progress is available. We emit a cancellation
 /// check only at start/end for this reason.
+#[allow(clippy::too_many_arguments)]
 pub async fn compress(
     resolver: &BinaryResolver,
     gs_resource_dir: Option<&Path>,
@@ -33,6 +40,8 @@ pub async fn compress(
     output: &Path,
     quality: PdfQuality,
     cancel: CancellationToken,
+    pids: Option<Arc<dyn PidRegistry>>,
+    job_id: Option<JobId>,
 ) -> Result<(), PdfError> {
     let bin = resolver
         .resolve("gs")
@@ -62,6 +71,12 @@ pub async fn compress(
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(PdfError::Io)?;
+    // Phase G: register the gs child PID for pause/resume. RAII guard
+    // unregisters on Drop (covers success, error, cancel, panic).
+    let _pid_guard = match (pids.as_ref(), job_id, child.id()) {
+        (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
+        _ => None,
+    };
 
     tokio::select! {
         status = child.wait() => {
@@ -157,6 +172,8 @@ mod tests {
             &output,
             PdfQuality::Screen,
             CancellationToken::new(),
+            None,
+            None,
         )
         .await
         .expect("gs must be on PATH for this ignored test");

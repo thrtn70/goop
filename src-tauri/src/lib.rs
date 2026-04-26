@@ -7,10 +7,12 @@ pub mod thumbnail;
 use events::TauriSink;
 use goop_config as cfg;
 use goop_converter::{detect_encoders, ConversionBackend, FfmpegBackend, ImageMagickBackend};
-use goop_core::{path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation};
+use goop_core::{
+    path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation, PidRegistry,
+};
 use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
 use goop_pdf::{compress as pdf_compress, merge as pdf_merge, split as pdf_split};
-use goop_queue::{QueueStore, Scheduler, WorkerFn};
+use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
 use state::AppState;
 use std::path::PathBuf;
@@ -54,8 +56,21 @@ pub fn run() {
             let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
             let _interrupted = store.reconcile().ok();
+            // Phase G: silently re-queue any jobs left in `paused` state from
+            // a previous run. The child process is gone so we restart from
+            // scratch; the user already knows the app restarted.
+            if let Ok(reset) = store.recover_paused() {
+                if reset > 0 {
+                    tracing::info!(count = reset, "re-queued paused jobs after restart");
+                }
+            }
             let app_handle = app.handle().clone();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app_handle.clone()));
+
+            // Phase G: shared PID registry for pause/resume support. The
+            // ffmpeg and Ghostscript workers register their child PIDs into
+            // this; the scheduler looks them up to send SIGSTOP/SIGCONT.
+            let pid_registry: Arc<dyn PidRegistry> = Arc::new(SchedulerPidRegistry::new());
 
             let r_for_extract = resolver.clone();
             let sink_for_extract = sink.clone();
@@ -84,19 +99,25 @@ pub fn run() {
             let sink_for_convert = sink.clone();
             let encoders_for_convert = encoders.clone();
             let hw_enabled_for_convert = hw_enabled.clone();
+            let pids_for_convert = pid_registry.clone();
             let convert_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
                 let r = r_for_convert.clone();
                 let s = sink_for_convert.clone();
                 let enc = encoders_for_convert.clone();
                 let hw = hw_enabled_for_convert.load(Ordering::Relaxed);
+                let pids = pids_for_convert.clone();
                 Box::pin(async move {
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     let res = if req.target.is_image() {
+                        // ImageMagick runs in-process — no child PID, no
+                        // pause/resume support (out of scope for Phase G).
                         let im = ImageMagickBackend::new(&r, s);
                         im.convert(id, &req, cancel).await?
                     } else {
-                        let ffmpeg = FfmpegBackend::new(&r, s).with_encoders(enc, hw);
+                        let ffmpeg = FfmpegBackend::new(&r, s)
+                            .with_encoders(enc, hw)
+                            .with_pid_registry(pids);
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
@@ -114,9 +135,11 @@ pub fn run() {
             // than one — the UI formats the directory reveal-in-OS that way.
             let r_for_pdf = resolver.clone();
             let gs_dir_for_pdf = gs_resource_dir.clone();
-            let pdf_worker: WorkerFn = Arc::new(move |_id, payload, cancel| {
+            let pids_for_pdf = pid_registry.clone();
+            let pdf_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
                 let r = r_for_pdf.clone();
                 let gs_dir = gs_dir_for_pdf.clone();
+                let pids = pids_for_pdf.clone();
                 Box::pin(async move {
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
@@ -177,6 +200,8 @@ pub fn run() {
                                 &out,
                                 quality,
                                 cancel,
+                                Some(pids),
+                                Some(id),
                             )
                             .await
                             .map_err(GoopError::from)?;
@@ -192,7 +217,7 @@ pub fn run() {
                 })
             });
 
-            let scheduler = Scheduler::new(
+            let scheduler = Scheduler::with_pids(
                 store.clone(),
                 sink,
                 settings.extract_concurrency,
@@ -201,6 +226,7 @@ pub fn run() {
                 extract_worker,
                 convert_worker,
                 pdf_worker,
+                pid_registry,
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
             // so spawn the worker loops on Tauri's own async runtime.
@@ -238,6 +264,8 @@ pub fn run() {
             commands::queue::queue_list,
             commands::queue::queue_cancel,
             commands::queue::queue_cancel_many,
+            commands::queue::queue_pause,
+            commands::queue::queue_resume,
             commands::queue::queue_reorder,
             commands::queue::queue_move_to_top,
             commands::queue::queue_clear_completed,

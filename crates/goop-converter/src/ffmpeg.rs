@@ -5,8 +5,8 @@ use crate::naming::{allocate_output_path, stem_of};
 use crate::probe_json::parse_probe_json;
 use crate::progress::ProgressTracker;
 use goop_core::{
-    ConvertRequest, ConvertResult, EventSink, GoopError, JobId, ProbeResult, ProgressEvent,
-    TargetFormat,
+    ConvertRequest, ConvertResult, EventSink, GoopError, JobId, PidGuard, PidRegistry, ProbeResult,
+    ProgressEvent, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,11 @@ pub struct FfmpegBackend<'a> {
     /// User's "Use hardware acceleration" toggle. Honoured only when
     /// `encoders` is also set.
     hw_enabled: bool,
+    /// Optional PID registry for pause/resume support (v0.2.0 Phase G). When
+    /// set, the spawned ffmpeg child PID is registered immediately after
+    /// `cmd.spawn()` and unregistered via RAII guard on every exit path.
+    /// `None` disables pause/resume — pause IPC will return JobNotRunning.
+    pids: Option<Arc<dyn PidRegistry>>,
 }
 
 impl<'a> FfmpegBackend<'a> {
@@ -34,6 +39,7 @@ impl<'a> FfmpegBackend<'a> {
             sink,
             encoders: None,
             hw_enabled: false,
+            pids: None,
         }
     }
 
@@ -43,6 +49,13 @@ impl<'a> FfmpegBackend<'a> {
     pub fn with_encoders(mut self, encoders: Arc<DetectedEncoders>, enabled: bool) -> Self {
         self.encoders = Some(encoders);
         self.hw_enabled = enabled;
+        self
+    }
+
+    /// Wire up pause/resume support. The scheduler in `goop-queue` provides
+    /// `Scheduler::pid_registry()` for this.
+    pub fn with_pid_registry(mut self, pids: Arc<dyn PidRegistry>) -> Self {
+        self.pids = Some(pids);
         self
     }
 }
@@ -258,6 +271,15 @@ impl<'a> FfmpegBackend<'a> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child: Child = cmd.spawn()?;
+        // Phase G: register the child PID for pause/resume. The guard
+        // unregisters on Drop, covering success, error, cancel, and panic.
+        // `_pid_guard = None` when no registry is wired (e.g. tests, or
+        // pause/resume disabled at the application level).
+        let _pid_guard = self.pids.as_ref().and_then(|reg| {
+            child
+                .id()
+                .map(|pid| PidGuard::new(reg.clone(), job_id, pid))
+        });
         // invariant: stdout was requested with Stdio::piped above.
         let stdout = child.stdout.take().expect("stdout was piped");
         // invariant: stderr was requested with Stdio::piped above.
