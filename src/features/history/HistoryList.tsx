@@ -152,6 +152,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                       onQuickView(j);
                     }}
                     className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+                    aria-label="Quick view"
                     title="Quick View (Space)"
                   >
                     ⎵

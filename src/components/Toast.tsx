@@ -52,10 +52,13 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
   const canReveal = Boolean(toast.outputPath) && toast.variant === "success";
   const canExpand = Boolean(toast.detail) && toast.variant === "error";
 
+  // Errors should pre-empt other content (`role="alert"` +
+  // `aria-live="assertive"`); successes / info / cancels queue politely.
+  const isError = toast.variant === "error";
   return (
     <div
-      role="status"
-      aria-live="polite"
+      role={isError ? "alert" : "status"}
+      aria-live={isError ? "assertive" : "polite"}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       className={clsx(
