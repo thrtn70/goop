@@ -37,6 +37,13 @@ pub struct Settings {
     /// their existing browser session. `None` = no cookies passed.
     #[serde(default)]
     pub cookies_from_browser: Option<String>,
+    /// Phase I (v0.2.0): tracks whether the user has dismissed the
+    /// first-run onboarding flow. Defaults to false; flipped to true
+    /// when the user finishes or skips. Re-accessible from
+    /// Settings → About via a "Show welcome screen" button that
+    /// flips it back to false.
+    #[serde(default)]
+    pub has_seen_onboarding: bool,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -79,6 +86,7 @@ impl Default for Settings {
             queue_sidebar_width: default_queue_sidebar_width(),
             hw_acceleration_enabled: default_hw_acceleration_enabled(),
             cookies_from_browser: None,
+            has_seen_onboarding: false,
         }
     }
 }
@@ -101,6 +109,10 @@ pub struct SettingsPatch {
     /// - `Some(Some("chrome"))` → set to a specific browser
     /// - `Some(None)` → clear (turn cookies off)
     pub cookies_from_browser: Option<Option<String>>,
+    /// Phase I (v0.2.0): set to `Some(true)` when the user finishes or
+    /// skips onboarding; `Some(false)` from Settings → About to
+    /// re-show the welcome screen.
+    pub has_seen_onboarding: Option<bool>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -163,6 +175,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
             _ => None,
         };
     }
+    if let Some(v) = patch.has_seen_onboarding {
+        next.has_seen_onboarding = v;
+    }
     next
 }
 
@@ -203,5 +218,46 @@ mod tests {
         );
         assert_eq!(patched.theme, Theme::Dark);
         assert_eq!(patched.output_dir, base.output_dir);
+    }
+
+    #[test]
+    fn has_seen_onboarding_defaults_to_false() {
+        assert!(!Settings::default().has_seen_onboarding);
+    }
+
+    #[test]
+    fn apply_patch_can_flip_onboarding_flag() {
+        let base = Settings::default();
+        let patched = apply_patch(
+            &base,
+            SettingsPatch {
+                has_seen_onboarding: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(patched.has_seen_onboarding);
+        let reset = apply_patch(
+            &patched,
+            SettingsPatch {
+                has_seen_onboarding: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!reset.has_seen_onboarding);
+    }
+
+    #[test]
+    fn legacy_settings_without_onboarding_field_load_with_default_false() {
+        // Simulate a settings.json from before Phase I — no
+        // `has_seen_onboarding` field.
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(!loaded.has_seen_onboarding);
     }
 }

@@ -169,6 +169,7 @@ describe("UpdateBanner", () => {
     queue_sidebar_width: 288,
     hw_acceleration_enabled: true,
     cookies_from_browser: null,
+    has_seen_onboarding: true,
   };
 
   it("renders nothing when no update is available", () => {

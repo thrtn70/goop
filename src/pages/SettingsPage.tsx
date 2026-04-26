@@ -221,13 +221,22 @@ export default function SettingsPage() {
           <dt className="text-fg-muted">Platform</dt>
           <dd className="text-fg">{version.os}</dd>
         </dl>
-        <button
-          type="button"
-          onClick={() => void handleOpenReleases()}
-          className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
-        >
-          View releases on GitHub →
-        </button>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <button
+            type="button"
+            onClick={() => void handleOpenReleases()}
+            className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+          >
+            View releases on GitHub →
+          </button>
+          <button
+            type="button"
+            onClick={() => void patch({ has_seen_onboarding: false })}
+            className="btn-press text-xs text-fg-secondary transition duration-fast ease-out hover:text-fg"
+          >
+            Show welcome screen
+          </button>
+        </div>
       </SettingsSection>
 
       {err && <p className="text-sm text-error">{err}</p>}
