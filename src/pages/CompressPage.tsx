@@ -6,12 +6,17 @@ import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
 import CompressActionBar from "@/features/compress/CompressActionBar";
 import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
 import PresetChips from "@/features/presets/PresetChips";
+import PdfFlow from "@/features/pdf/PdfFlow";
 import type { Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
   const last = normalized.lastIndexOf("/");
   return last > 0 ? normalized.slice(0, last) : ".";
+}
+
+function isPdf(p: string): boolean {
+  return p.toLowerCase().endsWith(".pdf");
 }
 
 /**
@@ -45,20 +50,31 @@ function targetFromPath(path: string): TargetFormat {
 
 export default function CompressPage() {
   const [files, setFiles] = useState<CompressFileEntry[]>([]);
+  const [pdfs, setPdfs] = useState<string[]>([]);
 
   const addPaths = useCallback((paths: string[]) => {
-    setFiles((prev) => {
-      const existing = new Set(prev.map((f) => f.path));
-      const fresh: CompressFileEntry[] = paths
-        .filter((p) => !existing.has(p))
-        .map((p) => ({
-          path: p,
-          target: targetFromPath(p),
-          sourceDir: dirname(p),
-          mode: { kind: "quality", value: 75 },
-        }));
-      return [...prev, ...fresh];
-    });
+    const pdfPaths = paths.filter(isPdf);
+    const mediaPaths = paths.filter((p) => !isPdf(p));
+    if (pdfPaths.length > 0) {
+      setPdfs((prev) => {
+        const existing = new Set(prev);
+        return [...prev, ...pdfPaths.filter((p) => !existing.has(p))];
+      });
+    }
+    if (mediaPaths.length > 0) {
+      setFiles((prev) => {
+        const existing = new Set(prev.map((f) => f.path));
+        const fresh: CompressFileEntry[] = mediaPaths
+          .filter((p) => !existing.has(p))
+          .map((p) => ({
+            path: p,
+            target: targetFromPath(p),
+            sourceDir: dirname(p),
+            mode: { kind: "quality", value: 75 },
+          }));
+        return [...prev, ...fresh];
+      });
+    }
   }, []);
 
   const handleOptionsChange = useCallback(
@@ -100,6 +116,7 @@ export default function CompressPage() {
   };
 
   const hasFiles = files.length > 0;
+  const hasPdfs = pdfs.length > 0;
 
   return (
     <div className="flex h-full flex-col p-6">
@@ -131,7 +148,7 @@ export default function CompressPage() {
               .
             </p>
             <p className="mt-1 text-xs text-fg-muted">
-              Video, audio, and images. Smaller files, same format.
+              Video, audio, images, and PDFs. Smaller files, same format.
             </p>
           </div>
         )}
@@ -152,6 +169,17 @@ export default function CompressPage() {
           </div>
         )}
       </DropZone>
+
+      {hasPdfs && (
+        <div className="mt-3">
+          <PdfFlow
+            files={pdfs}
+            onFilesChanged={setPdfs}
+            onDone={() => setPdfs([])}
+            defaultOp="compress"
+          />
+        </div>
+      )}
 
       {hasFiles && (
         <div className="mt-3">

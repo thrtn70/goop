@@ -13,6 +13,9 @@ interface PdfFlowProps {
   files: string[];
   onFilesChanged: (files: string[]) => void;
   onDone: () => void;
+  /** Initial operation. Useful when the host page implies the action
+   *  (e.g. CompressPage routes PDFs in here with `compress` preselected). */
+  defaultOp?: PdfOperationKind;
 }
 
 function basename(p: string): string {
@@ -38,9 +41,14 @@ function dirname(p: string): string {
  * probes the single file to learn its page count, then hands the user a
  * picker + operation-specific sub-form + a primary action button.
  */
-export default function PdfFlow({ files, onFilesChanged, onDone }: PdfFlowProps) {
+export default function PdfFlow({
+  files,
+  onFilesChanged,
+  onDone,
+  defaultOp = "merge",
+}: PdfFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [op, setOp] = useState<PdfOperationKind>("merge");
+  const [op, setOp] = useState<PdfOperationKind>(defaultOp);
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useState<PageRange[]>([]);
   const [quality, setQuality] = useState<PdfQuality>("ebook");
