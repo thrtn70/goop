@@ -75,6 +75,10 @@
   /* Font families */
   --font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
   --font-body: 'Figtree', ui-sans-serif, system-ui, sans-serif;
+  /* Mono stack — system fonts only. Cascadia Mono ships with Win 11
+     Terminal; Consolas covers older Windows. SF Mono / Menlo cover
+     macOS. ui-monospace is the modern engine fallback. */
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
 
   /* Motion */
   --duration-instant: 100ms;

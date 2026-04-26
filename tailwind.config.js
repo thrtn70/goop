@@ -47,6 +47,7 @@ export default {
       fontFamily: {
         display: "var(--font-display)",
         body: "var(--font-body)",
+        mono: "var(--font-mono)",
       },
       fontSize: {
         xs: ["var(--text-xs)", { lineHeight: "var(--leading-normal)" }],
