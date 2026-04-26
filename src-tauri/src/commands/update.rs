@@ -53,3 +53,29 @@ pub async fn open_releases_page(app: AppHandle) -> Result<(), IpcError> {
         .map_err(|e| IpcError::Unknown(format!("open releases page failed: {e}")))?;
     Ok(())
 }
+
+/// Open a fixed external URL by name. Hardcoded allowlist so the
+/// renderer can't smuggle arbitrary URLs through this command.
+///
+/// **Keep the match arms below in sync with the `AboutLinkTarget`
+/// union in `src/ipc/commands.ts`** — they're the same allowlist
+/// expressed twice (once for the Rust validator, once for the TS
+/// caller's type narrowing). A new arm here without a corresponding
+/// TS union member compiles but loses type-checking at the call site.
+#[tauri::command]
+pub async fn open_about_link(app: AppHandle, target: String) -> Result<(), IpcError> {
+    let url = match target.as_str() {
+        "repo" => "https://github.com/thrtn70/goop",
+        "issues" => "https://github.com/thrtn70/goop/issues",
+        "license" => "https://github.com/thrtn70/goop/blob/main/LICENSE",
+        "yt-dlp" => "https://github.com/yt-dlp/yt-dlp",
+        "ffmpeg" => "https://ffmpeg.org",
+        "ghostscript" => "https://ghostscript.com",
+        "tauri" => "https://tauri.app",
+        _ => return Err(IpcError::Unknown(format!("unknown about target: {target}"))),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| IpcError::Unknown(format!("open url failed: {e}")))?;
+    Ok(())
+}

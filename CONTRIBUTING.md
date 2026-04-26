@@ -2,6 +2,23 @@
 
 Thanks for your interest. Goop is early — v0.1 MVP is still landing. Read this once before submitting a change.
 
+## Project Layout
+
+Goop is a Cargo workspace with a Tauri 2 shell. The Rust backend lives in `crates/`:
+
+| Crate | What it owns |
+|---|---|
+| `goop-core` | Shared types (`Job`, `JobState`, `JobKind`, `ConvertRequest`, `Preset`, …), `EventSink` / `PidRegistry` traits, errors, `ts-rs` exports to `shared/types/`. |
+| `goop-config` | `Settings`, `SettingsPatch`, `apply_patch`. JSON file in your OS config dir. |
+| `goop-queue` | SQLite job store, `Scheduler`, `process_control` (cross-platform pause / resume primitives). |
+| `goop-extractor` | `yt-dlp` wrapper — URL probe + download, `--cookies-from-browser` support, friendly error mapping. |
+| `goop-converter` | `ConversionBackend` trait, `FfmpegBackend` (with hardware-encoder detection + software fallback) and `ImageMagickBackend` (in-process via the `image` crate). |
+| `goop-pdf` | Merge / split / compress via `lopdf` and a bundled Ghostscript sidecar. |
+| `goop-sidecar` | `BinaryResolver` — sidecar dir → `$PATH` fallback. |
+| `src-tauri` | Tauri shell, `AppState`, IPC commands (`commands/*.rs`), `ThumbnailService` (video first frame, image decode, PDF page 1, audio waveform). |
+
+Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + react-router 6 + Vite 5. State lives in `src/store/appStore.ts`. IPC commands are wrapped in `src/ipc/commands.ts` (`api.queue.*`, `api.preset.*`, …). Rust types reach TS via `ts-rs` — when a struct on the Rust side changes, run `scripts/generate-bindings.sh` to refresh `shared/types/`.
+
 ## Build Prerequisites
 
 - **Rust:** stable 1.80+. Use `rustup` and the pinned toolchain in `rust-toolchain.toml`.
@@ -32,6 +49,14 @@ cargo test
 npm run typecheck
 npm run test
 ```
+
+If you changed any `#[derive(TS)]` struct or enum on the Rust side, regenerate the TypeScript bindings:
+
+```bash
+scripts/generate-bindings.sh
+```
+
+This rewrites `shared/types/*.ts` from the Rust definitions. Commit the regenerated files alongside the Rust change.
 
 ## Sidecar Binary Sources & Provenance
 

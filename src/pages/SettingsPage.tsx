@@ -66,6 +66,16 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleOpenAboutLink(
+    target: Parameters<typeof api.update.openAboutLink>[0],
+  ): Promise<void> {
+    try {
+      await api.update.openAboutLink(target);
+    } catch (e) {
+      setErr(formatError(e));
+    }
+  }
+
   if (!settings)
     return (
       <div className="p-6 text-fg-muted" role="status" aria-live="polite">
@@ -221,13 +231,35 @@ export default function SettingsPage() {
           <dt className="text-fg-muted">Platform</dt>
           <dd className="text-fg">{version.os}</dd>
         </dl>
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             type="button"
             onClick={() => void handleOpenReleases()}
             className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
           >
-            View releases on GitHub →
+            Releases →
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleOpenAboutLink("repo")}
+            className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+          >
+            Source on GitHub →
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleOpenAboutLink("issues")}
+            className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+          >
+            Report an issue →
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleOpenAboutLink("license")}
+            className="btn-press text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+          >
+            License (MIT) →
           </button>
           <button
             type="button"
@@ -236,6 +268,60 @@ export default function SettingsPage() {
           >
             Show welcome screen
           </button>
+        </div>
+
+        <div className="mt-4 border-t border-subtle pt-3">
+          <h4 className="text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+            Built on
+          </h4>
+          <p className="mt-2 text-xs text-fg-secondary">
+            Goop ships bundled copies of these excellent open-source tools:
+          </p>
+          <ul className="mt-2 space-y-1 text-xs">
+            <li>
+              <button
+                type="button"
+                onClick={() => void handleOpenAboutLink("yt-dlp")}
+                className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover"
+              >
+                yt-dlp
+              </button>
+              <span className="text-fg-muted"> — URL extraction and download.</span>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => void handleOpenAboutLink("ffmpeg")}
+                className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover"
+              >
+                ffmpeg
+              </button>
+              <span className="text-fg-muted">
+                {" "}
+                — media conversion, compression, and audio waveform thumbnails.
+              </span>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => void handleOpenAboutLink("ghostscript")}
+                className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover"
+              >
+                Ghostscript
+              </button>
+              <span className="text-fg-muted"> — PDF compression and thumbnail rendering.</span>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => void handleOpenAboutLink("tauri")}
+                className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover"
+              >
+                Tauri
+              </button>
+              <span className="text-fg-muted"> — desktop shell and IPC.</span>
+            </li>
+          </ul>
         </div>
       </SettingsSection>
 

@@ -284,6 +284,7 @@ pub fn run() {
             commands::update::check_for_update,
             commands::update::download_update,
             commands::update::open_releases_page,
+            commands::update::open_about_link,
             commands::pdf::pdf_probe,
             commands::pdf::pdf_run,
             commands::history::history_list,
