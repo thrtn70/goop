@@ -1,4 +1,4 @@
-import { Eye } from "lucide-react";
+import { ChevronDown, ChevronUp, Eye } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import EmptyHistory from "@/features/history/EmptyHistory";
@@ -59,7 +59,12 @@ function SortHeader({
       } ${className}`}
     >
       {label}
-      {active && <span aria-hidden>{descending ? "↓" : "↑"}</span>}
+      {active &&
+        (descending ? (
+          <ChevronDown size={12} strokeWidth={2.5} aria-hidden />
+        ) : (
+          <ChevronUp size={12} strokeWidth={2.5} aria-hidden />
+        ))}
     </button>
   );
 }
@@ -156,7 +161,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                     aria-label="Quick view"
                     title="Quick View (Space)"
                   >
-                    <Eye size={14} aria-hidden />
+                    <Eye size={14} strokeWidth={2.5} aria-hidden />
                   </button>
                 </td>
               </tr>

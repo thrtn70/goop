@@ -147,6 +147,20 @@ export default function QueueSidebar() {
     }
   }, [confirmingCount, selectedQueuedCount]);
 
+  // Escape dismisses the destructive confirm — matches the pattern users
+  // expect from confirm prompts elsewhere in the app.
+  useEffect(() => {
+    if (confirmingCount === null) return;
+    function onKeyDown(e: KeyboardEvent): void {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setConfirmingCount(null);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmingCount]);
+
   async function handleConfirmCancel(): Promise<void> {
     setConfirmingCount(null);
     try {

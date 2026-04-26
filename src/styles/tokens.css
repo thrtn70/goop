@@ -72,7 +72,10 @@
   --leading-normal: 1.55;
   --leading-relaxed: 1.7;
 
-  /* Font families */
+  /* Font families. Declared once in :root only — fonts don't theme-vary,
+     so the light/system blocks deliberately don't override them. (Color
+     tokens like --accent-fg are repeated for clarity even when the value
+     matches; fonts skip the repetition.) */
   --font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
   --font-body: 'Figtree', ui-sans-serif, system-ui, sans-serif;
   /* Mono stack — system fonts only. Cascadia Mono ships with Win 11
