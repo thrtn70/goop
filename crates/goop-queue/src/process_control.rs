@@ -91,6 +91,21 @@ mod imp {
         })
     }
 
+    /// RAII wrapper so `CloseHandle` runs even if the closure inside
+    /// `with_handle` panics. Without this, an unwind would leak the handle.
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle was returned by `OpenProcess` and not yet
+            // closed. CloseHandle accepts and invalidates it. Failure is
+            // non-recoverable and not actionable for the caller.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
     fn with_handle<F>(pid: u32, f: F) -> Result<(), ProcessControlError>
     where
         F: FnOnce(HANDLE) -> Result<(), ProcessControlError>,
@@ -109,14 +124,8 @@ mod imp {
                 _ => ProcessControlError::Other { pid, source: err },
             });
         }
-        let result = f(handle);
-        // SAFETY: `handle` is a valid open handle; CloseHandle accepts and
-        // invalidates it. We ignore the return because failure here is
-        // non-recoverable and not relevant to the caller.
-        unsafe {
-            CloseHandle(handle);
-        }
-        result
+        let owned = OwnedHandle(handle);
+        f(owned.0)
     }
 
     fn ntstatus_to_result(pid: u32, status: i32) -> Result<(), ProcessControlError> {

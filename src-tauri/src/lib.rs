@@ -59,10 +59,10 @@ pub fn run() {
             // Phase G: silently re-queue any jobs left in `paused` state from
             // a previous run. The child process is gone so we restart from
             // scratch; the user already knows the app restarted.
-            if let Ok(reset) = store.recover_paused() {
-                if reset > 0 {
-                    tracing::info!(count = reset, "re-queued paused jobs after restart");
-                }
+            match store.recover_paused() {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "re-queued paused jobs after restart"),
+                Err(e) => tracing::error!(error = %e, "failed to recover paused jobs on boot"),
             }
             let app_handle = app.handle().clone();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app_handle.clone()));

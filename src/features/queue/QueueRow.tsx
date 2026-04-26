@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import type { Job, JobState, TargetFormat } from "@/types";
 import { api } from "@/ipc/commands";
+import { formatError, parseIpcError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 
 type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
@@ -19,14 +20,18 @@ const IMAGE_TARGETS: ReadonlySet<TargetFormat> = new Set<TargetFormat>([
   "bmp",
 ]);
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function isPausable(job: Job): boolean {
+  if (!isPlainObject(job.payload)) return false;
   if (job.kind === "pdf") {
-    const op = job.payload as { kind?: string } | null;
-    return op?.kind === "compress";
+    return job.payload.kind === "compress";
   }
   if (job.kind === "convert") {
-    const target = (job.payload as { target?: TargetFormat } | null)?.target;
-    return target != null && !IMAGE_TARGETS.has(target);
+    const target = job.payload.target;
+    return typeof target === "string" && !IMAGE_TARGETS.has(target as TargetFormat);
   }
   return false;
 }
@@ -101,9 +106,18 @@ function stateInfo(name: StateName): { glyph: string; label: string } {
 }
 
 /**
+ * Backend signals the PID-registration race as `IpcError::Queue` with
+ * message "job_not_running". All other errors propagate immediately.
+ */
+function isPidRaceError(err: unknown): boolean {
+  const ipc = parseIpcError(err);
+  return ipc?.code === "queue" && ipc.message === "job_not_running";
+}
+
+/**
  * Pause IPC can race with the worker's PID registration in the ~1ms window
- * between scheduler->Running and `register_pid`. Retry briefly on
- * `JobNotRunning` before surfacing the error to the user.
+ * between scheduler->Running and `register_pid`. Retry briefly on the race
+ * error only — surface every other error immediately.
  */
 async function pauseWithRetry(jobId: Job["id"]): Promise<void> {
   const delays = [0, 100, 200];
@@ -114,6 +128,7 @@ async function pauseWithRetry(jobId: Job["id"]): Promise<void> {
       await api.queue.pause(jobId);
       return;
     } catch (err) {
+      if (!isPidRaceError(err)) throw err;
       lastErr = err;
     }
   }
@@ -126,11 +141,36 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
     s.ui.queueSelectedIds.has(jobIdKey(job.id)),
   );
   const toggleSelection = useAppStore((s) => s.toggleQueueSelection);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const name = stateName(job.state);
   const pct = progress?.percent ?? 0;
   const outputPath = job.result?.output_path ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  async function handlePauseClick(): Promise<void> {
+    try {
+      await pauseWithRetry(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't pause",
+        detail: formatError(err),
+      });
+    }
+  }
+
+  async function handleResumeClick(): Promise<void> {
+    try {
+      await api.queue.resume(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't resume",
+        detail: formatError(err),
+      });
+    }
+  }
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -216,7 +256,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             {isPausable(job) && (
               <button
                 type="button"
-                onClick={() => void pauseWithRetry(job.id)}
+                onClick={() => void handlePauseClick()}
                 aria-label={`Pause ${shortLabel(job)}`}
                 className="btn-press rounded-md px-2 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:bg-surface-3 hover:text-fg"
               >
@@ -237,7 +277,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"
-              onClick={() => void api.queue.resume(job.id)}
+              onClick={() => void handleResumeClick()}
               aria-label={`Resume ${shortLabel(job)}`}
               className="btn-press rounded-md px-2 py-1 text-xs text-accent transition duration-fast ease-out hover:bg-accent-subtle hover:text-accent-hover"
             >

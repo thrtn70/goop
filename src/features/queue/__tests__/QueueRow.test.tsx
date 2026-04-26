@@ -138,17 +138,47 @@ describe("QueueRow pause/resume controls", () => {
     expect(screen.getByText(/ETA/)).toBeTruthy();
   });
 
-  it("calls api.queue.pause when Pause is clicked", async () => {
+  it("calls api.queue.pause with the correct jobId when Pause is clicked", async () => {
     const user = userEvent.setup();
-    render(<QueueRow job={makeJob({ state: "running" })} index={0} />);
+    const job = makeJob({ state: "running" });
+    render(<QueueRow job={job} index={0} />);
     await user.click(screen.getByRole("button", { name: /^Pause/ }));
     expect(queueMocks.pause).toHaveBeenCalledOnce();
+    expect(queueMocks.pause).toHaveBeenCalledWith(job.id);
   });
 
-  it("calls api.queue.resume when Resume is clicked", async () => {
+  it("calls api.queue.resume with the correct jobId when Resume is clicked", async () => {
     const user = userEvent.setup();
-    render(<QueueRow job={makeJob({ state: "paused" })} index={0} />);
+    const job = makeJob({ state: "paused" });
+    render(<QueueRow job={job} index={0} />);
     await user.click(screen.getByRole("button", { name: /^Resume/ }));
     expect(queueMocks.resume).toHaveBeenCalledOnce();
+    expect(queueMocks.resume).toHaveBeenCalledWith(job.id);
+  });
+
+  it("hides the pause button on a convert job whose payload has no target", () => {
+    render(
+      <QueueRow
+        job={makeJob({
+          state: "running",
+          payload: { input_path: "/tmp/in.mp4" },
+        })}
+        index={0}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /^Pause/ })).toBeNull();
+  });
+
+  it("hides the pause button on a convert job whose target is null", () => {
+    render(
+      <QueueRow
+        job={makeJob({
+          state: "running",
+          payload: { input_path: "/tmp/in.mp4", target: null },
+        })}
+        index={0}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /^Pause/ })).toBeNull();
   });
 });

@@ -207,6 +207,12 @@ impl Scheduler {
     /// running, or in the ~1ms window between state→Running and the
     /// worker's PID registration — the IPC layer retries this case).
     pub fn pause(&self, id: JobId) -> Result<(), SchedulerError> {
+        // TOCTOU note: PID lookup and signal are not atomic with worker
+        // exit. After child.wait() returns but before PidGuard drops, the
+        // PID is still registered. Sending SIGSTOP to a dead PID returns
+        // ESRCH (NotFound), mapped to JobNotRunning by the IPC layer —
+        // benign. PID reuse on Unix requires the kernel's PID counter to
+        // wrap (~32k+ spawns), so reuse-then-pause is vanishingly rare.
         let pid = self.pids.lookup(id).ok_or(SchedulerError::JobNotRunning)?;
         process_control::pause(pid)?;
         self.store
@@ -252,14 +258,17 @@ fn now_ms() -> i64 {
 /// `DashMap`-backed `PidRegistry`. Used by `Scheduler::new` and exposed via
 /// `Scheduler::pid_registry()` so worker closures can share the same
 /// instance the scheduler queries during pause/resume.
+///
+/// `DashMap` is already `Send + Sync`, so the outer `Arc<dyn PidRegistry>`
+/// in callers provides the only shared-ownership wrapper needed.
 pub struct SchedulerPidRegistry {
-    pids: Arc<DashMap<JobId, u32>>,
+    pids: DashMap<JobId, u32>,
 }
 
 impl SchedulerPidRegistry {
     pub fn new() -> Self {
         Self {
-            pids: Arc::new(DashMap::new()),
+            pids: DashMap::new(),
         }
     }
 }
