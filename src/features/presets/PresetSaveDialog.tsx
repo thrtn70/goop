@@ -81,7 +81,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
       role="dialog"
       aria-modal="true"
       aria-label="Save preset"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/40"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

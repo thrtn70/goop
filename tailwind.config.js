@@ -24,7 +24,9 @@ export default {
           hover: oklch("--accent-hover"),
           subtle: oklch("--accent-subtle"),
           fg: oklch("--accent-fg"),
+          strong: oklch("--accent-strong"),
         },
+        scrim: oklch("--scrim"),
         success: {
           DEFAULT: oklch("--success"),
           subtle: oklch("--success-subtle"),

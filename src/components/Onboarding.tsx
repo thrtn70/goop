@@ -143,7 +143,7 @@ export default function Onboarding() {
       role="dialog"
       aria-modal="true"
       aria-label="Welcome to Goop"
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-scrim/60 px-4"
     >
       <div
         ref={dialogRef}

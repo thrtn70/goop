@@ -45,7 +45,7 @@ export default function LeftNav() {
       {pill && (
         <div
           className={clsx(
-            "absolute left-2 right-2 rounded-md bg-accent",
+            "absolute left-2 right-2 rounded-md bg-accent-strong",
             ready ? "transition-transform duration-normal ease-out" : "",
           )}
           style={{ transform: `translateY(${pill.top}px)`, height: pill.height }}
@@ -75,7 +75,7 @@ export default function LeftNav() {
                 className={clsx(
                   "ml-2 rounded px-1 font-mono text-[10px]",
                   isActive
-                    ? "bg-accent-fg/15 text-accent-fg"
+                    ? "bg-scrim/30 text-accent-fg"
                     : "bg-surface-3 text-fg-muted",
                 )}
                 aria-hidden

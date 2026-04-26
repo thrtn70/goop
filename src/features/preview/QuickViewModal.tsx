@@ -31,7 +31,7 @@ export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
       role="dialog"
       aria-modal="true"
       aria-label="Quick view"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-6"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-scrim/55 p-6"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
