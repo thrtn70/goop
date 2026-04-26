@@ -185,7 +185,7 @@ export default function QueueSidebar() {
   if (collapsed) {
     return (
       <aside
-        className="flex w-10 shrink-0 flex-col items-center gap-2 border-l border-subtle bg-surface-1 py-3 transition-[width] duration-normal ease-out"
+        className="flex w-10 shrink-0 flex-col items-center gap-2 border-l border-subtle bg-surface-1 py-3"
         aria-label="Job queue (collapsed)"
       >
         <button
