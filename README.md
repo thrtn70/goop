@@ -67,6 +67,30 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - List view or grid view (persists across restarts). Grid lazy-loads thumbnails as cards scroll into view.
 - Multi-select rows with checkboxes → batch **Reveal all**, **Remove from history**, or **Move to Trash**.
 
+### Hardware-accelerated encoding (v0.1.9)
+
+- Auto-detects your GPU encoder at startup — **VideoToolbox** on macOS, **NVENC** / **QSV** / **AMF** on Windows. 2–5× faster re-encodes when available; transparently falls back to software if the GPU encode fails.
+- Toggle it in **Settings → General → Hardware acceleration**. Queue rows show a small **HW** pill while a GPU encoder is active.
+
+### Queue management (v0.1.9)
+
+- **Drag to reorder** queued jobs in the sidebar. Running jobs stay pinned.
+- **Batch cancel**: shift-click rows to multi-select, then cancel them as a group.
+- **Resizable + collapsible sidebar**: drag the left edge to resize (persists across restarts), or hit `⌘⇧Q` / `Ctrl+Shift+Q` to collapse it to a tab — handy when the History preview panel needs the room.
+- Header now shows total ETA for in-flight jobs and a "done today" count.
+
+### Cookies from browser (v0.1.9)
+
+- New **Settings → General → Cookies from browser** dropdown. Pick Chrome / Firefox / Safari / Edge / etc., and Goop passes your existing browser session to yt-dlp via `--cookies-from-browser` for sites that require login (Twitter/X, Instagram, members-only YouTube). Cookies are read locally and never leave your machine.
+- Common yt-dlp errors now resolve to one-sentence hints instead of dumping the raw stderr — "This tweet's video may require login. Try enabling Cookies from browser…" rather than a Python traceback.
+
+### Polish (v0.1.9)
+
+- "Apply preset to all" in Convert + Compress when multiple files are staged.
+- Settings → About loads instantly (versions cached at app boot, not spawned per visit).
+- Preview thumbnails regenerate automatically when the on-disk cache is stale instead of showing a broken-image icon.
+- "Clear" in the queue's Done section now soft-hides finished jobs from the queue tab only — they remain in History.
+
 ---
 
 ## Requirements
@@ -121,9 +145,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (Rust 1.80+, Node 20+, 
 
 ## Roadmap
 
-Planned after v0.1.8:
-- Hardware-accelerated encoding (VideoToolbox, NVENC, AMF, QSV).
-- Queue management (drag to reorder, pause/resume, batch cancel).
+Planned after v0.1.9:
+- Pause / resume running jobs (macOS first, Windows after).
+- Right-click context menu on queue rows ("Move to top", "Cancel").
+- Cobalt fallback extractor for Twitter / Instagram / TikTok URLs that yt-dlp can't reach.
 - Keyboard shortcuts and command palette.
 - First-run onboarding and accessibility polish.
 - Audio waveform thumbnails.

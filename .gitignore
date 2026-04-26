@@ -43,3 +43,6 @@ CLAUDE.md
 
 # Cursor IDE local state
 .cursor/
+
+# Release notes are applied via gh release edit; not tracked
+.release-notes/
