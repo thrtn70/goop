@@ -2,6 +2,7 @@ import { Outlet, useNavigate } from "react-router-dom";
 import LeftNav from "./LeftNav";
 import TopBar from "./TopBar";
 import CommandPalette from "./CommandPalette";
+import Onboarding from "./Onboarding";
 import QueueSidebar from "@/features/queue/QueueSidebar";
 import { useTheme } from "@/hooks/useTheme";
 import { useQueueHotkey } from "@/hooks/useQueueHotkey";
@@ -26,6 +27,7 @@ export default function Layout() {
         <QueueSidebar />
       </div>
       <CommandPalette />
+      <Onboarding />
     </div>
   );
 }

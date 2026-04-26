@@ -9,4 +9,10 @@ export type SettingsPatch = { output_dir: string | null, theme: Theme | null, yt
  * - `Some(Some("chrome"))` → set to a specific browser
  * - `Some(None)` → clear (turn cookies off)
  */
-cookies_from_browser: string | null | null, };
+cookies_from_browser: string | null | null, 
+/**
+ * Phase I (v0.2.0): set to `Some(true)` when the user finishes or
+ * skips onboarding; `Some(false)` from Settings → About to
+ * re-show the welcome screen.
+ */
+has_seen_onboarding: boolean | null, };

@@ -9,4 +9,12 @@ export type Settings = { output_dir: string, theme: Theme, yt_dlp_last_update_ms
  * sites that require login (Twitter, Instagram, etc.) by reusing
  * their existing browser session. `None` = no cookies passed.
  */
-cookies_from_browser: string | null, };
+cookies_from_browser: string | null, 
+/**
+ * Phase I (v0.2.0): tracks whether the user has dismissed the
+ * first-run onboarding flow. Defaults to false; flipped to true
+ * when the user finishes or skips. Re-accessible from
+ * Settings → About via a "Show welcome screen" button that
+ * flips it back to false.
+ */
+has_seen_onboarding: boolean, };
