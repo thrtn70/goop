@@ -1,5 +1,6 @@
 import type { HistorySort, Job, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryListProps {
   onPreview: (job: Job) => void;
@@ -72,13 +73,12 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
   const selectedIds = useAppStore((s) => s.history.selectedIds);
   const previewSelectedId = useAppStore((s) => s.history.previewSelectedId);
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
+  const search = useAppStore((s) => s.history.search);
+  const kind = useAppStore((s) => s.history.kind);
 
   if (jobs.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-fg-secondary">No finished jobs match those filters.</p>
-      </div>
-    );
+    const filtersActive = search.trim() !== "" || kind !== null;
+    return <EmptyHistory filtersActive={filtersActive} />;
   }
 
   return (

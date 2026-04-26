@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Job, JobId, SourceKind } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useThumbnail } from "@/hooks/useThumbnail";
+import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryGridProps {
   onPreview: (job: Job) => void;
@@ -104,6 +105,16 @@ function Card({
           src={thumbState.src}
           alt=""
           className="aspect-[16/10] w-full bg-surface-2 object-cover"
+          // Phase: View Transitions. The card gives up its name when its
+          // preview is open so the same name is unique across the page —
+          // avoiding the duplicate-name conflict that would suppress the
+          // morph. The previewing card stays mounted; only the preview
+          // pane's <img> carries the name in the after-state.
+          style={
+            previewing
+              ? undefined
+              : { viewTransitionName: `vt-thumb-${jobIdKey(job.id)}` }
+          }
         />
       ) : (
         <KindIcon kind={kind} />
@@ -145,13 +156,12 @@ export default function HistoryGrid({ onPreview, onQuickView }: HistoryGridProps
   const jobs = useAppStore((s) => s.history.jobs);
   const selectedIds = useAppStore((s) => s.history.selectedIds);
   const previewSelectedId = useAppStore((s) => s.history.previewSelectedId);
+  const search = useAppStore((s) => s.history.search);
+  const kind = useAppStore((s) => s.history.kind);
 
   if (jobs.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-fg-secondary">No finished jobs match those filters.</p>
-      </div>
-    );
+    const filtersActive = search.trim() !== "" || kind !== null;
+    return <EmptyHistory filtersActive={filtersActive} />;
   }
 
   return (

@@ -4,6 +4,7 @@ import type { Job, JobState, TargetFormat } from "@/types";
 import { api } from "@/ipc/commands";
 import { formatError, parseIpcError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useSpringValue } from "@/hooks/useSpringValue";
 
 type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
 
@@ -144,6 +145,13 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const name = stateName(job.state);
   const pct = progress?.percent ?? 0;
+  // Spring-settle the ETA so it doesn't jitter "12s … 11s … 13s" on
+  // every progress event. Pause settles too — when paused the underlying
+  // value is null, which the hook surfaces as null without trying to
+  // interpolate between unknown and a number.
+  const targetEta =
+    name === "paused" ? null : progress?.eta_secs != null ? progress.eta_secs : null;
+  const settledEta = useSpringValue(targetEta);
   const outputPath = job.result?.output_path ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -341,18 +349,29 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             >
               <div
                 className={clsx(
-                  "h-1 w-full origin-left rounded-full",
+                  "relative h-1 w-full origin-left overflow-hidden rounded-full",
                   name === "paused" ? "bg-fg-muted" : "bg-accent",
                 )}
                 style={{
                   transform: `scaleX(${pct / 100})`,
                   transition: `transform var(--duration-normal) var(--ease-out)`,
                 }}
-              />
+              >
+                {/* Wave-flow overlay: a soft lighter wash slides
+                 *  continuously across the running fill, suggesting
+                 *  motion. Skipped while paused (frozen feel) and on
+                 *  reduced-motion via the global @media rule. */}
+                {name === "running" && (
+                  <span
+                    aria-hidden
+                    className="progress-flow absolute inset-0 block"
+                  />
+                )}
+              </div>
             </div>
             {name === "running" && isHardwareEncoder(progress?.encoder ?? null) && (
               <span
-                className="rounded-full bg-accent-subtle px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent"
+                className="pulse-glow rounded-full bg-accent-subtle px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent"
                 title={`Hardware-accelerated encoder: ${progress?.encoder}`}
               >
                 HW
@@ -365,8 +384,8 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             <span>
               {name === "paused"
                 ? "ETA —"
-                : progress?.eta_secs != null
-                  ? `ETA ${progress.eta_secs}s`
+                : settledEta != null
+                  ? `ETA ${Math.max(0, Math.round(settledEta))}s`
                   : ""}
             </span>
           </div>
