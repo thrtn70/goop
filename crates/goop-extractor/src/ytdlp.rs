@@ -10,6 +10,24 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
+/// yt-dlp browser names this crate is willing to forward to
+/// `--cookies-from-browser`. Defense-in-depth: even though the IPC layer
+/// validates against `goop_config::SUPPORTED_BROWSERS` before storing the
+/// request, the worker re-deserializes the payload from SQLite and the
+/// row could in principle contain an unsanitised string (DB tampering,
+/// future migration bug, manual edit). Re-validate here so an arbitrary
+/// value can never reach the yt-dlp argv. Keeping a duplicate constant
+/// avoids a circular crate dep on goop-config; the list is short and
+/// rarely changes.
+const SUPPORTED_BROWSERS: &[&str] = &[
+    "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
+];
+
+fn validated_browser(name: Option<&str>) -> Option<&'static str> {
+    let n = name?;
+    SUPPORTED_BROWSERS.iter().copied().find(|b| *b == n)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ExtractRequest {
@@ -77,7 +95,7 @@ impl<'a> YtDlp<'a> {
         let bin = resolver.resolve("yt-dlp")?;
         let mut cmd = Command::new(&bin.path);
         cmd.args(["-J", "--no-warnings"]);
-        if let Some(browser) = cookies_from_browser {
+        if let Some(browser) = validated_browser(cookies_from_browser) {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
         cmd.arg(url);
@@ -127,7 +145,7 @@ impl<'a> YtDlp<'a> {
         if let Some(fmt) = &req.format {
             cmd.arg("-f").arg(fmt);
         }
-        if let Some(browser) = &req.cookies_from_browser {
+        if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
         // arg(), not shell: URL is passed as argv, not expanded by a shell.
@@ -337,5 +355,28 @@ mod tests {
     fn parse_eta_hours() {
         assert_eq!(parse_eta("01:02:03"), Some(3723));
         assert_eq!(parse_eta("02:05"), Some(125));
+    }
+
+    #[test]
+    fn validated_browser_accepts_known_names() {
+        assert_eq!(validated_browser(Some("chrome")), Some("chrome"));
+        assert_eq!(validated_browser(Some("firefox")), Some("firefox"));
+        assert_eq!(validated_browser(Some("safari")), Some("safari"));
+    }
+
+    #[test]
+    fn validated_browser_rejects_unknown_or_path_traversal() {
+        // None passes through.
+        assert_eq!(validated_browser(None), None);
+        // Bare unknown string.
+        assert_eq!(validated_browser(Some("netscape")), None);
+        // yt-dlp profile-suffix syntax (chrome:profile_path) is rejected
+        // because we don't expose profile selection in the UI and the
+        // suffix can carry filesystem paths.
+        assert_eq!(validated_browser(Some("chrome:../../tmp/evil")), None);
+        assert_eq!(validated_browser(Some("firefox:default")), None);
+        // Empty / whitespace.
+        assert_eq!(validated_browser(Some("")), None);
+        assert_eq!(validated_browser(Some(" chrome")), None);
     }
 }

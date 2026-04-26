@@ -17,12 +17,16 @@ export type ThumbnailState =
  *
  * If the first attempt fails, the store entry is invalidated and the backend
  * is asked to regenerate once. A second failure resolves to `"unavailable"`.
+ *
+ * Implementation note: we deliberately do NOT subscribe to the
+ * `thumbnailsById[key]` store slice. The effect calls `invalidateThumbnail`
+ * during the regen path, which would mutate that slice and re-fire the
+ * effect mid-flight, racing two concurrent IPC calls. Instead, we read the
+ * cached path once at effect entry via `getState()` and react only to
+ * `jobId` / `skip` changes.
  */
 export function useThumbnail(jobId: JobId, skip: boolean): ThumbnailState {
   const key = jobIdKey(jobId);
-  const loadThumbnail = useAppStore((s) => s.loadThumbnail);
-  const invalidateThumbnail = useAppStore((s) => s.invalidateThumbnail);
-  const cached = useAppStore((s) => s.thumbnailsById[key] ?? null);
   const [state, setState] = useState<ThumbnailState>({ status: "loading" });
 
   useEffect(() => {
@@ -44,9 +48,11 @@ export function useThumbnail(jobId: JobId, skip: boolean): ThumbnailState {
     }
 
     (async () => {
-      let path: string | null = cached;
+      const store = useAppStore.getState();
+      const initial = store.thumbnailsById[key] ?? null;
+      let path: string | null = initial;
       if (!path) {
-        path = await loadThumbnail(jobId);
+        path = await store.loadThumbnail(jobId);
       }
       if (cancelled) return;
       if (!path) {
@@ -62,8 +68,11 @@ export function useThumbnail(jobId: JobId, skip: boolean): ThumbnailState {
       }
 
       // Path was stale; drop it, ask backend to regenerate, try once more.
-      invalidateThumbnail(jobId);
-      const fresh = await loadThumbnail(jobId);
+      // This call mutates the store slice we deliberately don't subscribe
+      // to — see the implementation note above.
+      const latest = useAppStore.getState();
+      latest.invalidateThumbnail(jobId);
+      const fresh = await latest.loadThumbnail(jobId);
       if (cancelled) return;
       if (!fresh) {
         setState({ status: "unavailable" });
@@ -79,7 +88,7 @@ export function useThumbnail(jobId: JobId, skip: boolean): ThumbnailState {
     return () => {
       cancelled = true;
     };
-  }, [jobId, key, cached, skip, loadThumbnail, invalidateThumbnail]);
+  }, [jobId, key, skip]);
 
   return state;
 }

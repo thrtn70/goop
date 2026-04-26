@@ -40,3 +40,6 @@ Thumbs.db
 CLAUDE.md
 .impeccable.md
 .superpowers/
+
+# Cursor IDE local state
+.cursor/

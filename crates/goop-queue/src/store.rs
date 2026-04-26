@@ -28,12 +28,7 @@ impl QueueStore {
         // them from History. SQLite's ALTER TABLE has no IF NOT EXISTS so
         // we check `pragma_table_info` first; that keeps re-opens of an
         // already-migrated DB silent.
-        ensure_column(
-            &conn,
-            "jobs",
-            "hidden_from_queue",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
+        ensure_hidden_from_queue_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -437,26 +432,29 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Idempotent ALTER TABLE ADD COLUMN. SQLite has no `IF NOT EXISTS` for
-/// columns, so we look for it in the table's metadata and only emit the
-/// ALTER when it's missing. Lets `QueueStore::open` run safely against
-/// both fresh DBs and DBs from older app versions.
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    decl: &str,
-) -> Result<(), GoopError> {
+/// Idempotent migration for the v0.1.9 `hidden_from_queue` column on the
+/// `jobs` table. SQLite has no `IF NOT EXISTS` clause for ALTER TABLE ADD
+/// COLUMN, so we check `pragma_table_info` and skip the ALTER when the
+/// column is already present.
+///
+/// Specialized (rather than generic) on purpose: a generic
+/// `add_column(table, name, decl)` helper would format identifiers into
+/// raw SQL and become a latent injection surface for any future caller.
+/// Keeping the table/column/declaration as compile-time literals here
+/// closes that hole.
+fn ensure_hidden_from_queue_column(conn: &Connection) -> Result<(), GoopError> {
     let mut stmt = conn
-        .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+        .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'hidden_from_queue'")
         .map_err(|e| GoopError::Queue(e.to_string()))?;
     let exists = stmt
-        .exists(params![table, column])
+        .exists([])
         .map_err(|e| GoopError::Queue(e.to_string()))?;
     if !exists {
-        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
-        conn.execute(&sql, [])
-            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN hidden_from_queue INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
     }
     Ok(())
 }
