@@ -1,7 +1,16 @@
 import { useState } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { useAppStore } from "@/store/appStore";
 import { formatError } from "@/ipc/error";
+import { api } from "@/ipc/commands";
 import type { Preset } from "@/types";
+import {
+  entriesToPresets,
+  parsePresetBundle,
+  PresetParseError,
+  serializePresets,
+} from "./io";
 
 /**
  * Settings → Presets section. Lists saved presets with rename (click the
@@ -12,9 +21,86 @@ export default function PresetManager() {
   const presets = useAppStore((s) => s.presets);
   const savePreset = useAppStore((s) => s.savePreset);
   const deletePreset = useAppStore((s) => s.deletePreset);
+  const loadPresets = useAppStore((s) => s.loadPresets);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const exportable = presets.filter((p) => !p.is_builtin);
+
+  async function handleExport(): Promise<void> {
+    setError(null);
+    if (exportable.length === 0) {
+      enqueueToast({
+        variant: "info",
+        title: "Nothing to export",
+        detail: "Save a preset on Convert or Compress first.",
+      });
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const dest = await save({
+      title: "Export presets",
+      defaultPath: `goop-presets-${today}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!dest) return;
+    setBusy(true);
+    try {
+      await writeTextFile(dest, serializePresets(presets));
+      enqueueToast({
+        variant: "success",
+        title: `Exported ${exportable.length} preset${exportable.length === 1 ? "" : "s"}`,
+      });
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleImport(): Promise<void> {
+    setError(null);
+    const picked = await open({
+      title: "Import presets",
+      multiple: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    try {
+      const raw = await readTextFile(picked);
+      const entries = parsePresetBundle(raw);
+      if (entries.length === 0) {
+        enqueueToast({
+          variant: "info",
+          title: "No presets found in that file",
+        });
+        return;
+      }
+      const fresh = entriesToPresets(entries, presets);
+      // Save sequentially so the backend's `created_at` ordering is
+      // deterministic and any one failure short-circuits the rest.
+      for (const p of fresh) {
+        await api.preset.save(p);
+      }
+      await loadPresets();
+      enqueueToast({
+        variant: "success",
+        title: `Imported ${fresh.length} preset${fresh.length === 1 ? "" : "s"}`,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof PresetParseError
+          ? `Couldn't read that file — ${e.message}`
+          : formatError(e);
+      setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function commitRename(p: Preset) {
     const name = draft.trim();
@@ -39,11 +125,41 @@ export default function PresetManager() {
     }
   }
 
+  const actionRow = (
+    <div className="flex flex-wrap items-center gap-3 text-xs">
+      <button
+        type="button"
+        onClick={() => void handleImport()}
+        disabled={busy}
+        className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover disabled:opacity-50"
+      >
+        Import…
+      </button>
+      <button
+        type="button"
+        onClick={() => void handleExport()}
+        disabled={busy || exportable.length === 0}
+        title={
+          exportable.length === 0
+            ? "Save a preset first; built-ins are excluded from export."
+            : undefined
+        }
+        className="btn-press text-fg-secondary transition duration-fast ease-out hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Export…
+      </button>
+    </div>
+  );
+
   if (presets.length === 0) {
     return (
-      <p className="text-xs text-fg-muted">
-        No saved presets yet. Use "Save as preset" on the Convert or Compress page.
-      </p>
+      <div className="flex flex-col gap-3">
+        <p className="text-xs text-fg-muted">
+          No saved presets yet. Use "Save as preset" on the Convert or Compress page.
+        </p>
+        {actionRow}
+        {error && <p className="text-xs text-error">{error}</p>}
+      </div>
     );
   }
 
@@ -100,6 +216,7 @@ export default function PresetManager() {
           </li>
         ))}
       </ul>
+      <div className="mt-3">{actionRow}</div>
       {error && <p className="mt-2 text-xs text-error">{error}</p>}
     </div>
   );
