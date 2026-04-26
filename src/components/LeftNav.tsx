@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import clsx from "clsx";
+import { modKeyLabel } from "@/lib/platform";
 
 const items = [
-  { to: "/extract", label: "Extract" },
-  { to: "/convert", label: "Convert" },
-  { to: "/compress", label: "Compress" },
-  { to: "/history", label: "History" },
-  { to: "/settings", label: "Settings" },
+  { to: "/extract", label: "Extract", shortcut: "1" },
+  { to: "/convert", label: "Convert", shortcut: "2" },
+  { to: "/compress", label: "Compress", shortcut: "3" },
+  { to: "/history", label: "History", shortcut: "4" },
+  { to: "/settings", label: "Settings", shortcut: "5" },
 ];
 
 export default function LeftNav() {
@@ -36,6 +37,8 @@ export default function LeftNav() {
     }
   }, [location.pathname, ready]);
 
+  const mod = modKeyLabel();
+
   return (
     <nav ref={navRef} className="relative flex w-48 flex-col border-r border-subtle bg-surface-1 py-3">
       {/* Sliding pill indicator */}
@@ -55,16 +58,33 @@ export default function LeftNav() {
           key={it.to}
           to={it.to}
           ref={(el) => { itemRefs.current[i] = el; }}
+          title={`${it.label} (${mod}${it.shortcut})`}
           className={({ isActive }) =>
             clsx(
-              "relative z-10 mx-2 rounded-md px-3 py-2 font-display text-sm font-medium transition duration-fast ease-out",
+              "relative z-10 mx-2 flex items-center justify-between rounded-md px-3 py-2 font-display text-sm font-medium transition duration-fast ease-out",
               isActive
                 ? "text-accent-fg"
                 : "text-fg-secondary hover:bg-surface-3 hover:text-fg"
             )
           }
         >
-          {it.label}
+          {({ isActive }) => (
+            <>
+              <span>{it.label}</span>
+              <kbd
+                className={clsx(
+                  "ml-2 rounded px-1 font-mono text-[10px]",
+                  isActive
+                    ? "bg-accent-fg/15 text-accent-fg"
+                    : "bg-surface-3 text-fg-muted",
+                )}
+                aria-hidden
+              >
+                {mod}
+                {it.shortcut}
+              </kbd>
+            </>
+          )}
         </NavLink>
       ))}
     </nav>

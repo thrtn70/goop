@@ -1,10 +1,20 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useAppStore } from "@/store/appStore";
 
 type Props = { onSubmit: (url: string) => void };
 
 export default function TopBar({ onSubmit }: Props) {
   const [url, setUrl] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const focusToken = useAppStore((s) => s.pendingFocusUrlInput);
+  // Phase H: Cmd+N increments `pendingFocusUrlInput`. Mirror that increment
+  // into the URL input by focusing + selecting on every change > 0.
+  useEffect(() => {
+    if (focusToken > 0) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [focusToken]);
   return (
     <header className="flex items-center border-b border-subtle bg-surface-1 px-4 py-2">
       <input

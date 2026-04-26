@@ -96,6 +96,19 @@ type AppStoreState = {
   updateInfo: UpdateInfo | null;
   updateDownload: UpdateDownloadState | null;
   history: HistoryState;
+  /** Phase H: command palette open state. Toggled by Cmd+K. */
+  paletteOpen: boolean;
+  /**
+   * Phase H: counter that increments each time Cmd+N fires. Pages with a URL
+   * input (TopBar) watch this and call `inputRef.current?.focus()` when it
+   * changes. Counter (vs boolean) avoids consume/clear races.
+   */
+  pendingFocusUrlInput: number;
+  /**
+   * Phase H: counter that increments each time Cmd+O fires. Convert and
+   * Compress pages watch this and trigger their file picker when it changes.
+   */
+  pendingFilePicker: number;
   /** `job_id` (as a string key) -> filesystem path to cached thumbnail PNG. */
   thumbnailsById: Record<string, string>;
   /**
@@ -158,6 +171,13 @@ type AppStoreState = {
    * regenerate.
    */
   invalidateThumbnail: (jobId: JobId) => void;
+  /** Phase H: open or close the command palette. */
+  setPaletteOpen: (open: boolean) => void;
+  togglePalette: () => void;
+  /** Phase H: ask the URL input to focus. Called by the Cmd+N hotkey. */
+  requestFocusUrlInput: () => void;
+  /** Phase H: ask the active page (Convert/Compress) to open its file picker. */
+  requestFilePicker: () => void;
 };
 
 /**
@@ -250,6 +270,9 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   thumbnailsById: {},
   versions: null,
   ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
+  paletteOpen: false,
+  pendingFocusUrlInput: 0,
+  pendingFilePicker: 0,
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
@@ -524,6 +547,18 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       delete thumbs[key];
       return { thumbnailsById: thumbs };
     });
+  },
+  setPaletteOpen(open) {
+    set({ paletteOpen: open });
+  },
+  togglePalette() {
+    set((s) => ({ paletteOpen: !s.paletteOpen }));
+  },
+  requestFocusUrlInput() {
+    set((s) => ({ pendingFocusUrlInput: s.pendingFocusUrlInput + 1 }));
+  },
+  requestFilePicker() {
+    set((s) => ({ pendingFilePicker: s.pendingFilePicker + 1 }));
   },
 }));
 

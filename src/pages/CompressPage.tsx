@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import CompressFileRow from "@/features/compress/CompressFileRow";
@@ -7,6 +8,7 @@ import CompressActionBar from "@/features/compress/CompressActionBar";
 import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
+import { useAppStore } from "@/store/appStore";
 import type { Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
@@ -49,6 +51,7 @@ function targetFromPath(path: string): TargetFormat {
 }
 
 export default function CompressPage() {
+  const location = useLocation();
   const [files, setFiles] = useState<CompressFileEntry[]>([]);
   const [pdfs, setPdfs] = useState<string[]>([]);
 
@@ -104,7 +107,7 @@ export default function CompressPage() {
     });
   }, []);
 
-  const handleBrowse = async () => {
+  const handleBrowse = useCallback(async () => {
     const picked = await open({
       multiple: true,
       title: "Select files to compress",
@@ -113,7 +116,18 @@ export default function CompressPage() {
       const paths = Array.isArray(picked) ? picked : [picked];
       addPaths(paths.filter((p): p is string => typeof p === "string"));
     }
-  };
+  }, [addPaths]);
+
+  // Phase H: Cmd+O increments `pendingFilePicker`. Only fire when this
+  // page is the active route — guards against double-fire if a future
+  // animated route transition keeps both Convert and Compress mounted
+  // briefly.
+  const pickerToken = useAppStore((s) => s.pendingFilePicker);
+  useEffect(() => {
+    if (pickerToken > 0 && location.pathname.startsWith("/compress")) {
+      void handleBrowse();
+    }
+  }, [pickerToken, handleBrowse, location.pathname]);
 
   const hasFiles = files.length > 0;
   const hasPdfs = pdfs.length > 0;
