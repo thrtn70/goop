@@ -93,6 +93,9 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
         </p>
         <input
           ref={inputRef}
+          aria-label="Preset name"
+          aria-invalid={error ? true : false}
+          aria-describedby="preset-name-error"
           className="mt-3 w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
           placeholder="e.g. YouTube Upload"
           value={name}
@@ -102,7 +105,9 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
             if (e.key === "Escape") onClose();
           }}
         />
-        {error && <p className="mt-2 text-xs text-error">{error}</p>}
+        <span id="preset-name-error" className="text-xs">
+          {error && <p role="alert" className="mt-2 text-error">{error}</p>}
+        </span>
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
