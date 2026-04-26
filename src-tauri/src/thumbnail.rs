@@ -18,11 +18,23 @@ use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 const CACHE_BUDGET_BYTES: u64 = 500 * 1024 * 1024;
 const THUMB_WIDTH: u32 = 240;
 const THUMB_HEIGHT: u32 = 160;
+/// Phase M: cap on concurrent thumbnail generators. Each generator
+/// can spawn an ffmpeg / Ghostscript process or do an in-process image
+/// decode. Without a cap, scrolling through a History grid of several
+/// hundred files burst-spawns that many processes simultaneously and
+/// can saturate the system or trip "too many open files" on Linux/macOS.
+///
+/// The fixed value of 4 doesn't scale with cpu count — it's chosen as
+/// a conservative ceiling that leaves headroom for actively running
+/// queue jobs (the user's foreground work) on every shipping target.
+/// Independent of the `convert_concurrency` config setting, which
+/// governs queue jobs rather than thumbnails.
+const MAX_CONCURRENT_GENERATORS: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum ThumbError {
@@ -36,6 +48,12 @@ pub enum ThumbError {
     Ghostscript(String),
     #[error("ffmpeg sidecar missing: {0}")]
     SidecarMissing(String),
+    /// Service-level / infrastructure failure — distinct from per-format
+    /// decode errors so callers don't misclassify shutdown as "image
+    /// decode failed". Currently only the generator semaphore being
+    /// closed during teardown produces this.
+    #[error("thumbnail service unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Service handle — cheap to clone. Callers keep it in the Tauri `AppState`
@@ -49,6 +67,10 @@ pub struct ThumbnailService {
     /// has its own resource-path baked in (dev builds where gs is on PATH).
     gs_resource_dir: Option<PathBuf>,
     locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Phase M: bounds the number of generator processes (ffmpeg / gs)
+    /// that can run at once. Held only while a generator runs; cache
+    /// hits don't acquire it.
+    gen_sem: Arc<Semaphore>,
 }
 
 impl ThumbnailService {
@@ -57,6 +79,7 @@ impl ThumbnailService {
             data_dir,
             gs_resource_dir,
             locks: Arc::new(DashMap::new()),
+            gen_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_GENERATORS)),
         }
     }
 
@@ -84,6 +107,25 @@ impl ThumbnailService {
             // accessed. Opening in append mode bumps the mtime on Unix and
             // Windows without needing an extra crate.
             let _ = std::fs::OpenOptions::new().append(true).open(&cached);
+            return Ok(cached);
+        }
+
+        // Phase M: acquire the global concurrency permit BEFORE the
+        // per-job mutex. This way, when the semaphore is saturated we
+        // hold no per-job locks while waiting — concurrent callers
+        // for the same job can take the cache-hit fast path the moment
+        // a generator finishes and writes its PNG, without queueing
+        // behind a peer that's currently blocked on the semaphore.
+        let _permit = self
+            .gen_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| ThumbError::Unavailable(format!("semaphore closed: {e}")))?;
+
+        // Cache may have been filled while we were queuing for the
+        // permit (a peer for the same job won the race).
+        if cached.exists() {
             return Ok(cached);
         }
 
@@ -348,6 +390,41 @@ mod tests {
         svc.evict_if_over_budget();
         assert!(a.exists());
         assert!(b.exists());
+    }
+
+    #[tokio::test]
+    async fn generator_semaphore_caps_concurrent_acquisitions_at_max() {
+        // Phase M: a freshly-constructed service should have exactly
+        // MAX_CONCURRENT_GENERATORS permits available. Acquiring more
+        // than that should block until one is released.
+        let dir = tempdir().unwrap();
+        let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
+        // Drain all permits up to the cap.
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_GENERATORS {
+            held.push(svc.gen_sem.clone().acquire_owned().await.unwrap());
+        }
+        // Next acquisition must block. We race it against a short
+        // timeout to confirm it doesn't immediately succeed.
+        let timeout = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            svc.gen_sem.clone().acquire_owned(),
+        )
+        .await;
+        assert!(
+            timeout.is_err(),
+            "expected the semaphore to block when at capacity"
+        );
+        // Release one and verify the next acquisition succeeds quickly.
+        drop(held.pop());
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            svc.gen_sem.clone().acquire_owned(),
+        )
+        .await
+        .expect("acquisition after release should not block")
+        .expect("permit");
+        drop(permit);
     }
 
     #[tokio::test]
