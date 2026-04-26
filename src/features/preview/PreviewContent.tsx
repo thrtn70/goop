@@ -41,7 +41,9 @@ export default function PreviewContent({
 }: PreviewContentProps) {
   const outputPath = job.result?.output_path ?? null;
   const kind = outputPath ? sourceKindFromPath(outputPath) : "video";
-  const thumbState = useThumbnail(job.id, kind === "audio");
+  // Audio rows render a waveform PNG (Phase J); falls back to a badge
+  // below when the waveform isn't ready or generation failed.
+  const thumbState = useThumbnail(job.id, false);
 
   const bytes = job.result?.bytes != null ? Number(job.result.bytes) : 0;
   const thumbSize = variant === "modal" ? "aspect-video" : "aspect-video";
@@ -69,23 +71,21 @@ export default function PreviewContent({
         </div>
       )}
 
-      {kind === "audio" ? (
-        <div
-          className={`${thumbSize} flex items-center justify-center rounded-md bg-surface-2 text-xs text-fg-muted`}
-        >
-          ♫ audio
-        </div>
-      ) : thumbState.status === "ready" ? (
+      {thumbState.status === "ready" ? (
         <img
           src={thumbState.src}
-          alt=""
+          alt={kind === "audio" ? "audio waveform" : ""}
           className={`${thumbSize} w-full rounded-md bg-surface-2 object-contain`}
         />
       ) : (
         <div
           className={`${thumbSize} flex items-center justify-center rounded-md bg-surface-2 text-xs text-fg-muted`}
         >
-          {thumbState.status === "unavailable" ? "preview unavailable" : "loading..."}
+          {thumbState.status === "unavailable"
+            ? kind === "audio"
+              ? "♫ audio"
+              : "preview unavailable"
+            : "loading..."}
         </div>
       )}
 
