@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/store/appStore";
+import BrandMark from "@/components/BrandMark";
 
 type Props = { onSubmit: (url: string) => void };
 
@@ -16,7 +17,8 @@ export default function TopBar({ onSubmit }: Props) {
     }
   }, [focusToken]);
   return (
-    <header className="flex items-center border-b border-subtle bg-surface-1 px-4 py-2">
+    <header className="flex items-center gap-3 border-b border-subtle bg-surface-1 px-4 py-2">
+      <BrandMark size={24} className="shrink-0" />
       <input
         ref={inputRef}
         type="text"
@@ -30,7 +32,7 @@ export default function TopBar({ onSubmit }: Props) {
           }
         }}
         placeholder="Paste a link and press Enter..."
-        className="w-full rounded-md bg-surface-2 px-3 py-2 text-sm text-fg placeholder:text-fg-muted transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        className="w-full min-w-0 rounded-md bg-surface-2 px-3 py-2 text-sm text-fg placeholder:text-fg-muted transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
       />
     </header>
   );
