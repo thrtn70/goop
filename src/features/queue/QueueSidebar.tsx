@@ -193,7 +193,7 @@ export default function QueueSidebar() {
           onClick={toggleCollapsed}
           aria-label="Expand queue sidebar"
           title="Expand queue (⌘⇧Q)"
-          className="btn-press flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+          className="btn-press flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
         >
           <svg
             aria-hidden="true"
@@ -263,7 +263,7 @@ export default function QueueSidebar() {
           onClick={toggleCollapsed}
           aria-label="Collapse queue sidebar"
           title="Collapse queue (⌘⇧Q)"
-          className="btn-press ml-auto flex h-6 w-6 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+          className="btn-press ml-auto flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
         >
           <svg
             aria-hidden="true"
