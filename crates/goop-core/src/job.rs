@@ -38,6 +38,7 @@ pub enum JobKind {
 pub enum JobState {
     Queued,
     Running,
+    Paused,
     Done,
     Error { message: String },
     Cancelled,
@@ -134,5 +135,20 @@ mod tests {
         assert!(j.is_terminal());
         j.state = JobState::Cancelled;
         assert!(j.is_terminal());
+    }
+
+    #[test]
+    fn paused_is_not_terminal() {
+        let mut j = Job::new(JobKind::Convert, serde_json::Value::Null);
+        j.state = JobState::Paused;
+        assert!(!j.is_terminal());
+    }
+
+    #[test]
+    fn paused_state_serializes_as_snake_case() {
+        let s = serde_json::to_string(&JobState::Paused).unwrap();
+        assert_eq!(s, "\"paused\"");
+        let back: JobState = serde_json::from_str("\"paused\"").unwrap();
+        assert_eq!(back, JobState::Paused);
     }
 }

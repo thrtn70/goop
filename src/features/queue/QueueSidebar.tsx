@@ -29,8 +29,10 @@ function clampWidth(w: number): number {
   return Math.round(w);
 }
 
-function isRunning(s: JobState): boolean {
-  return typeof s === "string" && s === "running";
+/** Active = running or paused. Paused is in-flight (semaphore slot held)
+ *  and the user can resume from this group. */
+function isActive(s: JobState): boolean {
+  return typeof s === "string" && (s === "running" || s === "paused");
 }
 
 function isQueued(s: JobState): boolean {
@@ -124,16 +126,18 @@ export default function QueueSidebar() {
     void reorderQueue(orderedJobIds);
   }
 
-  const running = jobs.filter((j) => isRunning(j.state));
+  const active = jobs.filter((j) => isActive(j.state));
   const queued = jobs.filter((j) => isQueued(j.state));
   const done = jobs.filter((j) => isTerminal(j.state));
-  const activeCount = running.length + queued.length;
+  const activeCount = active.length + queued.length;
   const selectedQueuedCount = queued.filter((j) =>
     selectedIds.has(jobIdKey(j.id)),
   ).length;
 
-  // Sum ETAs for in-flight jobs (queued unknowns are not included).
-  const totalEtaSecs = running.reduce((sum, j) => {
+  // Sum ETAs for in-flight jobs. Paused jobs have no meaningful ETA so
+  // they're excluded; queued unknowns also not included.
+  const totalEtaSecs = active.reduce((sum, j) => {
+    if (j.state === "paused") return sum;
     const e = progressById[jobIdKey(j.id)]?.eta_secs ?? 0;
     return sum + (e > 0 ? e : 0);
   }, 0);
@@ -272,7 +276,7 @@ export default function QueueSidebar() {
       )}
 
       <div className="mt-2 space-y-1">
-        {running.map((j, i) => (
+        {active.map((j, i) => (
           <QueueRow key={jobIdKey(j.id)} job={j} index={i} />
         ))}
       </div>
@@ -284,7 +288,7 @@ export default function QueueSidebar() {
           >
             <div className="mt-1 space-y-1">
               {queued.map((j, i) => (
-                <SortableQueueRow key={jobIdKey(j.id)} job={j} index={i + running.length} />
+                <SortableQueueRow key={jobIdKey(j.id)} job={j} index={i + active.length} />
               ))}
             </div>
           </SortableContext>

@@ -6,6 +6,7 @@ pub mod job;
 pub mod path;
 pub mod pdf;
 pub mod preset;
+pub mod process_registry;
 pub mod update;
 
 pub use convert::{
@@ -18,4 +19,5 @@ pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use job::{Job, JobId, JobKind, JobResult, JobState};
 pub use pdf::{PageRange, PdfOperation, PdfProbeResult, PdfQuality};
 pub use preset::Preset;
+pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};
 pub use update::UpdateInfo;

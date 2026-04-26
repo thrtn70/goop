@@ -1,6 +1,18 @@
 use crate::state::AppState;
 use goop_core::{IpcError, Job, JobId, JobState};
+use goop_queue::SchedulerError;
 use tauri::State;
+
+fn map_scheduler_err(e: SchedulerError) -> IpcError {
+    match e {
+        // The race window between state→Running and the worker registering
+        // its PID. The frontend retries briefly when it sees this.
+        SchedulerError::JobNotRunning => IpcError::Queue("job_not_running".into()),
+        SchedulerError::JobNotPaused => IpcError::Queue("job_not_paused".into()),
+        SchedulerError::ProcessControl(inner) => IpcError::Unknown(inner.to_string()),
+        SchedulerError::Store(inner) => inner.into(),
+    }
+}
 
 #[tauri::command]
 pub fn queue_list(state: State<'_, AppState>) -> Result<Vec<Job>, IpcError> {
@@ -11,6 +23,22 @@ pub fn queue_list(state: State<'_, AppState>) -> Result<Vec<Job>, IpcError> {
 pub fn queue_cancel(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
     state.scheduler.cancel(job_id);
     Ok(())
+}
+
+/// Suspend the running child process for `job_id` (Phase G — v0.2.0).
+/// Maps to SIGSTOP on Unix, NtSuspendProcess on Windows. Only ffmpeg
+/// conversions and Ghostscript PDF compress jobs register PIDs; image
+/// conversions and yt-dlp downloads return a `job_not_running` queue error.
+#[tauri::command]
+pub fn queue_pause(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
+    state.scheduler.pause(job_id).map_err(map_scheduler_err)
+}
+
+/// Resume a previously-paused child process. Maps to SIGCONT on Unix,
+/// NtResumeProcess on Windows.
+#[tauri::command]
+pub fn queue_resume(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
+    state.scheduler.resume(job_id).map_err(map_scheduler_err)
 }
 
 #[tauri::command]

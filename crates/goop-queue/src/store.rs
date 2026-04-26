@@ -185,6 +185,21 @@ impl QueueStore {
         Ok(n)
     }
 
+    /// Reset any rows left in `paused` state from a previous run back to
+    /// `queued` and clear `started_at`. The child process is dead so the
+    /// job re-runs from scratch on next pull. Called once at startup before
+    /// workers begin pulling. Returns the number of rows reset.
+    pub fn recover_paused(&self) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?1, started_at = NULL WHERE state = 'paused'",
+                params![state_to_str(&JobState::Queued)],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
     /// Soft-hide finished/cancelled/errored jobs from the queue tab. The
     /// rows stay in the database so the History page still lists them; only
     /// the queue's `list()` filter excludes them.
@@ -404,6 +419,7 @@ fn state_to_str(s: &JobState) -> String {
     match s {
         JobState::Queued => "queued".into(),
         JobState::Running => "running".into(),
+        JobState::Paused => "paused".into(),
         JobState::Done => "done".into(),
         JobState::Cancelled => "cancelled".into(),
         JobState::Error { message } => format!("error:{message}"),
@@ -419,6 +435,7 @@ fn str_to_state(s: &str) -> Option<JobState> {
     match s {
         "queued" => Some(JobState::Queued),
         "running" => Some(JobState::Running),
+        "paused" => Some(JobState::Paused),
         "done" => Some(JobState::Done),
         "cancelled" => Some(JobState::Cancelled),
         _ => None,
@@ -552,6 +569,35 @@ mod tests {
             3,
             "history must still see all three terminal jobs"
         );
+    }
+
+    #[test]
+    fn recover_paused_resets_to_queued_and_clears_started_at() {
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Convert, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        // Mark it Paused with a started_at to simulate a job that was running
+        // before the previous app exit.
+        s.update_state(job.id, &JobState::Running, None, 1234)
+            .unwrap();
+        s.update_state(job.id, &JobState::Paused, None, 5678)
+            .unwrap();
+
+        let n = s.recover_paused().unwrap();
+        assert_eq!(n, 1);
+
+        let after = s.get_by_id(job.id).unwrap().expect("row");
+        assert_eq!(after.state, JobState::Queued);
+        assert!(after.started_at.is_none(), "started_at must be cleared");
+    }
+
+    #[test]
+    fn recover_paused_is_noop_when_no_paused_rows() {
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        let n = s.recover_paused().unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]

@@ -1,10 +1,40 @@
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import type { Job, JobState } from "@/types";
+import type { Job, JobState, TargetFormat } from "@/types";
 import { api } from "@/ipc/commands";
+import { formatError, parseIpcError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 
-type StateName = "queued" | "running" | "done" | "cancelled" | "error";
+type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
+
+/**
+ * Phase G: image targets are NOT pausable (ImageMagick runs in-process via
+ * the `image` crate — no child PID to signal). yt-dlp downloads are also
+ * not pausable (long pauses can drop the connection). Mirrors
+ * `TargetFormat::is_image` in `crates/goop-core/src/convert.rs`.
+ */
+const IMAGE_TARGETS: ReadonlySet<TargetFormat> = new Set<TargetFormat>([
+  "png",
+  "jpeg",
+  "webp",
+  "bmp",
+]);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isPausable(job: Job): boolean {
+  if (!isPlainObject(job.payload)) return false;
+  if (job.kind === "pdf") {
+    return job.payload.kind === "compress";
+  }
+  if (job.kind === "convert") {
+    const target = job.payload.target;
+    return typeof target === "string" && !IMAGE_TARGETS.has(target as TargetFormat);
+  }
+  return false;
+}
 
 /**
  * Names emitted by the converter when ffmpeg uses a hardware encoder.
@@ -64,6 +94,8 @@ function stateInfo(name: StateName): { glyph: string; label: string } {
       return { glyph: "\u25B6", label: "Running" };
     case "queued":
       return { glyph: "\u25E6", label: "Waiting in queue" };
+    case "paused":
+      return { glyph: "⏸", label: "Paused" };
     case "done":
       return { glyph: "\u2713", label: "Completed" };
     case "error":
@@ -73,17 +105,72 @@ function stateInfo(name: StateName): { glyph: string; label: string } {
   }
 }
 
+/**
+ * Backend signals the PID-registration race as `IpcError::Queue` with
+ * message "job_not_running". All other errors propagate immediately.
+ */
+function isPidRaceError(err: unknown): boolean {
+  const ipc = parseIpcError(err);
+  return ipc?.code === "queue" && ipc.message === "job_not_running";
+}
+
+/**
+ * Pause IPC can race with the worker's PID registration in the ~1ms window
+ * between scheduler->Running and `register_pid`. Retry briefly on the race
+ * error only — surface every other error immediately.
+ */
+async function pauseWithRetry(jobId: Job["id"]): Promise<void> {
+  const delays = [0, 100, 200];
+  let lastErr: unknown = null;
+  for (const delay of delays) {
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    try {
+      await api.queue.pause(jobId);
+      return;
+    } catch (err) {
+      if (!isPidRaceError(err)) throw err;
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 export default function QueueRow({ job, index }: { job: Job; index: number }) {
   const progress = useAppStore((s) => s.progressById[jobIdKey(job.id)] ?? null);
   const isSelected = useAppStore((s) =>
     s.ui.queueSelectedIds.has(jobIdKey(job.id)),
   );
   const toggleSelection = useAppStore((s) => s.toggleQueueSelection);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const name = stateName(job.state);
   const pct = progress?.percent ?? 0;
   const outputPath = job.result?.output_path ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  async function handlePauseClick(): Promise<void> {
+    try {
+      await pauseWithRetry(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't pause",
+        detail: formatError(err),
+      });
+    }
+  }
+
+  async function handleResumeClick(): Promise<void> {
+    try {
+      await api.queue.resume(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't resume",
+        detail: formatError(err),
+      });
+    }
+  }
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -154,20 +241,57 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         )}
         <span
-          className={clsx("truncate font-medium", name === "running" ? "text-accent" : "text-fg-secondary")}
+          className={clsx(
+            "truncate font-medium",
+            name === "running" && "text-accent",
+            name === "paused" && "text-fg-muted",
+            name !== "running" && name !== "paused" && "text-fg-secondary",
+          )}
           title={shortLabel(job)}
         >
           <span title={stateInfo(name).label}>{stateInfo(name).glyph}</span> {shortLabel(job)}
         </span>
         {name === "running" && (
-          <button
-            type="button"
-            onClick={() => void api.queue.cancel(job.id)}
-            aria-label={`Cancel ${shortLabel(job)}`}
-            className="btn-press shrink-0 rounded-md px-2 py-1 text-xs text-error transition duration-fast ease-out hover:bg-error-subtle hover:text-error/80"
-          >
-            cancel
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {isPausable(job) && (
+              <button
+                type="button"
+                onClick={() => void handlePauseClick()}
+                aria-label={`Pause ${shortLabel(job)}`}
+                className="btn-press rounded-md px-2 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:bg-surface-3 hover:text-fg"
+              >
+                pause
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void api.queue.cancel(job.id)}
+              aria-label={`Cancel ${shortLabel(job)}`}
+              className="btn-press rounded-md px-2 py-1 text-xs text-error transition duration-fast ease-out hover:bg-error-subtle hover:text-error/80"
+            >
+              cancel
+            </button>
+          </div>
+        )}
+        {name === "paused" && (
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void handleResumeClick()}
+              aria-label={`Resume ${shortLabel(job)}`}
+              className="btn-press rounded-md px-2 py-1 text-xs text-accent transition duration-fast ease-out hover:bg-accent-subtle hover:text-accent-hover"
+            >
+              resume
+            </button>
+            <button
+              type="button"
+              onClick={() => void api.queue.cancel(job.id)}
+              aria-label={`Cancel ${shortLabel(job)}`}
+              className="btn-press rounded-md px-2 py-1 text-xs text-error transition duration-fast ease-out hover:bg-error-subtle hover:text-error/80"
+            >
+              cancel
+            </button>
+          </div>
         )}
         {name === "done" && outputPath && (
           <button
@@ -204,9 +328,9 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         </div>
       )}
-      {name === "running" && (
+      {(name === "running" || name === "paused") && (
         <>
-          <div className="mt-1 flex items-center gap-2">
+          <div className={clsx("mt-1 flex items-center gap-2", name === "paused" && "opacity-50")}>
             <div
               role="progressbar"
               aria-valuenow={Math.round(pct)}
@@ -216,14 +340,17 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
               className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3"
             >
               <div
-                className="h-1 w-full origin-left rounded-full bg-accent"
+                className={clsx(
+                  "h-1 w-full origin-left rounded-full",
+                  name === "paused" ? "bg-fg-muted" : "bg-accent",
+                )}
                 style={{
                   transform: `scaleX(${pct / 100})`,
                   transition: `transform var(--duration-normal) var(--ease-out)`,
                 }}
               />
             </div>
-            {isHardwareEncoder(progress?.encoder ?? null) && (
+            {name === "running" && isHardwareEncoder(progress?.encoder ?? null) && (
               <span
                 className="rounded-full bg-accent-subtle px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent"
                 title={`Hardware-accelerated encoder: ${progress?.encoder}`}
@@ -234,8 +361,14 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </div>
           <div className="mt-1 flex justify-between tabular-nums text-xs text-fg-muted">
             <span>{pct.toFixed(1)}%</span>
-            <span>{progress?.speed_hr ?? ""}</span>
-            <span>{progress?.eta_secs != null ? `ETA ${progress.eta_secs}s` : ""}</span>
+            <span>{name === "paused" ? "" : progress?.speed_hr ?? ""}</span>
+            <span>
+              {name === "paused"
+                ? "ETA —"
+                : progress?.eta_secs != null
+                  ? `ETA ${progress.eta_secs}s`
+                  : ""}
+            </span>
           </div>
         </>
       )}
