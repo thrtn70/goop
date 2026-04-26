@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { X } from "lucide-react";
 
 interface PdfMergeListProps {
   files: string[];
@@ -60,9 +61,9 @@ export default function PdfMergeList({
             type="button"
             onClick={() => onRemove(path)}
             aria-label={`Remove ${basename(path)}`}
-            className="text-xs text-fg-muted transition duration-fast ease-out hover:text-error"
+            className="inline-flex items-center justify-center text-fg-muted transition duration-fast ease-out hover:text-error"
           >
-            ✕
+            <X size={14} strokeWidth={2.5} aria-hidden="true" />
           </button>
         </li>
       ))}

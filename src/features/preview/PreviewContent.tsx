@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import type { Job, SourceKind } from "@/types";
 import { useThumbnail } from "@/hooks/useThumbnail";
 import { jobIdKey } from "@/store/appStore";
@@ -67,9 +68,9 @@ export default function PreviewContent({
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="text-fg-muted transition duration-fast ease-out hover:text-fg"
+              className="inline-flex items-center justify-center text-fg-muted transition duration-fast ease-out hover:text-fg"
             >
-              ✕
+              <X size={14} strokeWidth={2.5} aria-hidden="true" />
             </button>
           )}
         </div>

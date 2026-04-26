@@ -15,6 +15,7 @@ import {
 } from "@dnd-kit/sortable";
 import type { JobId, JobState } from "@/types";
 import { api } from "@/ipc/commands";
+import { X } from "lucide-react";
 import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
@@ -334,10 +335,10 @@ export default function QueueSidebar() {
                 <button
                   type="button"
                   onClick={() => clearQueueSelection()}
-                  className="text-fg-muted hover:text-fg"
+                  className="inline-flex items-center justify-center text-fg-muted hover:text-fg"
                   aria-label="Clear selection"
                 >
-                  ✕
+                  <X size={12} strokeWidth={2.5} aria-hidden="true" />
                 </button>
               </div>
             </>

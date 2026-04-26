@@ -105,9 +105,9 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
             if (e.key === "Escape") onClose();
           }}
         />
-        <span id="preset-name-error" className="text-xs">
+        <div id="preset-name-error" className="text-xs">
           {error && <p role="alert" className="mt-2 text-error">{error}</p>}
-        </span>
+        </div>
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
