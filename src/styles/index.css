@@ -84,6 +84,26 @@ body {
   50% { opacity: 0.8; }
 }
 
+/* Phase: queue progress flow — a soft lighter wash slides across the
+ * progress fill, suggesting motion. The fill itself is a solid accent;
+ * this layer is a translucent gradient panned via background-position
+ * so it works on any background colour. */
+@keyframes progress-flow {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Subtle pulsing glow on the HW (hardware encoder) pill. Runs slow on
+ * purpose — a gentle "on-air" indicator, not an attention-grabber. */
+@keyframes hw-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 oklch(var(--accent) / 0.0);
+  }
+  50% {
+    box-shadow: 0 0 0 3px oklch(var(--accent) / 0.18);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Motion: Utility classes                                            */
 /* ------------------------------------------------------------------ */
@@ -102,6 +122,26 @@ body {
 /* Running pulse */
 .pulse-running {
   animation: pulse-running 2s ease-in-out infinite;
+}
+
+/* Wave-flow overlay used inside the queue progress fill. Apply to a
+ * positioned child of the fill so it slides over the accent base. */
+.progress-flow {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    oklch(var(--accent-fg) / 0.0) 30%,
+    oklch(var(--accent-fg) / 0.35) 50%,
+    oklch(var(--accent-fg) / 0.0) 70%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: progress-flow 2.4s linear infinite;
+}
+
+/* HW pill glow */
+.pulse-glow {
+  animation: hw-glow 2.6s ease-in-out infinite;
 }
 
 /* Button press — scale down on active, spring back */
@@ -133,7 +173,9 @@ body {
     animation-delay: 0ms !important;
   }
 
-  .pulse-running {
+  .pulse-running,
+  .progress-flow,
+  .pulse-glow {
     animation: none;
   }
 
@@ -143,5 +185,30 @@ body {
 
   .btn-press:active {
     transform: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* View Transitions: shared element morph between History card and    */
+/* PreviewPanel thumbnail. The default UA easing/timing feels generic */
+/* — push it to our exponential ease-out so the morph feels           */
+/* considered. old/new and group share the same 380ms duration so     */
+/* the inner cross-fade doesn't finish before the bounding-box morph. */
+/* ------------------------------------------------------------------ */
+::view-transition-old(*),
+::view-transition-new(*),
+::view-transition-group(*) {
+  animation-duration: 380ms;
+  animation-timing-function: var(--ease-out);
+}
+
+/* Belt-and-suspenders: even though `withViewTransition()` already
+ * skips the API call when reduced-motion is on, defensively flatten
+ * any transition that *does* fire so it's effectively instantaneous. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 1ms;
   }
 }

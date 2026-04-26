@@ -1,5 +1,6 @@
 import type { Job, SourceKind } from "@/types";
 import { useThumbnail } from "@/hooks/useThumbnail";
+import { jobIdKey } from "@/store/appStore";
 import DeleteMenu from "./DeleteMenu";
 
 interface PreviewContentProps {
@@ -46,7 +47,10 @@ export default function PreviewContent({
   const thumbState = useThumbnail(job.id, false);
 
   const bytes = job.result?.bytes != null ? Number(job.result.bytes) : 0;
-  const thumbSize = variant === "modal" ? "aspect-video" : "aspect-video";
+  // Both variants currently want the same aspect; the variant prop is
+  // still meaningful elsewhere (e.g. controlling which surfaces claim
+  // the view-transition-name).
+  const thumbSize = "aspect-video";
 
   return (
     <div className={variant === "modal" ? "flex flex-col" : "flex flex-col gap-3"}>
@@ -76,6 +80,15 @@ export default function PreviewContent({
           src={thumbState.src}
           alt={kind === "audio" ? "audio waveform" : ""}
           className={`${thumbSize} w-full rounded-md bg-surface-2 object-contain`}
+          // View Transitions: only the side panel claims the shared
+          // `vt-thumb-{id}` name. Quick View (variant === "modal") would
+          // double-claim it on top of the panel and suppress the morph.
+          // The modal gets its own enter animation via `enter-up`.
+          style={
+            variant === "panel"
+              ? { viewTransitionName: `vt-thumb-${jobIdKey(job.id)}` }
+              : undefined
+          }
         />
       ) : (
         <div

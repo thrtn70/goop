@@ -8,6 +8,7 @@ import HistoryBulkActions from "@/features/history/HistoryBulkActions";
 import PreviewPanel from "@/features/preview/PreviewPanel";
 import QuickViewModal from "@/features/preview/QuickViewModal";
 import { useQuickView } from "@/features/preview/useQuickView";
+import { withViewTransition } from "@/lib/viewTransition";
 
 /**
  * Terminal-state jobs with search / filter / sort / grid-or-list /
@@ -28,9 +29,17 @@ export default function HistoryPage() {
   }, [loadHistory]);
 
   function openPreview(job: Job) {
-    setPreview(job.id);
+    // Wrap in View Transitions so the card thumbnail morphs into the
+    // preview panel header instead of fading. Falls back to instant
+    // when the API is missing or reduced-motion is on.
+    withViewTransition(() => setPreview(job.id));
   }
   function openQuickView(job: Job) {
+    // Quick View opens with the existing enter-up animation. We skip
+    // the View-Transitions shared-element morph here to avoid a
+    // duplicate-name conflict with PreviewPanel's claim on the same
+    // job's thumbnail name. (See PreviewContent + HistoryGrid card
+    // for the panel-only view-transition-name handshake.)
     quick.open(job.id);
   }
 
