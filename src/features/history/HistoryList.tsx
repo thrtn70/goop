@@ -1,3 +1,4 @@
+import { Eye } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import EmptyHistory from "@/features/history/EmptyHistory";
@@ -151,11 +152,11 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                       e.stopPropagation();
                       onQuickView(j);
                     }}
-                    className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+                    className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
                     aria-label="Quick view"
                     title="Quick View (Space)"
                   >
-                    ⎵
+                    <Eye size={14} aria-hidden />
                   </button>
                 </td>
               </tr>
