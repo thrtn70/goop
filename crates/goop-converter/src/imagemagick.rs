@@ -58,6 +58,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             eta_secs: None,
             speed_hr: None,
             stage: "converting".into(),
+            encoder: None,
         });
 
         let started = std::time::Instant::now();
@@ -93,6 +94,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             eta_secs: Some(0),
             speed_hr: None,
             stage: "converting".into(),
+            encoder: None,
         });
 
         Ok(ConvertResult {

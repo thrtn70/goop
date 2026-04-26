@@ -105,6 +105,16 @@ export default function ConvertPage() {
     );
   }, []);
 
+  const applyFirstToAll = useCallback(() => {
+    setFiles((prev) => {
+      if (prev.length < 2) return prev;
+      const head = prev[0];
+      return prev.map((f, i) =>
+        i === 0 ? f : { ...f, target: head.target, gifOptions: head.gifOptions },
+      );
+    });
+  }, []);
+
   const handleBrowse = async () => {
     const picked = await open({
       multiple: true,
@@ -216,6 +226,7 @@ export default function ConvertPage() {
             files={files}
             disabled={false}
             onEnqueued={() => setFiles([])}
+            onApplyToAll={applyFirstToAll}
           />
         </div>
       )}

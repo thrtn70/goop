@@ -17,11 +17,18 @@ import type {
 import { api } from "@/ipc/commands";
 import { subscribeAll } from "@/ipc/events";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 
 type ProgressEntry = {
   percent: number;
   eta_secs: number | null;
   speed_hr: string | null;
+  /** Active encoder name when known (e.g. `h264_videotoolbox`). */
+  encoder: string | null;
+};
+
+type AppProgressEvent = ProgressEvent & {
+  encoder?: string | null;
 };
 
 export type ToastVariant = "success" | "error" | "cancelled" | "info";
@@ -44,6 +51,26 @@ export type UpdateDownloadState = {
   total: number;
   active: boolean;
 };
+
+export interface AppVersionInfo {
+  goop: string;
+  ytDlp: string | null;
+  ffmpeg: string | null;
+  os: string;
+}
+
+/**
+ * Session-only UI state that doesn't belong in persisted Settings.
+ * Resets on app restart by design (per product decision for v0.1.9).
+ */
+export interface UiState {
+  /** When true, QueueSidebar renders a narrow tab instead of the full panel. */
+  queueCollapsed: boolean;
+  /** Currently-selected queued job IDs for batch operations. */
+  queueSelectedIds: Set<string>;
+  /** Count of jobs that finished today. Refreshed when the queue changes. */
+  doneToday: number;
+}
 
 export interface HistoryState {
   search: string;
@@ -71,8 +98,15 @@ type AppStoreState = {
   history: HistoryState;
   /** `job_id` (as a string key) -> filesystem path to cached thumbnail PNG. */
   thumbnailsById: Record<string, string>;
+  /**
+   * Cached app + sidecar versions. Populated once per app launch via
+   * `loadVersions()` so Settings → About renders instantly on navigation
+   * instead of spawning `yt-dlp --version` / `ffmpeg -version` each mount.
+   */
+  versions: AppVersionInfo | null;
+  ui: UiState;
   loadAll: () => Promise<void>;
-  applyProgress: (e: ProgressEvent) => void;
+  applyProgress: (e: AppProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
   cancel: (id: JobId) => Promise<void>;
   enqueueToast: (t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & { ttlMs?: number | null }) => string;
@@ -103,7 +137,27 @@ type AppStoreState = {
   setHistoryPreview: (jobId: JobId | null) => void;
   forgetJobs: (ids: JobId[]) => Promise<void>;
   trashJobs: (jobs: { id: JobId; path: string }[]) => Promise<void>;
+  /**
+   * Fetch Goop + sidecar versions and cache them. Idempotent — subsequent
+   * calls return the existing cached value without re-spawning binaries.
+   * Pass `force: true` to bypass the cache (e.g. after a sidecar update).
+   */
+  loadVersions: (force?: boolean) => Promise<AppVersionInfo>;
+  /** Toggle the QueueSidebar's collapsed state. Session-only; does not persist. */
+  toggleQueueCollapsed: () => void;
+  toggleQueueSelection: (jobId: JobId) => void;
+  clearQueueSelection: () => void;
+  reorderQueue: (orderedIds: JobId[]) => Promise<void>;
+  cancelSelectedQueue: () => Promise<void>;
+  refreshDoneToday: () => Promise<void>;
   loadThumbnail: (jobId: JobId) => Promise<string | null>;
+  /**
+   * Drop the cached thumbnail path for a job from the in-memory map.
+   * Call when an `<img>` load fails — the disk file was likely LRU-evicted
+   * since the path was cached, so the next `loadThumbnail` must hit IPC to
+   * regenerate.
+   */
+  invalidateThumbnail: (jobId: JobId) => void;
 };
 
 /**
@@ -141,6 +195,9 @@ function emptyPatch(): SettingsPatch {
     auto_check_updates: null,
     dismissed_update_version: null,
     history_view_mode: null,
+    queue_sidebar_width: null,
+    hw_acceleration_enabled: null,
+    cookies_from_browser: null,
   };
 }
 
@@ -155,6 +212,21 @@ const emptyHistory: HistoryState = {
   selectedIds: new Set(),
   previewSelectedId: null,
 };
+
+function detectOs(): string {
+  if (typeof navigator === "undefined") return "-";
+  const ua = navigator.userAgent;
+  if (/Mac OS X/.test(ua)) {
+    const m = ua.match(/Mac OS X ([0-9_]+)/);
+    const ver = m?.[1]?.replace(/_/g, ".") ?? "";
+    return ver ? `macOS ${ver}` : "macOS";
+  }
+  if (/Windows NT/.test(ua)) {
+    const m = ua.match(/Windows NT ([0-9.]+)/);
+    return m?.[1] ? `Windows ${m[1]}` : "Windows";
+  }
+  return navigator.platform || "-";
+}
 
 function currentFilter(h: HistoryState): HistoryFilter {
   return {
@@ -176,6 +248,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   updateDownload: null,
   history: emptyHistory,
   thumbnailsById: {},
+  versions: null,
+  ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
@@ -189,6 +263,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
           percent: e.percent,
           eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
           speed_hr: e.speed_hr ?? null,
+          encoder: e.encoder ?? null,
         },
       },
     }));
@@ -359,16 +434,75 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     await get().loadHistory();
   },
   async trashJobs(jobs) {
-    for (const { path } of jobs) {
+    const trashedIds: JobId[] = [];
+    let failed = 0;
+    for (const { id, path } of jobs) {
       try {
         await api.file.moveToTrash(path);
-      } catch (e) {
-        // Continue with the remaining jobs; surface the last error if every
-        // path failed. The UI shows a toast on rejection.
-        console.warn("trash failed for", path, e);
+        trashedIds.push(id);
+      } catch {
+        failed += 1;
       }
     }
-    await get().forgetJobs(jobs.map((j) => j.id));
+    await get().forgetJobs(trashedIds);
+    if (failed > 0) {
+      throw new Error(`Could not move ${failed} item${failed === 1 ? "" : "s"} to Trash.`);
+    }
+  },
+  toggleQueueCollapsed() {
+    set((s) => ({ ui: { ...s.ui, queueCollapsed: !s.ui.queueCollapsed } }));
+  },
+  toggleQueueSelection(jobId) {
+    const key = jobIdKey(jobId);
+    set((s) => {
+      const next = new Set(s.ui.queueSelectedIds);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return { ui: { ...s.ui, queueSelectedIds: next } };
+    });
+  },
+  clearQueueSelection() {
+    set((s) => ({ ui: { ...s.ui, queueSelectedIds: new Set() } }));
+  },
+  async reorderQueue(orderedIds) {
+    if (orderedIds.length === 0) return;
+    await api.queue.reorder(orderedIds);
+    const jobs = await api.queue.list();
+    set({ jobs });
+  },
+  async cancelSelectedQueue() {
+    const selected = get().ui.queueSelectedIds;
+    if (selected.size === 0) return;
+    const ids = get()
+      .jobs.filter((j) => selected.has(jobIdKey(j.id)))
+      .map((j) => j.id);
+    if (ids.length === 0) return;
+    await api.queue.cancelMany(ids);
+    set((s) => ({ ui: { ...s.ui, queueSelectedIds: new Set() } }));
+  },
+  async refreshDoneToday() {
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    try {
+      const count = await api.queue.completedSince(midnight.getTime());
+      set((s) => ({ ui: { ...s.ui, doneToday: count } }));
+    } catch {
+      /* opportunistic */
+    }
+  },
+  async loadVersions(force) {
+    if (!force) {
+      const cached = get().versions;
+      if (cached) return cached;
+    }
+    const [goop, ytDlp, ffmpeg] = await Promise.all([
+      getVersion().catch(() => "-"),
+      api.sidecar.ytDlpVersion().catch(() => null),
+      api.sidecar.ffmpegVersion().catch(() => null),
+    ]);
+    const info: AppVersionInfo = { goop, ytDlp, ffmpeg, os: detectOs() };
+    set({ versions: info });
+    return info;
   },
   async loadThumbnail(jobId) {
     const key = jobIdKey(jobId);
@@ -381,6 +515,15 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     } catch {
       return null;
     }
+  },
+  invalidateThumbnail(jobId) {
+    const key = jobIdKey(jobId);
+    set((s) => {
+      if (!(key in s.thumbnailsById)) return s;
+      const thumbs = { ...s.thumbnailsById };
+      delete thumbs[key];
+      return { thumbnailsById: thumbs };
+    });
   },
 }));
 
@@ -414,6 +557,16 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
   } catch {
     /* history unavailable (Tauri mock or first-launch with fresh DB) */
   }
+  // Warm the version cache in the background so Settings → About renders
+  // instantly when the user navigates there. Sidecar version spawns are
+  // ~100-400ms each; doing it during boot hides the latency.
+  void useAppStore
+    .getState()
+    .loadVersions()
+    .catch(() => {
+      /* versions are opportunistic; About will show placeholders */
+    });
+  void useAppStore.getState().refreshDoneToday();
   try {
     const settings = useAppStore.getState().settings;
     if (settings?.auto_check_updates) {
@@ -454,7 +607,10 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
           typeof term === "string"
             ? term === "done" || term === "cancelled"
             : "error" in term;
-        if (isTerminal) void refreshHistory();
+        if (isTerminal) {
+          void refreshHistory();
+          void useAppStore.getState().refreshDoneToday();
+        }
       },
       onSidecar: () => {
         /* reserved for future sidecar-driven UI state */

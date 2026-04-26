@@ -166,6 +166,9 @@ describe("UpdateBanner", () => {
     auto_check_updates: true,
     dismissed_update_version: null,
     history_view_mode: "list",
+    queue_sidebar_width: 288,
+    hw_acceleration_enabled: true,
+    cookies_from_browser: null,
   };
 
   it("renders nothing when no update is available", () => {

@@ -2,13 +2,31 @@ use goop_core::{EventSink, GoopError, JobId, ProgressEvent};
 use goop_sidecar::BinaryResolver;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
+
+/// yt-dlp browser names this crate is willing to forward to
+/// `--cookies-from-browser`. Defense-in-depth: even though the IPC layer
+/// validates against `goop_config::SUPPORTED_BROWSERS` before storing the
+/// request, the worker re-deserializes the payload from SQLite and the
+/// row could in principle contain an unsanitised string (DB tampering,
+/// future migration bug, manual edit). Re-validate here so an arbitrary
+/// value can never reach the yt-dlp argv. Keeping a duplicate constant
+/// avoids a circular crate dep on goop-config; the list is short and
+/// rarely changes.
+const SUPPORTED_BROWSERS: &[&str] = &[
+    "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
+];
+
+fn validated_browser(name: Option<&str>) -> Option<&'static str> {
+    let n = name?;
+    SUPPORTED_BROWSERS.iter().copied().find(|b| *b == n)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
@@ -17,6 +35,13 @@ pub struct ExtractRequest {
     pub output_dir: String,
     pub format: Option<String>, // e.g., "bestaudio[ext=m4a]"
     pub audio_only: bool,
+    /// When set, yt-dlp is invoked with `--cookies-from-browser <name>`
+    /// so it can reuse the user's existing browser session for sites that
+    /// require login (Twitter/X, Instagram, etc.). Validated against
+    /// `goop_config::SUPPORTED_BROWSERS` at the IPC boundary; unrecognised
+    /// values are dropped to `None`.
+    #[serde(default)]
+    pub cookies_from_browser: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -60,16 +85,26 @@ impl<'a> YtDlp<'a> {
 
     /// Probe a URL with `yt-dlp -J` (JSON metadata only, no download).
     /// Sinkless — callable without constructing a `YtDlp` instance.
-    pub async fn probe(resolver: &BinaryResolver, url: &str) -> Result<UrlProbe, GoopError> {
+    /// `cookies_from_browser` mirrors the `--cookies-from-browser` flag;
+    /// pass `None` to keep the spawn anonymous.
+    pub async fn probe(
+        resolver: &BinaryResolver,
+        url: &str,
+        cookies_from_browser: Option<&str>,
+    ) -> Result<UrlProbe, GoopError> {
         let bin = resolver.resolve("yt-dlp")?;
-        let out = Command::new(&bin.path)
-            .args(["-J", "--no-warnings", url])
-            .output()
-            .await?;
+        let mut cmd = Command::new(&bin.path);
+        cmd.args(["-J", "--no-warnings"]);
+        if let Some(browser) = validated_browser(cookies_from_browser) {
+            cmd.arg("--cookies-from-browser").arg(browser);
+        }
+        cmd.arg(url);
+        let out = cmd.output().await?;
         if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             return Err(GoopError::SubprocessFailed {
                 binary: "yt-dlp".into(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                stderr: crate::error_map::friendly_message(&stderr).unwrap_or(stderr),
             });
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -93,7 +128,8 @@ impl<'a> YtDlp<'a> {
         cancel: CancellationToken,
     ) -> Result<ExtractResult, GoopError> {
         let bin = self.resolver.resolve("yt-dlp")?;
-        let out_template = PathBuf::from(&req.output_dir).join("%(title)s.%(ext)s");
+        let output_dir = canonical_output_dir(&req.output_dir)?;
+        let out_template = output_dir.join("%(title)s.%(ext)s");
 
         let mut cmd = Command::new(&bin.path);
         cmd.arg("--newline") // each progress line on its own
@@ -109,13 +145,19 @@ impl<'a> YtDlp<'a> {
         if let Some(fmt) = &req.format {
             cmd.arg("-f").arg(fmt);
         }
+        if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
+            cmd.arg("--cookies-from-browser").arg(browser);
+        }
+        // arg(), not shell: URL is passed as argv, not expanded by a shell.
         cmd.arg(&req.url)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         let started = std::time::Instant::now();
         let mut child: Child = cmd.spawn()?;
+        // invariant: stdout was requested with Stdio::piped above.
         let stdout = child.stdout.take().expect("stdout was piped");
+        // invariant: stderr was requested with Stdio::piped above.
         let stderr = child.stderr.take().expect("stderr was piped");
         let mut out_reader = BufReader::new(stdout).lines();
         let mut err_reader = BufReader::new(stderr).lines();
@@ -129,7 +171,7 @@ impl<'a> YtDlp<'a> {
                 _ = cancel.cancelled() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    cleanup_partials(&req.output_dir, last_progress_line.as_deref());
+                    cleanup_partials(&output_dir, last_progress_line.as_deref());
                     return Err(GoopError::Cancelled);
                 }
                 line = out_reader.next_line() => {
@@ -162,7 +204,7 @@ impl<'a> YtDlp<'a> {
         if !status.success() {
             return Err(GoopError::SubprocessFailed {
                 binary: "yt-dlp".into(),
-                stderr: stderr_tail,
+                stderr: crate::error_map::friendly_message(&stderr_tail).unwrap_or(stderr_tail),
             });
         }
         let output_path = output_path.ok_or_else(|| GoopError::SubprocessFailed {
@@ -196,6 +238,7 @@ fn parse_format(v: &serde_json::Value) -> Option<FormatOption> {
 fn progress_regexes() -> &'static (Regex, Regex, Regex) {
     static REGEXES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
     REGEXES.get_or_init(|| {
+        // invariant: these hardcoded patterns are valid regex syntax.
         (
             Regex::new(r"(\d+\.\d+)%").expect("pct regex"),
             Regex::new(r"at\s+([\d.]+\s*[KMG]?i?B/s)").expect("speed regex"),
@@ -231,14 +274,27 @@ fn parse_progress(job_id: JobId, line: &str) -> Option<ProgressEvent> {
         eta_secs,
         speed_hr: speed,
         stage: "downloading".into(),
+        encoder: None,
     })
+}
+
+fn canonical_output_dir(raw: &str) -> Result<PathBuf, GoopError> {
+    let expanded = goop_core::path::expand(raw);
+    let dir = std::fs::canonicalize(&expanded)?;
+    if !dir.is_dir() {
+        return Err(GoopError::Config(format!(
+            "output path is not a directory: {}",
+            expanded.display()
+        )));
+    }
+    Ok(dir)
 }
 
 /// Best-effort removal of yt-dlp's `.part` / `.ytdl` partial files on cancel.
 /// yt-dlp doesn't emit the target filename until the move step, so we scan
 /// the output directory for recently-modified `.part` / `.ytdl` files. This
 /// is a best-effort cleanup — failures are silent by design (logged at debug).
-fn cleanup_partials(output_dir: &str, _last_progress_line: Option<&str>) {
+fn cleanup_partials(output_dir: &Path, _last_progress_line: Option<&str>) {
     let Ok(entries) = std::fs::read_dir(output_dir) else {
         return;
     };
@@ -299,5 +355,28 @@ mod tests {
     fn parse_eta_hours() {
         assert_eq!(parse_eta("01:02:03"), Some(3723));
         assert_eq!(parse_eta("02:05"), Some(125));
+    }
+
+    #[test]
+    fn validated_browser_accepts_known_names() {
+        assert_eq!(validated_browser(Some("chrome")), Some("chrome"));
+        assert_eq!(validated_browser(Some("firefox")), Some("firefox"));
+        assert_eq!(validated_browser(Some("safari")), Some("safari"));
+    }
+
+    #[test]
+    fn validated_browser_rejects_unknown_or_path_traversal() {
+        // None passes through.
+        assert_eq!(validated_browser(None), None);
+        // Bare unknown string.
+        assert_eq!(validated_browser(Some("netscape")), None);
+        // yt-dlp profile-suffix syntax (chrome:profile_path) is rejected
+        // because we don't expose profile selection in the UI and the
+        // suffix can carry filesystem paths.
+        assert_eq!(validated_browser(Some("chrome:../../tmp/evil")), None);
+        assert_eq!(validated_browser(Some("firefox:default")), None);
+        // Empty / whitespace.
+        assert_eq!(validated_browser(Some("")), None);
+        assert_eq!(validated_browser(Some(" chrome")), None);
     }
 }

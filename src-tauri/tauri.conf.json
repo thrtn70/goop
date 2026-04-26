@@ -20,7 +20,17 @@
         "resizable": true,
         "fullscreen": false
       }
-    ]
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$DATA/goop/thumbs/**",
+          "$HOME/Library/Application Support/goop/thumbs/**",
+          "$APPDATA/goop/thumbs/**"
+        ]
+      }
+    }
   },
   "bundle": {
     "active": true,

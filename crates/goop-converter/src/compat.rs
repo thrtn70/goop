@@ -1,3 +1,4 @@
+use crate::encoders::DetectedEncoders;
 use goop_core::{
     CompressMode, GifOptions, GifSizePreset, QualityPreset, ResolutionCap, TargetFormat,
 };
@@ -410,6 +411,90 @@ fn audio_bitrate(q: QualityPreset) -> &'static str {
         QualityPreset::Original | QualityPreset::Balanced => "192k",
         QualityPreset::Fast => "128k",
         QualityPreset::Small => "96k",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hardware-accelerated h.264 substitution (v0.1.9)
+//
+// Plans built above default to libx264 (software). When the user has HW
+// acceleration enabled and a GPU encoder is available, we replace the
+// `-c:v libx264 -preset X -crf Y` block with the equivalent for the
+// detected encoder. Audio + filter args pass through untouched.
+// ---------------------------------------------------------------------------
+
+/// Walk `args`, find the `-c:v libx264` block and its trailing `-preset` /
+/// `-crf` arguments, and rewrite them to use `hw_encoder` with quality args
+/// chosen for `quality`. Returns `Some(replacement)` on substitution and
+/// `None` if `args` doesn't contain a libx264 codec selector.
+pub fn substitute_h264_hw(
+    args: &[String],
+    hw_encoder: &str,
+    quality: Option<QualityPreset>,
+) -> Option<Vec<String>> {
+    let codec_idx = args
+        .windows(2)
+        .position(|w| w[0] == "-c:v" && w[1] == "libx264")?;
+    let mut out = Vec::with_capacity(args.len() + 4);
+    out.extend(args[..codec_idx].iter().cloned());
+    out.push("-c:v".into());
+    out.push(hw_encoder.into());
+    let mut i = codec_idx + 2;
+    // Skip any -preset / -crf pair following the codec selector. Other
+    // args pass through (e.g. -pix_fmt) — we don't drop them.
+    while i + 1 < args.len() && (args[i] == "-preset" || args[i] == "-crf") {
+        i += 2;
+    }
+    out.extend(
+        hw_h264_quality_args(hw_encoder, quality)
+            .iter()
+            .map(|s| (*s).to_string()),
+    );
+    out.extend(args[i..].iter().cloned());
+    Some(out)
+}
+
+/// Apply HW h.264 substitution in place, returning the encoder name used
+/// (or `None` if no substitution applied). Convenience wrapper that hides
+/// the encoder-availability check.
+pub fn maybe_apply_hw_h264(
+    plan: &mut Plan,
+    encoders: &DetectedEncoders,
+    quality: Option<QualityPreset>,
+) -> Option<&'static str> {
+    let hw = encoders.preferred_h264()?;
+    let new_args = substitute_h264_hw(&plan.args, hw, quality)?;
+    plan.args = new_args;
+    Some(hw)
+}
+
+fn hw_h264_quality_args(encoder: &str, q: Option<QualityPreset>) -> &'static [&'static str] {
+    let q = q.unwrap_or(QualityPreset::Balanced);
+    match (encoder, q) {
+        ("h264_videotoolbox", QualityPreset::Fast) => &["-q:v", "50"],
+        ("h264_videotoolbox", QualityPreset::Original | QualityPreset::Balanced) => &["-q:v", "65"],
+        ("h264_videotoolbox", QualityPreset::Small) => &["-q:v", "80"],
+        ("h264_nvenc", QualityPreset::Fast) => &["-preset", "p3", "-cq", "28"],
+        ("h264_nvenc", QualityPreset::Original | QualityPreset::Balanced) => {
+            &["-preset", "p5", "-cq", "23"]
+        }
+        ("h264_nvenc", QualityPreset::Small) => &["-preset", "p7", "-cq", "20"],
+        ("h264_qsv", QualityPreset::Fast) => &["-preset", "fast", "-global_quality", "28"],
+        ("h264_qsv", QualityPreset::Original | QualityPreset::Balanced) => {
+            &["-preset", "medium", "-global_quality", "23"]
+        }
+        ("h264_qsv", QualityPreset::Small) => &["-preset", "slow", "-global_quality", "20"],
+        ("h264_amf", QualityPreset::Fast) => &[
+            "-quality", "speed", "-rc", "cqp", "-qp_i", "28", "-qp_p", "30",
+        ],
+        ("h264_amf", QualityPreset::Original | QualityPreset::Balanced) => &[
+            "-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "25",
+        ],
+        ("h264_amf", QualityPreset::Small) => &[
+            "-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+        ],
+        // Unknown encoder — emit no quality args; ffmpeg uses encoder defaults.
+        _ => &[],
     }
 }
 
@@ -1219,5 +1304,72 @@ mod tests {
             120_000,
         );
         assert!(p.args.iter().any(|a| a == "libvorbis"));
+    }
+
+    // -----------------------------------------------------------------------
+    // HW substitution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn substitute_replaces_libx264_with_videotoolbox() {
+        let plan = decide(
+            TargetFormat::Mp4,
+            Some("vp9"),
+            Some("opus"),
+            Some(QualityPreset::Balanced),
+            None,
+            None,
+        );
+        assert!(plan.args.iter().any(|a| a == "libx264"));
+        let out = substitute_h264_hw(
+            &plan.args,
+            "h264_videotoolbox",
+            Some(QualityPreset::Balanced),
+        )
+        .expect("should substitute");
+        assert!(out.iter().any(|a| a == "h264_videotoolbox"));
+        assert!(!out.iter().any(|a| a == "libx264"));
+        assert!(!out.iter().any(|a| a == "-preset"));
+        assert!(!out.iter().any(|a| a == "-crf"));
+        assert!(out.windows(2).any(|w| w[0] == "-q:v" && w[1] == "65"));
+    }
+
+    #[test]
+    fn substitute_keeps_audio_args_intact() {
+        let plan = decide(
+            TargetFormat::Mp4,
+            Some("vp9"),
+            Some("opus"),
+            Some(QualityPreset::Balanced),
+            None,
+            None,
+        );
+        let out = substitute_h264_hw(&plan.args, "h264_nvenc", Some(QualityPreset::Balanced))
+            .expect("should substitute");
+        // Audio block survives the rewrite.
+        assert!(out.windows(2).any(|w| w[0] == "-c:a" && w[1] == "aac"));
+        assert!(out.windows(2).any(|w| w[0] == "-b:a" && w[1] == "192k"));
+    }
+
+    #[test]
+    fn substitute_returns_none_when_no_libx264() {
+        let plan = decide(TargetFormat::Mp3, None, Some("aac"), None, None, None);
+        assert!(substitute_h264_hw(&plan.args, "h264_videotoolbox", None).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_returns_none_when_no_hw_available() {
+        let mut plan = decide(
+            TargetFormat::Mp4,
+            Some("vp9"),
+            Some("opus"),
+            Some(QualityPreset::Balanced),
+            None,
+            None,
+        );
+        let original_args = plan.args.clone();
+        let used = maybe_apply_hw_h264(&mut plan, &DetectedEncoders::empty(), None);
+        assert_eq!(used, None);
+        assert_eq!(plan.args, original_args);
     }
 }

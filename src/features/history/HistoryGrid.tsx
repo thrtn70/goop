@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Job, JobId, SourceKind } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useThumbnail } from "@/hooks/useThumbnail";
 
 interface HistoryGridProps {
   onPreview: (job: Job) => void;
@@ -60,21 +60,15 @@ function Card({
   onPreview: (j: Job) => void;
   onQuickView: (j: Job) => void;
 }) {
-  const loadThumbnail = useAppStore((s) => s.loadThumbnail);
-  const cached = useAppStore((s) => s.thumbnailsById[jobIdKey(job.id)] ?? null);
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
-  const [thumb, setThumb] = useState<string | null>(cached);
   const ref = useRef<HTMLButtonElement | null>(null);
   const [visible, setVisible] = useState(false);
   const outputPath = job.result?.output_path ?? null;
   const kind = kindOf(outputPath);
-
-  useEffect(() => {
-    setThumb(cached);
-  }, [cached]);
-
   // Lazy-load thumbnails via IntersectionObserver so a grid of 500 rows
   // doesn't queue 500 simultaneous ffmpeg/gs invocations at mount.
+  const thumbState = useThumbnail(job.id, !visible || kind === "audio");
+
   useEffect(() => {
     if (!ref.current || visible) return;
     const obs = new IntersectionObserver(
@@ -88,17 +82,6 @@ function Card({
     obs.observe(ref.current);
     return () => obs.disconnect();
   }, [visible]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!visible || kind === "audio" || thumb) return;
-    void loadThumbnail(job.id).then((path) => {
-      if (!cancelled && path) setThumb(path);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [visible, kind, thumb, loadThumbnail, job.id]);
 
   return (
     <button
@@ -115,9 +98,9 @@ function Card({
         previewing ? "ring-2 ring-accent" : ""
       }`}
     >
-      {thumb && kind !== "audio" ? (
+      {thumbState.status === "ready" ? (
         <img
-          src={convertFileSrc(thumb)}
+          src={thumbState.src}
           alt=""
           className="aspect-[16/10] w-full bg-surface-2 object-cover"
         />

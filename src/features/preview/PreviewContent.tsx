@@ -1,8 +1,5 @@
-import { useEffect, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Job, SourceKind } from "@/types";
-import { useAppStore } from "@/store/appStore";
-import { jobIdKey } from "@/store/appStore";
+import { useThumbnail } from "@/hooks/useThumbnail";
 import DeleteMenu from "./DeleteMenu";
 
 interface PreviewContentProps {
@@ -44,27 +41,7 @@ export default function PreviewContent({
 }: PreviewContentProps) {
   const outputPath = job.result?.output_path ?? null;
   const kind = outputPath ? sourceKindFromPath(outputPath) : "video";
-  const loadThumbnail = useAppStore((s) => s.loadThumbnail);
-  const cached = useAppStore((s) => s.thumbnailsById[jobIdKey(job.id)] ?? null);
-  const [thumb, setThumb] = useState<string | null>(cached);
-  const [thumbFailed, setThumbFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (kind === "audio") return;
-    if (cached) {
-      setThumb(cached);
-      return;
-    }
-    void loadThumbnail(job.id).then((path) => {
-      if (cancelled) return;
-      if (path) setThumb(path);
-      else setThumbFailed(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [job.id, kind, cached, loadThumbnail]);
+  const thumbState = useThumbnail(job.id, kind === "audio");
 
   const bytes = job.result?.bytes != null ? Number(job.result.bytes) : 0;
   const thumbSize = variant === "modal" ? "aspect-video" : "aspect-video";
@@ -98,18 +75,17 @@ export default function PreviewContent({
         >
           ♫ audio
         </div>
-      ) : thumb ? (
+      ) : thumbState.status === "ready" ? (
         <img
-          src={convertFileSrc(thumb)}
+          src={thumbState.src}
           alt=""
           className={`${thumbSize} w-full rounded-md bg-surface-2 object-contain`}
-          onError={() => setThumbFailed(true)}
         />
       ) : (
         <div
           className={`${thumbSize} flex items-center justify-center rounded-md bg-surface-2 text-xs text-fg-muted`}
         >
-          {thumbFailed ? "preview unavailable" : "loading..."}
+          {thumbState.status === "unavailable" ? "preview unavailable" : "loading..."}
         </div>
       )}
 

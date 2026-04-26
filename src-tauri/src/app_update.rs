@@ -14,7 +14,7 @@
 
 use futures_util::StreamExt;
 use goop_core::UpdateInfo;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -87,6 +87,7 @@ pub async fn download<F>(
 where
     F: Fn(u64, u64) + Send + Sync,
 {
+    validate_download_url(url)?;
     let client = build_download_client(current_version)?;
     let resp = client.get(url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
@@ -148,6 +149,17 @@ fn filename_from_url(url: &str) -> String {
         .to_string()
 }
 
+fn validate_download_url(raw: &str) -> anyhow::Result<()> {
+    let url = Url::parse(raw)?;
+    if url.scheme() != "https" {
+        anyhow::bail!("update download URL must use https");
+    }
+    match url.host_str() {
+        Some("github.com" | "objects.githubusercontent.com") => Ok(()),
+        _ => anyhow::bail!("update download URL host is not trusted"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Platform + asset matching
 // ---------------------------------------------------------------------------
@@ -171,6 +183,13 @@ fn current_platform() -> Platform {
     #[cfg(target_os = "windows")]
     {
         Platform::Windows
+    }
+    // Linux is not a release target; we still need *some* return value so
+    // the audit job's clippy compile passes. The updater is never invoked
+    // on Linux in practice (the in-app updater UI is hidden by the build).
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Platform::MacAarch64
     }
 }
 
@@ -287,5 +306,21 @@ mod tests {
     #[test]
     fn filename_from_url_falls_back_when_empty() {
         assert_eq!(filename_from_url("https://host/"), "goop-update.bin");
+    }
+
+    #[test]
+    fn validates_update_download_hosts() {
+        assert!(validate_download_url(
+            "https://github.com/thrtn70/goop/releases/download/v0.1.8/Goop.msi"
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://objects.githubusercontent.com/github-production-release-asset"
+        )
+        .is_ok());
+        assert!(
+            validate_download_url("http://github.com/thrtn70/goop/releases/download/x").is_err()
+        );
+        assert!(validate_download_url("https://example.com/Goop.msi").is_err());
     }
 }

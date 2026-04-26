@@ -198,7 +198,7 @@ mod tests {
         store.insert(&j).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let events = sink.queue.lock().unwrap().clone();
+        let events = sink.queue.lock().clone();
         assert!(events.iter().any(|e| matches!(e.state, JobState::Running)));
         assert!(events.iter().any(|e| matches!(e.state, JobState::Done)));
     }

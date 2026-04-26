@@ -1,9 +1,30 @@
+import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import type { Job, JobState } from "@/types";
 import { api } from "@/ipc/commands";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 
 type StateName = "queued" | "running" | "done" | "cancelled" | "error";
+
+/**
+ * Names emitted by the converter when ffmpeg uses a hardware encoder.
+ * Mirrors the list in `crates/goop-converter/src/encoders.rs::KNOWN_HW_ENCODERS`.
+ * Kept inline so the queue row doesn't pull in a larger encoder utility.
+ */
+const HW_ENCODER_NAMES = new Set([
+  "h264_videotoolbox",
+  "hevc_videotoolbox",
+  "h264_nvenc",
+  "hevc_nvenc",
+  "h264_qsv",
+  "hevc_qsv",
+  "h264_amf",
+  "hevc_amf",
+]);
+
+function isHardwareEncoder(name: string | null): boolean {
+  return name !== null && HW_ENCODER_NAMES.has(name);
+}
 
 function stateName(state: JobState): StateName {
   if (typeof state === "string") return state;
@@ -54,19 +75,84 @@ function stateInfo(name: StateName): { glyph: string; label: string } {
 
 export default function QueueRow({ job, index }: { job: Job; index: number }) {
   const progress = useAppStore((s) => s.progressById[jobIdKey(job.id)] ?? null);
+  const isSelected = useAppStore((s) =>
+    s.ui.queueSelectedIds.has(jobIdKey(job.id)),
+  );
+  const toggleSelection = useAppStore((s) => s.toggleQueueSelection);
   const name = stateName(job.state);
   const pct = progress?.percent ?? 0;
   const outputPath = job.result?.output_path ?? null;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onClickOutside(e: MouseEvent): void {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [menuOpen]);
+
+  function handleContextMenu(e: React.MouseEvent): void {
+    if (name !== "queued") return;
+    e.preventDefault();
+    setMenuOpen(true);
+  }
+
+  async function handleMoveToTop(): Promise<void> {
+    setMenuOpen(false);
+    try {
+      await api.queue.moveToTop(job.id);
+      const jobs = await api.queue.list();
+      useAppStore.setState({ jobs });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function handleCancelFromMenu(): Promise<void> {
+    setMenuOpen(false);
+    try {
+      await api.queue.cancel(job.id);
+    } catch {
+      /* ignore */
+    }
+  }
 
   return (
     <div
+      onContextMenu={handleContextMenu}
       className={clsx(
-        "enter-stagger hover-lift rounded-md bg-surface-2 p-2 text-xs",
+        "group enter-stagger hover-lift relative rounded-md bg-surface-2 p-2 text-xs",
         name === "running" && "pulse-running",
+        isSelected && "ring-1 ring-accent",
       )}
       style={{ "--i": index } as React.CSSProperties}
     >
       <div className="flex items-center justify-between gap-2">
+        {name === "queued" && (
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={isSelected}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelection(job.id);
+            }}
+            aria-label={isSelected ? `Deselect ${shortLabel(job)}` : `Select ${shortLabel(job)}`}
+            className={clsx(
+              "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-[9px] transition duration-fast ease-out",
+              isSelected
+                ? "border-accent bg-accent text-accent-fg"
+                : "border-subtle bg-surface-1/70 text-fg-muted opacity-0 group-hover:opacity-100 hover:opacity-100",
+            )}
+          >
+            {isSelected ? "✓" : ""}
+          </button>
+        )}
         <span
           className={clsx("truncate font-medium", name === "running" ? "text-accent" : "text-fg-secondary")}
           title={shortLabel(job)}
@@ -94,23 +180,57 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         )}
       </div>
+      {menuOpen && name === "queued" && (
+        <div
+          ref={menuRef}
+          role="menu"
+          className="absolute left-2 top-full z-20 mt-1 min-w-[160px] overflow-hidden rounded-md border border-subtle bg-surface-1 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void handleMoveToTop()}
+            className="block w-full px-3 py-1.5 text-left text-xs text-fg hover:bg-accent-subtle hover:text-accent"
+          >
+            Move to top
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void handleCancelFromMenu()}
+            className="block w-full px-3 py-1.5 text-left text-xs text-error hover:bg-error-subtle"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       {name === "running" && (
         <>
-          <div
-            role="progressbar"
-            aria-valuenow={Math.round(pct)}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label={`${shortLabel(job)} progress`}
-            className="mt-1 h-1 w-full overflow-hidden rounded-full bg-surface-3"
-          >
+          <div className="mt-1 flex items-center gap-2">
             <div
-              className="h-1 w-full origin-left rounded-full bg-accent"
-              style={{
-                transform: `scaleX(${pct / 100})`,
-                transition: `transform var(--duration-normal) var(--ease-out)`,
-              }}
-            />
+              role="progressbar"
+              aria-valuenow={Math.round(pct)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`${shortLabel(job)} progress`}
+              className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3"
+            >
+              <div
+                className="h-1 w-full origin-left rounded-full bg-accent"
+                style={{
+                  transform: `scaleX(${pct / 100})`,
+                  transition: `transform var(--duration-normal) var(--ease-out)`,
+                }}
+              />
+            </div>
+            {isHardwareEncoder(progress?.encoder ?? null) && (
+              <span
+                className="rounded-full bg-accent-subtle px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent"
+                title={`Hardware-accelerated encoder: ${progress?.encoder}`}
+              >
+                HW
+              </span>
+            )}
           </div>
           <div className="mt-1 flex justify-between tabular-nums text-xs text-fg-muted">
             <span>{pct.toFixed(1)}%</span>
