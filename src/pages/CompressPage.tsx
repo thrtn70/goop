@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
-import MediaBlob from "@/features/convert/MediaBlob";
+import CompressBlob from "@/features/compress/CompressBlob";
 import CompressFileRow from "@/features/compress/CompressFileRow";
 import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
 import CompressActionBar from "@/features/compress/CompressActionBar";
@@ -138,12 +138,12 @@ export default function CompressPage() {
       <DropZone onFiles={addPaths}>
         {!hasFiles && !hasPdfs && (
           <div className="enter-up flex flex-col items-center justify-center px-6 py-14 text-center">
-            <MediaBlob size={108} />
+            <CompressBlob size={108} />
             <p className="mt-5 font-display text-base font-semibold text-fg">
-              Drop something here.
+              Make it smaller.
             </p>
             <p className="mt-1.5 text-sm text-fg-secondary">
-              Smaller files, same format. Video, audio, images, and PDFs.{" "}
+              Drop a video, image, or PDF — keep quality, lose bytes.{" "}
               <button
                 type="button"
                 onClick={() => void handleBrowse()}
