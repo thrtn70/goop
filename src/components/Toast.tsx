@@ -70,7 +70,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
       )}
     >
       <span
-        aria-hidden
+        aria-hidden="true"
         className={clsx(
           "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-1",
           VARIANT_ICON_COLORS[toast.variant],
@@ -115,7 +115,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
         onClick={() => onDismiss(toast.id)}
         className="shrink-0 text-fg-muted transition duration-fast ease-out hover:text-fg"
       >
-        <X size={14} strokeWidth={2.5} aria-hidden />
+        <X size={14} strokeWidth={2.5} aria-hidden="true" />
       </button>
     </div>
   );

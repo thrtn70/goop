@@ -52,7 +52,7 @@ export default function LeftNav() {
             ready ? "transition-transform duration-normal ease-out" : "",
           )}
           style={{ transform: `translateY(${pill.top}px)`, height: pill.height }}
-          aria-hidden
+          aria-hidden="true"
         />
       )}
 
@@ -81,7 +81,7 @@ export default function LeftNav() {
                     ? "bg-scrim/30 text-accent-fg"
                     : "bg-surface-3 text-fg-muted",
                 )}
-                aria-hidden
+                aria-hidden="true"
               >
                 {mod}
                 {it.shortcut}

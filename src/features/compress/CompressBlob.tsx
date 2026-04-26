@@ -16,7 +16,7 @@ export default function CompressBlob({ size = 96 }: { size?: number }) {
       viewBox="0 0 128 96"
       fill="none"
       role="presentation"
-      aria-hidden
+      aria-hidden="true"
       className="isolate"
     >
       {/* Outer frame — the source size. Dashed border reads as

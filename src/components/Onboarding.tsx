@@ -246,7 +246,7 @@ export default function Onboarding() {
 
 
         {/* Step indicator */}
-        <div className="mt-8 flex items-center justify-center gap-1.5" aria-hidden>
+        <div className="mt-8 flex items-center justify-center gap-1.5" aria-hidden="true">
           {STEPS.map((id, i) => (
             <span
               key={id}

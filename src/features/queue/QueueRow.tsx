@@ -375,7 +375,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                  *  reduced-motion via the global @media rule. */}
                 {name === "running" && (
                   <span
-                    aria-hidden
+                    aria-hidden="true"
                     className="progress-flow absolute inset-0 block"
                   />
                 )}

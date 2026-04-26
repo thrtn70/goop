@@ -61,9 +61,9 @@ function SortHeader({
       {label}
       {active &&
         (descending ? (
-          <ChevronDown size={12} strokeWidth={2.5} aria-hidden />
+          <ChevronDown size={12} strokeWidth={2.5} aria-hidden="true" />
         ) : (
-          <ChevronUp size={12} strokeWidth={2.5} aria-hidden />
+          <ChevronUp size={12} strokeWidth={2.5} aria-hidden="true" />
         ))}
     </button>
   );
@@ -161,7 +161,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                     aria-label="Quick view"
                     title="Quick View (Space)"
                   >
-                    <Eye size={14} strokeWidth={2.5} aria-hidden />
+                    <Eye size={14} strokeWidth={2.5} aria-hidden="true" />
                   </button>
                 </td>
               </tr>

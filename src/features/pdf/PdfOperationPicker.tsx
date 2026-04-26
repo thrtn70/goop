@@ -59,10 +59,10 @@ export default function PdfOperationPicker({
               className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
                 active ? "border-accent bg-accent" : "border-fg-muted"
               }`}
-              aria-hidden
+              aria-hidden="true"
             >
               {active && (
-                <span className="h-1.5 w-1.5 rounded-full bg-accent-fg" aria-hidden />
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-fg" aria-hidden="true" />
               )}
             </span>
             <span>

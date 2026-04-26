@@ -82,7 +82,7 @@ function Stamp() {
       viewBox="0 0 72 56"
       fill="none"
       role="presentation"
-      aria-hidden
+      aria-hidden="true"
     >
       <rect
         x="2"

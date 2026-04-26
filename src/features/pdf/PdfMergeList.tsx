@@ -49,7 +49,7 @@ export default function PdfMergeList({
             draggingIdx === i ? "opacity-50" : ""
           }`}
         >
-          <span className="text-fg-muted" aria-hidden>
+          <span className="text-fg-muted" aria-hidden="true">
             ⋮⋮
           </span>
           <span className="w-5 text-xs tabular-nums text-fg-muted">{i + 1}.</span>
