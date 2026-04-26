@@ -6,6 +6,7 @@ import FileRow from "@/features/convert/FileRow";
 import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
+import MediaBlob from "@/features/convert/MediaBlob";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
 import { useAppStore } from "@/store/appStore";
@@ -175,23 +176,38 @@ export default function ConvertPage() {
     <div className="flex h-full flex-col p-6">
       <DropZone onFiles={addPaths}>
         {!hasMedia && !hasPdfs && (
-          <div className="enter-up flex flex-col items-center justify-center py-12 text-center">
-            <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">
-              <path d="M20 28V12M14 18l6-6 6 6" strokeLinecap="round" strokeLinejoin="round" />
-              <rect x="4" y="4" width="32" height="32" rx="6" strokeDasharray="4 3" />
-            </svg>
-            <p className="mt-3 text-sm text-fg-secondary">
-              Drop files here, or{" "}
+          <div className="enter-up flex flex-col items-center justify-center px-6 py-14 text-center">
+            <MediaBlob size={108} />
+            <p className="mt-5 font-display text-base font-semibold text-fg">
+              Drop something here.
+            </p>
+            <p className="mt-1.5 text-sm text-fg-secondary">
+              Video, audio, images, and PDFs — converted right on your machine.{" "}
               <button
                 type="button"
                 onClick={() => void handleBrowse()}
-                className="text-accent transition duration-fast ease-out hover:text-accent-hover"
+                className="text-accent underline-offset-2 transition duration-fast ease-out hover:text-accent-hover hover:underline"
               >
-                pick from your computer
+                Pick from your computer
               </button>
               .
             </p>
-            <p className="mt-1 text-xs text-fg-muted">Video, audio, images, and PDFs.</p>
+            {/* Educational chips — show what this page does at a glance.
+             *  Not interactive; they read as labels, not buttons, by
+             *  using <span> and reduced visual weight. The sr-only
+             *  preamble anchors the chips for screen readers so they
+             *  aren't read as orphaned tokens. */}
+            <p className="sr-only">Examples of supported conversions:</p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-1.5">
+              {["MOV → MP4", "MP4 → MP3", "PNG → JPG", "MP4 → GIF"].map((label) => (
+                <span
+                  key={label}
+                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-[10px] tracking-tight text-fg-muted"
+                >
+                  {label}
+                </span>
+              ))}
+            </div>
           </div>
         )}
         {hasMedia && (

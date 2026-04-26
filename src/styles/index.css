@@ -84,6 +84,51 @@ body {
   50% { opacity: 0.8; }
 }
 
+/* Onboarding step transition: directional slide. The new step enters
+ * from the side that matches the navigation direction (next = from
+ * right, back = from left). Distance is short (16px) so it reads as
+ * a "page turn" rather than a slideshow swap. */
+@keyframes step-slide-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes step-slide-left {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Onboarding folder path swap — re-mounts the path line with a tiny
+ * slide+fade so a folder change feels like new info arrived, vs
+ * silently text-swapping. */
+@keyframes path-swap {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Drop-zone perimeter stroke flow — pans the dash pattern so the
+ * border looks like a "live" indicator while files are being dragged
+ * over it. */
+@keyframes dropzone-stroke-flow {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -28; }
+}
+
+/* Drop-zone hover glow — soft warm wash centred on the zone. The
+ * radial gradient is the brand accent at low alpha, fading to
+ * transparent at the edges. Doesn't pulse; just on/off. */
+@keyframes dropzone-glow-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Drop-zone ripple — when a drop lands, a soft circle scales out
+ * from zone centre and fades. Single shot; cleaned up by JS. */
+@keyframes dropzone-ripple {
+  0%   { transform: translate(-50%, -50%) scale(0.4); opacity: 0.55; }
+  60%  { opacity: 0.25; }
+  100% { transform: translate(-50%, -50%) scale(2.4); opacity: 0; }
+}
+
 /* Phase: queue progress flow — a soft lighter wash slides across the
  * progress fill, suggesting motion. The fill itself is a solid accent;
  * this layer is a translucent gradient panned via background-position
@@ -117,6 +162,49 @@ body {
 /* Single entrance (no stagger) */
 .enter-up {
   animation: enter-up var(--duration-normal) var(--ease-out) both;
+}
+
+/* Onboarding step transitions — paired with a `key` change on the
+ * subtree so React remounts on each step, retriggering the animation. */
+.step-slide-in-right {
+  animation: step-slide-right 280ms var(--ease-out) both;
+}
+.step-slide-in-left {
+  animation: step-slide-left 280ms var(--ease-out) both;
+}
+
+/* Folder-path swap — short, intentional. */
+.path-swap {
+  animation: path-swap var(--duration-fast) var(--ease-out) both;
+}
+
+/* Drop zone — perimeter stroke pans the dash array continuously
+ * while files are being dragged over the zone. Linear timing so the
+ * motion reads as steady "flow" rather than ease-out deceleration. */
+.dropzone-stroke-static {
+  /* Idle state: no animation, just the static dash. */
+  stroke-dashoffset: 0;
+}
+.dropzone-stroke-flow {
+  animation: dropzone-stroke-flow 1.6s linear infinite;
+}
+
+/* Hover overlay: soft radial accent wash. The gradient itself is
+ * defined inline here (rather than as a token) because it's specific
+ * to this surface and not reused elsewhere. */
+.dropzone-glow {
+  background: radial-gradient(
+    circle at center,
+    oklch(var(--accent) / 0.18) 0%,
+    oklch(var(--accent) / 0.08) 35%,
+    transparent 70%
+  );
+  animation: dropzone-glow-fade-in var(--duration-fast) var(--ease-out) both;
+}
+
+/* Drop ripple — single-shot scale + fade out from zone centre. */
+.dropzone-ripple {
+  animation: dropzone-ripple 600ms var(--ease-out) both;
 }
 
 /* Running pulse */
@@ -167,7 +255,10 @@ body {
 /* ------------------------------------------------------------------ */
 @media (prefers-reduced-motion: reduce) {
   .enter-stagger,
-  .enter-up {
+  .enter-up,
+  .step-slide-in-right,
+  .step-slide-in-left,
+  .path-swap {
     animation-name: enter-fade;
     animation-duration: var(--duration-fast);
     animation-delay: 0ms !important;
@@ -175,7 +266,10 @@ body {
 
   .pulse-running,
   .progress-flow,
-  .pulse-glow {
+  .pulse-glow,
+  .dropzone-stroke-flow,
+  .dropzone-glow,
+  .dropzone-ripple {
     animation: none;
   }
 

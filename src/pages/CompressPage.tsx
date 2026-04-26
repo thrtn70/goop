@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
+import MediaBlob from "@/features/convert/MediaBlob";
 import CompressFileRow from "@/features/compress/CompressFileRow";
 import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
 import CompressActionBar from "@/features/compress/CompressActionBar";
@@ -136,34 +137,33 @@ export default function CompressPage() {
     <div className="flex h-full flex-col p-6">
       <DropZone onFiles={addPaths}>
         {!hasFiles && !hasPdfs && (
-          <div className="enter-up flex flex-col items-center justify-center py-12 text-center">
-            <svg
-              width="40"
-              height="40"
-              viewBox="0 0 40 40"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              className="text-fg-muted/30"
-            >
-              <path d="M14 22V14a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v8" strokeLinecap="round" />
-              <path d="M12 30h16" strokeLinecap="round" />
-              <rect x="4" y="4" width="32" height="32" rx="6" strokeDasharray="4 3" />
-            </svg>
-            <p className="mt-3 text-sm text-fg-secondary">
-              Drop files here, or{" "}
+          <div className="enter-up flex flex-col items-center justify-center px-6 py-14 text-center">
+            <MediaBlob size={108} />
+            <p className="mt-5 font-display text-base font-semibold text-fg">
+              Drop something here.
+            </p>
+            <p className="mt-1.5 text-sm text-fg-secondary">
+              Smaller files, same format. Video, audio, images, and PDFs.{" "}
               <button
                 type="button"
                 onClick={() => void handleBrowse()}
-                className="text-accent transition duration-fast ease-out hover:text-accent-hover"
+                className="text-accent underline-offset-2 transition duration-fast ease-out hover:text-accent-hover hover:underline"
               >
-                pick from your computer
+                Pick from your computer
               </button>
               .
             </p>
-            <p className="mt-1 text-xs text-fg-muted">
-              Video, audio, images, and PDFs. Smaller files, same format.
-            </p>
+            <p className="sr-only">Examples of supported compressions:</p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-1.5">
+              {["1080p MP4 → 720p", "MP3 → smaller MP3", "PNG → web JPG", "PDF → smaller PDF"].map((label) => (
+                <span
+                  key={label}
+                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-[10px] tracking-tight text-fg-muted"
+                >
+                  {label}
+                </span>
+              ))}
+            </div>
           </div>
         )}
         {hasFiles && (

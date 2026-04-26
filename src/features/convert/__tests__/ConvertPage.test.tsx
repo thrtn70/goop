@@ -104,8 +104,8 @@ describe("ConvertPage", () => {
 
   it("renders the empty drop zone with browse link", () => {
     renderPage();
-    expect(screen.getByText(/drop files here/i)).toBeDefined();
-    expect(screen.getByText(/pick from your computer/i)).toBeDefined();
+    expect(screen.getByText(/drop something here/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /pick from your computer/i })).toBeDefined();
   });
 
   it("shows file row after browse + probe", async () => {

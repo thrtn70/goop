@@ -143,6 +143,8 @@ type AppStoreState = {
   loadHistory: () => Promise<void>;
   setHistorySearch: (search: string) => void;
   setHistoryKind: (kind: JobKind | null) => void;
+  /** Reset both search and kind in a single set() so we only refetch once. */
+  clearHistoryFilters: () => void;
   setHistorySort: (sort: HistorySort, descending?: boolean) => void;
   toggleHistoryViewMode: () => Promise<void>;
   toggleHistorySelection: (jobId: JobId) => void;
@@ -401,6 +403,12 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   setHistoryKind(kind) {
     set((s) => ({ history: { ...s.history, kind } }));
+    void get().loadHistory();
+  },
+  clearHistoryFilters() {
+    // Combined reset so the History view doesn't flash through a
+    // partial state where only one of search/kind has been cleared.
+    set((s) => ({ history: { ...s.history, search: "", kind: null } }));
     void get().loadHistory();
   },
   setHistorySort(sort, descending) {
