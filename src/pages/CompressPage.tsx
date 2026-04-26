@@ -121,7 +121,7 @@ export default function CompressPage() {
   return (
     <div className="flex h-full flex-col p-6">
       <DropZone onFiles={addPaths}>
-        {!hasFiles && (
+        {!hasFiles && !hasPdfs && (
           <div className="enter-up flex flex-col items-center justify-center py-12 text-center">
             <svg
               width="40"

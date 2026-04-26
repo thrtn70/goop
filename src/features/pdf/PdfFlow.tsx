@@ -48,7 +48,14 @@ export default function PdfFlow({
   defaultOp = "merge",
 }: PdfFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [op, setOp] = useState<PdfOperationKind>(defaultOp);
+  // Resolve the initial op against the multi-file constraint so a host page
+  // that requests `compress` for two PDFs doesn't silently flip to `merge`
+  // on the first render via the auto-switch effect below.
+  const initialOp: PdfOperationKind =
+    files.length > 1 && (defaultOp === "split" || defaultOp === "compress")
+      ? "merge"
+      : defaultOp;
+  const [op, setOp] = useState<PdfOperationKind>(initialOp);
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useState<PageRange[]>([]);
   const [quality, setQuality] = useState<PdfQuality>("ebook");
