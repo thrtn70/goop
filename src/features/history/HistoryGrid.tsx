@@ -67,7 +67,8 @@ function Card({
   const kind = kindOf(outputPath);
   // Lazy-load thumbnails via IntersectionObserver so a grid of 500 rows
   // doesn't queue 500 simultaneous ffmpeg/gs invocations at mount.
-  const thumbState = useThumbnail(job.id, !visible || kind === "audio");
+  // Audio rows get a waveform PNG (Phase J) — same lazy treatment.
+  const thumbState = useThumbnail(job.id, !visible);
 
   useEffect(() => {
     if (!ref.current || visible) return;

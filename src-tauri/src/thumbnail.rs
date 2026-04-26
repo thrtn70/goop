@@ -6,9 +6,11 @@
 //! return the cached path. An LRU eviction pass runs on each write to keep
 //! the cache below ~500 MB.
 //!
-//! Audio jobs don't get thumbnails — callers should render a codec badge
-//! on the frontend instead. The service returns `Err(NoThumbnail)` for
-//! these.
+//! Per kind:
+//! - `Video` — first frame at t=1s, scaled to width.
+//! - `Image` — `image` crate decode + thumbnail.
+//! - `Pdf` — Ghostscript renders page 1 at 72dpi.
+//! - `Audio` — ffmpeg's `showwavespic` filter renders an RMS waveform.
 
 use dashmap::DashMap;
 use goop_core::{JobId, SourceKind};
@@ -32,8 +34,6 @@ pub enum ThumbError {
     Ffmpeg(String),
     #[error("ghostscript failed: {0}")]
     Ghostscript(String),
-    #[error("no thumbnail for this kind")]
-    NoThumbnail,
     #[error("ffmpeg sidecar missing: {0}")]
     SidecarMissing(String),
 }
@@ -78,10 +78,6 @@ impl ThumbnailService {
         source_kind: SourceKind,
         output_path: &Path,
     ) -> Result<PathBuf, ThumbError> {
-        if matches!(source_kind, SourceKind::Audio) {
-            return Err(ThumbError::NoThumbnail);
-        }
-
         let cached = self.cache_path(&job_id);
         if cached.exists() {
             // Touch the file so the LRU eviction pass treats this as recently
@@ -119,7 +115,7 @@ impl ThumbnailService {
                 )
                 .await?
             }
-            SourceKind::Audio => unreachable!("audio short-circuited above"),
+            SourceKind::Audio => generate_audio_waveform(resolver, output_path, &cached).await?,
         }
 
         self.evict_if_over_budget();
@@ -185,6 +181,54 @@ async fn generate_video(
         .arg("1")
         .arg("-vf")
         .arg(&scale)
+        .arg(output)
+        .output()
+        .await
+        .map_err(ThumbError::Io)?;
+    if !status.status.success() {
+        return Err(ThumbError::Ffmpeg(
+            String::from_utf8_lossy(&status.stderr).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Render an RMS waveform PNG for an audio file using ffmpeg's
+/// `showwavespic` filter. Output dimensions match the rest of the
+/// thumbnail family so audio rows lay out consistently in History.
+///
+/// Color is baked into the PNG (ffmpeg can't do CSS-style theming).
+/// `#3ec79a` is a mid-lightness teal-green chosen to read on both the
+/// light and dark surface-2 tokens. It's in the same hue family as
+/// Goop's brand accent without being the exact OKLCH match — the
+/// extra lightness avoids muddy waveforms on dark mode.
+///
+/// `-update 1` suppresses ffmpeg's "use a pattern" warning when a single
+/// PNG is the desired output. `showwavespic` auto-links to the input's
+/// audio stream when used inside `-filter_complex`; no explicit pad
+/// labels are needed.
+async fn generate_audio_waveform(
+    resolver: &BinaryResolver,
+    input: &Path,
+    output: &Path,
+) -> Result<(), ThumbError> {
+    let bin = resolver
+        .resolve("ffmpeg")
+        .map_err(|e| ThumbError::SidecarMissing(e.to_string()))?;
+    let filter = format!(
+        "showwavespic=s={}x{}:colors=#3ec79a",
+        THUMB_WIDTH, THUMB_HEIGHT
+    );
+    let status = tokio::process::Command::new(&bin.path)
+        .arg("-y")
+        .arg("-i")
+        .arg(input)
+        .arg("-filter_complex")
+        .arg(&filter)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-update")
+        .arg("1")
         .arg(output)
         .output()
         .await
@@ -307,10 +351,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audio_kind_returns_no_thumbnail_error() {
+    async fn audio_kind_routes_through_ffmpeg() {
+        // Phase J: audio used to short-circuit to `NoThumbnail`; now it
+        // routes through `generate_audio_waveform` which spawns ffmpeg.
+        // We don't ship a real audio fixture, so the call fails. Either
+        // outcome — `SidecarMissing` (no ffmpeg on PATH in CI) or
+        // `Ffmpeg` (ffmpeg ran and rejected the missing input file) —
+        // proves the audio code path was taken instead of returning a
+        // generic NoThumbnail error like the old behaviour.
         let dir = tempdir().unwrap();
         let svc = ThumbnailService::new(dir.path().to_path_buf(), None);
-        let resolver = BinaryResolver::new(dir.path().to_path_buf());
+        let resolver = BinaryResolver::new(dir.path().join("nonexistent"));
         let err = svc
             .get(
                 &resolver,
@@ -320,6 +371,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ThumbError::NoThumbnail));
+        assert!(
+            matches!(err, ThumbError::SidecarMissing(_) | ThumbError::Ffmpeg(_)),
+            "expected SidecarMissing or Ffmpeg, got {err:?}"
+        );
     }
 }
