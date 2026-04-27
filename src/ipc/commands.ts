@@ -46,6 +46,7 @@ export type AboutLinkTarget =
   | "issues"
   | "license"
   | "yt-dlp"
+  | "gallery-dl"
   | "ffmpeg"
   | "ghostscript"
   | "tauri";
@@ -96,7 +97,9 @@ export const api = {
   sidecar: {
     status: () => invoke<SidecarStatus>("sidecar_status"),
     updateYtDlp: () => invoke<UpdateStatus>("sidecar_update_yt_dlp"),
+    updateGalleryDl: () => invoke<UpdateStatus>("sidecar_update_gallery_dl"),
     ytDlpVersion: () => invoke<string>("sidecar_yt_dlp_version"),
+    galleryDlVersion: () => invoke<string>("sidecar_gallery_dl_version"),
     ffmpegVersion: () => invoke<string>("sidecar_ffmpeg_version"),
   },
   settings: {

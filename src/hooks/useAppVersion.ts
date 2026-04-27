@@ -3,7 +3,13 @@ import { type AppVersionInfo, useAppStore } from "@/store/appStore";
 
 export type { AppVersionInfo };
 
-const FALLBACK: AppVersionInfo = { goop: "-", ytDlp: null, ffmpeg: null, os: "-" };
+const FALLBACK: AppVersionInfo = {
+  goop: "-",
+  ytDlp: null,
+  galleryDl: null,
+  ffmpeg: null,
+  os: "-",
+};
 
 /**
  * Return the cached app + sidecar versions from the store. The cache is warmed

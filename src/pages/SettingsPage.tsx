@@ -30,6 +30,8 @@ export default function SettingsPage() {
   const [checkingForUpdate, setCheckingForUpdate] = useState(false);
   const [ytDlpUpdateMsg, setYtDlpUpdateMsg] = useState<string | null>(null);
   const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
+  const [galleryDlUpdateMsg, setGalleryDlUpdateMsg] = useState<string | null>(null);
+  const [galleryDlUpdating, setGalleryDlUpdating] = useState(false);
 
   useEffect(() => {
     if (settings?.theme) {
@@ -67,6 +69,19 @@ export default function SettingsPage() {
       setYtDlpUpdateMsg(formatError(e));
     } finally {
       setYtDlpUpdating(false);
+    }
+  }
+
+  async function handleGalleryDlUpdate() {
+    setGalleryDlUpdating(true);
+    setGalleryDlUpdateMsg(null);
+    try {
+      const status = await api.sidecar.updateGalleryDl();
+      setGalleryDlUpdateMsg(status.message || "gallery-dl is up to date.");
+    } catch (e) {
+      setGalleryDlUpdateMsg(formatError(e));
+    } finally {
+      setGalleryDlUpdating(false);
     }
   }
 
@@ -226,6 +241,19 @@ export default function SettingsPage() {
           </button>
           {ytDlpUpdateMsg && <span className="text-xs text-fg-muted">{ytDlpUpdateMsg}</span>}
         </div>
+        <div className="flex items-center gap-3 pt-2">
+          <button
+            type="button"
+            onClick={() => void handleGalleryDlUpdate()}
+            disabled={galleryDlUpdating}
+            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {galleryDlUpdating ? "Updating..." : "Update gallery-dl"}
+          </button>
+          {galleryDlUpdateMsg && (
+            <span className="text-xs text-fg-muted">{galleryDlUpdateMsg}</span>
+          )}
+        </div>
       </SettingsSection>
 
       <SettingsSection title="Presets" description="Named format + quality combinations for Convert and Compress.">
@@ -238,6 +266,8 @@ export default function SettingsPage() {
           <dd className="text-fg tabular-nums">{version.goop}</dd>
           <dt className="text-fg-muted">yt-dlp</dt>
           <dd className="text-fg tabular-nums">{version.ytDlp ?? "-"}</dd>
+          <dt className="text-fg-muted">gallery-dl</dt>
+          <dd className="text-fg tabular-nums">{version.galleryDl ?? "-"}</dd>
           <dt className="text-fg-muted">ffmpeg</dt>
           <dd className="text-fg">{version.ffmpeg ?? "-"}</dd>
           <dt className="text-fg-muted">Platform</dt>
@@ -298,7 +328,20 @@ export default function SettingsPage() {
               >
                 yt-dlp
               </button>
-              <span className="text-fg-muted"> — URL extraction and download.</span>
+              <span className="text-fg-muted"> — URL extraction for video and audio.</span>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => void handleOpenAboutLink("gallery-dl")}
+                className="btn-press text-accent transition duration-fast ease-out hover:text-accent-hover"
+              >
+                gallery-dl
+              </button>
+              <span className="text-fg-muted">
+                {" "}
+                — URL extraction for image hosts (Bunkr, Gofile, Pixeldrain, Imgur, Twitter/X).
+              </span>
             </li>
             <li>
               <button

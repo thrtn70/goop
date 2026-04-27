@@ -125,7 +125,11 @@ function Card({
         </div>
         <div className="mt-0.5 flex justify-between text-[10px] text-fg-muted">
           <span>{formatBytes(job.result?.bytes)}</span>
-          <span>{String(job.kind)}</span>
+          <span>
+            {job.result?.result_kind === "folder" && job.result.file_count > 1
+              ? `${job.result.file_count} files`
+              : String(job.kind)}
+          </span>
         </div>
       </div>
       <span
