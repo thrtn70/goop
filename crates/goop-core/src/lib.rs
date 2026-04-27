@@ -16,7 +16,7 @@ pub use convert::{
 pub use error::{GoopError, IpcError};
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
-pub use job::{Job, JobId, JobKind, JobResult, JobState};
+pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
 pub use pdf::{PageRange, PdfOperation, PdfProbeResult, PdfQuality};
 pub use preset::Preset;
 pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};

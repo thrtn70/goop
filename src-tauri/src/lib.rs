@@ -9,8 +9,9 @@ use goop_config as cfg;
 use goop_converter::{detect_encoders, ConversionBackend, FfmpegBackend, ImageMagickBackend};
 use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation, PidRegistry,
+    ResultKind,
 };
-use goop_extractor::ytdlp::{ExtractRequest, YtDlp};
+use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{compress as pdf_compress, merge as pdf_merge, split as pdf_split};
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -81,12 +82,20 @@ pub fn run() {
                 Box::pin(async move {
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
-                    let yt = YtDlp::new(&r, s);
-                    let res = yt.download(id, &req, cancel).await?;
+                    // Route via the dispatcher: it picks yt-dlp or
+                    // gallery-dl based on the URL's classifier output
+                    // and falls back to the OTHER extractor on a
+                    // no-matching-extractor error.
+                    let outcome = goop_extractor::dispatch(&r, s, id, &req, cancel).await?;
                     Ok(JobResult {
-                        output_path: Some(res.output_path),
-                        bytes: Some(res.bytes),
-                        duration_ms: res.duration_ms,
+                        output_path: Some(outcome.output_path),
+                        bytes: Some(outcome.bytes),
+                        duration_ms: outcome.duration_ms,
+                        result_kind: match outcome.result_kind {
+                            goop_extractor::ResultKindTag::File => ResultKind::File,
+                            goop_extractor::ResultKindTag::Folder => ResultKind::Folder,
+                        },
+                        file_count: outcome.file_count,
                     })
                 })
             });
@@ -125,6 +134,8 @@ pub fn run() {
                         output_path: Some(res.output_path),
                         bytes: Some(res.bytes),
                         duration_ms: res.duration_ms,
+                        result_kind: ResultKind::File,
+                        file_count: 1,
                     })
                 })
             });
@@ -145,7 +156,7 @@ pub fn run() {
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
                     let started = std::time::Instant::now();
-                    let (output_path, bytes) = match op {
+                    let (output_path, bytes, result_kind, file_count) = match op {
                         PdfOperation::Merge {
                             inputs,
                             output_path,
@@ -163,7 +174,12 @@ pub fn run() {
                             .map_err(|e| GoopError::Queue(e.to_string()))?
                             .map_err(GoopError::from)?;
                             let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
                         }
                         PdfOperation::Split {
                             input,
@@ -183,9 +199,15 @@ pub fn run() {
                                 .iter()
                                 .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
                                 .sum();
-                            // Report the output directory — the UI reveals
-                            // the folder so users see every file produced.
-                            (Some(dir.to_string_lossy().into_owned()), Some(bytes))
+                            // Report the output directory — Folder result_kind
+                            // tells the UI to render "Open folder" instead of
+                            // "Reveal" and to show the file count.
+                            (
+                                Some(dir.to_string_lossy().into_owned()),
+                                Some(bytes),
+                                ResultKind::Folder,
+                                outputs.len() as u32,
+                            )
                         }
                         PdfOperation::Compress {
                             input,
@@ -207,13 +229,20 @@ pub fn run() {
                             .await
                             .map_err(GoopError::from)?;
                             let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
                         }
                     };
                     Ok(JobResult {
                         output_path,
                         bytes,
                         duration_ms: started.elapsed().as_millis() as u64,
+                        result_kind,
+                        file_count,
                     })
                 })
             });
@@ -274,7 +303,9 @@ pub fn run() {
             commands::queue::queue_reveal,
             commands::sidecar::sidecar_status,
             commands::sidecar::sidecar_update_yt_dlp,
+            commands::sidecar::sidecar_update_gallery_dl,
             commands::sidecar::sidecar_yt_dlp_version,
+            commands::sidecar::sidecar_gallery_dl_version,
             commands::sidecar::sidecar_ffmpeg_version,
             commands::settings::settings_get,
             commands::settings::settings_set,

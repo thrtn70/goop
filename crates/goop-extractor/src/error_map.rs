@@ -1,13 +1,21 @@
-//! Map ugly yt-dlp stderr dumps to short, actionable user-facing messages.
+//! Map ugly yt-dlp / gallery-dl stderr dumps to short, actionable
+//! user-facing messages.
 //!
-//! yt-dlp's default error output includes full URLs, internal extractor
-//! paths, and Python-style tracebacks. None of that is useful to a Goop
-//! user. We pattern-match a small set of common failures and return a
-//! one-sentence replacement that hints at what the user can do — most often,
-//! enable cookies-from-browser or update yt-dlp.
+//! Both extractors emit verbose Python tracebacks and full URLs by
+//! default. None of that is useful to a Goop user. We pattern-match
+//! a small set of common failures and return a one-sentence
+//! replacement that hints at what the user can do — most often,
+//! enable cookies-from-browser or update the extractor.
 //!
-//! Patterns are checked in order; the first match wins. Unmatched stderr
-//! falls back to the raw text (the caller decides how to render it).
+//! Patterns are checked in order; the first match wins. Unmatched
+//! stderr falls back to the raw text (the caller decides how to
+//! render it).
+//!
+//! `is_no_matching_extractor` is a separate fast-path used by
+//! `dispatch::run` to decide whether to retry with the OTHER extractor
+//! before reporting failure. Both yt-dlp and gallery-dl signal this
+//! case with the same `Unsupported URL` substring; gallery-dl also
+//! emits `No suitable extractor found` in some configurations.
 
 const PATTERNS: &[(&str, &str)] = &[
     (
@@ -56,7 +64,7 @@ const PATTERNS: &[(&str, &str)] = &[
     ),
     (
         "Unsupported URL",
-        "yt-dlp doesn't support this URL. Make sure the link points directly to a video page.",
+        "Neither extractor recognized this URL. Make sure the link points directly to a media page (post, album, video, or file).",
     ),
     (
         "Video unavailable",
@@ -70,7 +78,54 @@ const PATTERNS: &[(&str, &str)] = &[
         "is geo restricted",
         "This video is region-locked and isn't available in your location.",
     ),
+    // gallery-dl patterns. Order matters less here — these patterns
+    // are unique to gallery-dl's traceback format and won't collide
+    // with the yt-dlp ones above.
+    (
+        "No suitable extractor found",
+        "Neither extractor recognized this URL. Make sure the link points directly to a media page (post, album, or file).",
+    ),
+    (
+        "HTTPError: 401",
+        "The site requires authentication. Enable \"Cookies from browser\" in Settings if you have a logged-in account.",
+    ),
+    (
+        "HTTPError: 403",
+        "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser, then try again.",
+    ),
+    (
+        "HTTPError: 404",
+        "The post or album is gone. The site may have removed it.",
+    ),
+    (
+        "HTTPError: 429",
+        "The site rate-limited the request. Wait a few minutes before trying again.",
+    ),
+    (
+        "[Errno 2] No such file or directory",
+        "Couldn't write to the output folder. Check that the folder exists and Goop has permission to write there.",
+    ),
 ];
+
+/// True when the stderr indicates the chosen extractor doesn't recognise
+/// the URL — the dispatch layer uses this to decide whether to retry
+/// with the other extractor before surfacing the failure to the user.
+///
+/// Both yt-dlp (`Unsupported URL`) and gallery-dl (`Unsupported URL` /
+/// `No suitable extractor found`) signal this case in raw stderr.
+///
+/// IMPORTANT: at the moment, the per-extractor wrappers run `friendly_message`
+/// over stderr BEFORE constructing `GoopError::SubprocessFailed`. After that
+/// substitution the raw markers are gone, so this matcher also checks for the
+/// friendly replacement strings (`Neither extractor recognized this URL`).
+/// Future cleanup: move `friendly_message` to the IPC boundary so the
+/// dispatch layer always sees raw stderr — until then, both forms must
+/// stay in sync between this function and the `PATTERNS` table above.
+pub fn is_no_matching_extractor(stderr: &str) -> bool {
+    stderr.contains("Unsupported URL")
+        || stderr.contains("No suitable extractor")
+        || stderr.contains("Neither extractor recognized")
+}
 
 /// Return a friendly replacement message if `stderr` matches any known
 /// failure pattern. Returns `None` to indicate the caller should keep the
@@ -120,7 +175,10 @@ mod tests {
     fn maps_unsupported_url() {
         let stderr = "ERROR: Unsupported URL: https://example.com/foo";
         let m = friendly_message(stderr).unwrap();
-        assert!(m.contains("yt-dlp doesn't support"));
+        // De-branded message — both yt-dlp and gallery-dl emit
+        // "Unsupported URL", so the friendly text must not single
+        // out either one.
+        assert!(m.contains("Neither extractor recognized"));
     }
 
     #[test]
@@ -164,5 +222,63 @@ mod tests {
              [twitter] 123: Downloading tweet API JSON\n\
              ERROR: [twitter] 123: No video could be found in this tweet\n";
         assert!(friendly_message(stderr).is_some());
+    }
+
+    #[test]
+    fn maps_gallery_dl_no_extractor() {
+        let stderr = "gallery-dl: error: No suitable extractor found for 'https://example.com'";
+        let m = friendly_message(stderr).expect("should match");
+        assert!(m.contains("Neither extractor"));
+    }
+
+    #[test]
+    fn maps_gallery_dl_401() {
+        let stderr = "[bunkr][album] HTTPError: 401 Unauthorized";
+        assert!(friendly_message(stderr)
+            .unwrap()
+            .contains("Cookies from browser"));
+    }
+
+    #[test]
+    fn maps_gallery_dl_403() {
+        let stderr = "[gofile][folder] HTTPError: 403 Forbidden";
+        let m = friendly_message(stderr).unwrap();
+        assert!(m.contains("blocked"));
+        assert!(m.contains("re-log in"));
+    }
+
+    #[test]
+    fn maps_gallery_dl_404() {
+        let stderr = "[bunkr][album] HTTPError: 404 Not Found";
+        assert!(friendly_message(stderr).unwrap().contains("gone"));
+    }
+
+    #[test]
+    fn maps_gallery_dl_output_dir_missing() {
+        let stderr = "[Errno 2] No such file or directory: '/nonexistent/foo.jpg'";
+        assert!(friendly_message(stderr).unwrap().contains("output folder"));
+    }
+
+    #[test]
+    fn detects_no_matching_extractor_for_yt_dlp() {
+        assert!(is_no_matching_extractor(
+            "ERROR: Unsupported URL: https://example.com"
+        ));
+    }
+
+    #[test]
+    fn detects_no_matching_extractor_for_gallery_dl() {
+        assert!(is_no_matching_extractor(
+            "gallery-dl: error: No suitable extractor found for 'https://example.com'"
+        ));
+        assert!(is_no_matching_extractor(
+            "ERROR: Unsupported URL 'https://example.com'"
+        ));
+    }
+
+    #[test]
+    fn does_not_detect_matching_extractor_for_normal_errors() {
+        assert!(!is_no_matching_extractor("HTTPError: 404 Not Found"));
+        assert!(!is_no_matching_extractor("Private video"));
     }
 }

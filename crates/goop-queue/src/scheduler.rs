@@ -295,7 +295,7 @@ impl PidRegistry for SchedulerPidRegistry {
 mod tests {
     use super::*;
     use goop_core::events::RecordingSink;
-    use goop_core::{Job, JobKind};
+    use goop_core::{Job, JobKind, ResultKind};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -308,7 +308,7 @@ mod tests {
             Box::pin(async move {
                 tokio::select! {
                     _ = cancel.cancelled() => Err(GoopError::Cancelled),
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => Ok(JobResult{ output_path: None, bytes: None, duration_ms: 20 }),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => Ok(JobResult{ output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
                 }
             })
         });
@@ -318,6 +318,8 @@ mod tests {
                     output_path: None,
                     bytes: None,
                     duration_ms: 0,
+                    result_kind: ResultKind::File,
+                    file_count: 1,
                 })
             })
         });
@@ -358,6 +360,8 @@ mod tests {
                     output_path: None,
                     bytes: None,
                     duration_ms: 0,
+                    result_kind: ResultKind::File,
+                    file_count: 1,
                 })
             })
         });

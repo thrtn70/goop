@@ -44,12 +44,43 @@ pub enum JobState {
     Cancelled,
 }
 
+/// Discriminator for `JobResult.output_path` shape.
+///
+/// `File` — `output_path` points at a single file (yt-dlp default,
+/// most converter/PDF jobs). The frontend's "Reveal" action selects
+/// the file in Finder/Explorer.
+///
+/// `Folder` — `output_path` points at a directory containing N files
+/// (gallery-dl albums, multi-file PDF splits). The frontend's
+/// "Open folder" action opens the containing directory; the queue row
+/// shows file-count progress instead of byte-percent.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ResultKind {
+    #[default]
+    File,
+    Folder,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct JobResult {
     pub output_path: Option<String>,
     pub bytes: Option<u64>,
     pub duration_ms: u64,
+    /// Defaults to `File` for backward compatibility with existing rows
+    /// that pre-date the gallery-dl folder-result variant.
+    #[serde(default)]
+    pub result_kind: ResultKind,
+    /// Number of files produced. `1` for `File` results; `N` for
+    /// `Folder` results. Defaults to `1` for backward compatibility.
+    #[serde(default = "default_file_count")]
+    pub file_count: u32,
+}
+
+fn default_file_count() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

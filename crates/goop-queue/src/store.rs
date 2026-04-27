@@ -479,6 +479,7 @@ fn ensure_hidden_from_queue_column(conn: &Connection) -> Result<(), GoopError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goop_core::ResultKind;
     use tempfile::tempdir;
 
     fn temp_store() -> (QueueStore, tempfile::TempDir) {
@@ -671,6 +672,8 @@ mod tests {
             }),
             bytes,
             duration_ms: 1000,
+            result_kind: ResultKind::File,
+            file_count: 1,
         });
         j
     }

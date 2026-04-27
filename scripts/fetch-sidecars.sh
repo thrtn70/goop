@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Usage: fetch-sidecars.sh <TARGET_TRIPLE>
-# Writes binaries to src-tauri/bin/{ffmpeg,ffprobe,yt-dlp,gs}-<triple>[.exe]
+# Writes binaries to src-tauri/bin/{ffmpeg,ffprobe,yt-dlp,gs,gallery-dl}-<triple>[.exe]
 # and the shared Ghostscript Resource tree to src-tauri/bin/gs-resources/Resource/
+#
+# Supported targets:
+#   x86_64-pc-windows-msvc      (release)
+#   aarch64-apple-darwin        (release — Apple Silicon only; Intel Mac dropped)
+#   x86_64-unknown-linux-gnu    (audit only — never shipped)
 set -euo pipefail
 TARGET="${1:?target triple required}"
 OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
 mkdir -p "$OUT_DIR"
+
+# Pinned gallery-dl release on Codeberg. The in-app `--update` flow lets
+# users move past this baseline once installed; bumping here is mostly
+# about keeping the bundled-out-of-the-box version reasonably fresh.
+GALLERY_DL_VERSION="v1.32.0"
+GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLERY_DL_VERSION}"
 
 case "$TARGET" in
   x86_64-pc-windows-msvc)
@@ -15,6 +26,8 @@ case "$TARGET" in
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    # gallery-dl (Codeberg PyInstaller bundle)
+    curl -L -o "$OUT_DIR/gallery-dl-$TARGET.exe" "${GALLERY_DL_BASE}/gallery-dl.exe"
     # Ghostscript — Artifex official release. The installer is a 7z-
     # compressed self-extractor; 7z is preinstalled on windows-latest.
     GS_VER_NODOT="10040"
@@ -44,7 +57,7 @@ case "$TARGET" in
     done
     rm -rf /tmp/gs.exe /tmp/gs_extract
     ;;
-  x86_64-apple-darwin|aarch64-apple-darwin)
+  aarch64-apple-darwin)
     # ffmpeg — evermeet.cx
     curl -L -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
     unzip -o /tmp/ffmpeg.zip -d /tmp/
@@ -58,27 +71,14 @@ case "$TARGET" in
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
-    # Ghostscript — via Homebrew. The macos-14 runner has both arm64
-    # Homebrew at /opt/homebrew and Intel Homebrew at /usr/local; pick
-    # the one matching the target. Cross-arch installs happen via Rosetta.
-    if [ "$TARGET" = "aarch64-apple-darwin" ]; then
-      GS_BREW=/opt/homebrew/bin/brew
-      GS_ARCH=arm64
-    else
-      GS_BREW=/usr/local/bin/brew
-      GS_ARCH=x86_64
-    fi
-    # macos-14 ships with arm64 Homebrew only. For x86_64 builds, install
-    # Intel Homebrew on demand (~30s) so we can fetch the x64 ghostscript
-    # bottle. The Homebrew installer is idempotent and NONINTERACTIVE=1
-    # keeps it from prompting.
-    if [ ! -x "$GS_BREW" ]; then
-      echo "$GS_BREW not found — installing Intel Homebrew for $TARGET"
-      NONINTERACTIVE=1 arch -$GS_ARCH /bin/bash -c \
-        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    fi
-    arch -$GS_ARCH "$GS_BREW" install --quiet ghostscript || true
-    GS_PREFIX="$(arch -$GS_ARCH "$GS_BREW" --prefix ghostscript)"
+    # gallery-dl — built locally via PyInstaller because Codeberg ships
+    # no macOS binary. The build script writes directly to OUT_DIR.
+    "$(git rev-parse --show-toplevel)/scripts/build-gallery-dl-macos.sh" "$TARGET"
+    # Ghostscript — via Homebrew. macos-14 ships with arm64 Homebrew at
+    # /opt/homebrew. Apple Silicon only — Intel Mac was dropped in v0.2.0.
+    GS_BREW=/opt/homebrew/bin/brew
+    "$GS_BREW" install --quiet ghostscript || true
+    GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
     cp "$GS_PREFIX/bin/gs" "$OUT_DIR/gs-$TARGET"
     chmod +x "$OUT_DIR/gs-$TARGET"
     # Copy the full share tree (Resource/, lib/, iccprofiles/) — only once,
@@ -121,6 +121,10 @@ case "$TARGET" in
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
+    # gallery-dl (Codeberg PyInstaller bundle for Linux). Used by the
+    # audit job's sidecar-smoke `--version` check; never shipped.
+    curl -L -o "$OUT_DIR/gallery-dl-$TARGET" "${GALLERY_DL_BASE}/gallery-dl.bin"
+    chmod +x "$OUT_DIR/gallery-dl-$TARGET"
     # gs stub — empty executable file. Satisfies Tauri's externalBin
     # existence check without shipping Ghostscript on Linux.
     printf '#!/bin/sh\necho "gs is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/gs-$TARGET"

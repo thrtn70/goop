@@ -42,7 +42,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/yt-dlp", "bin/gs"],
+    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/yt-dlp", "bin/gallery-dl", "bin/gs"],
     "resources": {
       "bin/gs-resources/Resource": "gs-resources/Resource",
       "bin/gs-resources/lib": "gs-resources/lib",
