@@ -85,7 +85,7 @@ export default function DropZone({ onFiles, children }: DropZoneProps) {
        *  so the children remain interactive. The dash pattern slides
        *  via stroke-dashoffset keyframes when `hovering` is on. */}
       <svg
-        aria-hidden
+        aria-hidden="true"
         className="pointer-events-none absolute inset-0 h-full w-full"
         preserveAspectRatio="none"
       >
@@ -108,7 +108,7 @@ export default function DropZone({ onFiles, children }: DropZoneProps) {
        *  drag events don't give cursor position. */}
       {hovering && (
         <div
-          aria-hidden
+          aria-hidden="true"
           className="dropzone-glow pointer-events-none absolute inset-0 rounded-lg"
         />
       )}
@@ -119,7 +119,7 @@ export default function DropZone({ onFiles, children }: DropZoneProps) {
       {ripples.map((id) => (
         <span
           key={id}
-          aria-hidden
+          aria-hidden="true"
           className="dropzone-ripple pointer-events-none absolute left-1/2 top-1/2 h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent/40"
         />
       ))}

@@ -27,6 +27,14 @@
   --accent-hover: 74% 0.15 160;
   --accent-subtle: 24% 0.05 160;
   --accent-fg: 98% 0.005 160;
+  /* Accent-strong: darker accent for AA-contrast pairings with --accent-fg.
+     Same value in both themes — anchors the LeftNav active pill so the
+     foreground white reads cleanly regardless of mode. */
+  --accent-strong: 42% 0.14 160;
+
+  /* Modal scrim — warm-tinted near-black, hue 160 to match the rest of
+     the neutral system. Use with Tailwind's /<alpha> modifier. */
+  --scrim: 8% 0.005 160;
 
   /* Borders */
   --border: 28% 0.01 160;
@@ -64,9 +72,16 @@
   --leading-normal: 1.55;
   --leading-relaxed: 1.7;
 
-  /* Font families */
+  /* Font families. Declared once in :root only — fonts don't theme-vary,
+     so the light/system blocks deliberately don't override them. (Color
+     tokens like --accent-fg are repeated for clarity even when the value
+     matches; fonts skip the repetition.) */
   --font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
   --font-body: 'Figtree', ui-sans-serif, system-ui, sans-serif;
+  /* Mono stack — system fonts only. Cascadia Mono ships with Win 11
+     Terminal; Consolas covers older Windows. SF Mono / Menlo cover
+     macOS. ui-monospace is the modern engine fallback. */
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
 
   /* Motion */
   --duration-instant: 100ms;
@@ -104,6 +119,9 @@
   --accent-hover: 36% 0.15 160;
   --accent-subtle: 92% 0.04 160;
   --accent-fg: 98% 0.005 160;
+  --accent-strong: 42% 0.14 160;
+
+  --scrim: 8% 0.005 160;
 
   /* Borders */
   --border: 85% 0.012 160;
@@ -145,6 +163,9 @@
     --accent-hover: 36% 0.15 160;
     --accent-subtle: 92% 0.04 160;
     --accent-fg: 98% 0.005 160;
+    --accent-strong: 42% 0.14 160;
+
+    --scrim: 8% 0.005 160;
 
     --border: 85% 0.012 160;
     --border-subtle: 90% 0.008 160;

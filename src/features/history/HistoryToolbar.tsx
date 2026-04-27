@@ -30,6 +30,7 @@ export default function HistoryToolbar() {
     <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-subtle bg-surface-0 px-6 py-3">
       <input
         type="search"
+        aria-label="Search history by filename"
         placeholder="Search by filename..."
         value={draft}
         onChange={(e) => setDraft(e.target.value)}

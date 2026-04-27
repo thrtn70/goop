@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { X } from "lucide-react";
 import type { Job } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { api } from "@/ipc/commands";
@@ -43,9 +44,9 @@ export default function PreviewPanel() {
           type="button"
           aria-label="Close preview"
           onClick={() => setPreview(null)}
-          className="text-fg-muted transition duration-fast ease-out hover:text-fg"
+          className="inline-flex items-center justify-center text-fg-muted transition duration-fast ease-out hover:text-fg"
         >
-          ✕
+          <X size={14} strokeWidth={2.5} aria-hidden="true" />
         </button>
       </div>
       <PreviewContent

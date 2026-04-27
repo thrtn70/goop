@@ -24,7 +24,9 @@ export default {
           hover: oklch("--accent-hover"),
           subtle: oklch("--accent-subtle"),
           fg: oklch("--accent-fg"),
+          strong: oklch("--accent-strong"),
         },
+        scrim: oklch("--scrim"),
         success: {
           DEFAULT: oklch("--success"),
           subtle: oklch("--success-subtle"),
@@ -45,6 +47,7 @@ export default {
       fontFamily: {
         display: "var(--font-display)",
         body: "var(--font-body)",
+        mono: "var(--font-mono)",
       },
       fontSize: {
         xs: ["var(--text-xs)", { lineHeight: "var(--leading-normal)" }],

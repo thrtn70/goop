@@ -41,15 +41,18 @@ export default function LeftNav() {
 
   return (
     <nav ref={navRef} className="relative flex w-48 flex-col border-r border-subtle bg-surface-1 py-3">
-      {/* Sliding pill indicator */}
+      {/* Sliding pill indicator. Inset by 12px (left-3 right-3) — 4px
+       *  inside the item's outer edge, 8px outside the content edge —
+       *  so the pill wraps the text and kbd snugly without bleeding to
+       *  the row's hard outer extent. */}
       {pill && (
         <div
           className={clsx(
-            "absolute left-2 right-2 rounded-md bg-accent",
+            "absolute left-3 right-3 rounded-md bg-accent-strong",
             ready ? "transition-transform duration-normal ease-out" : "",
           )}
           style={{ transform: `translateY(${pill.top}px)`, height: pill.height }}
-          aria-hidden
+          aria-hidden="true"
         />
       )}
 
@@ -75,10 +78,10 @@ export default function LeftNav() {
                 className={clsx(
                   "ml-2 rounded px-1 font-mono text-[10px]",
                   isActive
-                    ? "bg-accent-fg/15 text-accent-fg"
+                    ? "bg-scrim/30 text-accent-fg"
                     : "bg-surface-3 text-fg-muted",
                 )}
-                aria-hidden
+                aria-hidden="true"
               >
                 {mod}
                 {it.shortcut}

@@ -149,7 +149,7 @@ export default function CommandPalette() {
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 pt-[12vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-scrim/40 px-4 pt-[12vh]"
       onClick={(e) => {
         if (e.target === e.currentTarget) close();
       }}

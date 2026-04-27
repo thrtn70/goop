@@ -1,3 +1,4 @@
+import { ChevronDown, ChevronsUpDown, ChevronUp, Eye } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import EmptyHistory from "@/features/history/EmptyHistory";
@@ -53,12 +54,25 @@ function SortHeader({
     <button
       type="button"
       onClick={() => setHistorySort(col)}
-      className={`flex items-center gap-1 text-left uppercase tracking-wide transition duration-fast ease-out hover:text-fg ${
+      className={`group flex items-center gap-1 text-left uppercase tracking-wide transition duration-fast ease-out hover:text-fg ${
         active ? "text-fg" : "text-fg-muted"
       } ${className}`}
     >
       {label}
-      {active && <span aria-hidden>{descending ? "↓" : "↑"}</span>}
+      {active ? (
+        descending ? (
+          <ChevronDown size={12} strokeWidth={2.5} aria-hidden="true" />
+        ) : (
+          <ChevronUp size={12} strokeWidth={2.5} aria-hidden="true" />
+        )
+      ) : (
+        <ChevronsUpDown
+          size={12}
+          strokeWidth={2.5}
+          aria-hidden="true"
+          className="opacity-0 transition-opacity duration-fast ease-out group-hover:opacity-60"
+        />
+      )}
     </button>
   );
 }
@@ -151,11 +165,11 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                       e.stopPropagation();
                       onQuickView(j);
                     }}
-                    className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+                    className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
                     aria-label="Quick view"
                     title="Quick View (Space)"
                   >
-                    ⎵
+                    <Eye size={14} strokeWidth={2.5} aria-hidden="true" />
                   </button>
                 </td>
               </tr>

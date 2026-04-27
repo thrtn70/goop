@@ -71,8 +71,8 @@ export default function UpdateBanner() {
             aria-valuemax={100}
           >
             <div
-              className="h-full bg-accent transition-[width] duration-fast ease-out"
-              style={{ width: `${percent}%` }}
+              className="h-full w-full origin-left bg-accent transition-transform duration-fast ease-out"
+              style={{ transform: `scaleX(${percent / 100})` }}
             />
           </div>
           <span className="text-xs tabular-nums text-fg-muted">{percent}%</span>

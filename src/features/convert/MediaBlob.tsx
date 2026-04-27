@@ -16,7 +16,7 @@ export default function MediaBlob({ size = 96 }: { size?: number }) {
       viewBox="0 0 128 96"
       fill="none"
       role="presentation"
-      aria-hidden
+      aria-hidden="true"
       className="isolate"
     >
       {/* Back tile — most muted, slight clockwise tilt */}

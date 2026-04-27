@@ -203,18 +203,30 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
       await api.queue.moveToTop(job.id);
       const jobs = await api.queue.list();
       useAppStore.setState({ jobs });
-    } catch {
-      /* ignore */
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't move to top",
+        detail: formatError(err),
+      });
+    }
+  }
+
+  async function handleCancel(): Promise<void> {
+    try {
+      await api.queue.cancel(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't cancel",
+        detail: formatError(err),
+      });
     }
   }
 
   async function handleCancelFromMenu(): Promise<void> {
     setMenuOpen(false);
-    try {
-      await api.queue.cancel(job.id);
-    } catch {
-      /* ignore */
-    }
+    await handleCancel();
   }
 
   return (
@@ -273,7 +285,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             )}
             <button
               type="button"
-              onClick={() => void api.queue.cancel(job.id)}
+              onClick={() => void handleCancel()}
               aria-label={`Cancel ${shortLabel(job)}`}
               className="btn-press rounded-md px-2 py-1 text-xs text-error transition duration-fast ease-out hover:bg-error-subtle hover:text-error/80"
             >
@@ -293,7 +305,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             </button>
             <button
               type="button"
-              onClick={() => void api.queue.cancel(job.id)}
+              onClick={() => void handleCancel()}
               aria-label={`Cancel ${shortLabel(job)}`}
               className="btn-press rounded-md px-2 py-1 text-xs text-error transition duration-fast ease-out hover:bg-error-subtle hover:text-error/80"
             >
@@ -363,7 +375,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                  *  reduced-motion via the global @media rule. */}
                 {name === "running" && (
                   <span
-                    aria-hidden
+                    aria-hidden="true"
                     className="progress-flow absolute inset-0 block"
                   />
                 )}

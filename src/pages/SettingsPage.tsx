@@ -8,6 +8,18 @@ import SettingsSection from "@/components/SettingsSection";
 import PresetManager from "@/features/presets/PresetManager";
 import { useAppVersion } from "@/hooks/useAppVersion";
 
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 16;
+
+// Empty inputs (Number("") === 0) and non-numeric paste produce values
+// that would otherwise round-trip 0 to the backend. Clamp at the UI
+// edge so settings can never persist a sub-min concurrency.
+function clampConcurrency(raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return MIN_CONCURRENCY;
+  return Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.round(parsed)));
+}
+
 export default function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const patchSettings = useAppStore((s) => s.patchSettings);
@@ -116,12 +128,12 @@ export default function SettingsPage() {
         >
           <input
             type="number"
-            min={1}
-            max={16}
+            min={MIN_CONCURRENCY}
+            max={MAX_CONCURRENCY}
             className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
             defaultValue={settings.extract_concurrency}
             key={`ec-${settings.extract_concurrency}`}
-            onBlur={(e) => void patch({ extract_concurrency: Number(e.target.value) })}
+            onBlur={(e) => void patch({ extract_concurrency: clampConcurrency(e.target.value) })}
           />
         </Field>
         <Field
@@ -130,12 +142,12 @@ export default function SettingsPage() {
         >
           <input
             type="number"
-            min={1}
-            max={16}
+            min={MIN_CONCURRENCY}
+            max={MAX_CONCURRENCY}
             className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
             defaultValue={settings.convert_concurrency}
             key={`cc-${settings.convert_concurrency}`}
-            onBlur={(e) => void patch({ convert_concurrency: Number(e.target.value) })}
+            onBlur={(e) => void patch({ convert_concurrency: clampConcurrency(e.target.value) })}
           />
         </Field>
         <Field

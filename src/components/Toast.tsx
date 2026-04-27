@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
+import { AlertTriangle, Check, Info, X } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { api } from "@/ipc/commands";
 import type { Toast as ToastData } from "@/store/appStore";
 
@@ -15,11 +17,11 @@ const VARIANT_STYLES: Record<ToastData["variant"], string> = {
   info: "bg-surface-2 border-accent/40",
 };
 
-const VARIANT_ICONS: Record<ToastData["variant"], string> = {
-  success: "✓",
-  error: "!",
-  cancelled: "×",
-  info: "ⓘ",
+const VARIANT_ICONS: Record<ToastData["variant"], LucideIcon> = {
+  success: Check,
+  error: AlertTriangle,
+  cancelled: X,
+  info: Info,
 };
 
 const VARIANT_ICON_COLORS: Record<ToastData["variant"], string> = {
@@ -55,6 +57,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
   // Errors should pre-empt other content (`role="alert"` +
   // `aria-live="assertive"`); successes / info / cancels queue politely.
   const isError = toast.variant === "error";
+  const Icon = VARIANT_ICONS[toast.variant];
   return (
     <div
       role={isError ? "alert" : "status"}
@@ -67,13 +70,13 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
       )}
     >
       <span
-        aria-hidden
+        aria-hidden="true"
         className={clsx(
-          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-1 text-sm font-semibold",
+          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-1",
           VARIANT_ICON_COLORS[toast.variant],
         )}
       >
-        {VARIANT_ICONS[toast.variant]}
+        <Icon size={12} strokeWidth={2.5} />
       </span>
       <div className="flex-1 min-w-0">
         <p className="truncate text-sm font-medium text-fg">{toast.title}</p>
@@ -112,7 +115,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
         onClick={() => onDismiss(toast.id)}
         className="shrink-0 text-fg-muted transition duration-fast ease-out hover:text-fg"
       >
-        ×
+        <X size={14} strokeWidth={2.5} aria-hidden="true" />
       </button>
     </div>
   );

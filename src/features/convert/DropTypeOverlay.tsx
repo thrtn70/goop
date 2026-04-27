@@ -12,7 +12,7 @@ export default function DropTypeOverlay({ visible }: DropTypeOverlayProps) {
   if (!visible) return null;
   return (
     <div
-      aria-hidden
+      aria-hidden="true"
       className="pointer-events-none absolute inset-0 flex items-center justify-center"
     >
       <div className="animate-pulse rounded-full bg-accent/20 px-4 py-2 text-xs font-medium text-accent">

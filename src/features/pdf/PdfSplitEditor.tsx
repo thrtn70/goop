@@ -68,19 +68,25 @@ export default function PdfSplitEditor({
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-xs text-fg-muted">Page ranges</label>
+      <label htmlFor="pdf-split-pages" className="text-xs text-fg-muted">
+        Page ranges
+      </label>
       <input
+        id="pdf-split-pages"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder={`e.g. 1-3, 7-10  (this PDF has ${totalPages} pages)`}
         className="rounded-md bg-surface-2 px-3 py-1.5 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
         aria-invalid={error ? true : false}
+        aria-describedby="pdf-split-pages-help"
       />
-      {error ? (
-        <span className="text-xs text-error">{error}</span>
-      ) : preview ? (
-        <span className="text-xs text-fg-muted">Will produce {preview}.</span>
-      ) : null}
+      <span id="pdf-split-pages-help" className="text-xs">
+        {error ? (
+          <span className="text-error">{error}</span>
+        ) : preview ? (
+          <span className="text-fg-muted">Will produce {preview}.</span>
+        ) : null}
+      </span>
     </div>
   );
 }

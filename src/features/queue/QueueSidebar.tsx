@@ -15,6 +15,8 @@ import {
 } from "@dnd-kit/sortable";
 import type { JobId, JobState } from "@/types";
 import { api } from "@/ipc/commands";
+import { X } from "lucide-react";
+import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
 import SortableQueueRow from "./SortableQueueRow";
@@ -65,9 +67,15 @@ export default function QueueSidebar() {
   const reorderQueue = useAppStore((s) => s.reorderQueue);
   const cancelSelectedQueue = useAppStore((s) => s.cancelSelectedQueue);
   const clearQueueSelection = useAppStore((s) => s.clearQueueSelection);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const progressById = useAppStore((s) => s.progressById);
   const [width, setWidth] = useState<number>(persistedWidth);
   const dragStartRef = useRef<{ x: number; w: number } | null>(null);
+  // When non-null, the user has clicked "Cancel selected" once and is
+  // looking at a confirm prompt. The number is the count being confirmed
+  // — if the selection changes (add/remove), the confirm resets so we
+  // don't act on a stale count.
+  const [confirmingCount, setConfirmingCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (dragStartRef.current === null) setWidth(persistedWidth);
@@ -134,6 +142,39 @@ export default function QueueSidebar() {
     selectedIds.has(jobIdKey(j.id)),
   ).length;
 
+  useEffect(() => {
+    if (confirmingCount !== null && selectedQueuedCount !== confirmingCount) {
+      setConfirmingCount(null);
+    }
+  }, [confirmingCount, selectedQueuedCount]);
+
+  // Escape dismisses the destructive confirm — matches the pattern users
+  // expect from confirm prompts elsewhere in the app.
+  useEffect(() => {
+    if (confirmingCount === null) return;
+    function onKeyDown(e: KeyboardEvent): void {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setConfirmingCount(null);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmingCount]);
+
+  async function handleConfirmCancel(): Promise<void> {
+    setConfirmingCount(null);
+    try {
+      await cancelSelectedQueue();
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't cancel selection",
+        detail: formatError(err),
+      });
+    }
+  }
+
   // Sum ETAs for in-flight jobs. Paused jobs have no meaningful ETA so
   // they're excluded; queued unknowns also not included.
   const totalEtaSecs = active.reduce((sum, j) => {
@@ -145,7 +186,7 @@ export default function QueueSidebar() {
   if (collapsed) {
     return (
       <aside
-        className="flex w-10 shrink-0 flex-col items-center gap-2 border-l border-subtle bg-surface-1 py-3 transition-[width] duration-normal ease-out"
+        className="flex w-10 shrink-0 flex-col items-center gap-2 border-l border-subtle bg-surface-1 py-3"
         aria-label="Job queue (collapsed)"
       >
         <button
@@ -153,7 +194,7 @@ export default function QueueSidebar() {
           onClick={toggleCollapsed}
           aria-label="Expand queue sidebar"
           title="Expand queue (⌘⇧Q)"
-          className="btn-press flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+          className="btn-press flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
         >
           <svg
             aria-hidden="true"
@@ -223,7 +264,7 @@ export default function QueueSidebar() {
           onClick={toggleCollapsed}
           aria-label="Collapse queue sidebar"
           title="Collapse queue (⌘⇧Q)"
-          className="btn-press ml-auto flex h-6 w-6 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+          className="btn-press ml-auto flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
         >
           <svg
             aria-hidden="true"
@@ -251,27 +292,57 @@ export default function QueueSidebar() {
       )}
 
       {selectedQueuedCount > 0 && (
-        <div className="mt-2 flex items-center justify-between rounded-md bg-accent-subtle px-2 py-1 text-xs text-accent">
-          <span>
-            {selectedQueuedCount} selected
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void cancelSelectedQueue()}
-              className="btn-press rounded px-1.5 py-0.5 hover:bg-error-subtle hover:text-error"
-            >
-              Cancel selected
-            </button>
-            <button
-              type="button"
-              onClick={() => clearQueueSelection()}
-              className="text-fg-muted hover:text-fg"
-              aria-label="Clear selection"
-            >
-              ✕
-            </button>
-          </div>
+        <div
+          className="mt-2 flex items-center justify-between rounded-md bg-accent-subtle px-2 py-1 text-xs text-accent"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {confirmingCount !== null ? (
+            <>
+              <span>
+                Cancel {confirmingCount} job{confirmingCount !== 1 ? "s" : ""}?
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmCancel()}
+                  className="btn-press rounded px-1.5 py-0.5 text-error hover:bg-error-subtle"
+                >
+                  Yes, cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingCount(null)}
+                  className="btn-press rounded px-1.5 py-0.5 text-fg-secondary hover:bg-surface-3 hover:text-fg"
+                >
+                  No
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span>
+                {selectedQueuedCount} selected
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmingCount(selectedQueuedCount)}
+                  className="btn-press rounded px-1.5 py-0.5 hover:bg-error-subtle hover:text-error"
+                >
+                  Cancel selected
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearQueueSelection()}
+                  className="inline-flex items-center justify-center text-fg-muted hover:text-fg"
+                  aria-label="Clear selection"
+                >
+                  <X size={12} strokeWidth={2.5} aria-hidden="true" />
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
