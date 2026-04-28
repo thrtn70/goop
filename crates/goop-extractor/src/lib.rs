@@ -1,6 +1,5 @@
 pub mod backend;
 pub mod classify;
-pub mod error_map;
 pub mod gallery_dl;
 pub mod ytdlp;
 

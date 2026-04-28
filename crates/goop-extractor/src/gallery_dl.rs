@@ -68,10 +68,12 @@ impl<'a> GalleryDl<'a> {
         cmd.arg(url);
         let out = cmd.output().await?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            // Store raw stderr; friendly_message is applied at the IPC
+            // boundary so the dispatch layer can still inspect raw
+            // markers (Unsupported URL, etc.) for fallback decisions.
             return Err(GoopError::SubprocessFailed {
                 binary: "gallery-dl".into(),
-                stderr: crate::error_map::friendly_message(&stderr).unwrap_or(stderr),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             });
         }
         let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
@@ -207,7 +209,7 @@ impl<'a> GalleryDl<'a> {
         if !status.success() {
             return Err(GoopError::SubprocessFailed {
                 binary: "gallery-dl".into(),
-                stderr: crate::error_map::friendly_message(&stderr_tail).unwrap_or(stderr_tail),
+                stderr: stderr_tail,
             });
         }
         // Authoritative count: walk the output directory for files
