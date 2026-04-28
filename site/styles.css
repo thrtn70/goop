@@ -210,34 +210,31 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
 
 .skip-link:focus-visible { transform: translateY(0); }
 
-/* Cursor-trail paragraph mark — appended to body by JS on hover-capable
+/* Cursor-trail brand blob — appended to body by JS on hover-capable
    pointers only. Inline transform is set per-frame by RAF. The element
    sits above content but never blocks pointer events. */
 .cursor-trail {
   position: fixed;
   left: 0;
   top: 0;
-  width: 0;
-  height: 0;
+  width: 26px;
+  height: 26px;
   pointer-events: none;
   user-select: none;
   z-index: 4;
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 500;
-  font-style: italic;
-  font-size: 0.95rem;
-  line-height: 1;
-  color: var(--teal);
+  background-image: url('assets/blob.svg');
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
   opacity: 0;
   transition: opacity 320ms var(--ease-quart);
-  /* Optical offset so the glyph sits next to the cursor, not on top of it. */
+  /* Optical offset so the blob sits next to the cursor, not on top of it. */
   margin-left: 14px;
-  margin-top: -2px;
-  letter-spacing: 0;
+  margin-top: -8px;
 }
 
 .cursor-trail--visible {
-  opacity: 0.4;
+  opacity: 0.85;
 }
 
 @media (hover: none), (pointer: coarse), (prefers-reduced-motion: reduce) {
@@ -389,10 +386,55 @@ main { display: block; }
    ============================================================ */
 
 .hero {
+  position: relative;
   padding: clamp(var(--s-6), 3vw, var(--s-12)) var(--gutter) clamp(var(--s-8), 5vw, var(--s-16));
+  overflow: hidden;
+}
+
+/* Hero blob — brand mark anchored in the upper-right negative space.
+   Sits behind the grid so the hairline rule under the lede stays
+   clean. Drifts very slowly to feel alive without competing. */
+.hero__blob {
+  position: absolute;
+  top: clamp(-1rem, 1vw, 1rem);
+  right: clamp(-4rem, -2vw, -1rem);
+  width: clamp(13rem, 24vw, 22rem);
+  height: auto;
+  transform: translate3d(0, 0, 0) rotate(-8deg);
+  z-index: 1;
+  pointer-events: none;
+  user-select: none;
+  will-change: transform;
+  filter: saturate(1.05);
+  animation: hero-blob-drift 22s ease-in-out infinite;
+}
+
+@keyframes hero-blob-drift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(-8deg);
+  }
+  50% {
+    transform: translate3d(-10px, 14px, 0) rotate(-4deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .hero__blob {
+    right: -22%;
+    width: 14rem;
+    opacity: 0.92;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero__blob {
+    animation: none;
+  }
 }
 
 .hero__grid {
+  position: relative;
+  z-index: 2;
   max-width: var(--page-max);
   margin: 0 auto;
   display: grid;

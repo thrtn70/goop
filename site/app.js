@@ -283,7 +283,6 @@
     const el = document.createElement('div');
     el.className = 'cursor-trail';
     el.setAttribute('aria-hidden', 'true');
-    el.textContent = '¶';
     return el;
   }
 
