@@ -397,8 +397,11 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
              *  percent + speed + ETA layout. The prefix-based check is
              *  intentional: the Rust side controls both ends of this
              *  contract, and adding a structured "is_indeterminate"
-             *  flag for one consumer felt heavier than the prefix. */}
-            {progress?.stage?.startsWith("downloaded ") ? (
+             *  flag for one consumer felt heavier than the prefix.
+             *  `progress?.` guards undefined slots (no event for the
+             *  job yet); `.stage` is non-nullable on the wire so no
+             *  inner optional chain is needed. */}
+            {progress?.stage.startsWith("downloaded ") ? (
               <span>{progress.stage}</span>
             ) : (
               <>

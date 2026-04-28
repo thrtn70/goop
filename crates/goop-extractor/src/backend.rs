@@ -6,13 +6,12 @@
 //! backends produce the same `BackendOutcome` shape so the caller can
 //! convert to a `JobResult` without caring which extractor ran.
 
-use goop_core::{EventSink, GoopError, JobId};
+use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId};
 use goop_sidecar::BinaryResolver;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::classify::{classify_extractor, ExtractorChoice};
-use crate::error_map::is_no_matching_extractor;
 use crate::gallery_dl::GalleryDl;
 use crate::ytdlp::{ExtractRequest, YtDlp};
 

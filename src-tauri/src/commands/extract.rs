@@ -1,7 +1,6 @@
 use crate::state::AppState;
-use goop_core::{GoopError, IpcError, Job, JobId, JobKind};
+use goop_core::{is_no_matching_extractor, GoopError, IpcError, Job, JobId, JobKind};
 use goop_extractor::classify::{classify_extractor, ExtractorChoice};
-use goop_extractor::error_map::is_no_matching_extractor;
 use goop_extractor::gallery_dl::GalleryDl;
 use goop_extractor::ytdlp::{ExtractRequest, UrlProbe, YtDlp};
 use std::path::PathBuf;

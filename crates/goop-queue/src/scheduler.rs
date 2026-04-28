@@ -176,8 +176,13 @@ impl Scheduler {
                     Ok(r) => (JobState::Done, Some(r.clone())),
                     Err(GoopError::Cancelled) => (JobState::Cancelled, None),
                     Err(e) => (
+                        // user_message() applies friendly_message at this
+                        // boundary so History rows show "age verification"
+                        // instead of a raw yt-dlp traceback. Internal
+                        // dispatch decisions (which run before this point)
+                        // see the raw stderr on the GoopError variant.
                         JobState::Error {
-                            message: e.to_string(),
+                            message: e.user_message(),
                         },
                         None,
                     ),

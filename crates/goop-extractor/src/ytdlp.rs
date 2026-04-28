@@ -101,10 +101,12 @@ impl<'a> YtDlp<'a> {
         cmd.arg(url);
         let out = cmd.output().await?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            // Store raw stderr; friendly_message is applied at the IPC
+            // boundary so the dispatch layer can still inspect raw
+            // markers (Unsupported URL, etc.) for fallback decisions.
             return Err(GoopError::SubprocessFailed {
                 binary: "yt-dlp".into(),
-                stderr: crate::error_map::friendly_message(&stderr).unwrap_or(stderr),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             });
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -213,7 +215,7 @@ impl<'a> YtDlp<'a> {
         if !status.success() {
             return Err(GoopError::SubprocessFailed {
                 binary: "yt-dlp".into(),
-                stderr: crate::error_map::friendly_message(&stderr_tail).unwrap_or(stderr_tail),
+                stderr: stderr_tail,
             });
         }
         let output_path = output_path.ok_or_else(|| GoopError::SubprocessFailed {
