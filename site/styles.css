@@ -37,9 +37,9 @@
   --ink-3: oklch(22% 0.012 160);    /* hairlines, dividers */
 
   --paper: oklch(94% 0.005 160);    /* primary text */
-  --paper-2: oklch(72% 0.012 160);  /* secondary text */
-  --paper-3: oklch(52% 0.012 160);  /* muted text, captions */
-  --paper-4: oklch(38% 0.012 160);  /* dimmest text, eyebrows */
+  --paper-2: oklch(82% 0.012 160);  /* secondary text — AAA */
+  --paper-3: oklch(72% 0.012 160);  /* muted, body-size — AA 4.5:1 */
+  --paper-4: oklch(56% 0.012 160);  /* dimmest, large-size only — AA 3:1 */
 
   --teal: oklch(70% 0.13 160);      /* accent, used SPARINGLY */
   --teal-bright: oklch(76% 0.14 160);
