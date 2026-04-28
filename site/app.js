@@ -110,10 +110,29 @@
     }
   }
 
+  /**
+   * Duplicate ticker contents so the CSS infinite-scroll animation
+   * (translateX -50%) loops seamlessly. The clone is aria-hidden so screen
+   * readers don't double-read the site list.
+   */
+  function initTicker() {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+    const list = document.querySelector('[data-ticker-list]');
+    if (!list || list.dataset.tickerInit === '1') return;
+
+    const clone = list.cloneNode(true);
+    clone.setAttribute('aria-hidden', 'true');
+    clone.removeAttribute('data-ticker-list');
+    list.dataset.tickerInit = '1';
+    list.parentElement?.appendChild(clone);
+  }
+
   async function init() {
     setVersion(FALLBACK.version);
     setDownloadURLs(FALLBACK.mac, FALLBACK.windows);
     applyOSCTAs(detectOS());
+    initTicker();
 
     const latest = await fetchLatestRelease();
     if (!latest) return;
