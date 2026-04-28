@@ -243,8 +243,7 @@
   const HERO_REST = 600;
   const HERO_RADIUS = 360;
   const WEIGHT_LERP = 0.18;
-  const TRAIL_LERP = 0.10;
-  const IDLE_FADE_MS = 900;
+  const IDLE_MS = 900;
   const REST_FADE_MS = 1600;
 
   function lerp(a, b, t) {
@@ -279,13 +278,6 @@
     return chars;
   }
 
-  function createTrailMark() {
-    const el = document.createElement('div');
-    el.className = 'cursor-trail';
-    el.setAttribute('aria-hidden', 'true');
-    return el;
-  }
-
   function initCursorChoreography() {
     const supportsHover = window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
     if (!supportsHover) return;
@@ -298,14 +290,9 @@
     const chars = splitHeadlineChars(headline);
     if (chars.length === 0) return;
 
-    const trail = createTrailMark();
-    document.body.appendChild(trail);
-
     const state = {
       mouseX: window.innerWidth / 2,
       mouseY: -1000,
-      trailX: window.innerWidth / 2,
-      trailY: -1000,
       lastMove: 0,
       heroVisible: true,
       ticking: false,
@@ -329,11 +316,6 @@
     }
 
     function loop(now) {
-      // Trail position (always lerp toward mouse)
-      state.trailX = lerp(state.trailX, state.mouseX, TRAIL_LERP);
-      state.trailY = lerp(state.trailY, state.mouseY, TRAIL_LERP);
-      trail.style.transform = `translate3d(${state.trailX.toFixed(1)}px, ${state.trailY.toFixed(1)}px, 0)`;
-
       // Hero char weights — read all rects first, then write all weights.
       // Batching avoids per-char layout thrash from interleaved reads/writes.
       // While the cursor is active (recently moved) chars near the cursor
@@ -341,7 +323,7 @@
       // idle, every char returns to a comfortable REST weight.
       if (state.heroVisible) {
         const idleFor = now - state.lastMove;
-        const isIdle = idleFor > IDLE_FADE_MS;
+        const isIdle = idleFor > IDLE_MS;
         const targets = new Array(chars.length);
 
         if (isIdle) {
@@ -376,9 +358,6 @@
       }
 
       const idleSince = now - state.lastMove;
-      if (idleSince > IDLE_FADE_MS) {
-        trail.classList.remove('cursor-trail--visible');
-      }
 
       // Keep the loop alive while there is recent activity OR while chars
       // are still lerping back to their resting weight.
@@ -387,7 +366,7 @@
         return Math.abs(w - HERO_REST) > 0.6;
       });
 
-      if (idleSince < IDLE_FADE_MS + REST_FADE_MS || stillSettling) {
+      if (idleSince < IDLE_MS + REST_FADE_MS || stillSettling) {
         requestAnimationFrame(loop);
       } else {
         state.ticking = false;
@@ -398,7 +377,6 @@
       state.mouseX = e.clientX;
       state.mouseY = e.clientY;
       state.lastMove = performance.now();
-      trail.classList.add('cursor-trail--visible');
       if (!state.ticking) {
         state.ticking = true;
         requestAnimationFrame(loop);
@@ -406,9 +384,6 @@
     }
 
     document.addEventListener('mousemove', onMove, { passive: true });
-    document.addEventListener('mouseleave', () => {
-      trail.classList.remove('cursor-trail--visible');
-    });
   }
 
   /* ----------------------------------------------------------------
