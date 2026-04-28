@@ -730,6 +730,45 @@ main { display: block; }
   .btn { min-width: 0; flex: 1 1 16rem; }
 }
 
+/* On narrow mobile (iPhone SE class), collapse hero whitespace so both
+   the alt-OS link and the archive link land above the 812 fold.
+   Body lede font drops slightly to absorb a long paragraph in fewer
+   lines without going below 16px. */
+@media (max-width: 540px) {
+  .hero {
+    padding-block-end: var(--s-3);
+  }
+  .hero__grid {
+    row-gap: var(--s-3);
+  }
+  .hero__headline-line--indent {
+    /* Indent eats too much horizontal room at this width — the
+       enjambment becomes a hard break mid-word. Pull it back to
+       a visible-but-modest offset. */
+    padding-left: var(--s-4);
+  }
+  .hero__lede {
+    gap: var(--s-3);
+    padding-top: var(--s-3);
+  }
+  .hero__lede p:not(.hero__lede-pull) {
+    font-size: 1rem;
+    line-height: 1.5;
+  }
+  .hero__alt {
+    margin-top: 0;
+  }
+  .hero__alt a {
+    padding-block: 0.25em;
+  }
+  .hero__archive {
+    margin-top: var(--s-1);
+  }
+  .hero__archive a {
+    padding-block: 0.35em;
+  }
+}
+
 /* ============================================================
    Ticker
    ============================================================ */
