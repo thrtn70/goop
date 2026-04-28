@@ -347,7 +347,14 @@ main { display: block; }
   .masthead__inner { gap: var(--s-4); }
   .masthead__nav { gap: var(--s-3); font-size: 0.78rem; }
   .masthead__index { display: none; }
-  .masthead__github { display: none; }
+  .masthead__nav a.masthead__github { display: none; }
+}
+
+/* On small mobile, drop the two interior nav links — visitors will
+   scroll past those sections anyway. Keep entry, FAQ, and Archive. */
+@media (max-width: 540px) {
+  .masthead__nav a[href="#depth"],
+  .masthead__nav a[href="#begin"] { display: none; }
 }
 
 /* ============================================================
@@ -695,16 +702,6 @@ main { display: block; }
   flex-wrap: wrap;
   gap: 0.6em;
   align-items: baseline;
-}
-
-.ticker__index {
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-feature-settings: 'tnum';
-  font-size: 0.72rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wider);
-  color: var(--paper-4);
 }
 
 .ticker__sub {
