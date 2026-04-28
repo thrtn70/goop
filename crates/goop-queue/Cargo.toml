@@ -21,7 +21,12 @@ uuid = { workspace = true, features = ["v7"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+# windows-sys 0.60+ exposes NtSuspendProcess / NtResumeProcess under
+# Wdk::System::Threading. 0.59 declared the feature but the functions
+# weren't re-exported until 0.60. The Windows release.yml build caught
+# this in CI on the v0.2.0 tag; locally everything's #[cfg(windows)]
+# so macOS dev never exercised the import.
+windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Wdk_System_Threading",
