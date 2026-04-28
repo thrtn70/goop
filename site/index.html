@@ -399,7 +399,7 @@
           <p>
             For age-gated, members-only, or paywalled content,
             Goop can read your existing browser session.
-            Open <em>Settings → Cookies</em> and pick
+            Open <em>Settings › Cookies</em> and pick
             Chrome, Firefox, Safari, or Edge.
           </p>
         </blockquote>
@@ -493,7 +493,7 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Wherever you set in <em>Settings → Download folder</em>.
+                  Wherever you set in <em>Settings › Download folder</em>.
                   From <em>History</em>, click any item to reveal it in
                   Finder or Explorer.
                 </p>
@@ -530,8 +530,35 @@
         </header>
 
         <ol class="archive__list" data-archive-list>
-          <li class="archive__skeleton" data-archive-skeleton>
-            <span class="archive__skeleton-text">Loading the archive…</span>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">01</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">02</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">03</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
+            </div>
           </li>
         </ol>
 
