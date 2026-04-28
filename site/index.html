@@ -75,7 +75,7 @@
             </p>
           </div>
 
-          <div class="hero__cta" data-cta-group>
+          <div class="hero__cta">
             <a
               class="btn btn--primary"
               data-cta="mac"
@@ -98,9 +98,8 @@
               <span class="btn__label">Download for Windows</span>
               <span class="btn__meta">x64 · .msi</span>
             </a>
-            <p class="hero__alt" data-cta-alt hidden>
-              <span data-cta-alt-text></span>
-              <a data-cta-alt-link href="https://github.com/thrtn70/goop/releases/latest" rel="noopener"></a>
+            <p class="hero__archive">
+              <a href="#archive">Looking for an older version? See the archive</a>
             </p>
           </div>
 
@@ -506,6 +505,35 @@
             </details>
           </li>
         </ol>
+      </section>
+      <section id="archive" class="archive" aria-labelledby="archive-heading">
+        <header class="archive__header">
+          <p class="section-eyebrow">№ 05 · The archive</p>
+          <h2 id="archive-heading" class="section-headline">Previous releases.</h2>
+          <p class="section-lede">
+            Every published build, fetched live from GitHub. Pre-1.0 — the
+            version numbers are still informal.
+          </p>
+        </header>
+
+        <ol class="archive__list" data-archive-list>
+          <li class="archive__skeleton" data-archive-skeleton>
+            <span class="archive__skeleton-text">Loading the archive…</span>
+          </li>
+        </ol>
+
+        <noscript>
+          <p class="archive__fallback">
+            Version history requires JavaScript. See
+            <a href="https://github.com/thrtn70/goop/releases" rel="noopener">all releases on GitHub</a>.
+          </p>
+        </noscript>
+
+        <p class="archive__more">
+          See
+          <a href="https://github.com/thrtn70/goop/releases" rel="noopener">every release on GitHub</a>
+          for full notes and source diffs.
+        </p>
       </section>
     </main>
 
