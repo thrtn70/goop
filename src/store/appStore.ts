@@ -25,6 +25,10 @@ type ProgressEntry = {
   speed_hr: string | null;
   /** Active encoder name when known (e.g. `h264_videotoolbox`). */
   encoder: string | null;
+  /** Free-form stage label. yt-dlp uses "downloading"; gallery-dl uses
+   *  "downloaded N file(s)" so the queue row can render a file count
+   *  instead of a meaningless 0% percent. Always present on the wire. */
+  stage: string;
 };
 
 type AppProgressEvent = ProgressEvent & {
@@ -55,6 +59,7 @@ export type UpdateDownloadState = {
 export interface AppVersionInfo {
   goop: string;
   ytDlp: string | null;
+  galleryDl: string | null;
   ffmpeg: string | null;
   os: string;
 }
@@ -290,6 +295,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
           eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
           speed_hr: e.speed_hr ?? null,
           encoder: e.encoder ?? null,
+          stage: e.stage,
         },
       },
     }));
@@ -527,12 +533,13 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       const cached = get().versions;
       if (cached) return cached;
     }
-    const [goop, ytDlp, ffmpeg] = await Promise.all([
+    const [goop, ytDlp, galleryDl, ffmpeg] = await Promise.all([
       getVersion().catch(() => "-"),
       api.sidecar.ytDlpVersion().catch(() => null),
+      api.sidecar.galleryDlVersion().catch(() => null),
       api.sidecar.ffmpegVersion().catch(() => null),
     ]);
-    const info: AppVersionInfo = { goop, ytDlp, ffmpeg, os: detectOs() };
+    const info: AppVersionInfo = { goop, ytDlp, galleryDl, ffmpeg, os: detectOs() };
     set({ versions: info });
     return info;
   },

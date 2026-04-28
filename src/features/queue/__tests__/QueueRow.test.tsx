@@ -182,3 +182,50 @@ describe("QueueRow pause/resume controls", () => {
     expect(screen.queryByRole("button", { name: /^Pause/ })).toBeNull();
   });
 });
+
+describe("QueueRow folder progress (gallery-dl)", () => {
+  it("renders the file-count stage instead of percent for gallery-dl jobs", () => {
+    const job = makeJob({
+      kind: "extract",
+      state: "running",
+      payload: { url: "https://bunkr.cr/a/abc" },
+    });
+    useAppStore.setState({
+      progressById: {
+        [job.id]: {
+          percent: 0,
+          eta_secs: null,
+          speed_hr: null,
+          encoder: null,
+          stage: "downloaded 12 file(s)",
+        },
+      },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText("downloaded 12 file(s)")).toBeTruthy();
+    // The 0.0% percent column should be hidden for folder-mode progress.
+    expect(screen.queryByText("0.0%")).toBeNull();
+  });
+
+  it("keeps percent + ETA layout for yt-dlp jobs (no folder stage)", () => {
+    const job = makeJob({
+      kind: "extract",
+      state: "running",
+      payload: { url: "https://youtube.com/watch?v=abc" },
+    });
+    useAppStore.setState({
+      progressById: {
+        [job.id]: {
+          percent: 42.5,
+          eta_secs: 30,
+          speed_hr: "1.2MiB/s",
+          encoder: null,
+          stage: "downloading",
+        },
+      },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText("42.5%")).toBeTruthy();
+    expect(screen.getByText("1.2MiB/s")).toBeTruthy();
+  });
+});

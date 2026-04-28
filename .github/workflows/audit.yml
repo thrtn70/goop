@@ -65,3 +65,4 @@ jobs:
           # Verify binaries invoke
           "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
           "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+          "./src-tauri/bin/gallery-dl-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version

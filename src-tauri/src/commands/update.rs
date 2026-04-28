@@ -69,6 +69,13 @@ pub async fn open_about_link(app: AppHandle, target: String) -> Result<(), IpcEr
         "issues" => "https://github.com/thrtn70/goop/issues",
         "license" => "https://github.com/thrtn70/goop/blob/main/LICENSE",
         "yt-dlp" => "https://github.com/yt-dlp/yt-dlp",
+        // gallery-dl: link to the GitHub repo since that's where most
+        // users discover the tool. Active development is on Codeberg
+        // (which is where binaries are fetched from in
+        // scripts/fetch-sidecars.sh) — the GitHub repo's README links
+        // through. Keeping the user-facing link on GitHub keeps the
+        // discovery path familiar.
+        "gallery-dl" => "https://github.com/mikf/gallery-dl",
         "ffmpeg" => "https://ffmpeg.org",
         "ghostscript" => "https://ghostscript.com",
         "tauri" => "https://tauri.app",

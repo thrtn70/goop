@@ -391,15 +391,28 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             )}
           </div>
           <div className="mt-1 flex justify-between tabular-nums text-xs text-fg-muted">
-            <span>{pct.toFixed(1)}%</span>
-            <span>{name === "paused" ? "" : progress?.speed_hr ?? ""}</span>
-            <span>
-              {name === "paused"
-                ? "ETA —"
-                : settledEta != null
-                  ? `ETA ${Math.max(0, Math.round(settledEta))}s`
-                  : ""}
-            </span>
+            {/* gallery-dl jobs emit stage like "downloaded 12 file(s)"
+             *  with percent always 0; surface that count instead of a
+             *  meaningless 0.0% reading. yt-dlp jobs keep the original
+             *  percent + speed + ETA layout. The prefix-based check is
+             *  intentional: the Rust side controls both ends of this
+             *  contract, and adding a structured "is_indeterminate"
+             *  flag for one consumer felt heavier than the prefix. */}
+            {progress?.stage?.startsWith("downloaded ") ? (
+              <span>{progress.stage}</span>
+            ) : (
+              <>
+                <span>{pct.toFixed(1)}%</span>
+                <span>{name === "paused" ? "" : progress?.speed_hr ?? ""}</span>
+                <span>
+                  {name === "paused"
+                    ? "ETA —"
+                    : settledEta != null
+                      ? `ETA ${Math.max(0, Math.round(settledEta))}s`
+                      : ""}
+                </span>
+              </>
+            )}
           </div>
         </>
       )}

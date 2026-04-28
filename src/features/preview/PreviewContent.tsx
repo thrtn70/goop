@@ -107,6 +107,11 @@ export default function PreviewContent({
         <div>
           <div className="text-sm font-medium text-fg" title={outputPath ?? undefined}>
             {outputPath ? basename(outputPath) : "Untitled"}
+            {job.result?.result_kind === "folder" && job.result.file_count > 1 && (
+              <span className="ml-1 font-normal text-fg-muted">
+                ({job.result.file_count} files)
+              </span>
+            )}
           </div>
           <div className="mt-1 text-xs text-fg-muted">
             {formatBytes(bytes)} · {String(job.kind)}
@@ -139,7 +144,14 @@ export default function PreviewContent({
               onClick={() => onReveal(outputPath)}
               className={`btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:text-fg ${variant === "panel" ? "w-full" : ""}`}
             >
-              Reveal in Finder
+              {/* "Open folder" applies for any folder result, even if
+               *  file_count === 1. The output_path IS a directory so
+               *  "Reveal in Finder" would mis-describe the action — it
+               *  would open the parent of the folder rather than the
+               *  folder itself. The "(N files)" badge is gated on
+               *  file_count > 1 separately because a single-file
+               *  badge reads as noise. */}
+              {job.result?.result_kind === "folder" ? "Open folder" : "Reveal in Finder"}
             </button>
           )}
           {job.kind === "convert" && (

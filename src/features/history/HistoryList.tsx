@@ -148,6 +148,11 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                 <td className="p-2 text-xs text-fg-muted">{String(j.kind)}</td>
                 <td className="p-2 truncate text-fg">
                   {basename(j.result?.output_path ?? null)}
+                  {j.result?.result_kind === "folder" && j.result.file_count > 1 && (
+                    <span className="ml-2 text-[10px] text-fg-muted">
+                      ({j.result.file_count} files)
+                    </span>
+                  )}
                   {typeof j.state !== "string" && " error" in j.state && (
                     <span className="ml-2 text-[10px] uppercase text-error">{stateLabel(j.state)}</span>
                   )}

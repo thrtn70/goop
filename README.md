@@ -2,7 +2,7 @@
 
 **A no-frills desktop app for downloading video and audio from URLs.**
 
-Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp` with a live queue, progress, and cancel. No accounts, no telemetry, no remote config — it only reaches out to download what you asked for.
+Paste a link, pick a format, and Goop handles the rest through bundled `yt-dlp` (videos and audio) and `gallery-dl` (image hosts) with a live queue, progress, and cancel. No accounts, no telemetry, no remote config — it only reaches out to download what you asked for.
 
 ![Screenshot placeholder](docs/screenshot.png)
 
@@ -19,7 +19,7 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 - Reveal finished downloads in the OS file manager.
 - Persistent settings (download folder, theme, concurrency) in your OS config dir.
 - Light / dark / system theme.
-- Supported sites include YouTube, SoundCloud, TikTok, Instagram, Twitter/X, Vimeo, Reddit, and generic HTTP(S) media — anything `yt-dlp` handles.
+- Supported sites include YouTube, SoundCloud, TikTok, Instagram, Vimeo, Reddit (yt-dlp); Bunkr, Gofile, Pixeldrain, Kemono, Coomer, Cyberdrop, Imgur, Twitter/X, RedGifs (gallery-dl); and any generic HTTP(S) media URL either tool can reach. Goop routes URLs to the right extractor automatically and falls back to the other one if the first doesn't recognize it.
 
 ### Convert (v0.1.3+)
 
@@ -135,8 +135,8 @@ Paste a link, pick a format, and Goop handles the rest through a bundled `yt-dlp
 ## Requirements
 
 - **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
-- **macOS 13+** on Intel or Apple Silicon.
-- ~150 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp).
+- **macOS 13+** on Apple Silicon (M-series). Intel Macs are no longer a release target.
+- ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl).
 - A working network connection *only* when downloading.
 
 ---
@@ -151,7 +151,7 @@ Grab the build for your OS from the [Releases page](https://github.com/thrtn70/g
 3. Launch from the Start menu.
 
 ### macOS
-1. Download `Goop_<version>_aarch64.dmg` (Apple Silicon) or `Goop_<version>_x64.dmg` (Intel).
+1. Download `Goop_<version>_aarch64.dmg` (Apple Silicon).
 2. Open the DMG and drag **Goop.app** into `/Applications`.
 3. **Run once in Terminal** to clear the Gatekeeper quarantine flag:
    ```bash

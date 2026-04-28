@@ -192,7 +192,16 @@ impl<'a> YtDlp<'a> {
                         stderr_tail.push_str(&l);
                         stderr_tail.push('\n');
                         if stderr_tail.len() > 8192 {
-                            let drop_to = stderr_tail.len() - 4096;
+                            // Walk forward to the next char boundary so a
+                            // truncation in the middle of a multi-byte UTF-8
+                            // sequence (CJK / emoji in extractor errors)
+                            // doesn't panic at the slice.
+                            let mut drop_to = stderr_tail.len() - 4096;
+                            while drop_to < stderr_tail.len()
+                                && !stderr_tail.is_char_boundary(drop_to)
+                            {
+                                drop_to += 1;
+                            }
                             stderr_tail = stderr_tail[drop_to..].to_string();
                         }
                     }
