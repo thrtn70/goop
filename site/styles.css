@@ -639,6 +639,31 @@ main { display: block; }
   border-color: var(--teal);
 }
 
+/* Failure note revealed by app.js when the GitHub release fetch can't
+   resolve. Hidden by default so the page stays clean on the happy path. */
+.colophon-status {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--paper-3);
+  margin: var(--s-3) 0 0;
+  letter-spacing: var(--tracking-snug);
+  max-width: 36rem;
+}
+
+.colophon-status a {
+  color: var(--paper-2);
+  border-bottom: 1px solid var(--ink-3);
+  padding-bottom: 1px;
+  font-style: normal;
+  transition: color var(--dur-fast) var(--ease-quart),
+              border-color var(--dur-fast) var(--ease-quart);
+}
+
+.colophon-status a:hover {
+  color: var(--teal);
+  border-color: var(--teal);
+}
+
 /* Colophon — the four-row metadata block under the CTAs */
 .colophon {
   display: grid;
