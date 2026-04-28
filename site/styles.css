@@ -130,7 +130,6 @@ body {
   background: var(--ink-0);
   font-feature-settings: 'kern', 'liga', 'ss01';
   font-variant-numeric: tabular-nums;
-  overflow-x: hidden;
 }
 
 img, picture, svg { max-width: 100%; height: auto; display: block; }
@@ -239,7 +238,14 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
   z-index: 2;
 }
 
-main { display: block; }
+main {
+  display: block;
+  /* Several section numerals (.hero__headline, .entry__numeral,
+     .step__numeral, .section-headline) use negative margin-left for
+     optical alignment. At narrow viewports those bleed past the
+     gutter — clip on main contains them without affecting scroll. */
+  overflow-x: clip;
+}
 
 /* ============================================================
    Masthead
@@ -366,7 +372,11 @@ main { display: block; }
 .hero {
   position: relative;
   padding: clamp(var(--s-6), 3vw, var(--s-12)) var(--gutter) clamp(var(--s-8), 5vw, var(--s-16));
-  overflow: hidden;
+  /* clip is preferred over hidden — it doesn't create a new scroll
+     container, so the sticky masthead and any future sticky children
+     keep their normal behavior. The blob overflow at small viewports
+     and the headline's -0.05em optical bleed both terminate here. */
+  overflow: clip;
 }
 
 /* Hero blob — brand mark anchored in the upper-right negative space.
