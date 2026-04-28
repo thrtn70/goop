@@ -3,56 +3,77 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Goop — Download. Convert. Compress.</title>
+    <title>Goop — Take control of your files.</title>
     <meta
       name="description"
-      content="A tiny desktop app that downloads from 2,000+ sites and converts video, audio, images, and PDFs. macOS and Windows. No accounts, no tracking."
+      content="A small desktop app that downloads from 2,000+ sites and converts video, audio, images, and PDFs. macOS and Windows. No accounts, no tracking."
     />
-    <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#0e0f12" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0c0e0d" />
 
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Goop — Download. Convert. Compress." />
+    <meta property="og:title" content="Goop — Take control of your files." />
     <meta
       property="og:description"
-      content="A tiny desktop app that downloads from 2,000+ sites and converts video, audio, images, and PDFs."
+      content="A small desktop app that downloads from 2,000+ sites and converts video, audio, images, and PDFs."
     />
-    <meta property="og:image" content="assets/og-image.png" />
     <meta property="og:url" content="https://thrtn70.github.io/goop/" />
-    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="og:image" content="assets/icon.png" />
 
     <link rel="icon" type="image/png" href="assets/icon.png" />
     <link rel="apple-touch-icon" href="assets/icon.png" />
+    <link rel="preload" href="assets/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="styles.css" />
     <script defer src="app.js"></script>
   </head>
-  <body>
-    <a class="skip-link" href="#main">Skip to main content</a>
+  <body class="dark">
+    <a class="skip-link" href="#main">Skip to content</a>
 
-    <header class="site-header">
-      <div class="container site-header__inner">
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="masthead">
+      <div class="masthead__rule" aria-hidden="true"></div>
+      <div class="masthead__inner">
         <a class="brand" href="#top" aria-label="Goop home">
-          <img src="assets/icon.png" alt="" width="32" height="32" class="brand__mark" />
+          <img src="assets/icon.png" alt="" width="36" height="36" class="brand__mark" />
           <span class="brand__name">Goop</span>
         </a>
-        <nav class="site-nav" aria-label="Primary">
-          <a href="#features">Features</a>
-          <a href="#quickstart">Quickstart</a>
-          <a href="#faq">FAQ</a>
-          <a href="https://github.com/thrtn70/goop" rel="noopener">GitHub</a>
+        <nav class="masthead__nav" aria-label="Primary">
+          <a href="#features"><span class="masthead__index">№ 01</span> Features</a>
+          <a href="#begin"><span class="masthead__index">№ 02</span> Begin</a>
+          <a href="#faq"><span class="masthead__index">№ 03</span> FAQ</a>
+          <a href="https://github.com/thrtn70/goop" rel="noopener" class="masthead__github">
+            <span class="masthead__index">№ 04</span> GitHub
+          </a>
         </nav>
       </div>
     </header>
 
     <main id="main">
-      <section id="top" class="hero">
-        <div class="container">
-          <h1 class="hero__title">Take control of your files.</h1>
-          <p class="hero__subtitle">
-            A tiny desktop app that downloads from 2,000+ sites and converts video,
-            audio, images, and PDFs. No accounts, no tracking, no nonsense.
+      <section id="top" class="hero" aria-labelledby="hero-headline">
+        <div class="hero__grid">
+          <p class="hero__eyebrow">
+            <span class="hero__eyebrow-mark" aria-hidden="true">¶</span>
+            A field guide to
+            <em>Goop</em>,
+            a small desktop app — issue
+            <span data-latest-version>v0.1.9</span>
           </p>
+          <h1 id="hero-headline" class="hero__headline">
+            <span class="hero__headline-line">Take&nbsp;control</span>
+            <span class="hero__headline-line hero__headline-line--indent">of&nbsp;your&nbsp;files.</span>
+          </h1>
+          <div class="hero__lede">
+            <p class="hero__lede-pull">A small desktop app for the people who actually move files for a living.</p>
+            <p>
+              Paste a link. Drop a folder. Goop pulls media down from over two
+              thousand sites, converts between every common format, compresses
+              without thinking, and handles PDFs in the same window. No
+              accounts, no telemetry, no remote configuration. The only
+              network call out is to the file you asked for.
+            </p>
+          </div>
 
           <div class="hero__cta" data-cta-group>
             <a
@@ -62,7 +83,9 @@
               href="https://github.com/thrtn70/goop/releases/latest"
               rel="noopener"
             >
-              Download for macOS (Apple Silicon)
+              <span class="btn__rule" aria-hidden="true"></span>
+              <span class="btn__label">Download for macOS</span>
+              <span class="btn__meta">Apple Silicon · .dmg</span>
             </a>
             <a
               class="btn btn--primary"
@@ -71,7 +94,9 @@
               href="https://github.com/thrtn70/goop/releases/latest"
               rel="noopener"
             >
-              Download for Windows
+              <span class="btn__rule" aria-hidden="true"></span>
+              <span class="btn__label">Download for Windows</span>
+              <span class="btn__meta">x64 · .msi</span>
             </a>
             <p class="hero__alt" data-cta-alt hidden>
               <span data-cta-alt-text></span>
@@ -79,247 +104,430 @@
             </p>
           </div>
 
-          <ul class="hero__badges" aria-label="Platform and license">
-            <li>macOS 13+</li>
-            <li>Windows 10+</li>
-            <li>MIT</li>
-            <li>
-              <a href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                <span data-latest-version>v0.1.9</span>
-              </a>
-            </li>
-          </ul>
+          <dl class="colophon">
+            <div class="colophon__row">
+              <dt>Platform</dt>
+              <dd>macOS 13+, Windows 10+</dd>
+            </div>
+            <div class="colophon__row">
+              <dt>License</dt>
+              <dd>MIT</dd>
+            </div>
+            <div class="colophon__row">
+              <dt>Latest</dt>
+              <dd>
+                <a href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
+                  <span data-latest-version>v0.1.9</span>
+                </a>
+              </dd>
+            </div>
+            <div class="colophon__row">
+              <dt>Source</dt>
+              <dd>
+                <a href="https://github.com/thrtn70/goop" rel="noopener">github.com/thrtn70/goop</a>
+              </dd>
+            </div>
+          </dl>
         </div>
       </section>
 
-      <section class="logo-wall" aria-labelledby="logo-wall-heading">
-        <div class="container">
-          <h2 id="logo-wall-heading" class="logo-wall__heading">Works with the sites you actually use</h2>
-          <ul class="logo-wall__list">
+      <section class="ticker" aria-labelledby="ticker-heading">
+        <div class="ticker__intro">
+          <h2 id="ticker-heading" class="ticker__heading">
+            <span class="ticker__index">№ 00</span>
+            Works with the sites you actually use
+          </h2>
+          <p class="ticker__sub">A partial roll-call. Two thousand more behind it.</p>
+        </div>
+        <div class="ticker__track" data-ticker>
+          <ul class="ticker__list" data-ticker-list>
             <li>YouTube</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>TikTok</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Instagram</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>X</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Vimeo</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>SoundCloud</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Reddit</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Bunkr</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Imgur</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Pixeldrain</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>Kemono</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
             <li>RedGifs</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
+            <li class="ticker__more">and 2,000 more</li>
+            <li class="ticker__sep" aria-hidden="true">¶</li>
           </ul>
-          <p class="logo-wall__more">and 2,000+ more sites</p>
         </div>
       </section>
 
-      <section id="features" class="features" aria-labelledby="features-heading">
-        <div class="container">
-          <h2 id="features-heading">What it does</h2>
-          <ul class="task-grid">
-            <li class="task-card">
-              <h3>Download from anywhere</h3>
+      <section id="features" class="dossier" aria-labelledby="dossier-heading">
+        <header class="dossier__header">
+          <p class="section-eyebrow">№ 01 · The work</p>
+          <h2 id="dossier-heading" class="section-headline">Four jobs.</h2>
+          <p class="section-lede">
+            Goop is a single window with four panels, each tuned for a kind
+            of file. Drop something in, hit go, get on with your day.
+          </p>
+        </header>
+
+        <ol class="dossier__entries">
+          <li class="entry">
+            <span class="entry__numeral" aria-hidden="true">01</span>
+            <div class="entry__body">
+              <h3 class="entry__headline">Download from anywhere.</h3>
               <p>
-                Paste a URL — Goop probes formats, you pick, it downloads.
-                <em>yt-dlp</em> and <em>gallery-dl</em> bundled, so video sites,
-                audio platforms, and image hosts all work out of the box.
+                Paste a URL. Goop probes the page, lists every available
+                format with size and codec, you pick, it pulls. yt-dlp and
+                gallery-dl are bundled, so video sites, audio platforms, and
+                image hosts are all handled out of the box. Cookies from
+                your browser unlock anything else.
               </p>
-            </li>
-            <li class="task-card">
-              <h3>Convert anything to anything</h3>
+            </div>
+            <aside class="entry__margin">
+              <p>Browser cookies stay local — Goop never uploads them.</p>
+            </aside>
+          </li>
+
+          <li class="entry">
+            <span class="entry__numeral" aria-hidden="true">02</span>
+            <div class="entry__body">
+              <h3 class="entry__headline">Convert anything to anything.</h3>
               <p>
-                Drop video, audio, or images in any common format. Smart targets,
-                batch jobs, and an output folder of your choice. Drop a PDF too —
-                merge, split, or compress in the same window.
+                Drop a video, audio file, image, or PDF. Goop reads what
+                came in, suggests a sensible target, and re-encodes through
+                ffmpeg with hardware acceleration when your machine has it.
+                Single file gets a Save-As. A batch of forty gets dumped
+                next to its sources, or to a folder you choose.
               </p>
-            </li>
-            <li class="task-card">
-              <h3>Shrink files without thinking</h3>
+            </div>
+            <aside class="entry__margin">
+              <p>Smart targets pick remux over re-encode whenever they can.</p>
+            </aside>
+          </li>
+
+          <li class="entry">
+            <span class="entry__numeral" aria-hidden="true">03</span>
+            <div class="entry__body">
+              <h3 class="entry__headline">Shrink files without thinking.</h3>
               <p>
                 A single quality slider, or hit a target file size. Works on
-                video, audio, images, and PDFs. Goop warns before it would
-                trash quality.
+                video (CRF math), audio (bitrate), images (JPEG, WebP, PNG
+                lossless), and PDFs. Goop warns out loud before settings
+                would obviously trash quality, instead of guessing on your
+                behalf.
               </p>
-            </li>
-            <li class="task-card">
-              <h3>Merge, split, compress PDFs</h3>
-              <p>
-                Drop PDFs to merge in any order, split by ranges
-                (<code>1-3, 7-10</code>), or compress with three quality presets
-                — Screen, Ebook, Printer.
-              </p>
-            </li>
-          </ul>
+            </div>
+            <aside class="entry__margin">
+              <p>The slider speaks Mb, not magic numbers.</p>
+            </aside>
+          </li>
 
-          <h2 class="features__sub">Power features</h2>
-          <ul class="feature-grid">
-            <li class="feature">
-              <h3>Live queue</h3>
-              <p>Per-job progress, speed, and ETA. Drag to reorder, cancel, or batch-cancel.</p>
-            </li>
-            <li class="feature">
-              <h3>History with grid view</h3>
-              <p>Searchable, filterable. Lazy-loaded thumbnails. Multi-select for batch actions.</p>
-            </li>
-            <li class="feature">
-              <h3>Hardware-accelerated encoding</h3>
-              <p>VideoToolbox on macOS; NVENC, QSV, and AMF on Windows. Auto-detected.</p>
-            </li>
-            <li class="feature">
-              <h3>Pause and resume</h3>
-              <p>Freeze long encodes mid-flight. Resume after lunch — or after a restart.</p>
-            </li>
-            <li class="feature">
-              <h3>Command palette</h3>
-              <p><kbd>⌘K</kbd> on macOS, <kbd>Ctrl+K</kbd> on Windows. Fuzzy search every action.</p>
-            </li>
-            <li class="feature">
-              <h3>Cookies from browser</h3>
-              <p>Reach age-gated and members-only content using your existing browser session.</p>
-            </li>
-            <li class="feature">
-              <h3>Keyboard-driven</h3>
-              <p><kbd>⌘1</kbd>–<kbd>⌘5</kbd> for pages, <kbd>⌘N</kbd> for URL, <kbd>⌘O</kbd> for files.</p>
-            </li>
-            <li class="feature">
-              <h3>Accessible by default</h3>
-              <p>WCAG 2.1 AA: focus rings, keyboard navigation, screen reader support, reduced motion.</p>
-            </li>
-          </ul>
-        </div>
+          <li class="entry">
+            <span class="entry__numeral" aria-hidden="true">04</span>
+            <div class="entry__body">
+              <h3 class="entry__headline">Merge, split, compress PDFs.</h3>
+              <p>
+                Drop PDFs onto Convert. Re-order pages by drag, split with
+                a range string like <code>1-3, 7-10</code>, or compress
+                with three Ghostscript presets — Screen, Ebook, Printer.
+                It is bookkeeping, but the kind that finishes in a second.
+              </p>
+            </div>
+            <aside class="entry__margin">
+              <p>The PDF tools share the queue with everything else.</p>
+            </aside>
+          </li>
+        </ol>
       </section>
 
-      <section id="quickstart" class="quickstart" aria-labelledby="quickstart-heading">
-        <div class="container">
-          <h2 id="quickstart-heading">Up and running in 30 seconds</h2>
-          <ol class="quickstart__steps">
-            <li>
-              <h3>Download the right installer.</h3>
+      <section class="indexed" aria-labelledby="indexed-heading">
+        <header class="indexed__header">
+          <p class="section-eyebrow">№ 02 · The depth</p>
+          <h2 id="indexed-heading" class="section-headline">Beneath the surface.</h2>
+          <p class="section-lede">
+            The kind of work a utility quietly does after you stop noticing
+            it. Read it as a glossary.
+          </p>
+        </header>
+
+        <dl class="glossary">
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">i.</span> Live queue</dt>
+            <dd>
+              Per-job progress, throughput, and ETA. Drag rows to reorder.
+              Cancel one or shift-click to cancel a batch.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">ii.</span> History, with grid</dt>
+            <dd>
+              Searchable, filterable, multi-selectable. Lazy-loaded
+              thumbnails. Reveal in Finder or Explorer in one click.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">iii.</span> Hardware-accelerated encoding</dt>
+            <dd>
+              VideoToolbox on macOS. NVENC, QuickSync, and AMF on Windows.
+              Goop probes your machine and picks the right one.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">iv.</span> Pause and resume</dt>
+            <dd>
+              Freeze a long encode mid-flight when something more urgent
+              comes up. Resume after lunch. Or after a restart.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">v.</span> Command palette</dt>
+            <dd>
+              <kbd>⌘ K</kbd> on macOS, <kbd>Ctrl K</kbd> on Windows. Fuzzy
+              search across every action and page.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">vi.</span> Cookies from the browser</dt>
+            <dd>
+              Reach age-gated and members-only content using your existing
+              session. No re-login required. Cookies never leave your machine.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">vii.</span> Keyboard-driven</dt>
+            <dd>
+              <kbd>⌘ 1</kbd>–<kbd>⌘ 5</kbd> to jump between pages.
+              <kbd>⌘ N</kbd> for a new URL. <kbd>⌘ O</kbd> for files.
+            </dd>
+          </div>
+          <div class="glossary__row">
+            <dt><span class="glossary__roman">viii.</span> Accessible by default</dt>
+            <dd>
+              WCAG 2.1 AA: visible focus, keyboard navigation, screen reader
+              support, motion respected.
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section id="begin" class="begin" aria-labelledby="begin-heading">
+        <header class="begin__header">
+          <p class="section-eyebrow">№ 03 · The setup</p>
+          <h2 id="begin-heading" class="section-headline">Begin.</h2>
+          <p class="section-lede">
+            Three steps. The third one is just "use it."
+          </p>
+        </header>
+
+        <ol class="steps">
+          <li class="step">
+            <span class="step__numeral" aria-hidden="true">01</span>
+            <div class="step__body">
+              <h3 class="step__headline">Download the right installer.</h3>
               <p>
                 <a class="link" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                  macOS (Apple Silicon, .dmg)
+                  macOS, Apple Silicon (.dmg)
                 </a>
                 or
                 <a class="link" data-win-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
                   Windows (.msi)
                 </a>.
+                Both come from GitHub Releases.
               </p>
-            </li>
-            <li>
-              <h3>Install.</h3>
-              <p>
-                <strong>macOS:</strong> drag <em>Goop.app</em> to <em>Applications</em>.
-                If Gatekeeper blocks it on first launch, run this once:
+            </div>
+          </li>
+
+          <li class="step">
+            <span class="step__numeral" aria-hidden="true">02</span>
+            <div class="step__body">
+              <h3 class="step__headline">Install.</h3>
+              <p class="step__os">
+                <em>On macOS,</em> drag <em>Goop.app</em> to <em>Applications</em>.
+                If Gatekeeper blocks the first launch, run this once:
               </p>
               <pre><code>sudo xattr -cr /Applications/Goop.app</code></pre>
-              <p>
-                <strong>Windows:</strong> run the <em>.msi</em>. If SmartScreen
-                warns, click <em>More info</em>, then <em>Run anyway</em>. The app
-                isn't code-signed yet — that's on the roadmap.
+              <p class="step__os">
+                <em>On Windows,</em> run the <em>.msi</em>. If SmartScreen
+                warns, click <em>More info</em>, then <em>Run anyway</em>.
               </p>
-            </li>
-            <li>
-              <h3>Use it.</h3>
-              <p>
-                Paste a URL, drop a file, or hit <kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd>
-                to open the command palette. That's the whole tutorial.
+              <p class="step__note">
+                Goop is not yet code-signed. That is on the roadmap.
               </p>
-            </li>
-          </ol>
-        </div>
+            </div>
+          </li>
+
+          <li class="step">
+            <span class="step__numeral" aria-hidden="true">03</span>
+            <div class="step__body">
+              <h3 class="step__headline">Use it.</h3>
+              <p>
+                Paste a URL, drop a file, or hit <kbd>⌘ K</kbd>
+                / <kbd>Ctrl K</kbd> for the command palette. That is the
+                whole tutorial.
+              </p>
+            </div>
+          </li>
+        </ol>
       </section>
 
-      <aside class="tip" aria-labelledby="tip-heading">
-        <div class="container">
-          <div class="tip__inner">
-            <h2 id="tip-heading">Pro tip — Cookies from your browser</h2>
-            <p>
-              For age-gated, members-only, or paywalled content, Goop can read
-              your existing browser session. Open <em>Settings → Cookies</em>
-              and pick Chrome, Firefox, Safari, or Edge.
-            </p>
-            <p class="tip__privacy">
-              Cookies stay on your machine. Goop never uploads them, and there's
-              no telemetry to send them anywhere.
-            </p>
-          </div>
-        </div>
+      <aside class="aside" aria-labelledby="aside-heading">
+        <p class="aside__eyebrow">A note on cookies.</p>
+        <blockquote class="aside__quote">
+          <p>
+            For age-gated, members-only, or paywalled content,
+            Goop can read your existing browser session.
+            Open <em>Settings → Cookies</em> and pick
+            Chrome, Firefox, Safari, or Edge.
+          </p>
+        </blockquote>
+        <p class="aside__attribution">
+          Cookies stay on your machine. Goop never uploads them, and there is
+          no telemetry to send anything anywhere.
+        </p>
       </aside>
 
       <section id="faq" class="faq" aria-labelledby="faq-heading">
-        <div class="container">
-          <h2 id="faq-heading">Questions</h2>
-          <div class="faq__list">
+        <header class="faq__header">
+          <p class="section-eyebrow">№ 04 · The questions</p>
+          <h2 id="faq-heading" class="section-headline">Frequently raised.</h2>
+        </header>
+
+        <ol class="faq__list">
+          <li>
             <details>
-              <summary>Is Goop really free and open-source?</summary>
-              <p>
-                Yes. MIT licensed.
-                <a href="https://github.com/thrtn70/goop" rel="noopener">Source on GitHub</a>.
-                No paid tier, no premium upsell.
-              </p>
+              <summary>
+                <span class="faq__index">i.</span>
+                <span class="faq__question">Is Goop really free and open-source?</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Yes. MIT licensed.
+                  <a href="https://github.com/thrtn70/goop" rel="noopener">Source on GitHub</a>.
+                  No paid tier, no premium upsell, no nag screens.
+                </p>
+              </div>
             </details>
+          </li>
+          <li>
             <details>
-              <summary>Why is macOS blocking the app on first launch?</summary>
-              <p>
-                Goop isn't code-signed by an Apple Developer account yet. After
-                installing, run this once in Terminal to clear the quarantine flag:
-              </p>
-              <pre><code>sudo xattr -cr /Applications/Goop.app</code></pre>
-              <p>That's a standard step for unsigned macOS apps; signing is on the roadmap.</p>
+              <summary>
+                <span class="faq__index">ii.</span>
+                <span class="faq__question">Why is macOS blocking the app on first launch?</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Goop is not yet signed by an Apple Developer account. After
+                  installing, run this once in Terminal to clear the quarantine flag:
+                </p>
+                <pre><code>sudo xattr -cr /Applications/Goop.app</code></pre>
+                <p>That is the standard step for unsigned macOS apps. Signing is on the roadmap.</p>
+              </div>
             </details>
+          </li>
+          <li>
             <details>
-              <summary>Why is Windows SmartScreen warning me?</summary>
-              <p>
-                Same reason — the installer isn't signed yet. On the SmartScreen
-                dialog, click <em>More info</em>, then <em>Run anyway</em>.
-              </p>
+              <summary>
+                <span class="faq__index">iii.</span>
+                <span class="faq__question">Why is Windows SmartScreen warning me?</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Same reason — the installer is not signed yet. On the
+                  SmartScreen dialog, click <em>More info</em>, then
+                  <em>Run anyway</em>.
+                </p>
+              </div>
             </details>
+          </li>
+          <li>
             <details>
-              <summary>A site stopped working. I'm getting 403s.</summary>
-              <p>
-                Sites change frequently and <em>yt-dlp</em> ships fixes constantly.
-                Goop fetches the latest <em>yt-dlp</em> automatically. If a site
-                still misbehaves, the matching fix usually lands in <em>yt-dlp</em>
-                within hours —
-                <a href="https://github.com/thrtn70/goop/issues" rel="noopener">file an issue</a>
-                if it persists.
-              </p>
+              <summary>
+                <span class="faq__index">iv.</span>
+                <span class="faq__question">A site stopped working. I am getting 403s.</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Sites change behavior without warning. <em>yt-dlp</em>
+                  ships fixes constantly, and Goop fetches the latest
+                  automatically. If a site still misbehaves, the matching
+                  fix usually lands within hours.
+                  <a href="https://github.com/thrtn70/goop/issues" rel="noopener">File an issue</a>
+                  if it persists.
+                </p>
+              </div>
             </details>
+          </li>
+          <li>
             <details>
-              <summary>Where do my downloads go?</summary>
-              <p>
-                Wherever you set it in <em>Settings → Download folder</em>. From
-                <em>History</em>, click any item to reveal it in Finder or
-                Explorer.
-              </p>
+              <summary>
+                <span class="faq__index">v.</span>
+                <span class="faq__question">Where do my downloads go?</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  Wherever you set in <em>Settings → Download folder</em>.
+                  From <em>History</em>, click any item to reveal it in
+                  Finder or Explorer.
+                </p>
+              </div>
             </details>
+          </li>
+          <li>
             <details>
-              <summary>Does Goop send any of my data anywhere?</summary>
-              <p>
-                No. There's no telemetry, no accounts, no cloud. Every job runs
-                on your machine. The only network traffic is the actual downloads
-                you ask for, plus a release-check ping to GitHub.
-              </p>
+              <summary>
+                <span class="faq__index">vi.</span>
+                <span class="faq__question">Does Goop send any of my data anywhere?</span>
+                <span class="faq__chevron" aria-hidden="true"></span>
+              </summary>
+              <div class="faq__answer">
+                <p>
+                  No. There is no telemetry, no accounts, no cloud. Every
+                  job runs locally. The only outbound network calls are the
+                  download you asked for and a periodic ping to GitHub for
+                  release updates.
+                </p>
+              </div>
             </details>
-          </div>
-        </div>
+          </li>
+        </ol>
       </section>
     </main>
 
-    <footer class="site-footer">
-      <div class="container site-footer__inner">
-        <div class="site-footer__links">
-          <a href="https://github.com/thrtn70/goop" rel="noopener">GitHub</a>
-          <a href="https://github.com/thrtn70/goop/releases" rel="noopener">Releases</a>
-          <a href="https://github.com/thrtn70/goop/blob/main/LICENSE" rel="noopener">MIT License</a>
-        </div>
-        <p class="site-footer__credits">
-          Built on <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener">yt-dlp</a>,
+    <footer class="colophon-footer" aria-labelledby="footer-heading">
+      <h2 id="footer-heading" class="visually-hidden">Colophon</h2>
+      <div class="colophon-footer__rule" aria-hidden="true"></div>
+      <div class="colophon-footer__inner">
+        <p class="colophon-footer__statement">
+          Goop is built on
+          <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener">yt-dlp</a>,
           <a href="https://github.com/mikf/gallery-dl" rel="noopener">gallery-dl</a>,
-          <a href="https://ffmpeg.org/" rel="noopener">ffmpeg</a>, and
+          <a href="https://ffmpeg.org/" rel="noopener">ffmpeg</a>,
+          and
           <a href="https://www.ghostscript.com/" rel="noopener">Ghostscript</a>.
-          © 2026 thrtn70.
+          MIT licensed.
         </p>
+        <nav class="colophon-footer__nav" aria-label="Project links">
+          <a href="https://github.com/thrtn70/goop" rel="noopener">Source</a>
+          <a href="https://github.com/thrtn70/goop/releases" rel="noopener">Releases</a>
+          <a href="https://github.com/thrtn70/goop/issues" rel="noopener">Issues</a>
+        </nav>
+        <p class="colophon-footer__copy">© 2026 thrtn70.</p>
       </div>
     </footer>
   </body>
