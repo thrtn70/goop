@@ -47,7 +47,7 @@
   --teal-wash: oklch(20% 0.05 160); /* tint wash */
 
   /* Type — fluid display, fixed body */
-  --type-display-xxxl: clamp(4.25rem, 1.5rem + 12vw, 13rem);  /* hero */
+  --type-display-xxxl: clamp(3.5rem, 1.5rem + 7vw, 8rem);     /* hero */
   --type-display-xxl:  clamp(3rem, 1rem + 8vw, 8rem);         /* numerals */
   --type-display-xl:   clamp(2rem, 1rem + 4vw, 4.25rem);      /* section heads */
   --type-display-l:    clamp(1.5rem, 1rem + 2vw, 2.5rem);     /* entry heads */
@@ -276,20 +276,39 @@ main { display: block; }
 
 .brand {
   display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
+  align-items: baseline;
+  gap: 0.5em;
   font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 600;
-  font-size: 1.375rem;
-  letter-spacing: var(--tracking-snug);
   color: var(--paper);
 }
 
-.brand__mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  display: block;
+.brand__name {
+  font-weight: 700;
+  font-size: 1.375rem;
+  letter-spacing: var(--tracking-tight);
+  line-height: 1;
+}
+
+.brand__dot {
+  color: var(--teal);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1;
+  transform: translateY(-0.05em);
+}
+
+.brand__sub {
+  font-family: 'Figtree', system-ui;
+  font-style: italic;
+  font-weight: 400;
+  font-size: 0.85rem;
+  letter-spacing: var(--tracking-snug);
+  color: var(--paper-3);
+  line-height: 1;
+}
+
+@media (max-width: 720px) {
+  .brand__dot, .brand__sub { display: none; }
 }
 
 .masthead__nav {
@@ -336,7 +355,7 @@ main { display: block; }
    ============================================================ */
 
 .hero {
-  padding: clamp(var(--s-12), 8vw, var(--s-32)) var(--gutter) clamp(var(--s-16), 10vw, var(--s-48));
+  padding: clamp(var(--s-6), 3vw, var(--s-12)) var(--gutter) clamp(var(--s-8), 5vw, var(--s-16));
 }
 
 .hero__grid {
@@ -344,7 +363,7 @@ main { display: block; }
   margin: 0 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  row-gap: clamp(var(--s-8), 5vw, var(--s-16));
+  row-gap: clamp(var(--s-4), 2.5vw, var(--s-8));
 }
 
 .hero__eyebrow {
@@ -399,10 +418,10 @@ main { display: block; }
 .hero__lede {
   display: grid;
   grid-template-columns: minmax(0, 22rem) minmax(0, 36rem);
-  gap: clamp(var(--s-6), 4vw, var(--s-16));
+  gap: clamp(var(--s-6), 4vw, var(--s-12));
   align-items: start;
   border-top: var(--hairline);
-  padding-top: var(--s-8);
+  padding-top: var(--s-6);
 }
 
 .hero__lede-pull {
