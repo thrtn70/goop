@@ -449,6 +449,11 @@
    * Boot
    * ---------------------------------------------------------------- */
 
+  function setFetchStatus(failed) {
+    const status = document.querySelector('[data-fetch-status]');
+    if (status) status.hidden = !failed;
+  }
+
   async function init() {
     setVersion(FALLBACK.version);
     setDownloadURLs(FALLBACK.mac, FALLBACK.windows);
@@ -464,6 +469,8 @@
     if (latest) {
       setVersion(latest.version);
       setDownloadURLs(latest.mac, latest.windows);
+    } else {
+      setFetchStatus(true);
     }
   }
 

@@ -249,10 +249,7 @@ main { display: block; }
   position: sticky;
   top: 0;
   z-index: 30;
-  background:
-    linear-gradient(to bottom, var(--ink-0) 70%, color-mix(in oklch, var(--ink-0), transparent 30%) 100%);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--ink-0);
 }
 
 .masthead__rule {
@@ -639,6 +636,31 @@ main { display: block; }
   border-color: var(--teal);
 }
 
+/* Failure note revealed by app.js when the GitHub release fetch can't
+   resolve. Hidden by default so the page stays clean on the happy path. */
+.colophon-status {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--paper-3);
+  margin: var(--s-3) 0 0;
+  letter-spacing: var(--tracking-snug);
+  max-width: 36rem;
+}
+
+.colophon-status a {
+  color: var(--paper-2);
+  border-bottom: 1px solid var(--ink-3);
+  padding-bottom: 1px;
+  font-style: normal;
+  transition: color var(--dur-fast) var(--ease-quart),
+              border-color var(--dur-fast) var(--ease-quart);
+}
+
+.colophon-status a:hover {
+  color: var(--teal);
+  border-color: var(--teal);
+}
+
 /* Colophon — the four-row metadata block under the CTAs */
 .colophon {
   display: grid;
@@ -658,13 +680,13 @@ main { display: block; }
 .colophon__row:last-child { border-right: 0; }
 
 .colophon__row dt {
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-size: 0.7rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wider);
+  font-family: 'Figtree', system-ui;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: var(--tracking-snug);
   color: var(--paper-4);
-  margin-bottom: var(--s-2);
+  font-style: italic;
+  margin-bottom: var(--s-1);
 }
 
 .colophon__row dd {
@@ -1357,13 +1379,38 @@ main { display: block; }
   margin-bottom: var(--s-8);
 }
 
-.archive__skeleton {
-  padding: var(--s-6) 0;
-  border-bottom: var(--hairline);
-  font-style: italic;
-  color: var(--paper-4);
-  font-size: var(--type-body-s);
+/* Skeleton rows match the resolved row geometry exactly so the layout
+   stays put when JS replaces them. Ghost bars are static — no shimmer
+   animation, since the page already respects prefers-reduced-motion
+   and a busy shimmer would compete with the ticker. */
+.archive__row--skeleton .archive__numeral { color: var(--paper-4); }
+
+.archive__skeleton-bar {
+  display: inline-block;
+  background: var(--ink-2);
+  border-radius: 2px;
+  vertical-align: middle;
 }
+
+.archive__skeleton-bar--tag {
+  width: 4rem;
+  height: 1.125rem;
+}
+
+.archive__skeleton-bar--date {
+  width: 7rem;
+  height: 0.78rem;
+  margin-top: 4px;
+  background: var(--ink-1);
+}
+
+.archive__skeleton-bar--title {
+  width: min(22rem, 90%);
+  height: 1rem;
+}
+
+.archive__skeleton-bar--shorter { width: min(18rem, 75%); }
+.archive__skeleton-bar--shortest { width: min(14rem, 60%); }
 
 .archive__row {
   display: grid;
