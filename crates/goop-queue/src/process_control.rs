@@ -67,11 +67,21 @@ mod imp {
 mod imp {
     use super::ProcessControlError;
     use std::io;
-    use windows_sys::Wdk::System::Threading::{NtResumeProcess, NtSuspendProcess};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, HANDLE,
     };
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
+
+    // NtSuspendProcess / NtResumeProcess are exported from `ntdll.dll`
+    // but not surfaced by the auto-generated `windows-sys` crate (the
+    // Microsoft-published win32 metadata excludes them — they're stable
+    // but technically undocumented kernel-mode entry points). Declare
+    // them manually so this crate doesn't need a heavier dep.
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtSuspendProcess(process: HANDLE) -> i32;
+        fn NtResumeProcess(process: HANDLE) -> i32;
+    }
 
     pub fn pause(pid: u32) -> Result<(), ProcessControlError> {
         with_handle(pid, |h| {
