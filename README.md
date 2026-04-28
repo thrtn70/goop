@@ -4,6 +4,8 @@
 
 Paste a link, pick a format, and Goop handles the rest through bundled `yt-dlp` (videos and audio) and `gallery-dl` (image hosts) with a live queue, progress, and cancel. No accounts, no telemetry, no remote config — it only reaches out to download what you asked for.
 
+**Website:** [thrtn70.github.io/goop](https://thrtn70.github.io/goop/) · **Releases:** [github.com/thrtn70/goop/releases](https://github.com/thrtn70/goop/releases)
+
 ![Screenshot placeholder](docs/screenshot.png)
 
 *Screenshot coming in v0.1.1.*
