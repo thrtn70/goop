@@ -210,6 +210,40 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
 
 .skip-link:focus-visible { transform: translateY(0); }
 
+/* Cursor-trail paragraph mark — appended to body by JS on hover-capable
+   pointers only. Inline transform is set per-frame by RAF. The element
+   sits above content but never blocks pointer events. */
+.cursor-trail {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  user-select: none;
+  z-index: 4;
+  font-family: 'Bricolage Grotesque', system-ui;
+  font-weight: 500;
+  font-style: italic;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--teal);
+  opacity: 0;
+  transition: opacity 320ms var(--ease-quart);
+  /* Optical offset so the glyph sits next to the cursor, not on top of it. */
+  margin-left: 14px;
+  margin-top: -2px;
+  letter-spacing: 0;
+}
+
+.cursor-trail--visible {
+  opacity: 0.4;
+}
+
+@media (hover: none), (pointer: coarse), (prefers-reduced-motion: reduce) {
+  .cursor-trail { display: none; }
+}
+
 /* Subtle warm noise overlay grounds the page as physical. */
 .grain {
   position: fixed;
@@ -413,6 +447,23 @@ main { display: block; }
 .hero__headline-line--indent {
   padding-left: clamp(var(--s-12), 14vw, 11rem);
   color: var(--teal);
+}
+
+/* Per-char weight response — set by JS at runtime when (hover: hover).
+   Default weight matches the headline's static state so non-hover users
+   see no difference. The transition is none — RAF handles smoothing. */
+.hero__char {
+  display: inline-block;
+  font-variation-settings: 'wght' 600;
+  will-change: font-variation-settings;
+  transition: none;
+}
+
+@media (hover: none), (pointer: coarse), (prefers-reduced-motion: reduce) {
+  .hero__char {
+    will-change: auto;
+    font-variation-settings: 'wght' 700;
+  }
 }
 
 .hero__lede {

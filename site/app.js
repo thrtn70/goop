@@ -230,6 +230,189 @@
   }
 
   /* ----------------------------------------------------------------
+   * Cursor-driven typographic response (overdrive)
+   *
+   * Each character in the hero headline shifts variable-font weight
+   * based on its distance from the cursor. A faint paragraph-mark
+   * trails the cursor through the page. Both effects are gated on
+   * pointer:fine devices with prefers-reduced-motion: no-preference.
+   * ---------------------------------------------------------------- */
+
+  const HERO_WEIGHT_MIN = 380;
+  const HERO_WEIGHT_MAX = 800;
+  const HERO_REST = 600;
+  const HERO_RADIUS = 360;
+  const WEIGHT_LERP = 0.18;
+  const TRAIL_LERP = 0.10;
+  const IDLE_FADE_MS = 900;
+  const REST_FADE_MS = 1600;
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function splitHeadlineChars(headline) {
+    if (!headline || headline.dataset.charsSplit === '1') return [];
+
+    const fullText = headline.textContent.replace(/\s+/g, ' ').trim();
+    headline.setAttribute('aria-label', fullText);
+
+    const chars = [];
+    const lines = headline.querySelectorAll('.hero__headline-line');
+    lines.forEach((line) => {
+      const text = line.textContent;
+      line.textContent = '';
+      line.setAttribute('aria-hidden', 'true');
+      for (const ch of text) {
+        if (ch === ' ' || ch === ' ') {
+          line.appendChild(document.createTextNode(ch));
+          continue;
+        }
+        const span = document.createElement('span');
+        span.className = 'hero__char';
+        span.textContent = ch;
+        line.appendChild(span);
+        chars.push(span);
+      }
+    });
+    headline.dataset.charsSplit = '1';
+    return chars;
+  }
+
+  function createTrailMark() {
+    const el = document.createElement('div');
+    el.className = 'cursor-trail';
+    el.setAttribute('aria-hidden', 'true');
+    el.textContent = '¶';
+    return el;
+  }
+
+  function initCursorChoreography() {
+    const supportsHover = window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+    if (!supportsHover) return;
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+
+    const headline = document.querySelector('.hero__headline');
+    if (!headline) return;
+
+    const chars = splitHeadlineChars(headline);
+    if (chars.length === 0) return;
+
+    const trail = createTrailMark();
+    document.body.appendChild(trail);
+
+    const state = {
+      mouseX: window.innerWidth / 2,
+      mouseY: -1000,
+      trailX: window.innerWidth / 2,
+      trailY: -1000,
+      lastMove: 0,
+      heroVisible: true,
+      ticking: false,
+      charWeights: new WeakMap(),
+    };
+
+    chars.forEach((c) => {
+      state.charWeights.set(c, HERO_REST);
+      c.style.fontVariationSettings = `"wght" ${HERO_REST}`;
+    });
+
+    const heroSection = document.querySelector('.hero');
+    if (heroSection && 'IntersectionObserver' in window) {
+      const io = new IntersectionObserver(
+        ([entry]) => {
+          state.heroVisible = entry.isIntersecting;
+        },
+        { threshold: 0 },
+      );
+      io.observe(heroSection);
+    }
+
+    function loop(now) {
+      // Trail position (always lerp toward mouse)
+      state.trailX = lerp(state.trailX, state.mouseX, TRAIL_LERP);
+      state.trailY = lerp(state.trailY, state.mouseY, TRAIL_LERP);
+      trail.style.transform = `translate3d(${state.trailX.toFixed(1)}px, ${state.trailY.toFixed(1)}px, 0)`;
+
+      // Hero char weights — read all rects first, then write all weights.
+      // Batching avoids per-char layout thrash from interleaved reads/writes.
+      // While the cursor is active (recently moved) chars near the cursor
+      // surge toward MAX; far chars drop toward MIN. After the cursor goes
+      // idle, every char returns to a comfortable REST weight.
+      if (state.heroVisible) {
+        const idleFor = now - state.lastMove;
+        const isIdle = idleFor > IDLE_FADE_MS;
+        const targets = new Array(chars.length);
+
+        if (isIdle) {
+          for (let i = 0; i < chars.length; i++) targets[i] = HERO_REST;
+        } else {
+          for (let i = 0; i < chars.length; i++) {
+            const rect = chars[i].getBoundingClientRect();
+            if (rect.width === 0) {
+              targets[i] = null;
+              continue;
+            }
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const dist = Math.hypot(state.mouseX - cx, state.mouseY - cy);
+            if (dist >= HERO_RADIUS) {
+              targets[i] = HERO_WEIGHT_MIN;
+            } else {
+              const t = 1 - dist / HERO_RADIUS;
+              targets[i] = HERO_WEIGHT_MIN + (HERO_WEIGHT_MAX - HERO_WEIGHT_MIN) * (t * t);
+            }
+          }
+        }
+
+        for (let i = 0; i < chars.length; i++) {
+          if (targets[i] === null) continue;
+          const c = chars[i];
+          const current = state.charWeights.get(c) ?? HERO_REST;
+          const next = lerp(current, targets[i], WEIGHT_LERP);
+          state.charWeights.set(c, next);
+          c.style.fontVariationSettings = `"wght" ${Math.round(next)}`;
+        }
+      }
+
+      const idleSince = now - state.lastMove;
+      if (idleSince > IDLE_FADE_MS) {
+        trail.classList.remove('cursor-trail--visible');
+      }
+
+      // Keep the loop alive while there is recent activity OR while chars
+      // are still lerping back to their resting weight.
+      const stillSettling = chars.some((c) => {
+        const w = state.charWeights.get(c) ?? HERO_REST;
+        return Math.abs(w - HERO_REST) > 0.6;
+      });
+
+      if (idleSince < IDLE_FADE_MS + REST_FADE_MS || stillSettling) {
+        requestAnimationFrame(loop);
+      } else {
+        state.ticking = false;
+      }
+    }
+
+    function onMove(e) {
+      state.mouseX = e.clientX;
+      state.mouseY = e.clientY;
+      state.lastMove = performance.now();
+      trail.classList.add('cursor-trail--visible');
+      if (!state.ticking) {
+        state.ticking = true;
+        requestAnimationFrame(loop);
+      }
+    }
+
+    document.addEventListener('mousemove', onMove, { passive: true });
+    document.addEventListener('mouseleave', () => {
+      trail.classList.remove('cursor-trail--visible');
+    });
+  }
+
+  /* ----------------------------------------------------------------
    * Boot
    * ---------------------------------------------------------------- */
 
@@ -237,6 +420,7 @@
     setVersion(FALLBACK.version);
     setDownloadURLs(FALLBACK.mac, FALLBACK.windows);
     initTicker();
+    initCursorChoreography();
 
     const [latest] = await Promise.all([
       fetchLatestRelease(),
