@@ -1,4 +1,4 @@
-use goop_core::{EventSink, GoopError, JobId, ProgressEvent};
+use goop_core::{is_cookie_db_error, EventSink, GoopError, JobId, ProgressEvent, SidecarEvent};
 use goop_sidecar::BinaryResolver;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -54,15 +54,39 @@ impl<'a> GalleryDl<'a> {
     /// triples — we walk it once to pick out a representative title and
     /// count items. Most extractors set `info["title"]` for collection
     /// objects (type 2) and individual file metadata for type 3.
+    ///
+    /// On a cookie-DB read failure (Chrome v127+ DPAPI lock, missing
+    /// browser, etc.), retries silently without `--cookies-from-browser`.
+    /// The retry is silent because `probe` has no event sink to surface
+    /// a warning through; the user sees the warning when the actual
+    /// download retries via `download` below.
     pub async fn probe(
         resolver: &BinaryResolver,
         url: &str,
         cookies_from_browser: Option<&str>,
     ) -> Result<UrlProbe, GoopError> {
         let bin = resolver.resolve("gallery-dl")?;
-        let mut cmd = Command::new(&bin.path);
+        let first = Self::probe_once(&bin.path, url, cookies_from_browser).await;
+        match first {
+            Err(GoopError::SubprocessFailed { ref stderr, .. })
+                if cookies_from_browser.is_some() && is_cookie_db_error(stderr) =>
+            {
+                // Silent retry without cookies. Probe is sinkless — the
+                // download step will emit the user-facing warning toast.
+                Self::probe_once(&bin.path, url, None).await
+            }
+            other => other,
+        }
+    }
+
+    async fn probe_once(
+        bin_path: &std::path::Path,
+        url: &str,
+        cookies: Option<&str>,
+    ) -> Result<UrlProbe, GoopError> {
+        let mut cmd = Command::new(bin_path);
         cmd.args(["--simulate", "-j", "--quiet"]);
-        if let Some(browser) = validated_browser(cookies_from_browser) {
+        if let Some(browser) = validated_browser(cookies) {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
         cmd.arg(url);
@@ -99,6 +123,12 @@ impl<'a> GalleryDl<'a> {
     /// folder path + total bytes + count once gallery-dl exits 0.
     /// Cancellation kills the child process and removes any partial
     /// `.part` files gallery-dl left behind.
+    ///
+    /// On a cookie-DB read failure (Chrome v127+ DPAPI lock, missing
+    /// browser, etc.) when `req.cookies_from_browser` was set, retries
+    /// once without `--cookies-from-browser` and emits a one-shot
+    /// `SidecarEvent::Warning` so the UI can toast the user. Cancellation
+    /// short-circuits the retry.
     pub async fn download(
         &self,
         job_id: JobId,
@@ -108,9 +138,61 @@ impl<'a> GalleryDl<'a> {
         let bin = self.resolver.resolve("gallery-dl")?;
         let output_dir = canonical_output_dir(&req.output_dir)?;
 
-        let mut cmd = Command::new(&bin.path);
+        let first = self
+            .download_once(
+                job_id,
+                req,
+                &bin.path,
+                &output_dir,
+                cancel.clone(),
+                /* with_cookies: */ true,
+            )
+            .await;
+
+        match first {
+            Err(GoopError::SubprocessFailed { ref stderr, .. })
+                if is_cookie_db_error(stderr)
+                    && req.cookies_from_browser.is_some()
+                    && !cancel.is_cancelled() =>
+            {
+                let browser = req.cookies_from_browser.as_deref().unwrap_or("the browser");
+                self.sink.emit_sidecar(SidecarEvent::Warning {
+                    code: "cookie_fallback".into(),
+                    message: format!(
+                        "Couldn't read {browser} cookies — proceeded without. \
+                         Close {browser} fully and retry to use logged-in cookies."
+                    ),
+                });
+                self.download_once(
+                    job_id,
+                    req,
+                    &bin.path,
+                    &output_dir,
+                    cancel,
+                    /* with_cookies: */ false,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    /// Single spawn + drive of gallery-dl. `with_cookies = false` omits
+    /// the `--cookies-from-browser` flag regardless of
+    /// `req.cookies_from_browser` — used by the retry path on cookie-DB
+    /// read failures.
+    async fn download_once(
+        &self,
+        job_id: JobId,
+        req: &ExtractRequest,
+        bin_path: &std::path::Path,
+        output_dir: &std::path::Path,
+        cancel: CancellationToken,
+        with_cookies: bool,
+    ) -> Result<GalleryDlResult, GoopError> {
+        let mut cmd = Command::new(bin_path);
         cmd.arg("--directory")
-            .arg(&output_dir)
+            .arg(output_dir)
             // Skip per-extractor JSON metadata sidecars by default — the
             // user wants the media files, not gallery-dl bookkeeping.
             .arg("--no-mtime")
@@ -120,8 +202,10 @@ impl<'a> GalleryDl<'a> {
             // need for progress counting (those land on stdout via -v
             // would be too noisy; --no-skip preserves redownload rules).
             .arg("--quiet");
-        if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
-            cmd.arg("--cookies-from-browser").arg(browser);
+        if with_cookies {
+            if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
+                cmd.arg("--cookies-from-browser").arg(browser);
+            }
         }
         cmd.arg(&req.url)
             .stdout(Stdio::piped())
@@ -149,7 +233,7 @@ impl<'a> GalleryDl<'a> {
                 _ = cancel.cancelled() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    cleanup_partials(&output_dir);
+                    cleanup_partials(output_dir);
                     return Err(GoopError::Cancelled);
                 }
                 line = out_reader.next_line() => {
@@ -217,7 +301,7 @@ impl<'a> GalleryDl<'a> {
         // race the in-loop is_file() check had where a freshly-renamed
         // file might not show up as a regular file by the time the
         // event-loop reads gallery-dl's stdout line for it.
-        let (file_count, bytes) = scan_outputs(&output_dir, started);
+        let (file_count, bytes) = scan_outputs(output_dir, started);
         if file_count == 0 {
             // gallery-dl exited 0 but the output dir has no new files —
             // likely the URL probed cleanly but had no extractable

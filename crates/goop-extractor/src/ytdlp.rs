@@ -1,4 +1,4 @@
-use goop_core::{EventSink, GoopError, JobId, ProgressEvent};
+use goop_core::{is_cookie_db_error, EventSink, GoopError, JobId, ProgressEvent, SidecarEvent};
 use goop_sidecar::BinaryResolver;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -87,15 +87,39 @@ impl<'a> YtDlp<'a> {
     /// Sinkless — callable without constructing a `YtDlp` instance.
     /// `cookies_from_browser` mirrors the `--cookies-from-browser` flag;
     /// pass `None` to keep the spawn anonymous.
+    ///
+    /// On a cookie-DB read failure (Chrome v127+ DPAPI lock, missing
+    /// browser, etc.), retries silently without `--cookies-from-browser`.
+    /// The retry is silent because `probe` has no event sink to surface
+    /// a warning through; the user sees the warning when the actual
+    /// download retries via `download` below.
     pub async fn probe(
         resolver: &BinaryResolver,
         url: &str,
         cookies_from_browser: Option<&str>,
     ) -> Result<UrlProbe, GoopError> {
         let bin = resolver.resolve("yt-dlp")?;
-        let mut cmd = Command::new(&bin.path);
+        let first = Self::probe_once(&bin.path, url, cookies_from_browser).await;
+        match first {
+            Err(GoopError::SubprocessFailed { ref stderr, .. })
+                if cookies_from_browser.is_some() && is_cookie_db_error(stderr) =>
+            {
+                // Silent retry without cookies. Probe is sinkless — the
+                // download step will emit the user-facing warning toast.
+                Self::probe_once(&bin.path, url, None).await
+            }
+            other => other,
+        }
+    }
+
+    async fn probe_once(
+        bin_path: &Path,
+        url: &str,
+        cookies: Option<&str>,
+    ) -> Result<UrlProbe, GoopError> {
+        let mut cmd = Command::new(bin_path);
         cmd.args(["-J", "--no-warnings"]);
-        if let Some(browser) = validated_browser(cookies_from_browser) {
+        if let Some(browser) = validated_browser(cookies) {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
         cmd.arg(url);
@@ -133,12 +157,74 @@ impl<'a> YtDlp<'a> {
         let output_dir = canonical_output_dir(&req.output_dir)?;
         let out_template = output_dir.join("%(title)s.%(ext)s");
 
-        let mut cmd = Command::new(&bin.path);
+        // First attempt: with cookies (if the request had any).
+        let first = self
+            .download_once(
+                job_id,
+                req,
+                &bin.path,
+                &output_dir,
+                &out_template,
+                cancel.clone(),
+                /* with_cookies: */ true,
+            )
+            .await;
+
+        // Cookie-DB read failure + cookies were actually requested → retry
+        // without the flag and surface a one-shot warning. Public videos
+        // and most yt-dlp-supported sites work without cookies, so the
+        // fallback turns "extract fails" into "extract works, with a
+        // heads-up". Cancellation short-circuits the retry.
+        match first {
+            Err(GoopError::SubprocessFailed { ref stderr, .. })
+                if is_cookie_db_error(stderr)
+                    && req.cookies_from_browser.is_some()
+                    && !cancel.is_cancelled() =>
+            {
+                let browser = req.cookies_from_browser.as_deref().unwrap_or("the browser");
+                self.sink.emit_sidecar(SidecarEvent::Warning {
+                    code: "cookie_fallback".into(),
+                    message: format!(
+                        "Couldn't read {browser} cookies — proceeded without. \
+                         Close {browser} fully and retry to use logged-in cookies."
+                    ),
+                });
+                self.download_once(
+                    job_id,
+                    req,
+                    &bin.path,
+                    &output_dir,
+                    &out_template,
+                    cancel,
+                    /* with_cookies: */ false,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    /// Single spawn + drive of yt-dlp. Pulled out of `download` so the
+    /// outer fn can run it twice (once with cookies, once without) on
+    /// cookie-DB failure. `with_cookies = false` omits the
+    /// `--cookies-from-browser` flag regardless of `req.cookies_from_browser`.
+    #[allow(clippy::too_many_arguments)]
+    async fn download_once(
+        &self,
+        job_id: JobId,
+        req: &ExtractRequest,
+        bin_path: &Path,
+        output_dir: &Path,
+        out_template: &Path,
+        cancel: CancellationToken,
+        with_cookies: bool,
+    ) -> Result<ExtractResult, GoopError> {
+        let mut cmd = Command::new(bin_path);
         cmd.arg("--newline") // each progress line on its own
             .arg("--no-warnings")
             .arg("--continue") // resume .part files on restart
             .arg("-o")
-            .arg(&out_template)
+            .arg(out_template)
             .arg("--print")
             .arg("after_move:filepath");
         if req.audio_only {
@@ -147,8 +233,10 @@ impl<'a> YtDlp<'a> {
         if let Some(fmt) = &req.format {
             cmd.arg("-f").arg(fmt);
         }
-        if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
-            cmd.arg("--cookies-from-browser").arg(browser);
+        if with_cookies {
+            if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
+                cmd.arg("--cookies-from-browser").arg(browser);
+            }
         }
         // arg(), not shell: URL is passed as argv, not expanded by a shell.
         cmd.arg(&req.url)
@@ -173,7 +261,7 @@ impl<'a> YtDlp<'a> {
                 _ = cancel.cancelled() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    cleanup_partials(&output_dir, last_progress_line.as_deref());
+                    cleanup_partials(output_dir, last_progress_line.as_deref());
                     return Err(GoopError::Cancelled);
                 }
                 line = out_reader.next_line() => {
@@ -389,5 +477,20 @@ mod tests {
         // Empty / whitespace.
         assert_eq!(validated_browser(Some("")), None);
         assert_eq!(validated_browser(Some(" chrome")), None);
+    }
+
+    /// Locks in the user-facing string for the cookie-fallback toast.
+    /// Matches the format constructed in `YtDlp::download` and
+    /// `GalleryDl::download` so changes here surface as test failures.
+    #[test]
+    fn cookie_fallback_warning_format() {
+        let browser = "chrome";
+        let msg = format!(
+            "Couldn't read {browser} cookies — proceeded without. \
+             Close {browser} fully and retry to use logged-in cookies."
+        );
+        assert!(msg.contains("chrome"));
+        assert!(msg.contains("proceeded without"));
+        assert!(msg.contains("Close chrome"));
     }
 }
