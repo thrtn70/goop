@@ -66,3 +66,15 @@ jobs:
           "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
           "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/gallery-dl-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+      # Compile-check the Windows-only Rust paths on a real Windows
+      # runner. cfg(windows) code in goop-queue::process_control was
+      # not exercised by the Linux audit job, so v0.2.0 hit two
+      # tag-time regressions (windows-sys feature mismatch + missing
+      # ntdll exports). Cross-compiling on Linux is blocked by C-deps
+      # (sqlite3, ring) requiring a Windows toolchain we don't want
+      # to install in CI; running natively here is cheaper and 100%
+      # faithful to the release builder.
+      - name: Cargo check (Windows-only path)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: cargo check -p goop-queue --all-features

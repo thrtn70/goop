@@ -91,6 +91,27 @@ impl Default for Settings {
     }
 }
 
+/// Serde helper to disambiguate `null` from absent for `Option<Option<T>>`
+/// fields. Default serde behaviour collapses both to `None`, so a frontend
+/// patch like `{"cookies_from_browser": null}` (intended to clear) reads
+/// as "no change". Apply this helper via
+/// `#[serde(default, deserialize_with = "double_option::deserialize")]`
+/// to get tri-state semantics:
+/// - field absent → `None` (no change)
+/// - `null`       → `Some(None)` (clear)
+/// - `value`      → `Some(Some(value))` (set)
+mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        T: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        Ok(Some(Option::deserialize(deserializer)?))
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct SettingsPatch {
@@ -104,10 +125,11 @@ pub struct SettingsPatch {
     pub history_view_mode: Option<HistoryViewMode>,
     pub queue_sidebar_width: Option<u32>,
     pub hw_acceleration_enabled: Option<bool>,
-    /// Tri-state on the wire:
-    /// - field absent → no change
-    /// - `Some(Some("chrome"))` → set to a specific browser
-    /// - `Some(None)` → clear (turn cookies off)
+    /// Tri-state on the wire (see `double_option` helper above):
+    /// - field absent → `None` (no change)
+    /// - `null`       → `Some(None)` (clear)
+    /// - `"chrome"`   → `Some(Some("chrome"))` (set)
+    #[serde(default, deserialize_with = "double_option::deserialize")]
     pub cookies_from_browser: Option<Option<String>>,
     /// Phase I (v0.2.0): set to `Some(true)` when the user finishes or
     /// skips onboarding; `Some(false)` from Settings → About to
@@ -259,5 +281,48 @@ mod tests {
         .unwrap();
         let loaded = load(&p).unwrap();
         assert!(!loaded.has_seen_onboarding);
+    }
+
+    #[test]
+    fn apply_patch_clears_cookies_when_field_set_to_null() {
+        let base = Settings {
+            cookies_from_browser: Some("chrome".to_string()),
+            ..Settings::default()
+        };
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"cookies_from_browser": null}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert!(
+            result.cookies_from_browser.is_none(),
+            "null on the wire must clear the cookie setting"
+        );
+    }
+
+    #[test]
+    fn apply_patch_leaves_cookies_alone_when_field_absent() {
+        let base = Settings {
+            cookies_from_browser: Some("chrome".to_string()),
+            ..Settings::default()
+        };
+        let patch: SettingsPatch = serde_json::from_str(r#"{}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert_eq!(
+            result.cookies_from_browser.as_deref(),
+            Some("chrome"),
+            "field-absent must be a no-op"
+        );
+    }
+
+    #[test]
+    fn apply_patch_sets_cookies_when_field_is_string() {
+        let base = Settings::default();
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"cookies_from_browser": "firefox"}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert_eq!(
+            result.cookies_from_browser.as_deref(),
+            Some("firefox"),
+            "string value must set the browser"
+        );
     }
 }

@@ -130,6 +130,24 @@ const PATTERNS: &[(&str, &str)] = &[
         "No supported browsers found",
         "Goop couldn't read cookies from the selected browser. Make sure the browser is installed and you've granted the necessary permissions.",
     ),
+    // Cookie-DB read failures — paired with `is_cookie_db_error` in the
+    // extractor wrapper, which auto-retries without cookies. These
+    // friendly strings are the backstop when the retry-without also fails
+    // (URL genuinely needs cookies) so the user sees guidance instead of
+    // raw stderr. Order: keep below `could not find login cookies` so the
+    // more-specific pattern still wins. Keys narrowed to "cookie database"
+    // (singular, matches "Could not copy {Browser} cookie database") and
+    // "cookies database" (plural, matches "could not find {browser}
+    // cookies database in <path>") so a hypothetical unrelated
+    // "Could not copy file to ..." error doesn't show cookie guidance.
+    (
+        "cookie database",
+        "Couldn't read your browser cookies. Quit the browser completely and try again, or pick a different browser in Settings — Goop will retry without cookies automatically.",
+    ),
+    (
+        "cookies database",
+        "Goop couldn't find that browser's cookies database. Make sure the browser is installed and you've used it at least once, or pick a different browser in Settings.",
+    ),
     (
         "HTTP Error 429",
         "The site rate-limited the request. Wait a few minutes before trying again.",
@@ -205,6 +223,22 @@ pub fn friendly_message(stderr: &str) -> Option<String> {
 /// is necessary here.
 pub fn is_no_matching_extractor(stderr: &str) -> bool {
     stderr.contains("Unsupported URL") || stderr.contains("No suitable extractor")
+}
+
+/// True when the raw stderr indicates the chosen extractor couldn't read
+/// the user's browser cookie database — either the DB was locked /
+/// encrypted (Chrome v127+ DPAPI on Windows, Firefox profile lock) or
+/// the DB simply doesn't exist (browser not installed, non-default
+/// profile path).
+///
+/// The wrapper layer uses this to decide whether to retry the spawn
+/// without `--cookies-from-browser` before surfacing the failure. Only
+/// matches when BOTH sentinel halves are present so unrelated errors
+/// containing one half (e.g. "Could not copy file to disk", "could not
+/// find login cookies") don't trigger spurious retries.
+pub fn is_cookie_db_error(stderr: &str) -> bool {
+    (stderr.contains("Could not copy") && stderr.contains("cookie database"))
+        || (stderr.contains("could not find") && stderr.contains("cookies database"))
 }
 
 #[cfg(test)]
@@ -322,6 +356,89 @@ mod tests {
         // dispatch decisions have been made.
         assert!(!is_no_matching_extractor(
             "Neither extractor recognized this URL."
+        ));
+    }
+
+    #[test]
+    fn friendly_message_handles_chrome_cookie_copy_failure() {
+        let stderr = "ERROR: Could not copy Chrome cookie database. \
+                      See https://github.com/yt-dlp/yt-dlp/issues/7271 for more info";
+        let m = friendly_message(stderr).expect("Chrome cookie-copy must map to friendly text");
+        assert!(
+            m.to_lowercase().contains("cookies"),
+            "friendly text should mention cookies: {m}"
+        );
+        assert!(
+            m.to_lowercase().contains("close") || m.to_lowercase().contains("quit"),
+            "friendly text should tell the user to close/quit the browser: {m}"
+        );
+    }
+
+    #[test]
+    fn friendly_message_handles_browser_not_installed() {
+        let stderr = r#"ERROR: could not find opera cookies database in "C:\Users\x\AppData\Roaming\Opera Software\Opera Stable""#;
+        let m = friendly_message(stderr).expect("missing-cookies-DB must map to friendly text");
+        assert!(
+            m.to_lowercase().contains("install") || m.to_lowercase().contains("different browser"),
+            "friendly text should mention install or different-browser: {m}"
+        );
+    }
+
+    #[test]
+    fn friendly_message_login_cookies_pattern_still_takes_precedence() {
+        // Existing more-specific pattern must still win when "could not find"
+        // appears next to "login cookies" — order matters in PATTERNS.
+        let stderr = "ERROR: could not find login cookies in chrome";
+        let m = friendly_message(stderr).expect("must match the existing pattern");
+        assert!(
+            m.contains("login cookies"),
+            "more-specific pattern should win: {m}"
+        );
+    }
+
+    #[test]
+    fn is_cookie_db_error_matches_chrome_copy_failure() {
+        let stderr = "ERROR: Could not copy Chrome cookie database. \
+                      See https://github.com/yt-dlp/yt-dlp/issues/7271 for more info";
+        assert!(is_cookie_db_error(stderr));
+    }
+
+    #[test]
+    fn is_cookie_db_error_matches_missing_browser_db() {
+        let stderr = r#"ERROR: could not find opera cookies database in "C:\Users\x\AppData\Roaming\Opera Software\Opera Stable""#;
+        assert!(is_cookie_db_error(stderr));
+    }
+
+    #[test]
+    fn is_cookie_db_error_matches_firefox_locked() {
+        let stderr = "ERROR: Could not copy Firefox cookie database (profile locked)";
+        assert!(is_cookie_db_error(stderr));
+    }
+
+    #[test]
+    fn friendly_message_does_not_show_cookie_text_for_unrelated_could_not_copy() {
+        // Regression: an earlier draft used "Could not copy" as the
+        // pattern, which would have matched this hypothetical non-cookie
+        // error and shown misleading guidance. The narrowed pattern
+        // ("cookie database") avoids the false positive.
+        let stderr = "ERROR: Could not copy file to output directory";
+        assert!(
+            friendly_message(stderr).is_none(),
+            "non-cookie 'Could not copy' should not match cookie patterns"
+        );
+    }
+
+    #[test]
+    fn is_cookie_db_error_ignores_unrelated_errors() {
+        assert!(!is_cookie_db_error(
+            "ERROR: HTTP Error 429: Too Many Requests"
+        ));
+        assert!(!is_cookie_db_error("ERROR: Sign in to confirm your age"));
+        assert!(!is_cookie_db_error(""));
+        // Partial match must still require both halves of the key phrase
+        assert!(!is_cookie_db_error("Could not copy file to disk"));
+        assert!(!is_cookie_db_error(
+            "could not find login cookies in chrome"
         ));
     }
 }
