@@ -135,13 +135,17 @@ const PATTERNS: &[(&str, &str)] = &[
     // friendly strings are the backstop when the retry-without also fails
     // (URL genuinely needs cookies) so the user sees guidance instead of
     // raw stderr. Order: keep below `could not find login cookies` so the
-    // more-specific pattern still wins.
+    // more-specific pattern still wins. Keys narrowed to "cookie database"
+    // (singular, matches "Could not copy {Browser} cookie database") and
+    // "cookies database" (plural, matches "could not find {browser}
+    // cookies database in <path>") so a hypothetical unrelated
+    // "Could not copy file to ..." error doesn't show cookie guidance.
     (
-        "Could not copy",
+        "cookie database",
         "Couldn't read your browser cookies. Quit the browser completely and try again, or pick a different browser in Settings — Goop will retry without cookies automatically.",
     ),
     (
-        "could not find",
+        "cookies database",
         "Goop couldn't find that browser's cookies database. Make sure the browser is installed and you've used it at least once, or pick a different browser in Settings.",
     ),
     (
@@ -411,6 +415,19 @@ mod tests {
     fn is_cookie_db_error_matches_firefox_locked() {
         let stderr = "ERROR: Could not copy Firefox cookie database (profile locked)";
         assert!(is_cookie_db_error(stderr));
+    }
+
+    #[test]
+    fn friendly_message_does_not_show_cookie_text_for_unrelated_could_not_copy() {
+        // Regression: an earlier draft used "Could not copy" as the
+        // pattern, which would have matched this hypothetical non-cookie
+        // error and shown misleading guidance. The narrowed pattern
+        // ("cookie database") avoids the false positive.
+        let stderr = "ERROR: Could not copy file to output directory";
+        assert!(
+            friendly_message(stderr).is_none(),
+            "non-cookie 'Could not copy' should not match cookie patterns"
+        );
     }
 
     #[test]
