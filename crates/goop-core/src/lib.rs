@@ -13,7 +13,9 @@ pub use convert::{
     CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, ProbeResult,
     QualityPreset, ResolutionCap, SourceKind, TargetFormat,
 };
-pub use error::{friendly_message, is_no_matching_extractor, GoopError, IpcError};
+pub use error::{
+    friendly_message, is_cookie_db_error, is_no_matching_extractor, GoopError, IpcError,
+};
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
