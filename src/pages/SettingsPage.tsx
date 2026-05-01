@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { formatError } from "@/ipc/error";
 import { api } from "@/ipc/commands";
 import type { Theme } from "@/types";
@@ -119,12 +120,35 @@ export default function SettingsPage() {
           label="Output folder"
           hint="Where finished downloads land. Drag-and-drop conversions save next to the source file unless you override here."
         >
-          <input
-            className="w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-            defaultValue={settings.output_dir}
-            key={settings.output_dir}
-            onBlur={(e) => void patch({ output_dir: e.target.value })}
-          />
+          <div className="flex flex-col gap-2">
+            <div
+              className="truncate rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
+              title={settings.output_dir}
+            >
+              {settings.output_dir}
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const picked = await open({
+                    directory: true,
+                    multiple: false,
+                    title: "Choose output folder",
+                  });
+                  if (typeof picked === "string") {
+                    await patch({ output_dir: picked });
+                  }
+                  // Picker cancelled (returns null) — silent no-op.
+                } catch (e) {
+                  setErr(formatError(e));
+                }
+              }}
+              className="btn-press self-start rounded-md bg-surface-3 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+            >
+              Browse…
+            </button>
+          </div>
         </Field>
         <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
           <select
