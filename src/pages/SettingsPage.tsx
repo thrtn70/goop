@@ -116,10 +116,19 @@ export default function SettingsPage() {
       <h2 className="font-display text-lg font-semibold text-fg">Settings</h2>
 
       <SettingsSection title="General" description="Where things land and how many run at once.">
-        <Field
-          label="Output folder"
-          hint="Where finished downloads land. Drag-and-drop conversions save next to the source file unless you override here."
-        >
+        {/* Output folder rendered inline rather than via <Field> because
+         *  Field wraps children in a <label> element, and a <button> is
+         *  not valid descendant content of a <label> per the HTML spec.
+         *  The other Fields wrap inputs/selects/checkboxes (the labelled
+         *  controls) and remain unchanged. */}
+        <div className="block">
+          <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
+            Output folder
+          </span>
+          <p className="mb-2 text-xs text-fg-muted/70">
+            Where finished downloads land. Drag-and-drop conversions save
+            next to the source file unless you override here.
+          </p>
           <div className="flex flex-col gap-2">
             <div
               className="truncate rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
@@ -149,7 +158,7 @@ export default function SettingsPage() {
               Browse…
             </button>
           </div>
-        </Field>
+        </div>
         <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
           <select
             className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
