@@ -369,8 +369,7 @@ mod tests {
             "friendly text should mention cookies: {m}"
         );
         assert!(
-            m.to_lowercase().contains("close")
-                || m.to_lowercase().contains("quit"),
+            m.to_lowercase().contains("close") || m.to_lowercase().contains("quit"),
             "friendly text should tell the user to close/quit the browser: {m}"
         );
     }
@@ -380,8 +379,7 @@ mod tests {
         let stderr = r#"ERROR: could not find opera cookies database in "C:\Users\x\AppData\Roaming\Opera Software\Opera Stable""#;
         let m = friendly_message(stderr).expect("missing-cookies-DB must map to friendly text");
         assert!(
-            m.to_lowercase().contains("install")
-                || m.to_lowercase().contains("different browser"),
+            m.to_lowercase().contains("install") || m.to_lowercase().contains("different browser"),
             "friendly text should mention install or different-browser: {m}"
         );
     }
@@ -432,7 +430,9 @@ mod tests {
 
     #[test]
     fn is_cookie_db_error_ignores_unrelated_errors() {
-        assert!(!is_cookie_db_error("ERROR: HTTP Error 429: Too Many Requests"));
+        assert!(!is_cookie_db_error(
+            "ERROR: HTTP Error 429: Too Many Requests"
+        ));
         assert!(!is_cookie_db_error("ERROR: Sign in to confirm your age"));
         assert!(!is_cookie_db_error(""));
         // Partial match must still require both halves of the key phrase
