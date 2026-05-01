@@ -161,4 +161,39 @@ describe("app store queue and settings operations", () => {
     expect(useAppStore.getState().settings).toEqual(next);
     expect(current.theme).toBe("system");
   });
+
+  it("enqueues a one-shot info toast for cookie_fallback sidecar warnings", () => {
+    const before = useAppStore.getState().toasts.length;
+    useAppStore.getState().handleSidecarEvent({
+      kind: "warning",
+      code: "cookie_fallback",
+      message: "Couldn't read chrome cookies — proceeded without.",
+    });
+    const after = useAppStore.getState().toasts;
+    expect(after.length).toBe(before + 1);
+    const t = after[after.length - 1];
+    expect(t.variant).toBe("info");
+    expect(t.title.toLowerCase()).toContain("cookies");
+    expect(t.detail).toContain("chrome");
+  });
+
+  it("ignores yt_dlp_updated sidecar events (handled by version subscriber)", () => {
+    const before = useAppStore.getState().toasts.length;
+    useAppStore.getState().handleSidecarEvent({
+      kind: "yt_dlp_updated",
+      from_version: "2024.10.07",
+      to_version: "2024.11.18",
+    });
+    expect(useAppStore.getState().toasts.length).toBe(before);
+  });
+
+  it("ignores warning sidecar events with unknown codes", () => {
+    const before = useAppStore.getState().toasts.length;
+    useAppStore.getState().handleSidecarEvent({
+      kind: "warning",
+      code: "unknown_future_code",
+      message: "noise",
+    });
+    expect(useAppStore.getState().toasts.length).toBe(before);
+  });
 });

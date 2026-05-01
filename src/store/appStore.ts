@@ -12,6 +12,7 @@ import type {
   QueueEvent,
   Settings,
   SettingsPatch,
+  SidecarEvent,
   UpdateInfo,
 } from "@/types";
 import { api } from "@/ipc/commands";
@@ -129,6 +130,13 @@ type AppStoreState = {
   cancel: (id: JobId) => Promise<void>;
   enqueueToast: (t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & { ttlMs?: number | null }) => string;
   dismissToast: (id: string) => void;
+  /**
+   * Routes a `SidecarEvent` to the right side effect. Handles
+   * `kind === "warning"` (cookie auto-fallback, future broadcast warnings)
+   * by enqueuing a one-shot info toast; other variants are no-ops here
+   * (yt_dlp_updated is consumed by the version-info subscriber instead).
+   */
+  handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
   clearUnseen: () => void;
   /**
@@ -332,6 +340,21 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   dismissToast(id) {
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
+  handleSidecarEvent(e) {
+    if (e.kind === "warning" && e.code === "cookie_fallback") {
+      // The cookie auto-fallback fires once per job at the wrapper layer
+      // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
+      // lock, missing browser, etc.). Surface as a non-blocking info toast
+      // so the user knows what happened without a hard error.
+      get().enqueueToast({
+        variant: "info",
+        title: "Cookies skipped for this download",
+        detail: e.message,
+      });
+    }
+    // yt_dlp_updated and other warning codes are consumed by their own
+    // dedicated subscribers (e.g. version-info refresh in useAppVersion).
   },
   incrementUnseen() {
     set((s) => ({ unseenCompletions: s.unseenCompletions + 1 }));
@@ -663,9 +686,7 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
           void useAppStore.getState().refreshDoneToday();
         }
       },
-      onSidecar: () => {
-        /* reserved for future sidecar-driven UI state */
-      },
+      onSidecar: (e) => useAppStore.getState().handleSidecarEvent(e),
       onUpdateProgress: (e) =>
         useAppStore.getState().applyUpdateProgress(Number(e.downloaded), Number(e.total)),
     });
