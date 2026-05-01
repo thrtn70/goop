@@ -58,8 +58,11 @@ impl<'a> GalleryDl<'a> {
     /// On a cookie-DB read failure (Chrome v127+ DPAPI lock, missing
     /// browser, etc.), retries silently without `--cookies-from-browser`.
     /// The retry is silent because `probe` has no event sink to surface
-    /// a warning through; the user sees the warning when the actual
-    /// download retries via `download` below.
+    /// a warning through; in the typical flow the user sees the warning
+    /// when the actual `download` retries. Best-effort: if the download
+    /// path doesn't reproduce the cookie failure, no warning lands —
+    /// the user just silently proceeds without cookies, which is
+    /// acceptable since the extract still succeeds.
     pub async fn probe(
         resolver: &BinaryResolver,
         url: &str,
@@ -227,6 +230,12 @@ impl<'a> GalleryDl<'a> {
         // gallery-dl printing a path and the VFS materialising it.
         let mut in_loop_count: u32 = 0;
         let mut stderr_tail = String::new();
+        // Sticky witness for the cookie-DB error. See ytdlp.rs for the
+        // full rationale: stderr_tail is a ring-buffer; we capture the
+        // first matching line so the retry guard in `download` can still
+        // recognise the failure even if later stderr flushes the line
+        // out of the tail window.
+        let mut cookie_error_line: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -269,6 +278,9 @@ impl<'a> GalleryDl<'a> {
                 }
                 line = err_reader.next_line() => {
                     if let Ok(Some(l)) = line {
+                        if cookie_error_line.is_none() && is_cookie_db_error(&l) {
+                            cookie_error_line = Some(l.clone());
+                        }
                         stderr_tail.push_str(&l);
                         stderr_tail.push('\n');
                         if stderr_tail.len() > 8192 {
@@ -291,9 +303,18 @@ impl<'a> GalleryDl<'a> {
 
         let status = child.wait().await?;
         if !status.success() {
+            // Preserve the cookie-error signal even if the tail
+            // truncated it out — prepend the captured line so the retry
+            // guard in `download` can still recognise the failure.
+            let stderr = match cookie_error_line {
+                Some(ref line) if !is_cookie_db_error(&stderr_tail) => {
+                    format!("{line}\n{stderr_tail}")
+                }
+                _ => stderr_tail,
+            };
             return Err(GoopError::SubprocessFailed {
                 binary: "gallery-dl".into(),
-                stderr: stderr_tail,
+                stderr,
             });
         }
         // Authoritative count: walk the output directory for files
