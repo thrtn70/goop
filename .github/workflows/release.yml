@@ -59,7 +59,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { targets: "${{ matrix.target }}" }
+      # Restore from existing main-branch caches but don't save new ones.
+      # Tag builds happen rarely (a few per quarter) and each adds ~500MB
+      # to the 10GB cache quota; over time that fills up and the post-step
+      # cache-save fails (e.g. v0.2.1's Windows builder hit the quota at
+      # 9.4GB). save-if=false lets us keep the warm-start benefit without
+      # accumulating tag-only caches forever.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: "false"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: "20", cache: "npm" }
       - name: Fetch sidecars
