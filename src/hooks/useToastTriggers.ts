@@ -1,7 +1,20 @@
 import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
+import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
 import type { Job, JobKind, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+
+async function fireNativeNotification(title: string, body?: string): Promise<void> {
+  if (typeof document !== "undefined" && document.hasFocus()) return;
+  try {
+    const granted = await isPermissionGranted();
+    if (!granted) return;
+    await sendNotification(body ? { title, body } : { title });
+  } catch {
+    // The in-app toast already informed the user — a follow-up "notification
+    // failed" toast would be noisy and not actionable here.
+  }
+}
 
 /**
  * Watches the queue store for job state transitions and fires toasts.
@@ -80,6 +93,8 @@ export function useToastTriggers(): void {
           const sourceLabel = jobLabel(job, payload);
           const outputPath = job.result?.output_path ?? null;
 
+          const notificationsEnabled = state.settings?.notifications_enabled === true;
+
           if (batchId) {
             const batch = batchesRef.current.get(batchId) ?? {
               ids: new Set<string>(),
@@ -103,10 +118,18 @@ export function useToastTriggers(): void {
             });
             if (!stillOpen) {
               emitBatchToast(enqueueToast, batch);
+              if (notificationsEnabled) {
+                void fireNativeNotification(batchNotificationTitle(batch));
+              }
               batchesRef.current.delete(batchId);
             }
           } else {
             emitIndividualToast(enqueueToast, job.kind, currentTerm, sourceLabel, outputPath, errorMessage(job.state));
+            if (notificationsEnabled && currentTerm !== "cancelled") {
+              void fireNativeNotification(
+                individualNotificationTitle(job.kind, currentTerm, sourceLabel),
+              );
+            }
           }
 
           if (currentTerm === "done") {
@@ -177,6 +200,38 @@ function emitIndividualToast(
       title: `${label} cancelled`,
     });
   }
+}
+
+function individualNotificationTitle(
+  kind: JobKind,
+  term: "done" | "error",
+  label: string,
+): string {
+  if (term === "error") return `${label} failed`;
+  const verb = kind === "extract" ? "Downloaded" : "Processed";
+  return `${verb} ${label}`;
+}
+
+function batchNotificationTitle(batch: {
+  ids: Set<string>;
+  done: number;
+  failed: number;
+  cancelled: number;
+  kind: JobKind | null;
+}): string {
+  const total = batch.ids.size;
+  const verb = batch.kind === "extract" ? "downloaded" : "processed";
+  if (batch.failed === 0 && batch.cancelled === 0) {
+    return `${total} file${total !== 1 ? "s" : ""} ${verb}`;
+  }
+  if (batch.done === 0 && batch.failed > 0) {
+    return `${batch.failed} file${batch.failed !== 1 ? "s" : ""} failed`;
+  }
+  const parts: string[] = [];
+  if (batch.done > 0) parts.push(`${batch.done} done`);
+  if (batch.failed > 0) parts.push(`${batch.failed} failed`);
+  if (batch.cancelled > 0) parts.push(`${batch.cancelled} cancelled`);
+  return parts.join(" · ");
 }
 
 function emitBatchToast(

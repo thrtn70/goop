@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import type { UrlProbe, FormatOption } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import ProbeCard from "./ProbeCard";
+
+function looksLikeCookieError(message: string | null): boolean {
+  return message != null && message.toLowerCase().includes("cookie");
+}
 
 export default function UrlHero({ url }: { url?: string }) {
   const [probe, setProbe] = useState<UrlProbe | null>(null);
@@ -12,6 +17,7 @@ export default function UrlHero({ url }: { url?: string }) {
   const [lastUrl, setLastUrl] = useState<string | null>(null);
   const cancelledRef = useRef(false);
   const outputDir = useAppStore((s) => s.settings?.output_dir ?? "~/Downloads");
+  const navigate = useNavigate();
 
   async function handleProbe(u: string) {
     cancelledRef.current = false;
@@ -116,6 +122,15 @@ export default function UrlHero({ url }: { url?: string }) {
                 className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
               >
                 Try again
+              </button>
+            )}
+            {looksLikeCookieError(error) && (
+              <button
+                type="button"
+                onClick={() => navigate("/settings#cookies-from-browser")}
+                className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
+              >
+                Cookie settings
               </button>
             )}
             <button

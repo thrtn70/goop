@@ -234,6 +234,7 @@ function emptyPatch(): SettingsPatch {
     hw_acceleration_enabled: null,
     cookies_from_browser: null,
     has_seen_onboarding: null,
+    notifications_enabled: null,
   };
 }
 

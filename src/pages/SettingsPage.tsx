@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { formatError } from "@/ipc/error";
 import { api } from "@/ipc/commands";
 import type { Theme } from "@/types";
@@ -8,6 +10,8 @@ import { useAppStore } from "@/store/appStore";
 import SettingsSection from "@/components/SettingsSection";
 import PresetManager from "@/features/presets/PresetManager";
 import { useAppVersion } from "@/hooks/useAppVersion";
+
+const COOKIES_ANCHOR_ID = "cookies-from-browser";
 
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 16;
@@ -26,6 +30,7 @@ export default function SettingsPage() {
   const patchSettings = useAppStore((s) => s.patchSettings);
   const updateInfo = useAppStore((s) => s.updateInfo);
   const checkForUpdate = useAppStore((s) => s.checkForUpdate);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const version = useAppVersion();
   const [err, setErr] = useState<string | null>(null);
   const [checkingForUpdate, setCheckingForUpdate] = useState(false);
@@ -40,12 +45,45 @@ export default function SettingsPage() {
     }
   }, [settings?.theme]);
 
+  const { hash } = useLocation();
+  const settingsLoaded = settings !== null;
+  useEffect(() => {
+    if (hash !== `#${COOKIES_ANCHOR_ID}` || !settingsLoaded) return;
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(COOKIES_ANCHOR_ID);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const select = el.querySelector("select");
+      if (select instanceof HTMLSelectElement) select.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [hash, settingsLoaded]);
+
   async function patch(partial: Parameters<typeof patchSettings>[0]): Promise<void> {
     try {
       await patchSettings(partial);
     } catch (e: unknown) {
       setErr(formatError(e));
     }
+  }
+
+  async function handleNotificationsToggle(enabled: boolean): Promise<void> {
+    if (enabled) {
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const result = await requestPermission();
+        granted = result === "granted";
+      }
+      if (!granted) {
+        enqueueToast({
+          variant: "info",
+          title: "Notifications blocked",
+          detail: "Allow Goop to send notifications in your system settings to use this.",
+        });
+        return;
+      }
+    }
+    await patch({ notifications_enabled: enabled });
   }
 
   async function handleCheckNow() {
@@ -213,29 +251,45 @@ export default function SettingsPage() {
           </label>
         </Field>
         <Field
-          label="Cookies from browser"
-          hint="Use cookies from a logged-in browser to download videos from sites that require an account (Twitter/X, Instagram, etc.). Cookies are read locally and never leave your machine."
+          label="Notifications"
+          hint="Get a system notification when a download or conversion finishes. Only fires when Goop isn't focused. Asks for permission the first time you turn it on."
         >
-          <select
-            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-            value={settings.cookies_from_browser ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              void patch({ cookies_from_browser: v === "" ? null : v });
-            }}
-          >
-            <option value="">None (off)</option>
-            <option value="brave">Brave</option>
-            <option value="chrome">Chrome</option>
-            <option value="chromium">Chromium</option>
-            <option value="edge">Edge</option>
-            <option value="firefox">Firefox</option>
-            <option value="opera">Opera</option>
-            <option value="safari">Safari</option>
-            <option value="vivaldi">Vivaldi</option>
-            <option value="whale">Whale</option>
-          </select>
+          <label className="flex items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              checked={settings.notifications_enabled}
+              onChange={(e) => void handleNotificationsToggle(e.target.checked)}
+              className="h-4 w-4 rounded border-subtle bg-surface-2 accent-accent"
+            />
+            <span>Notify me when jobs finish</span>
+          </label>
         </Field>
+        <div id={COOKIES_ANCHOR_ID}>
+          <Field
+            label="Cookies from browser"
+            hint="Use cookies from a logged-in browser to download videos from sites that require an account (Twitter/X, Instagram, etc.). Cookies are read locally and never leave your machine. If a download fails because the browser's cookie database is locked, Goop retries without cookies automatically — pick a different browser or close it to use cookies."
+          >
+            <select
+              className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+              value={settings.cookies_from_browser ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                void patch({ cookies_from_browser: v === "" ? null : v });
+              }}
+            >
+              <option value="">None (off)</option>
+              <option value="brave">Brave</option>
+              <option value="chrome">Chrome</option>
+              <option value="chromium">Chromium</option>
+              <option value="edge">Edge</option>
+              <option value="firefox">Firefox</option>
+              <option value="opera">Opera</option>
+              <option value="safari">Safari</option>
+              <option value="vivaldi">Vivaldi</option>
+              <option value="whale">Whale</option>
+            </select>
+          </Field>
+        </div>
       </SettingsSection>
 
       <SettingsSection title="Updates" description="Keep Goop and its sidecars current.">

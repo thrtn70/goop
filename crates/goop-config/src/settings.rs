@@ -44,6 +44,11 @@ pub struct Settings {
     /// flips it back to false.
     #[serde(default)]
     pub has_seen_onboarding: bool,
+    /// Off by default — opt-in toggle in Settings. When true, terminal
+    /// job transitions fire a native OS notification (in addition to
+    /// the in-app toast) if the goop window does not have focus.
+    #[serde(default)]
+    pub notifications_enabled: bool,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -87,6 +92,7 @@ impl Default for Settings {
             hw_acceleration_enabled: default_hw_acceleration_enabled(),
             cookies_from_browser: None,
             has_seen_onboarding: false,
+            notifications_enabled: false,
         }
     }
 }
@@ -135,6 +141,7 @@ pub struct SettingsPatch {
     /// skips onboarding; `Some(false)` from Settings → About to
     /// re-show the welcome screen.
     pub has_seen_onboarding: Option<bool>,
+    pub notifications_enabled: Option<bool>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -199,6 +206,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.has_seen_onboarding {
         next.has_seen_onboarding = v;
+    }
+    if let Some(v) = patch.notifications_enabled {
+        next.notifications_enabled = v;
     }
     next
 }
@@ -324,5 +334,44 @@ mod tests {
             Some("firefox"),
             "string value must set the browser"
         );
+    }
+
+    #[test]
+    fn notifications_enabled_defaults_to_false() {
+        assert!(!Settings::default().notifications_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_without_notifications_field_load_with_default_false() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(!loaded.notifications_enabled);
+    }
+
+    #[test]
+    fn apply_patch_can_flip_notifications_flag() {
+        let base = Settings::default();
+        let patched = apply_patch(
+            &base,
+            SettingsPatch {
+                notifications_enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(patched.notifications_enabled);
+        let reset = apply_patch(
+            &patched,
+            SettingsPatch {
+                notifications_enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!reset.notifications_enabled);
     }
 }

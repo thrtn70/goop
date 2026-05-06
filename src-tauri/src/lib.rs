@@ -32,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Tauri's externalBin bundler ships sidecars in the same directory as
             // the app's main executable (Contents/MacOS on macOS; next to the .exe

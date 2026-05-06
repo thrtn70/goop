@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import SettingsPage from "@/pages/SettingsPage";
 import { useAppStore } from "@/store/appStore";
 import type { Settings } from "@/types";
+
+function renderPage(initialEntries: string[] = ["/settings"]) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <SettingsPage />
+    </MemoryRouter>,
+  );
+}
 
 const dialogMocks = vi.hoisted(() => ({
   open: vi.fn(),
@@ -64,6 +73,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     hw_acceleration_enabled: true,
     cookies_from_browser: null,
     has_seen_onboarding: true,
+    notifications_enabled: false,
     ...overrides,
   };
 }
@@ -91,7 +101,7 @@ afterEach(() => {
 
 describe("SettingsPage Output folder Browse picker", () => {
   it("renders the current path and a Browse button (no typed input)", () => {
-    render(<SettingsPage />);
+    renderPage();
     expect(screen.getByText("/Users/example/Downloads")).toBeTruthy();
     // Match the button by its exact label (the ellipsis is U+2026).
     expect(screen.getByText("Browse…")).toBeTruthy();
@@ -103,7 +113,7 @@ describe("SettingsPage Output folder Browse picker", () => {
     dialogMocks.open.mockResolvedValue("/picked/folder");
     const user = userEvent.setup();
 
-    render(<SettingsPage />);
+    renderPage();
     await user.click(screen.getByText("Browse…"));
 
     await waitFor(() => {
@@ -120,7 +130,7 @@ describe("SettingsPage Output folder Browse picker", () => {
     dialogMocks.open.mockResolvedValue(null);
     const user = userEvent.setup();
 
-    render(<SettingsPage />);
+    renderPage();
     await user.click(screen.getByText("Browse…"));
 
     await waitFor(() => expect(dialogMocks.open).toHaveBeenCalled());

@@ -17,4 +17,10 @@ cookies_from_browser: string | null,
  * Settings → About via a "Show welcome screen" button that
  * flips it back to false.
  */
-has_seen_onboarding: boolean, };
+has_seen_onboarding: boolean, 
+/**
+ * Off by default — opt-in toggle in Settings. When true, terminal
+ * job transitions fire a native OS notification (in addition to
+ * the in-app toast) if the goop window does not have focus.
+ */
+notifications_enabled: boolean, };

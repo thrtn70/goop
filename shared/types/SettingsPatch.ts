@@ -15,4 +15,4 @@ cookies_from_browser: string | null | null,
  * skips onboarding; `Some(false)` from Settings → About to
  * re-show the welcome screen.
  */
-has_seen_onboarding: boolean | null, };
+has_seen_onboarding: boolean | null, notifications_enabled: boolean | null, };

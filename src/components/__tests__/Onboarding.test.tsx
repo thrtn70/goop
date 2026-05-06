@@ -39,6 +39,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     hw_acceleration_enabled: true,
     cookies_from_browser: null,
     has_seen_onboarding: false,
+    notifications_enabled: false,
     ...overrides,
   };
 }
