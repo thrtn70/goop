@@ -5,6 +5,7 @@ import ToastContainer from "@/components/ToastContainer";
 import UpdateBanner from "@/components/UpdateBanner";
 import ExtractPage from "@/pages/ExtractPage";
 import { useToastTriggers } from "@/hooks/useToastTriggers";
+import { useWindowTitle } from "@/hooks/useWindowTitle";
 
 // Phase M: lazy-load every page except Extract (the default landing).
 // Each becomes its own chunk so the cold-start payload is just
@@ -33,6 +34,7 @@ function PageFallback() {
 
 export default function App() {
   useToastTriggers();
+  useWindowTitle();
   return (
     <div className="flex h-screen flex-col">
       <UpdateBanner />
