@@ -140,14 +140,22 @@ function Card({
           e.stopPropagation();
           toggleSelection(job.id);
         }}
-        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-[10px] transition duration-fast ease-out ${
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleSelection(job.id);
+          }
+        }}
+        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-[10px] transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
           selected
             ? "border-accent bg-accent text-accent-fg"
             : "border-subtle bg-surface-1/70 text-fg-muted opacity-0 group-hover:opacity-100"
         }`}
-        aria-label="Select card"
+        aria-label={`Select ${basename(outputPath)}`}
         role="checkbox"
         aria-checked={selected}
+        tabIndex={0}
       >
         {selected ? "✓" : ""}
       </span>
@@ -166,9 +174,9 @@ function Card({
           }}
           role="button"
           tabIndex={0}
-          aria-label="Show in folder"
+          aria-label={`Show ${basename(outputPath)} in folder`}
           title="Show in folder"
-          className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
+          className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
         >
           <FolderOpen size={12} strokeWidth={2.5} aria-hidden="true" />
         </span>
