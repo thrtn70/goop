@@ -220,7 +220,14 @@ function newToastId(): string {
   }
 }
 
-function emptyPatch(): SettingsPatch {
+// Tri-state Option<Option<T>> fields are intentionally omitted from the
+// no-op patch. JSON.stringify drops absent keys (and undefined-valued keys
+// equivalently), which the backend's double_option deserializer reads as
+// "no change". Including them as `null` would mean "clear" on every patch
+// and silently wipe the user's setting whenever an unrelated field saves.
+type NoopPatch = Omit<SettingsPatch, "cookies_from_browser" | "output_dir_extract">;
+
+function emptyPatch(): NoopPatch {
   return {
     output_dir: null,
     theme: null,
@@ -232,7 +239,6 @@ function emptyPatch(): SettingsPatch {
     history_view_mode: null,
     queue_sidebar_width: null,
     hw_acceleration_enabled: null,
-    cookies_from_browser: null,
     has_seen_onboarding: null,
     notifications_enabled: null,
   };

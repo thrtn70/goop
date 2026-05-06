@@ -74,6 +74,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    output_dir_extract: null,
     ...overrides,
   };
 }
@@ -103,8 +104,7 @@ describe("SettingsPage Output folder Browse picker", () => {
   it("renders the current path and a Browse button (no typed input)", () => {
     renderPage();
     expect(screen.getByText("/Users/example/Downloads")).toBeTruthy();
-    // Match the button by its exact label (the ellipsis is U+2026).
-    expect(screen.getByText("Browse…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Browse for output folder" })).toBeTruthy();
     // No typed-input affordance for output_dir.
     expect(screen.queryByDisplayValue("/Users/example/Downloads")).toBeNull();
   });
@@ -114,7 +114,7 @@ describe("SettingsPage Output folder Browse picker", () => {
     const user = userEvent.setup();
 
     renderPage();
-    await user.click(screen.getByText("Browse…"));
+    await user.click(screen.getByRole("button", { name: "Browse for output folder" }));
 
     await waitFor(() => {
       expect(dialogMocks.open).toHaveBeenCalledWith(
@@ -131,7 +131,7 @@ describe("SettingsPage Output folder Browse picker", () => {
     const user = userEvent.setup();
 
     renderPage();
-    await user.click(screen.getByText("Browse…"));
+    await user.click(screen.getByRole("button", { name: "Browse for output folder" }));
 
     await waitFor(() => expect(dialogMocks.open).toHaveBeenCalled());
     expect(apiMocks.settings.set).not.toHaveBeenCalled();

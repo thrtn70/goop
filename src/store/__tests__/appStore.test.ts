@@ -58,6 +58,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    output_dir_extract: null,
     ...overrides,
   };
 }
@@ -161,6 +162,18 @@ describe("app store queue and settings operations", () => {
     );
     expect(useAppStore.getState().settings).toEqual(next);
     expect(current.theme).toBe("system");
+  });
+
+  it("omits tri-state fields from unrelated patches so the backend leaves them alone", async () => {
+    const current = makeSettings({ cookies_from_browser: "chrome" });
+    vi.mocked(api.settings.set).mockResolvedValue(current);
+    useAppStore.setState({ settings: current });
+
+    await useAppStore.getState().patchSettings({ theme: "dark" });
+
+    const sent = vi.mocked(api.settings.set).mock.calls[0]?.[0] ?? {};
+    expect(sent).not.toHaveProperty("cookies_from_browser");
+    expect(sent).not.toHaveProperty("output_dir_extract");
   });
 
   it("enqueues a one-shot info toast for cookie_fallback sidecar warnings", () => {

@@ -40,6 +40,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cookies_from_browser: null,
     has_seen_onboarding: false,
     notifications_enabled: false,
+    output_dir_extract: null,
     ...overrides,
   };
 }

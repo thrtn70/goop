@@ -49,6 +49,11 @@ pub struct Settings {
     /// the in-app toast) if the goop window does not have focus.
     #[serde(default)]
     pub notifications_enabled: bool,
+    /// Optional override for where URL extracts land. `None` means use
+    /// `output_dir` (the global default). Useful for users who want
+    /// downloads kept separate from conversions.
+    #[serde(default)]
+    pub output_dir_extract: Option<String>,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -93,6 +98,7 @@ impl Default for Settings {
             cookies_from_browser: None,
             has_seen_onboarding: false,
             notifications_enabled: false,
+            output_dir_extract: None,
         }
     }
 }
@@ -142,6 +148,12 @@ pub struct SettingsPatch {
     /// re-show the welcome screen.
     pub has_seen_onboarding: Option<bool>,
     pub notifications_enabled: Option<bool>,
+    /// Tri-state on the wire (see `double_option` helper):
+    /// - field absent → `None` (no change)
+    /// - `null`       → `Some(None)` (clear the override)
+    /// - `"/path"`    → `Some(Some(path))` (set)
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub output_dir_extract: Option<Option<String>>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -209,6 +221,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.notifications_enabled {
         next.notifications_enabled = v;
+    }
+    if let Some(v) = patch.output_dir_extract {
+        next.output_dir_extract = v.map(|p| expand(&p).to_string_lossy().into_owned());
     }
     next
 }
@@ -373,5 +388,54 @@ mod tests {
             },
         );
         assert!(!reset.notifications_enabled);
+    }
+
+    #[test]
+    fn output_dir_extract_defaults_to_none() {
+        assert!(Settings::default().output_dir_extract.is_none());
+    }
+
+    #[test]
+    fn legacy_settings_without_output_dir_extract_load_with_default_none() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(loaded.output_dir_extract.is_none());
+    }
+
+    #[test]
+    fn apply_patch_sets_output_dir_extract_from_string() {
+        let base = Settings::default();
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"output_dir_extract": "/tmp/extracts"}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert_eq!(result.output_dir_extract.as_deref(), Some("/tmp/extracts"));
+    }
+
+    #[test]
+    fn apply_patch_clears_output_dir_extract_with_null() {
+        let base = Settings {
+            output_dir_extract: Some("/tmp/old".into()),
+            ..Settings::default()
+        };
+        let patch: SettingsPatch = serde_json::from_str(r#"{"output_dir_extract": null}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert!(result.output_dir_extract.is_none());
+    }
+
+    #[test]
+    fn apply_patch_leaves_output_dir_extract_alone_when_field_absent() {
+        let base = Settings {
+            output_dir_extract: Some("/tmp/keep".into()),
+            ..Settings::default()
+        };
+        let patch: SettingsPatch = serde_json::from_str(r#"{}"#).unwrap();
+        let result = apply_patch(&base, patch);
+        assert_eq!(result.output_dir_extract.as_deref(), Some("/tmp/keep"));
     }
 }

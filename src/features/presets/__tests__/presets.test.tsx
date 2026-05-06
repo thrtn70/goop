@@ -171,6 +171,7 @@ describe("UpdateBanner", () => {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    output_dir_extract: null,
   };
 
   it("renders nothing when no update is available", () => {

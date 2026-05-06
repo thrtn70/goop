@@ -23,4 +23,10 @@ has_seen_onboarding: boolean,
  * job transitions fire a native OS notification (in addition to
  * the in-app toast) if the goop window does not have focus.
  */
-notifications_enabled: boolean, };
+notifications_enabled: boolean, 
+/**
+ * Optional override for where URL extracts land. `None` means use
+ * `output_dir` (the global default). Useful for users who want
+ * downloads kept separate from conversions.
+ */
+output_dir_extract: string | null, };

@@ -16,7 +16,9 @@ export default function UrlHero({ url }: { url?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [lastUrl, setLastUrl] = useState<string | null>(null);
   const cancelledRef = useRef(false);
-  const outputDir = useAppStore((s) => s.settings?.output_dir ?? "~/Downloads");
+  const outputDir = useAppStore(
+    (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
+  );
   const navigate = useNavigate();
 
   async function handleProbe(u: string) {

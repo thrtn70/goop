@@ -176,6 +176,7 @@ export default function SettingsPage() {
             </div>
             <button
               type="button"
+              aria-label="Browse for output folder"
               onClick={async () => {
                 try {
                   const picked = await open({
@@ -195,6 +196,57 @@ export default function SettingsPage() {
             >
               Browse…
             </button>
+          </div>
+        </div>
+        <div className="block">
+          <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
+            Downloads folder (optional)
+          </span>
+          <p className="mb-2 text-xs text-fg-muted/70">
+            Override where URL extracts land. Leave unset to use the
+            output folder above for everything.
+          </p>
+          <div className="flex flex-col gap-2">
+            <div
+              className="truncate rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
+              title={settings.output_dir_extract ?? "Using output folder"}
+            >
+              {settings.output_dir_extract ?? (
+                <span className="text-fg-muted">Using output folder</span>
+              )}
+            </div>
+            <div className="flex gap-2 self-start">
+              <button
+                type="button"
+                aria-label="Browse for downloads folder"
+                onClick={async () => {
+                  try {
+                    const picked = await open({
+                      directory: true,
+                      multiple: false,
+                      title: "Choose downloads folder",
+                    });
+                    if (typeof picked === "string") {
+                      await patch({ output_dir_extract: picked });
+                    }
+                  } catch (e) {
+                    setErr(formatError(e));
+                  }
+                }}
+                className="btn-press rounded-md bg-surface-3 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
+              >
+                Browse…
+              </button>
+              {settings.output_dir_extract && (
+                <button
+                  type="button"
+                  onClick={() => void patch({ output_dir_extract: null })}
+                  className="btn-press rounded-md px-3 py-1.5 text-xs font-medium text-fg-muted transition duration-fast ease-out hover:text-fg"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
         </div>
         <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
