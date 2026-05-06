@@ -31,6 +31,10 @@ const VARIANT_ICON_COLORS: Record<ToastData["variant"], string> = {
   info: "text-accent",
 };
 
+function truncateForAria(text: string): string {
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
 export default function Toast({ toast, onDismiss }: ToastProps) {
   const [expanded, setExpanded] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -112,7 +116,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
       </div>
       <button
         type="button"
-        aria-label="Dismiss"
+        aria-label={`Dismiss: ${truncateForAria(toast.title)}`}
         onClick={() => onDismiss(toast.id)}
         className="shrink-0 text-fg-muted transition duration-fast ease-out hover:text-fg"
       >
