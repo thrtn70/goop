@@ -145,7 +145,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                     checked={selected}
                     onChange={() => toggleSelection(j.id)}
                     onClick={(e) => e.stopPropagation()}
-                    aria-label="Select row"
+                    aria-label={outputPath ? `Select ${basename(outputPath)}` : "Select row"}
                   />
                 </td>
                 <td className="p-2 text-xs text-fg-muted">{String(j.kind)}</td>
@@ -176,7 +176,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                           void revealFile(outputPath);
                         }}
                         className="inline-flex items-center justify-center text-fg-muted transition duration-fast ease-out hover:text-fg"
-                        aria-label="Show in folder"
+                        aria-label={`Show ${basename(outputPath)} in folder`}
                         title="Show in folder"
                       >
                         <FolderOpen size={14} strokeWidth={2.5} aria-hidden="true" />
@@ -189,7 +189,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                         onQuickView(j);
                       }}
                       className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
-                      aria-label="Quick view"
+                      aria-label={outputPath ? `Quick view ${basename(outputPath)}` : "Quick view"}
                       title="Quick View (Space)"
                     >
                       <Eye size={14} strokeWidth={2.5} aria-hidden="true" />
