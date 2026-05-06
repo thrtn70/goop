@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { FolderOpen } from "lucide-react";
 import type { Job, JobId, SourceKind } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useRevealFile } from "@/hooks/useRevealFile";
 import { useThumbnail } from "@/hooks/useThumbnail";
 import EmptyHistory from "@/features/history/EmptyHistory";
 
@@ -62,6 +64,7 @@ function Card({
   onQuickView: (j: Job) => void;
 }) {
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
+  const revealFile = useRevealFile();
   const ref = useRef<HTMLButtonElement | null>(null);
   const [visible, setVisible] = useState(false);
   const outputPath = job.result?.output_path ?? null;
@@ -148,6 +151,28 @@ function Card({
       >
         {selected ? "✓" : ""}
       </span>
+      {outputPath && (
+        <span
+          onClick={(e) => {
+            e.stopPropagation();
+            void revealFile(outputPath);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              void revealFile(outputPath);
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-label="Show in folder"
+          title="Show in folder"
+          className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
+        >
+          <FolderOpen size={12} strokeWidth={2.5} aria-hidden="true" />
+        </span>
+      )}
     </button>
   );
 }

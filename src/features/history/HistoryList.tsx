@@ -1,6 +1,7 @@
-import { ChevronDown, ChevronsUpDown, ChevronUp, Eye } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, ChevronUp, Eye, FolderOpen } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useRevealFile } from "@/hooks/useRevealFile";
 import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryListProps {
@@ -89,6 +90,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
   const search = useAppStore((s) => s.history.search);
   const kind = useAppStore((s) => s.history.kind);
+  const revealFile = useRevealFile();
 
   if (jobs.length === 0) {
     const filtersActive = search.trim() !== "" || kind !== null;
@@ -111,7 +113,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
             <th className="p-2 text-right">
               <SortHeader label="Date" col="date" className="justify-end" />
             </th>
-            <th className="w-10 p-2 pr-6" />
+            <th className="w-20 p-2 pr-6" />
           </tr>
         </thead>
         <tbody>
@@ -119,6 +121,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
             const key = jobIdKey(j.id);
             const selected = selectedIds.has(key);
             const previewing = previewSelectedId === key;
+            const outputPath = j.result?.output_path ?? null;
             return (
               <tr
                 key={key}
@@ -164,18 +167,34 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                   {timeAgo(j.finished_at)}
                 </td>
                 <td className="p-2 pr-6 text-right">
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onQuickView(j);
-                    }}
-                    className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
-                    aria-label="Quick view"
-                    title="Quick View (Space)"
-                  >
-                    <Eye size={14} strokeWidth={2.5} aria-hidden="true" />
-                  </button>
+                  <div className="flex items-center justify-end gap-2">
+                    {outputPath && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void revealFile(outputPath);
+                        }}
+                        className="inline-flex items-center justify-center text-fg-muted transition duration-fast ease-out hover:text-fg"
+                        aria-label="Show in folder"
+                        title="Show in folder"
+                      >
+                        <FolderOpen size={14} strokeWidth={2.5} aria-hidden="true" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onQuickView(j);
+                      }}
+                      className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
+                      aria-label="Quick view"
+                      title="Quick View (Space)"
+                    >
+                      <Eye size={14} strokeWidth={2.5} aria-hidden="true" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             );
