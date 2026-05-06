@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { AlertTriangle, Check, Info, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { api } from "@/ipc/commands";
+import { useRevealFile } from "@/hooks/useRevealFile";
 import type { Toast as ToastData } from "@/store/appStore";
 
 interface ToastProps {
@@ -34,6 +34,7 @@ const VARIANT_ICON_COLORS: Record<ToastData["variant"], string> = {
 export default function Toast({ toast, onDismiss }: ToastProps) {
   const [expanded, setExpanded] = useState(false);
   const [paused, setPaused] = useState(false);
+  const revealFile = useRevealFile();
 
   useEffect(() => {
     if (toast.dismissAt === null || paused) return;
@@ -48,7 +49,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
 
   const handleReveal = () => {
     if (!toast.outputPath) return;
-    void api.queue.reveal(toast.outputPath);
+    void revealFile(toast.outputPath);
   };
 
   const canReveal = Boolean(toast.outputPath) && toast.variant === "success";
