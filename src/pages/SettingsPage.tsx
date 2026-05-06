@@ -5,13 +5,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { formatError } from "@/ipc/error";
 import { api } from "@/ipc/commands";
-import type { Theme } from "@/types";
+import type { ExtractNamingScheme, Theme } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import SettingsSection from "@/components/SettingsSection";
 import PresetManager from "@/features/presets/PresetManager";
 import { useAppVersion } from "@/hooks/useAppVersion";
 
 const COOKIES_ANCHOR_ID = "cookies-from-browser";
+
+const NAMING_SCHEMES = ["title", "title_site", "date_title"] as const;
+function isExtractNamingScheme(v: string): v is ExtractNamingScheme {
+  return (NAMING_SCHEMES as readonly string[]).includes(v);
+}
 
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 16;
@@ -249,6 +254,25 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+        <Field
+          label="Download filename style"
+          hint='Choose how URL extracts are named on disk. Examples: "My Video.mp4" · "My Video — youtube.mp4" · "20260505 — My Video.mp4".'
+        >
+          <select
+            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            value={settings.extract_naming_scheme}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (isExtractNamingScheme(v)) {
+                void patch({ extract_naming_scheme: v });
+              }
+            }}
+          >
+            <option value="title">Title</option>
+            <option value="title_site">Title — Site</option>
+            <option value="date_title">Date — Title</option>
+          </select>
+        </Field>
         <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
           <select
             className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"

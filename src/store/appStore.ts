@@ -241,6 +241,7 @@ function emptyPatch(): NoopPatch {
     hw_acceleration_enabled: null,
     has_seen_onboarding: null,
     notifications_enabled: null,
+    extract_naming_scheme: null,
   };
 }
 

@@ -23,6 +23,20 @@ const SUPPORTED_BROWSERS: &[&str] = &[
     "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
 ];
 
+/// Known-good yt-dlp output templates corresponding to
+/// `goop_config::ExtractNamingScheme`. Mirrors the same defense-in-depth
+/// pattern as `SUPPORTED_BROWSERS`: even though the IPC boundary resolves
+/// the user's chosen scheme into a template string, the worker
+/// re-deserializes the payload from SQLite later, so an arbitrary
+/// `output_template` value could in principle inject arbitrary yt-dlp
+/// formatting. The allowlist makes that impossible by construction.
+/// Keep in sync with `ExtractNamingScheme::to_yt_dlp_template`.
+const KNOWN_TEMPLATES: &[&str] = &[
+    "%(title)s.%(ext)s",
+    "%(title)s — %(extractor)s.%(ext)s",
+    "%(upload_date)s — %(title)s.%(ext)s",
+];
+
 fn validated_browser(name: Option<&str>) -> Option<&'static str> {
     let n = name?;
     SUPPORTED_BROWSERS.iter().copied().find(|b| *b == n)
@@ -42,6 +56,13 @@ pub struct ExtractRequest {
     /// values are dropped to `None`.
     #[serde(default)]
     pub cookies_from_browser: Option<String>,
+    /// yt-dlp output template fragment (no directory prefix), e.g.
+    /// `"%(title)s.%(ext)s"`. Resolved from the user's naming-scheme
+    /// setting at the IPC boundary; `None` falls back to yt-dlp's default.
+    /// Validated against a known-template allowlist before reaching argv
+    /// to keep a stale or tampered payload from injecting arbitrary args.
+    #[serde(default)]
+    pub output_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -159,7 +180,18 @@ impl<'a> YtDlp<'a> {
     ) -> Result<ExtractResult, GoopError> {
         let bin = self.resolver.resolve("yt-dlp")?;
         let output_dir = canonical_output_dir(&req.output_dir)?;
-        let out_template = output_dir.join("%(title)s.%(ext)s");
+        let template_str = match req.output_template.as_deref() {
+            Some(t) if KNOWN_TEMPLATES.contains(&t) => t,
+            Some(unknown) => {
+                tracing::warn!(
+                    template = unknown,
+                    "unknown output_template rejected, using default"
+                );
+                "%(title)s.%(ext)s"
+            }
+            None => "%(title)s.%(ext)s",
+        };
+        let out_template = output_dir.join(template_str);
 
         // First attempt: with cookies (if the request had any).
         let first = self
@@ -532,7 +564,28 @@ mod tests {
             format: None,
             audio_only: false,
             cookies_from_browser: None,
+            output_template: None,
         };
         assert!(req_no_cookies.cookies_from_browser.is_none());
+    }
+
+    #[test]
+    fn unknown_output_template_falls_back_to_default() {
+        // Defense-in-depth: an unrecognised template value (stale payload,
+        // tampered DB, etc.) must not be passed to yt-dlp argv.
+        let smuggled = "; rm -rf / #";
+        assert!(!KNOWN_TEMPLATES.contains(&smuggled));
+    }
+
+    #[test]
+    fn known_templates_are_unique() {
+        for i in 0..KNOWN_TEMPLATES.len() {
+            for j in (i + 1)..KNOWN_TEMPLATES.len() {
+                assert_ne!(
+                    KNOWN_TEMPLATES[i], KNOWN_TEMPLATES[j],
+                    "duplicate template at indices {i}/{j}"
+                );
+            }
+        }
     }
 }

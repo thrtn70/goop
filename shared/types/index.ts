@@ -2,6 +2,7 @@
 export * from './CompressMode';
 export * from './ConvertRequest';
 export * from './ConvertResult';
+export * from './ExtractNamingScheme';
 export * from './ExtractRequest';
 export * from './ExtractResult';
 export * from './ExtractorChoice';

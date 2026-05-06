@@ -13,6 +13,33 @@ pub enum Theme {
     System,
 }
 
+/// How URL extracts should be named on disk. Maps to a yt-dlp output
+/// template at the IPC boundary; the frontend never sees the template
+/// syntax.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractNamingScheme {
+    /// `Title.ext` — yt-dlp default.
+    #[default]
+    Title,
+    /// `Title — Site.ext` — appends the source platform.
+    TitleSite,
+    /// `YYYYMMDD — Title.ext` — upload date prefix for chronological browsing.
+    DateTitle,
+}
+
+impl ExtractNamingScheme {
+    /// Map to a yt-dlp output template fragment (no directory prefix).
+    pub fn to_yt_dlp_template(self) -> &'static str {
+        match self {
+            Self::Title => "%(title)s.%(ext)s",
+            Self::TitleSite => "%(title)s — %(extractor)s.%(ext)s",
+            Self::DateTitle => "%(upload_date)s — %(title)s.%(ext)s",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct Settings {
@@ -54,6 +81,11 @@ pub struct Settings {
     /// downloads kept separate from conversions.
     #[serde(default)]
     pub output_dir_extract: Option<String>,
+    /// Filename template for URL extracts. Defaults to `Title` which
+    /// preserves yt-dlp's default. Translated to a yt-dlp template at
+    /// the extract command boundary.
+    #[serde(default)]
+    pub extract_naming_scheme: ExtractNamingScheme,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -99,6 +131,7 @@ impl Default for Settings {
             has_seen_onboarding: false,
             notifications_enabled: false,
             output_dir_extract: None,
+            extract_naming_scheme: ExtractNamingScheme::default(),
         }
     }
 }
@@ -154,6 +187,7 @@ pub struct SettingsPatch {
     /// - `"/path"`    → `Some(Some(path))` (set)
     #[serde(default, deserialize_with = "double_option::deserialize")]
     pub output_dir_extract: Option<Option<String>>,
+    pub extract_naming_scheme: Option<ExtractNamingScheme>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -224,6 +258,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.output_dir_extract {
         next.output_dir_extract = v.map(|p| expand(&p).to_string_lossy().into_owned());
+    }
+    if let Some(v) = patch.extract_naming_scheme {
+        next.extract_naming_scheme = v;
     }
     next
 }
@@ -437,5 +474,52 @@ mod tests {
         let patch: SettingsPatch = serde_json::from_str(r#"{}"#).unwrap();
         let result = apply_patch(&base, patch);
         assert_eq!(result.output_dir_extract.as_deref(), Some("/tmp/keep"));
+    }
+
+    #[test]
+    fn extract_naming_scheme_defaults_to_title() {
+        assert_eq!(
+            Settings::default().extract_naming_scheme,
+            ExtractNamingScheme::Title
+        );
+    }
+
+    #[test]
+    fn extract_naming_scheme_template_strings_are_distinct() {
+        let a = ExtractNamingScheme::Title.to_yt_dlp_template();
+        let b = ExtractNamingScheme::TitleSite.to_yt_dlp_template();
+        let c = ExtractNamingScheme::DateTitle.to_yt_dlp_template();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn legacy_settings_without_naming_scheme_load_with_default_title() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        let loaded = load(&p).unwrap();
+        assert_eq!(loaded.extract_naming_scheme, ExtractNamingScheme::Title);
+    }
+
+    #[test]
+    fn apply_patch_can_change_naming_scheme() {
+        let base = Settings::default();
+        let patched = apply_patch(
+            &base,
+            SettingsPatch {
+                extract_naming_scheme: Some(ExtractNamingScheme::DateTitle),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            patched.extract_naming_scheme,
+            ExtractNamingScheme::DateTitle
+        );
     }
 }

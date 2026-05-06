@@ -58,10 +58,11 @@ export default function UrlHero({ url }: { url?: string }) {
         output_dir: outputDir,
         audio_only: audioOnly,
         format: format ? format.format_id : null,
-        // Backend overrides this from current Settings if left null, so the
-        // user's cookies-from-browser preference is applied to every extract
-        // without the URL hero needing its own picker.
+        // Backend overrides these from current Settings, so the URL hero
+        // doesn't need to surface the cookie picker or naming-scheme picker
+        // alongside every extract.
         cookies_from_browser: null,
+        output_template: null,
       });
     } catch (e) {
       setError(formatError(e));

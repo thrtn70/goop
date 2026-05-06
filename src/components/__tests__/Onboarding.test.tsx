@@ -41,6 +41,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     has_seen_onboarding: false,
     notifications_enabled: false,
     output_dir_extract: null,
+    extract_naming_scheme: "title",
     ...overrides,
   };
 }

@@ -53,11 +53,14 @@ pub async fn extract_from_url(
     mut req: ExtractRequest,
     state: State<'_, AppState>,
 ) -> Result<JobId, IpcError> {
-    // Bake the user's current cookies-from-browser preference into the
-    // request so the worker uses what was active when the job was queued.
-    // Mirrors the pattern used for HW acceleration and keeps in-flight
-    // jobs unaffected by later toggles.
-    req.cookies_from_browser = state.settings.read().cookies_from_browser.clone();
+    // Bake current settings into the request so the worker uses what was
+    // active when the job was queued. Mirrors the HW-acceleration pattern
+    // and keeps in-flight jobs unaffected by later toggles.
+    {
+        let s = state.settings.read();
+        req.cookies_from_browser = s.cookies_from_browser.clone();
+        req.output_template = Some(s.extract_naming_scheme.to_yt_dlp_template().to_string());
+    }
     req.output_dir = canonical_dir(&req.output_dir)?;
     let payload = serde_json::to_value(&req).map_err(|e| IpcError::Queue(e.to_string()))?;
     let job = Job::new(JobKind::Extract, payload);
@@ -84,4 +87,39 @@ fn canonical_dir(raw: &str) -> Result<String, IpcError> {
 
 fn path_to_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use goop_config::ExtractNamingScheme;
+
+    /// Drift guard: every variant of `ExtractNamingScheme::to_yt_dlp_template`
+    /// must produce a string that the extractor's `KNOWN_TEMPLATES` allowlist
+    /// will accept. This test runs in the only crate that can see both
+    /// constants (goop-config and goop-extractor are sibling crates with no
+    /// direct dep on each other). If a new variant is added in goop-config
+    /// and KNOWN_TEMPLATES isn't updated, this test fails. We assert against
+    /// the same hardcoded list the extractor uses, so a one-sided edit is
+    /// caught from either direction.
+    const EXPECTED: &[&str] = &[
+        "%(title)s.%(ext)s",
+        "%(title)s \u{2014} %(extractor)s.%(ext)s",
+        "%(upload_date)s \u{2014} %(title)s.%(ext)s",
+    ];
+
+    #[test]
+    fn naming_scheme_templates_match_extractor_allowlist() {
+        let templates: Vec<&'static str> = [
+            ExtractNamingScheme::Title,
+            ExtractNamingScheme::TitleSite,
+            ExtractNamingScheme::DateTitle,
+        ]
+        .into_iter()
+        .map(|s| s.to_yt_dlp_template())
+        .collect();
+        assert_eq!(
+            templates, EXPECTED,
+            "ExtractNamingScheme::to_yt_dlp_template drifted from extractor's KNOWN_TEMPLATES"
+        );
+    }
 }

@@ -8,4 +8,12 @@ export type ExtractRequest = { url: string, output_dir: string, format: string |
  * `goop_config::SUPPORTED_BROWSERS` at the IPC boundary; unrecognised
  * values are dropped to `None`.
  */
-cookies_from_browser: string | null, };
+cookies_from_browser: string | null, 
+/**
+ * yt-dlp output template fragment (no directory prefix), e.g.
+ * `"%(title)s.%(ext)s"`. Resolved from the user's naming-scheme
+ * setting at the IPC boundary; `None` falls back to yt-dlp's default.
+ * Validated against a known-template allowlist before reaching argv
+ * to keep a stale or tampered payload from injecting arbitrary args.
+ */
+output_template: string | null, };

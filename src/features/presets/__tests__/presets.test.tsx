@@ -172,6 +172,7 @@ describe("UpdateBanner", () => {
     has_seen_onboarding: true,
     notifications_enabled: false,
     output_dir_extract: null,
+    extract_naming_scheme: "title",
   };
 
   it("renders nothing when no update is available", () => {
