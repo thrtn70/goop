@@ -82,12 +82,24 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
 
 beforeEach(() => {
   apiMocks.settings.set.mockReset();
-  apiMocks.settings.set.mockImplementation(
-    async (patch: Partial<Settings>) => ({
-      ...useAppStore.getState().settings,
-      ...patch,
-    }),
-  );
+  // Mirror the Rust backend's apply_patch: regular Option<T> fields use
+  // `if let Some(v)` and so a `null` on the wire means "no change", not
+  // "set to null". Spreading the patch verbatim would overwrite theme,
+  // cookies, etc. to null on every save and trigger React controlled-input
+  // warnings on re-render.
+  //
+  // Caveat for future tests: the tri-state fields (cookies_from_browser,
+  // output_dir_extract) deliberately use `null` to mean "clear" on the
+  // wire. Tests that exercise the Clear-button flow on those fields will
+  // need a different mock that preserves explicit-null for those keys.
+  // Today's tests only patch regular Option<T> fields.
+  apiMocks.settings.set.mockImplementation(async (patch: Partial<Settings>) => {
+    const current = useAppStore.getState().settings ?? makeSettings();
+    const applied = Object.fromEntries(
+      Object.entries(patch).filter(([, v]) => v !== null),
+    );
+    return { ...current, ...applied } as Settings;
+  });
   apiMocks.preset.list.mockResolvedValue([]);
   dialogMocks.open.mockReset();
   useAppStore.setState({

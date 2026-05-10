@@ -159,19 +159,10 @@ export default function SettingsPage() {
       <h2 className="font-display text-lg font-semibold text-fg">Settings</h2>
 
       <SettingsSection title="General" description="Where things land and how many run at once.">
-        {/* Output folder rendered inline rather than via <Field> because
-         *  Field wraps children in a <label> element, and a <button> is
-         *  not valid descendant content of a <label> per the HTML spec.
-         *  The other Fields wrap inputs/selects/checkboxes (the labelled
-         *  controls) and remain unchanged. */}
-        <div className="block">
-          <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
-            Output folder
-          </span>
-          <p className="mb-2 text-xs text-fg-muted/70">
-            Where finished downloads land. Drag-and-drop conversions save
-            next to the source file unless you override here.
-          </p>
+        <Field
+          label="Output folder"
+          hint="Where finished downloads land. Drag-and-drop conversions save next to the source file unless you override here."
+        >
           <div className="flex flex-col gap-2">
             <div
               className="truncate rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
@@ -202,15 +193,11 @@ export default function SettingsPage() {
               Browse…
             </button>
           </div>
-        </div>
-        <div className="block">
-          <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
-            Downloads folder (optional)
-          </span>
-          <p className="mb-2 text-xs text-fg-muted/70">
-            Override where URL extracts land. Leave unset to use the
-            output folder above for everything.
-          </p>
+        </Field>
+        <Field
+          label="Downloads folder (optional)"
+          hint="Override where URL extracts land. Leave unset to use the output folder above for everything."
+        >
           <div className="flex flex-col gap-2">
             <div
               className="truncate rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg"
@@ -253,7 +240,7 @@ export default function SettingsPage() {
               )}
             </div>
           </div>
-        </div>
+        </Field>
         <Field
           label="Download filename style"
           hint='Choose how URL extracts are named on disk. Examples: "My Video.mp4" · "My Video — youtube.mp4" · "20260505 — My Video.mp4".'
@@ -548,12 +535,19 @@ export default function SettingsPage() {
   );
 }
 
+// `<div role="group">` rather than `<label>` so that:
+// (1) checkbox children whose own `<label>` wraps the input don't end
+// up nested inside a second `<label>` (invalid HTML, ignored
+// `for`/click-to-focus, screen readers may double-announce), and
+// (2) buttons are valid descendants — the Output folder field's
+// Browse button no longer needs to inline the field structure to
+// avoid the spec violation.
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
-    <label className="block">
+    <div role="group" aria-label={label} className="block">
       <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">{label}</span>
       {hint && <p className="mb-2 text-xs text-fg-muted/70">{hint}</p>}
       {children}
-    </label>
+    </div>
   );
 }
