@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -43,6 +43,12 @@ export default function SettingsPage() {
   const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
   const [galleryDlUpdateMsg, setGalleryDlUpdateMsg] = useState<string | null>(null);
   const [galleryDlUpdating, setGalleryDlUpdating] = useState(false);
+
+  const themeFieldId = useId();
+  const namingSchemeFieldId = useId();
+  const cookiesFieldId = useId();
+  const extractConcurrencyFieldId = useId();
+  const convertConcurrencyFieldId = useId();
 
   useEffect(() => {
     if (settings?.theme) {
@@ -244,8 +250,10 @@ export default function SettingsPage() {
         <Field
           label="Download filename style"
           hint='Choose how URL extracts are named on disk. Examples: "My Video.mp4" · "My Video — youtube.mp4" · "20260505 — My Video.mp4".'
+          htmlFor={namingSchemeFieldId}
         >
           <select
+            id={namingSchemeFieldId}
             className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
             value={settings.extract_naming_scheme}
             onChange={(e) => {
@@ -260,8 +268,13 @@ export default function SettingsPage() {
             <option value="date_title">Date — Title</option>
           </select>
         </Field>
-        <Field label="Theme" hint="Controls the app appearance. System follows your OS setting.">
+        <Field
+          label="Theme"
+          hint="Controls the app appearance. System follows your OS setting."
+          htmlFor={themeFieldId}
+        >
           <select
+            id={themeFieldId}
             className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
             value={settings.theme}
             onChange={(e) => void patch({ theme: e.target.value as Theme })}
@@ -274,8 +287,10 @@ export default function SettingsPage() {
         <Field
           label="Simultaneous downloads"
           hint="How many URLs to download at once. Higher is faster but uses more bandwidth."
+          htmlFor={extractConcurrencyFieldId}
         >
           <input
+            id={extractConcurrencyFieldId}
             type="number"
             min={MIN_CONCURRENCY}
             max={MAX_CONCURRENCY}
@@ -288,8 +303,10 @@ export default function SettingsPage() {
         <Field
           label="Simultaneous processing"
           hint="How many files to convert or compress at once. Lower this if your computer gets hot or sluggish."
+          htmlFor={convertConcurrencyFieldId}
         >
           <input
+            id={convertConcurrencyFieldId}
             type="number"
             min={MIN_CONCURRENCY}
             max={MAX_CONCURRENCY}
@@ -331,8 +348,10 @@ export default function SettingsPage() {
           <Field
             label="Cookies from browser"
             hint="Use cookies from a logged-in browser to download videos from sites that require an account (Twitter/X, Instagram, etc.). Cookies are read locally and never leave your machine. If a download fails because the browser's cookie database is locked, Goop retries without cookies automatically — pick a different browser or close it to use cookies."
+            htmlFor={cookiesFieldId}
           >
             <select
+              id={cookiesFieldId}
               className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
               value={settings.cookies_from_browser ?? ""}
               onChange={(e) => {
@@ -535,17 +554,46 @@ export default function SettingsPage() {
   );
 }
 
-// `<div role="group">` rather than `<label>` so that:
+// `<div>` (not `<label>`) so that:
 // (1) checkbox children whose own `<label>` wraps the input don't end
 // up nested inside a second `<label>` (invalid HTML, ignored
 // `for`/click-to-focus, screen readers may double-announce), and
 // (2) buttons are valid descendants — the Output folder field's
 // Browse button no longer needs to inline the field structure to
 // avoid the spec violation.
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+//
+// When the field has a single focusable control, the caller passes
+// `htmlFor` (paired with a matching `id` on the control) so the
+// visible text is a real `<label>` and clicking it focuses the
+// control. Compound fields (multiple buttons, no single input)
+// omit `htmlFor` and the field falls back to a `role="group"` with
+// the visible text as a `<span>` — still announced as the group's
+// accessible name.
+interface FieldProps {
+  label: string;
+  hint?: string;
+  htmlFor?: string;
+  children: ReactNode;
+}
+
+function Field({ label, hint, htmlFor, children }: FieldProps) {
   return (
-    <div role="group" aria-label={label} className="block">
-      <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">{label}</span>
+    <div
+      className="block"
+      {...(htmlFor ? {} : { role: "group", "aria-label": label })}
+    >
+      {htmlFor ? (
+        <label
+          htmlFor={htmlFor}
+          className="mb-1 block text-xs uppercase tracking-wide text-fg-muted"
+        >
+          {label}
+        </label>
+      ) : (
+        <span className="mb-1 block text-xs uppercase tracking-wide text-fg-muted">
+          {label}
+        </span>
+      )}
       {hint && <p className="mb-2 text-xs text-fg-muted/70">{hint}</p>}
       {children}
     </div>
