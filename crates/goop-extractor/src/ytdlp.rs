@@ -579,12 +579,9 @@ mod tests {
 
     #[test]
     fn known_templates_are_unique() {
-        for i in 0..KNOWN_TEMPLATES.len() {
-            for j in (i + 1)..KNOWN_TEMPLATES.len() {
-                assert_ne!(
-                    KNOWN_TEMPLATES[i], KNOWN_TEMPLATES[j],
-                    "duplicate template at indices {i}/{j}"
-                );
+        for (i, a) in KNOWN_TEMPLATES.iter().enumerate() {
+            for (j, b) in KNOWN_TEMPLATES.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "duplicate template at indices {i}/{j}");
             }
         }
     }
