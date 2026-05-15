@@ -62,6 +62,8 @@ export interface AppVersionInfo {
   ytDlp: string | null;
   galleryDl: string | null;
   ffmpeg: string | null;
+  ghostscript: string | null;
+  mutool: string | null;
   os: string;
 }
 
@@ -564,13 +566,23 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       const cached = get().versions;
       if (cached) return cached;
     }
-    const [goop, ytDlp, galleryDl, ffmpeg] = await Promise.all([
+    const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] = await Promise.all([
       getVersion().catch(() => "-"),
       api.sidecar.ytDlpVersion().catch(() => null),
       api.sidecar.galleryDlVersion().catch(() => null),
       api.sidecar.ffmpegVersion().catch(() => null),
+      api.sidecar.ghostscriptVersion().catch(() => null),
+      api.sidecar.mutoolVersion().catch(() => null),
     ]);
-    const info: AppVersionInfo = { goop, ytDlp, galleryDl, ffmpeg, os: detectOs() };
+    const info: AppVersionInfo = {
+      goop,
+      ytDlp,
+      galleryDl,
+      ffmpeg,
+      ghostscript,
+      mutool,
+      os: detectOs(),
+    };
     set({ versions: info });
     return info;
   },

@@ -308,6 +308,8 @@ pub fn run() {
             commands::sidecar::sidecar_yt_dlp_version,
             commands::sidecar::sidecar_gallery_dl_version,
             commands::sidecar::sidecar_ffmpeg_version,
+            commands::sidecar::sidecar_ghostscript_version,
+            commands::sidecar::sidecar_mutool_version,
             commands::settings::settings_get,
             commands::settings::settings_set,
             commands::preset::preset_list,

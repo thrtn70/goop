@@ -13,6 +13,10 @@ pub struct SidecarStatus {
     pub yt_dlp_version: Option<String>,
     pub gallery_dl_path: Option<String>,
     pub gallery_dl_version: Option<String>,
+    pub ghostscript_path: Option<String>,
+    pub ghostscript_version: Option<String>,
+    pub mutool_path: Option<String>,
+    pub mutool_version: Option<String>,
 }
 
 #[tauri::command]
@@ -48,12 +52,42 @@ pub async fn sidecar_status(state: State<'_, AppState>) -> Result<SidecarStatus,
     } else {
         None
     };
+    let gs = state
+        .resolver
+        .resolve("gs")
+        .ok()
+        .map(|r| r.path.to_string_lossy().into_owned());
+    let gs_version = if gs.is_some() {
+        UpdateChecker::for_ghostscript(&state.resolver)
+            .current_version()
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let mt = state
+        .resolver
+        .resolve("mutool")
+        .ok()
+        .map(|r| r.path.to_string_lossy().into_owned());
+    let mt_version = if mt.is_some() {
+        UpdateChecker::for_mutool(&state.resolver)
+            .current_version()
+            .await
+            .ok()
+    } else {
+        None
+    };
     Ok(SidecarStatus {
         ffmpeg_path: ff,
         yt_dlp_path: yt,
         yt_dlp_version: yt_version,
         gallery_dl_path: gd,
         gallery_dl_version: gd_version,
+        ghostscript_path: gs,
+        ghostscript_version: gs_version,
+        mutool_path: mt,
+        mutool_version: mt_version,
     })
 }
 
@@ -84,6 +118,22 @@ pub async fn sidecar_yt_dlp_version(state: State<'_, AppState>) -> Result<String
 #[tauri::command]
 pub async fn sidecar_gallery_dl_version(state: State<'_, AppState>) -> Result<String, IpcError> {
     let checker = UpdateChecker::for_gallery_dl(&state.resolver);
+    checker.current_version().await.map_err(Into::into)
+}
+
+/// Run `gs --version` and return the normalized semver. Used by the
+/// Settings → About section.
+#[tauri::command]
+pub async fn sidecar_ghostscript_version(state: State<'_, AppState>) -> Result<String, IpcError> {
+    let checker = UpdateChecker::for_ghostscript(&state.resolver);
+    checker.current_version().await.map_err(Into::into)
+}
+
+/// Run `mutool -v` and return the normalized semver. Used by the
+/// Settings → About section.
+#[tauri::command]
+pub async fn sidecar_mutool_version(state: State<'_, AppState>) -> Result<String, IpcError> {
+    let checker = UpdateChecker::for_mutool(&state.resolver);
     checker.current_version().await.map_err(Into::into)
 }
 

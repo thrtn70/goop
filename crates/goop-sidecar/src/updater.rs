@@ -14,15 +14,16 @@ pub struct UpdateStatus {
     pub message: String,
 }
 
-/// In-place updater for a self-updating sidecar binary. Both yt-dlp and
-/// gallery-dl support this pattern: a CLI flag instructs the binary to
-/// fetch its own latest release and overwrite itself in place. The
-/// concrete subcommand differs (`yt-dlp -U --update-to latest` vs
-/// `gallery-dl --update`), so the struct stores the per-binary command
-/// alongside the binary name.
+/// Version + in-place-update wrapper for a sidecar binary. Different
+/// sidecars expose version info under different flags (`yt-dlp
+/// --version`, `mutool -v`, `gs --version`) and only some support a
+/// self-update flag (`yt-dlp -U`, `gallery-dl --update`; mutool and gs
+/// are bundled binaries with no self-update). The struct captures both
+/// per-binary command lists. `update_args` empty = update is a no-op.
 pub struct UpdateChecker<'a> {
     resolver: &'a BinaryResolver,
     binary_name: &'static str,
+    version_args: &'static [&'static str],
     update_args: &'static [&'static str],
 }
 
@@ -32,6 +33,7 @@ impl<'a> UpdateChecker<'a> {
         Self {
             resolver,
             binary_name: "yt-dlp",
+            version_args: &["--version"],
             update_args: &["-U", "--update-to", "latest"],
         }
     }
@@ -42,7 +44,31 @@ impl<'a> UpdateChecker<'a> {
         Self {
             resolver,
             binary_name: "gallery-dl",
+            version_args: &["--version"],
             update_args: &["--update"],
+        }
+    }
+
+    /// Version-only checker for Ghostscript. No self-update — gs is
+    /// bundled at build time, users upgrade the app to upgrade gs.
+    pub fn for_ghostscript(resolver: &'a BinaryResolver) -> Self {
+        Self {
+            resolver,
+            binary_name: "gs",
+            version_args: &["--version"],
+            update_args: &[],
+        }
+    }
+
+    /// Version-only checker for mutool. mutool uses `-v` (its
+    /// `--version` flag prints help-and-exit-1 instead). No
+    /// self-update — bundled, like gs.
+    pub fn for_mutool(resolver: &'a BinaryResolver) -> Self {
+        Self {
+            resolver,
+            binary_name: "mutool",
+            version_args: &["-v"],
+            update_args: &[],
         }
     }
 
@@ -55,14 +81,18 @@ impl<'a> UpdateChecker<'a> {
 
     pub async fn current_version(&self) -> Result<String, GoopError> {
         let bin = self.resolver.resolve(self.binary_name)?;
-        let out = Command::new(&bin.path).arg("--version").output().await?;
+        let out = Command::new(&bin.path)
+            .args(self.version_args)
+            .output()
+            .await?;
         if !out.status.success() {
             return Err(GoopError::SubprocessFailed {
                 binary: self.binary_name.into(),
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
             });
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(normalize_version(self.binary_name, raw))
     }
 
     /// Run the configured `--update`-style command on the binary. If
@@ -70,6 +100,14 @@ impl<'a> UpdateChecker<'a> {
     /// returns a warning status without panicking — caller decides
     /// whether to download into `$APPDATA` instead.
     pub async fn update_in_place(&self) -> Result<UpdateStatus, GoopError> {
+        if self.update_args.is_empty() {
+            return Ok(UpdateStatus {
+                attempted: false,
+                previous_version: self.current_version().await.ok(),
+                new_version: None,
+                message: format!("{} has no self-update mechanism", self.binary_name),
+            });
+        }
         let prev = self.current_version().await.ok();
         let bin = self.resolver.resolve(self.binary_name)?;
         let out = tokio::time::timeout(
@@ -98,6 +136,32 @@ impl<'a> UpdateChecker<'a> {
             new_version: new,
             message: String::from_utf8_lossy(&out.stdout).to_string(),
         })
+    }
+}
+
+/// Strip per-binary preamble from the `--version` / `-v` stdout so
+/// Settings → Sidecars displays a clean semver. mutool prints
+/// "mutool version 1.27.2" rather than just the version; gs prints
+/// "GPL Ghostscript 10.04.0 (...)" on the first line. Other binaries
+/// already print a bare semver and are passed through unchanged.
+fn normalize_version(binary_name: &str, raw: String) -> String {
+    match binary_name {
+        "mutool" => raw
+            .strip_prefix("mutool version ")
+            .map(str::to_string)
+            .unwrap_or(raw),
+        "gs" => raw
+            .lines()
+            .next()
+            .map(|first| {
+                first
+                    .strip_prefix("GPL Ghostscript ")
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| first.to_string())
+            })
+            .unwrap_or(raw),
+        _ => raw,
     }
 }
 
@@ -141,5 +205,57 @@ mod tests {
         let c = UpdateChecker::for_gallery_dl(&r);
         assert_eq!(c.binary_name, "gallery-dl");
         assert_eq!(c.update_args, &["--update"]);
+    }
+
+    #[test]
+    fn mutool_constructor_uses_v_flag_and_has_no_self_update() {
+        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
+        let c = UpdateChecker::for_mutool(&r);
+        assert_eq!(c.binary_name, "mutool");
+        assert_eq!(c.version_args, &["-v"]);
+        assert!(c.update_args.is_empty(), "mutool has no --update flag");
+    }
+
+    #[test]
+    fn ghostscript_constructor_uses_version_flag_and_has_no_self_update() {
+        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
+        let c = UpdateChecker::for_ghostscript(&r);
+        assert_eq!(c.binary_name, "gs");
+        assert_eq!(c.version_args, &["--version"]);
+        assert!(c.update_args.is_empty(), "gs has no --update flag");
+    }
+
+    #[test]
+    fn normalize_version_strips_mutool_preamble() {
+        assert_eq!(
+            normalize_version("mutool", "mutool version 1.27.2".into()),
+            "1.27.2"
+        );
+    }
+
+    #[test]
+    fn normalize_version_strips_ghostscript_preamble() {
+        assert_eq!(
+            normalize_version("gs", "GPL Ghostscript 10.04.0 (2024-09-18)".into()),
+            "10.04.0"
+        );
+    }
+
+    #[test]
+    fn normalize_version_passes_other_binaries_through_unchanged() {
+        assert_eq!(
+            normalize_version("yt-dlp", "2024.11.18".into()),
+            "2024.11.18"
+        );
+        assert_eq!(normalize_version("gallery-dl", "1.32.0".into()), "1.32.0");
+    }
+
+    #[tokio::test]
+    async fn update_in_place_is_noop_when_update_args_empty() {
+        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
+        let c = UpdateChecker::for_mutool(&r);
+        let status = c.update_in_place().await.expect("noop must not error");
+        assert!(!status.attempted);
+        assert!(status.message.contains("no self-update"));
     }
 }

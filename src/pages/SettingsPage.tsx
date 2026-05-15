@@ -439,6 +439,10 @@ export default function SettingsPage() {
           <dd className="text-fg tabular-nums">{version.galleryDl ?? "-"}</dd>
           <dt className="text-fg-muted">ffmpeg</dt>
           <dd className="text-fg">{version.ffmpeg ?? "-"}</dd>
+          <dt className="text-fg-muted">Ghostscript</dt>
+          <dd className="text-fg tabular-nums">{version.ghostscript ?? "-"}</dd>
+          <dt className="text-fg-muted">mutool</dt>
+          <dd className="text-fg tabular-nums">{version.mutool ?? "-"}</dd>
           <dt className="text-fg-muted">Platform</dt>
           <dd className="text-fg">{version.os}</dd>
         </dl>

@@ -101,6 +101,8 @@ export const api = {
     ytDlpVersion: () => invoke<string>("sidecar_yt_dlp_version"),
     galleryDlVersion: () => invoke<string>("sidecar_gallery_dl_version"),
     ffmpegVersion: () => invoke<string>("sidecar_ffmpeg_version"),
+    ghostscriptVersion: () => invoke<string>("sidecar_ghostscript_version"),
+    mutoolVersion: () => invoke<string>("sidecar_mutool_version"),
   },
   settings: {
     get: () => invoke<Settings>("settings_get"),

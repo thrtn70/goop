@@ -8,6 +8,8 @@ const FALLBACK: AppVersionInfo = {
   ytDlp: null,
   galleryDl: null,
   ffmpeg: null,
+  ghostscript: null,
+  mutool: null,
   os: "-",
 };
 

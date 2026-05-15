@@ -55,6 +55,8 @@ vi.mock("@/hooks/useAppVersion", () => ({
     ytDlp: "2024.11.18",
     galleryDl: "1.32.0",
     ffmpeg: "n7.1",
+    ghostscript: "10.04.0",
+    mutool: "1.27.0",
     os: "darwin",
   }),
 }));

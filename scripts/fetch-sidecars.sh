@@ -18,6 +18,16 @@ mkdir -p "$OUT_DIR"
 GALLERY_DL_VERSION="v1.32.0"
 GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLERY_DL_VERSION}"
 
+# Pinned MuPDF release. Artifex publishes Windows binaries on
+# ArtifexSoftware/mupdf-downloads only for select tags (some .x patch
+# releases ship source-only) — pin to a known-good tag that has the
+# Windows zip published. macOS uses Homebrew's mupdf-tools which may
+# track ahead of this pin; mutool's CLI surface is stable across point
+# releases, so a brew-installed 1.27.x talking to a frontend that
+# expects pinned 1.27.0 argv is fine.
+MUPDF_VER="1.27.0"
+MUPDF_BASE="https://github.com/ArtifexSoftware/mupdf-downloads/releases/download/${MUPDF_VER}"
+
 case "$TARGET" in
   x86_64-pc-windows-msvc)
     # ffmpeg — Gyan essentials (LGPL)
@@ -56,6 +66,16 @@ case "$TARGET" in
       cp "$dll" "$OUT_DIR/"
     done
     rm -rf /tmp/gs.exe /tmp/gs_extract
+    # mutool — Artifex MuPDF official release. Statically linked, no
+    # DLL co-location needed. Zip layout: mupdf-<ver>-windows/mutool-x64.exe
+    # alongside the viewer and 32-bit variants we don't need.
+    curl -L -o /tmp/mupdf.zip "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip"
+    rm -rf /tmp/mupdf_extract
+    "$SEVENZIP" x /tmp/mupdf.zip -o/tmp/mupdf_extract -y > /dev/null
+    MUTOOL_BIN="$(find /tmp/mupdf_extract -name 'mutool-x64.exe' -type f | head -1)"
+    [ -n "$MUTOOL_BIN" ] || { echo "mutool-x64.exe not found in mupdf zip"; exit 1; }
+    cp "$MUTOOL_BIN" "$OUT_DIR/mutool-$TARGET.exe"
+    rm -rf /tmp/mupdf.zip /tmp/mupdf_extract
     ;;
   aarch64-apple-darwin)
     # ffmpeg — evermeet.cx
@@ -98,6 +118,13 @@ case "$TARGET" in
       [ -d "${GS_SHARE_VER}lib" ] && cp -R "${GS_SHARE_VER}lib" "$OUT_DIR/gs-resources/"
       [ -d "${GS_SHARE_VER}iccprofiles" ] && cp -R "${GS_SHARE_VER}iccprofiles" "$OUT_DIR/gs-resources/"
     fi
+    # mutool — via Homebrew's mupdf-tools formula. Conflicts with the
+    # `mupdf` formula (same binaries), so we install one or the other.
+    # macos-14 runners ship fresh — no pre-existing mupdf to collide.
+    "$GS_BREW" install --quiet mupdf-tools || true
+    MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
+    cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
+    chmod +x "$OUT_DIR/mutool-$TARGET"
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for
@@ -129,6 +156,9 @@ case "$TARGET" in
     # existence check without shipping Ghostscript on Linux.
     printf '#!/bin/sh\necho "gs is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/gs-$TARGET"
     chmod +x "$OUT_DIR/gs-$TARGET"
+    # mutool stub — same pattern as gs above. Linux is audit-only.
+    printf '#!/bin/sh\necho "mutool is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/mutool-$TARGET"
+    chmod +x "$OUT_DIR/mutool-$TARGET"
     # gs-resources stubs — Tauri's `resources` config in tauri.conf.json
     # references three subdirectories of the Ghostscript Resource tree.
     # Empty dirs are enough; the Linux build never invokes gs.
