@@ -7,6 +7,8 @@ import type {
   Job,
   JobId,
   PageRange,
+  PageRotation,
+  PdfMetadata,
   PdfOperation,
   PdfProbeResult,
   PdfQuality,
@@ -161,4 +163,52 @@ export function pdfCompress(
   quality: PdfQuality,
 ): PdfOperation {
   return { kind: "compress", input, output_path: outputPath, quality };
+}
+
+export function pdfExtractPages(
+  input: string,
+  ranges: PageRange[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "extract_pages", input, ranges, output_path: outputPath };
+}
+
+export function pdfRotate(
+  input: string,
+  rotations: PageRotation[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "rotate", input, rotations, output_path: outputPath };
+}
+
+export function pdfReorder(
+  input: string,
+  order: number[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "reorder", input, order, output_path: outputPath };
+}
+
+export function pdfDeletePages(
+  input: string,
+  pages: number[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "delete_pages", input, pages, output_path: outputPath };
+}
+
+export function pdfInsertBlank(
+  input: string,
+  positions: number[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "insert_blank", input, positions, output_path: outputPath };
+}
+
+export function pdfSetMetadata(
+  input: string,
+  metadata: PdfMetadata,
+  outputPath: string,
+): PdfOperation {
+  return { kind: "set_metadata", input, metadata, output_path: outputPath };
 }

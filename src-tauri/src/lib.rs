@@ -237,6 +237,19 @@ pub fn run() {
                                 1u32,
                             )
                         }
+                        // Phase 2 stubs — variants land in the enum now so
+                        // the frontend can build/test against them; the
+                        // backend implementations follow in Phases 3–6.
+                        PdfOperation::ExtractPages { .. }
+                        | PdfOperation::Rotate { .. }
+                        | PdfOperation::Reorder { .. }
+                        | PdfOperation::DeletePages { .. }
+                        | PdfOperation::InsertBlank { .. }
+                        | PdfOperation::SetMetadata { .. } => {
+                            return Err(GoopError::Queue(
+                                "this PDF operation is not yet implemented".into(),
+                            ));
+                        }
                     };
                     Ok(JobResult {
                         output_path,
