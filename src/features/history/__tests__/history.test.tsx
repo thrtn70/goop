@@ -82,34 +82,62 @@ describe("HistoryFilterChips", () => {
 describe("PdfOperationPicker", () => {
   afterEach(cleanup);
 
-  it("disables Split and Compress on multi-file drops", () => {
+  // v0.2.3 dropped role="radio" in favor of plain <button aria-pressed>
+  // because the picker has no roving-tabindex / arrow-key cycling
+  // (the ARIA radio contract requires both). Tests use role="button"
+  // and assert on aria-pressed accordingly.
+
+  it("disables every op except Merge on multi-file drops", () => {
     render(
       <PdfOperationPicker selected="merge" onSelect={() => {}} multiFile={true} />,
     );
-    const split = screen.getByRole("radio", { name: /Split/ });
-    const compress = screen.getByRole("radio", { name: /Compress/ });
-    const merge = screen.getByRole("radio", { name: /Merge/ });
-    expect(split).toHaveProperty("disabled", true);
-    expect(compress).toHaveProperty("disabled", true);
+    const merge = screen.getByRole("button", { name: /Merge/ });
     expect(merge).toHaveProperty("disabled", false);
+    for (const label of [
+      "Split",
+      "Compress",
+      "Extract pages",
+      "Reorder pages",
+      "Delete pages",
+      "Rotate pages",
+      "Insert blank pages",
+      "Edit metadata",
+    ]) {
+      expect(
+        screen.getByRole("button", { name: new RegExp(label) }),
+      ).toHaveProperty("disabled", true);
+    }
   });
 
-  it("enables all three on single-file drops", () => {
+  it("enables every op on single-file drops", () => {
     render(
       <PdfOperationPicker selected="split" onSelect={() => {}} multiFile={false} />,
     );
-    for (const label of ["Merge", "Split", "Compress"]) {
+    for (const label of [
+      "Merge",
+      "Split",
+      "Compress",
+      "Extract pages",
+      "Reorder pages",
+      "Delete pages",
+      "Rotate pages",
+      "Insert blank pages",
+      "Edit metadata",
+    ]) {
       expect(
-        screen.getByRole("radio", { name: new RegExp(label) }),
+        screen.getByRole("button", { name: new RegExp(label) }),
       ).toHaveProperty("disabled", false);
     }
   });
 
-  it("marks the selected operation with aria-checked", () => {
+  it("marks the selected operation with aria-pressed=true", () => {
     render(<PdfOperationPicker selected="compress" onSelect={() => {}} multiFile={false} />);
     expect(
-      screen.getByRole("radio", { name: /Compress/ }).getAttribute("aria-checked"),
+      screen.getByRole("button", { name: /Compress/ }).getAttribute("aria-pressed"),
     ).toBe("true");
+    expect(
+      screen.getByRole("button", { name: /Merge/ }).getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 });
 
