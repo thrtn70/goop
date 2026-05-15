@@ -67,13 +67,14 @@ case "$TARGET" in
     done
     rm -rf /tmp/gs.exe /tmp/gs_extract
     # mutool — Artifex MuPDF official release. Statically linked, no
-    # DLL co-location needed. Zip layout: mupdf-<ver>-windows/mutool-x64.exe
-    # alongside the viewer and 32-bit variants we don't need.
+    # DLL co-location needed. Zip layout (as of 1.27.0) is flat at
+    # the root: mupdf.exe, mupdf-gl.exe, mutool.exe — we want only
+    # mutool.exe; the viewer and the GL viewer are excluded.
     curl -L -o /tmp/mupdf.zip "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip"
     rm -rf /tmp/mupdf_extract
     "$SEVENZIP" x /tmp/mupdf.zip -o/tmp/mupdf_extract -y > /dev/null
-    MUTOOL_BIN="$(find /tmp/mupdf_extract -name 'mutool-x64.exe' -type f | head -1)"
-    [ -n "$MUTOOL_BIN" ] || { echo "mutool-x64.exe not found in mupdf zip"; exit 1; }
+    MUTOOL_BIN="$(find /tmp/mupdf_extract -name 'mutool.exe' -type f | head -1)"
+    [ -n "$MUTOOL_BIN" ] || { echo "mutool.exe not found in mupdf zip"; exit 1; }
     cp "$MUTOOL_BIN" "$OUT_DIR/mutool-$TARGET.exe"
     rm -rf /tmp/mupdf.zip /tmp/mupdf_extract
     ;;
