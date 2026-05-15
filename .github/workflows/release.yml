@@ -46,8 +46,29 @@ jobs:
             core.info(`Created draft release ${created.id} (${created.html_url})`);
             return created.id.toString();
 
+  # Mirror the audit workflow's `legal` job at release time so a tag push
+  # can't ship without the AGPL firewall enforced. See LICENSING.md.
+  legal:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: Rust dep graph clear of mupdf-*
+        run: |
+          if cargo tree --workspace --prefix none --edges normal,build,dev 2>/dev/null | grep -i mupdf; then
+            echo "::error::mupdf-* crate present in workspace dependency graph. See LICENSING.md."
+            exit 1
+          fi
+      - name: Frontend free of mupdf.js / mupdf.wasm imports
+        run: |
+          if grep -rEn "from ['\"]mupdf|require\(['\"]mupdf|@mupdf|mupdf\.js|mupdf\.wasm" src/ shared/ 2>/dev/null; then
+            echo "::error::mupdf.js / mupdf.wasm / @mupdf import in src/ or shared/. See LICENSING.md."
+            exit 1
+          fi
+
   build:
-    needs: create-release
+    needs: [create-release, legal]
     strategy:
       fail-fast: false
       matrix:

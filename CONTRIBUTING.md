@@ -72,6 +72,15 @@ Do not commit sidecar binaries. Do not point the script at mirrors or personal f
 
 Goop's pre-push hook (`scripts/pre-push.sh`, symlinked into `.git/hooks/pre-push`) runs formatter, lints, tests, and typecheck. Any failure blocks the push. Fix locally, re-run, re-push. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full gate contract.
 
+## Dependencies and Licensing
+
+Goop is MIT. We bundle two AGPL-3.0 sidecars from Artifex (Ghostscript, mutool) as separate executables, spawned via `Command::spawn`. **Do not add MuPDF-family code into goop's own binary.** Specifically:
+
+- No `mupdf-*` Rust crate in any workspace `Cargo.toml`.
+- No `mupdf.js` / `mupdf.wasm` / `@mupdf/*` import in `src/` or `shared/`.
+
+The CI `legal` job in `.github/workflows/audit.yml` rejects either pattern. Full rationale: [LICENSING.md](LICENSING.md).
+
 ## PR Checklist
 
 A PR is mergeable when:
