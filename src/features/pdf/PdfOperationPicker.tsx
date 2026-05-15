@@ -1,10 +1,19 @@
-export type PdfOperationKind = "merge" | "split" | "compress";
+export type PdfOperationKind =
+  | "merge"
+  | "split"
+  | "compress"
+  | "reorder"
+  | "delete_pages"
+  | "rotate"
+  | "extract_pages"
+  | "insert_blank"
+  | "set_metadata";
 
 interface PdfOperationPickerProps {
   selected: PdfOperationKind;
   onSelect: (kind: PdfOperationKind) => void;
-  /** If the user dropped multiple PDFs, Split and Compress shouldn't be
-   *  available — they act on a single PDF at a time. */
+  /** If the user dropped multiple PDFs, only Merge is available —
+   *  every other op acts on a single PDF at a time. */
   multiFile: boolean;
 }
 
@@ -20,7 +29,43 @@ const OPTIONS: Option[] = [
   {
     kind: "split",
     label: "Split",
-    hint: "Extract page ranges into separate files",
+    hint: "Slice a PDF into one file per page range",
+    multiFileOk: false,
+  },
+  {
+    kind: "extract_pages",
+    label: "Extract pages",
+    hint: "Pull page ranges into a single new PDF",
+    multiFileOk: false,
+  },
+  {
+    kind: "reorder",
+    label: "Reorder pages",
+    hint: "Drag pages into a new order",
+    multiFileOk: false,
+  },
+  {
+    kind: "delete_pages",
+    label: "Delete pages",
+    hint: "Mark pages to drop, keep the rest",
+    multiFileOk: false,
+  },
+  {
+    kind: "rotate",
+    label: "Rotate pages",
+    hint: "Spin individual pages 90° clockwise",
+    multiFileOk: false,
+  },
+  {
+    kind: "insert_blank",
+    label: "Insert blank pages",
+    hint: "Add blank Letter-sized pages at chosen positions",
+    multiFileOk: false,
+  },
+  {
+    kind: "set_metadata",
+    label: "Edit metadata",
+    hint: "Title, author, subject, keywords",
     multiFileOk: false,
   },
   {

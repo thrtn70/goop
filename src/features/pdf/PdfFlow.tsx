@@ -4,6 +4,12 @@ import PdfOperationPicker, { type PdfOperationKind } from "./PdfOperationPicker"
 import PdfMergeList from "./PdfMergeList";
 import PdfSplitEditor from "./PdfSplitEditor";
 import PdfCompressPicker from "./PdfCompressPicker";
+import PdfReorderFlow from "./PdfReorderFlow";
+import PdfDeleteFlow from "./PdfDeleteFlow";
+import PdfRotateFlow from "./PdfRotateFlow";
+import PdfExtractFlow from "./PdfExtractFlow";
+import PdfInsertBlankFlow from "./PdfInsertBlankFlow";
+import PdfMetadataForm from "./PdfMetadataForm";
 import { api, pdfCompress, pdfMerge, pdfSplit } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -52,9 +58,7 @@ export default function PdfFlow({
   // that requests `compress` for two PDFs doesn't silently flip to `merge`
   // on the first render via the auto-switch effect below.
   const initialOp: PdfOperationKind =
-    files.length > 1 && (defaultOp === "split" || defaultOp === "compress")
-      ? "merge"
-      : defaultOp;
+    files.length > 1 && defaultOp !== "merge" ? "merge" : defaultOp;
   const [op, setOp] = useState<PdfOperationKind>(initialOp);
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useState<PageRange[]>([]);
@@ -64,9 +68,9 @@ export default function PdfFlow({
   const multiFile = files.length > 1;
 
   // Auto-switch operation when the file count changes so we never land in
-  // an illegal state (Split/Compress on a multi-file drop).
+  // an illegal state (every op except Merge requires a single file).
   useEffect(() => {
-    if (multiFile && (op === "split" || op === "compress")) setOp("merge");
+    if (multiFile && op !== "merge") setOp("merge");
   }, [multiFile, op]);
 
   // Probe the single file to get the page count for the split editor.
@@ -177,17 +181,49 @@ export default function PdfFlow({
         <PdfCompressPicker selected={quality} onSelect={setQuality} />
       )}
 
-      <div className="mt-2 flex items-center gap-3 border-t border-subtle pt-4">
-        <button
-          type="button"
-          disabled={!canRun}
-          onClick={() => void handleRun()}
-          className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Running..." : op === "merge" ? "Merge PDFs" : op === "split" ? "Split PDF" : "Compress PDF"}
-        </button>
-        {error && <span className="text-xs text-error">{error}</span>}
-      </div>
+      {/* The new v0.2.3 ops each own their own internal save dialog +
+          Apply button (state machines too distinct from merge/split/
+          compress to share the bottom action row). They render
+          inline below the picker and hide the merge/split/compress
+          run button by virtue of being non-null. */}
+      {files.length === 1 && op === "reorder" && (
+        <PdfReorderFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "delete_pages" && (
+        <PdfDeleteFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "rotate" && (
+        <PdfRotateFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "extract_pages" && (
+        <PdfExtractFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "insert_blank" && (
+        <PdfInsertBlankFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "set_metadata" && (
+        <PdfMetadataForm file={files[0]} onDone={onDone} />
+      )}
+
+      {(op === "merge" || op === "split" || op === "compress") && (
+        <div className="mt-2 flex items-center gap-3 border-t border-subtle pt-4">
+          <button
+            type="button"
+            disabled={!canRun}
+            onClick={() => void handleRun()}
+            className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy
+              ? "Running..."
+              : op === "merge"
+                ? "Merge PDFs"
+                : op === "split"
+                  ? "Split PDF"
+                  : "Compress PDF"}
+          </button>
+          {error && <span className="text-xs text-error">{error}</span>}
+        </div>
+      )}
     </div>
   );
 }
