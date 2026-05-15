@@ -15,7 +15,7 @@ use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
     compress as pdf_compress, delete_pages as pdf_delete_pages, extract_pages as pdf_extract_pages,
     insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
-    split as pdf_split,
+    rotate as pdf_rotate, split as pdf_split,
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -329,9 +329,30 @@ pub fn run() {
                                 1u32,
                             )
                         }
-                        // Rotate (Phase 4) and Reorder (Phase 6) remain
-                        // stubbed — those phases ship next.
-                        PdfOperation::Rotate { .. } | PdfOperation::Reorder { .. } => {
+                        PdfOperation::Rotate {
+                            input,
+                            rotations,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                pdf_rotate::rotate(&in_path, &rotations, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
+                        // Reorder (Phase 6) remains stubbed.
+                        PdfOperation::Reorder { .. } => {
                             return Err(GoopError::Queue(
                                 "this PDF operation is not yet implemented".into(),
                             ));

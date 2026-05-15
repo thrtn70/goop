@@ -10,6 +10,7 @@ pub mod merge;
 pub mod metadata;
 pub mod probe;
 pub mod range_parser;
+pub mod rotate;
 pub mod split;
 
 #[cfg(test)]
