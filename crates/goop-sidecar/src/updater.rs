@@ -91,7 +91,18 @@ impl<'a> UpdateChecker<'a> {
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
             });
         }
-        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // mutool -v writes its version to stderr (with stdout empty);
+        // yt-dlp / gallery-dl / gs write to stdout. Fall back to stderr
+        // when stdout is empty so the same code path handles both.
+        let raw = {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                String::from_utf8_lossy(&out.stderr).trim().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
         Ok(normalize_version(self.binary_name, raw))
     }
 

@@ -98,6 +98,12 @@ export default function PdfFlow({
     setBusy(true);
     setError(null);
     try {
+      // handleRun is only invoked when op is merge/split/compress — the
+      // new v0.2.3 ops own their own Apply buttons inside their flow
+      // components. The explicit else-if + final no-op else keeps the
+      // dispatch exhaustive against the union; if a future op is added
+      // here without an arm, this returns rather than silently flowing
+      // into compress.
       if (op === "merge") {
         const dest = await save({
           defaultPath: `${stemOf(files[0])}-merged.pdf`,
@@ -117,7 +123,7 @@ export default function PdfFlow({
         const dir = await open({ directory: true, title: "Choose output folder" });
         const outDir = typeof dir === "string" ? dir : dirname(files[0]);
         await api.pdf.run(pdfSplit(files[0], ranges, outDir));
-      } else {
+      } else if (op === "compress") {
         const dest = await save({
           defaultPath: `${stemOf(files[0])}-compressed.pdf`,
           title: "Save compressed PDF",
@@ -127,6 +133,9 @@ export default function PdfFlow({
           return;
         }
         await api.pdf.run(pdfCompress(files[0], dest, quality));
+      } else {
+        setBusy(false);
+        return;
       }
       enqueueToast({ variant: "success", title: `PDF ${op} queued` });
       onDone();

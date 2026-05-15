@@ -45,12 +45,12 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
 
   function addPosition() {
     const n = Number(draft);
-    if (!Number.isFinite(n) || n < 1 || n > totalPages + 1) {
-      setError(`Position must be 1–${totalPages + 1}.`);
+    if (!Number.isInteger(n) || n < 1 || n > totalPages + 1) {
+      setError(`Position must be a whole number between 1 and ${totalPages + 1}.`);
       return;
     }
     setError(null);
-    setPositions((prev) => [...prev, Math.round(n)]);
+    setPositions((prev) => [...prev, n]);
     setDraft("");
   }
 
@@ -100,6 +100,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
           onKeyDown={(e) => {
             if (e.key === "Enter") addPosition();
           }}
+          aria-label={`Insert position, between 1 and ${totalPages + 1}`}
           placeholder={`1–${totalPages + 1}`}
           className="w-32 rounded-md bg-surface-2 px-3 py-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
         />

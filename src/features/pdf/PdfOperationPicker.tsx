@@ -81,8 +81,13 @@ export default function PdfOperationPicker({
   onSelect,
   multiFile,
 }: PdfOperationPickerProps) {
+  // Plain <button>s with aria-pressed rather than role="radio" inside
+  // role="radiogroup": the ARIA radio pattern requires roving-tabindex
+  // + arrow-key handlers (NVDA/JAWS expect ArrowUp/Down to cycle), and
+  // we'd rather have a working Tab-and-click pattern than a broken
+  // radio-group contract. Visually still a radio-style picker.
   return (
-    <div role="radiogroup" aria-label="PDF operation" className="flex flex-col gap-2">
+    <div aria-label="PDF operation" className="flex flex-col gap-2">
       {OPTIONS.map((opt) => {
         const disabled = multiFile && !opt.multiFileOk;
         const active = selected === opt.kind;
@@ -90,8 +95,7 @@ export default function PdfOperationPicker({
           <button
             key={opt.kind}
             type="button"
-            role="radio"
-            aria-checked={active}
+            aria-pressed={active}
             disabled={disabled}
             onClick={() => onSelect(opt.kind)}
             className={`flex items-start gap-3 rounded-lg border p-3 text-left transition duration-fast ease-out ${
