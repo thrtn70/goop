@@ -19,7 +19,9 @@ pub use error::{
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
-pub use pdf::{PageRange, PdfOperation, PdfProbeResult, PdfQuality};
+pub use pdf::{
+    PageRange, PageRotation, PdfMetadata, PdfOperation, PdfProbeResult, PdfQuality, RotationDegrees,
+};
 pub use preset::Preset;
 pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};
 pub use update::UpdateInfo;

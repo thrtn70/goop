@@ -12,7 +12,11 @@ use goop_core::{
     ResultKind,
 };
 use goop_extractor::ytdlp::ExtractRequest;
-use goop_pdf::{compress as pdf_compress, merge as pdf_merge, split as pdf_split};
+use goop_pdf::{
+    compress as pdf_compress, delete_pages as pdf_delete_pages, extract_pages as pdf_extract_pages,
+    insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
+    split as pdf_split,
+};
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
 use state::AppState;
@@ -237,15 +241,97 @@ pub fn run() {
                                 1u32,
                             )
                         }
-                        // Phase 2 stubs — variants land in the enum now so
-                        // the frontend can build/test against them; the
-                        // backend implementations follow in Phases 3–6.
-                        PdfOperation::ExtractPages { .. }
-                        | PdfOperation::Rotate { .. }
-                        | PdfOperation::Reorder { .. }
-                        | PdfOperation::DeletePages { .. }
-                        | PdfOperation::InsertBlank { .. }
-                        | PdfOperation::SetMetadata { .. } => {
+                        PdfOperation::ExtractPages {
+                            input,
+                            ranges,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                pdf_extract_pages::extract_pages(&in_path, &ranges, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
+                        PdfOperation::DeletePages {
+                            input,
+                            pages,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                pdf_delete_pages::delete_pages(&in_path, &pages, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
+                        PdfOperation::InsertBlank {
+                            input,
+                            positions,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                pdf_insert_blank::insert_blank(&in_path, &positions, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
+                        PdfOperation::SetMetadata {
+                            input,
+                            metadata,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                pdf_metadata::set_metadata(&in_path, &metadata, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
+                        // Rotate (Phase 4) and Reorder (Phase 6) remain
+                        // stubbed — those phases ship next.
+                        PdfOperation::Rotate { .. } | PdfOperation::Reorder { .. } => {
                             return Err(GoopError::Queue(
                                 "this PDF operation is not yet implemented".into(),
                             ));

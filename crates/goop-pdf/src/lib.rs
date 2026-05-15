@@ -3,10 +3,17 @@
 //! sync + blocking — callers run them on `spawn_blocking`.
 
 pub mod compress;
+pub mod delete_pages;
+pub mod extract_pages;
+pub mod insert_blank;
 pub mod merge;
+pub mod metadata;
 pub mod probe;
 pub mod range_parser;
 pub mod split;
+
+#[cfg(test)]
+pub(crate) mod test_fixture;
 
 use goop_core::GoopError;
 use thiserror::Error;
