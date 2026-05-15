@@ -457,6 +457,7 @@ pub fn run() {
             commands::update::open_about_link,
             commands::pdf::pdf_probe,
             commands::pdf::pdf_run,
+            commands::pdf::pdf_page_thumbs,
             commands::history::history_list,
             commands::history::history_counts,
             commands::thumbnail::thumbnail_get,

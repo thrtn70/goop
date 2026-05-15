@@ -126,6 +126,7 @@ export const api = {
   pdf: {
     probe: (path: string) => invoke<PdfProbeResult>("pdf_probe", { path }),
     run: (op: PdfOperation) => invoke<JobId>("pdf_run", { op }),
+    pageThumbs: (path: string) => invoke<string[]>("pdf_page_thumbs", { path }),
   },
   history: {
     list: (filter: HistoryFilter) => invoke<Job[]>("history_list", { filter }),

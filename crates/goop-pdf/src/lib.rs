@@ -8,6 +8,7 @@ pub mod extract_pages;
 pub mod insert_blank;
 pub mod merge;
 pub mod metadata;
+pub mod page_thumbs;
 pub mod probe;
 pub mod range_parser;
 pub mod reorder;
@@ -32,6 +33,10 @@ pub enum PdfError {
     EmptyOutput,
     #[error("ghostscript failed: {0}")]
     Ghostscript(String),
+    #[error("mutool failed: {0}")]
+    Mutool(String),
+    #[error("mutool missing: {0}")]
+    MutoolMissing(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

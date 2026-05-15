@@ -27,7 +27,10 @@
         "scope": [
           "$DATA/goop/thumbs/**",
           "$HOME/Library/Application Support/goop/thumbs/**",
-          "$APPDATA/goop/thumbs/**"
+          "$APPDATA/goop/thumbs/**",
+          "$DATA/goop/page-thumbs/**",
+          "$HOME/Library/Application Support/goop/page-thumbs/**",
+          "$APPDATA/goop/page-thumbs/**"
         ]
       }
     }
