@@ -20,6 +20,7 @@ export * from './JobId';
 export * from './JobKind';
 export * from './JobResult';
 export * from './JobState';
+export * from './LanguagePack';
 export * from './PageRange';
 export * from './PageRotation';
 export * from './PdfImageFormat';

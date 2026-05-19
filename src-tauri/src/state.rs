@@ -20,4 +20,14 @@ pub struct AppState {
     /// Live "use HW acceleration" toggle. Workers read this each convert
     /// so toggling the setting takes effect without restarting jobs.
     pub hw_enabled: Arc<AtomicBool>,
+    /// Writable user dir for downloaded Tesseract language packs.
+    /// Located under the OS-specific app-data dir; first dir searched
+    /// when resolving `<lang>.traineddata` so user downloads override
+    /// the bundled English file.
+    pub tessdata_user_dir: PathBuf,
+    /// Read-only bundled tessdata dir shipped with the installer.
+    /// `Some` when `eng.traineddata` is co-located with the app's
+    /// resources; `None` in dev builds (when the tessdata file hasn't
+    /// been fetched into the dev `src-tauri/bin/` tree).
+    pub tessdata_bundled_dir: Option<PathBuf>,
 }

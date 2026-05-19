@@ -28,6 +28,26 @@ GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLER
 MUPDF_VER="1.27.0"
 MUPDF_BASE="https://github.com/ArtifexSoftware/mupdf-downloads/releases/download/${MUPDF_VER}"
 
+# Pinned Tesseract release. The canonical upstream publishes Windows
+# NSIS installers on the tesseract-ocr/tesseract GitHub release (the
+# UB-Mannheim wiki points to the same artifact). The installer extracts
+# cleanly with 7z — same pattern we use for Ghostscript and mutool, and
+# the resulting tesseract.exe is MSVC-built so it composes with our
+# other Windows sidecars without runtime mismatch. macOS uses Homebrew's
+# tesseract formula. mutool ships without HAVE_TESSERACT, so v0.2.4 OCR
+# runs through a separate tesseract subprocess (see docs/mutool-ocr-support.md).
+TESSERACT_VER="5.5.0"
+TESSERACT_BUILD="5.5.0.20241111"
+TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/releases/download/${TESSERACT_VER}/tesseract-ocr-w64-setup-${TESSERACT_BUILD}.exe"
+
+# Pinned tessdata_fast release tag. The trained-data file under this tag
+# is compatible with tesseract 5.x; only `eng` is bundled — other
+# languages download on demand into the app's data dir (Settings → OCR
+# Languages). Bumping requires a regression sweep against the OCR
+# fixture corpus.
+TESSDATA_VER="4.1.0"
+TESSDATA_BASE="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_VER}"
+
 case "$TARGET" in
   x86_64-pc-windows-msvc)
     # ffmpeg — Gyan essentials (LGPL)
@@ -77,6 +97,22 @@ case "$TARGET" in
     [ -n "$MUTOOL_BIN" ] || { echo "mutool.exe not found in mupdf zip"; exit 1; }
     cp "$MUTOOL_BIN" "$OUT_DIR/mutool-$TARGET.exe"
     rm -rf /tmp/mupdf.zip /tmp/mupdf_extract
+    # tesseract — canonical Windows NSIS installer, extracted with 7z.
+    # MSVC build composes cleanly with the other Windows sidecars.
+    # Harvests tesseract.exe + every co-located DLL into $OUT_DIR so
+    # Tauri's loader resolves them as siblings of the sidecar at runtime.
+    curl -L -o /tmp/tesseract.exe "$TESSERACT_URL"
+    rm -rf /tmp/tesseract_extract
+    "$SEVENZIP" x /tmp/tesseract.exe -o/tmp/tesseract_extract -y > /dev/null
+    TESS_BIN="$(find /tmp/tesseract_extract -name 'tesseract.exe' -type f | head -1)"
+    [ -n "$TESS_BIN" ] || { echo "tesseract.exe not found in installer"; exit 1; }
+    cp "$TESS_BIN" "$OUT_DIR/tesseract-$TARGET.exe"
+    TESS_DIR="$(dirname "$TESS_BIN")"
+    for dll in "$TESS_DIR"/*.dll; do
+      [ -f "$dll" ] || continue
+      cp "$dll" "$OUT_DIR/"
+    done
+    rm -rf /tmp/tesseract.exe /tmp/tesseract_extract
     ;;
   aarch64-apple-darwin)
     # ffmpeg — evermeet.cx
@@ -126,6 +162,14 @@ case "$TARGET" in
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
     cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
     chmod +x "$OUT_DIR/mutool-$TARGET"
+    # tesseract — via Homebrew's tesseract formula. macOS arm64 builds
+    # are signed Mach-O binaries with their leptonica + image-format
+    # dylibs already resolved through Homebrew's rpath setup, so we
+    # don't need to co-locate dylibs (unlike the Windows DLL bundle).
+    "$GS_BREW" install --quiet tesseract || true
+    TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
+    cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
+    chmod +x "$OUT_DIR/tesseract-$TARGET"
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for
@@ -160,6 +204,9 @@ case "$TARGET" in
     # mutool stub — same pattern as gs above. Linux is audit-only.
     printf '#!/bin/sh\necho "mutool is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/mutool-$TARGET"
     chmod +x "$OUT_DIR/mutool-$TARGET"
+    # tesseract stub — same pattern. Linux audit job never runs OCR.
+    printf '#!/bin/sh\necho "tesseract is not available on Linux" >&2\nexit 1\n' > "$OUT_DIR/tesseract-$TARGET"
+    chmod +x "$OUT_DIR/tesseract-$TARGET"
     # gs-resources stubs — Tauri's `resources` config in tauri.conf.json
     # references three subdirectories of the Ghostscript Resource tree.
     # Empty dirs are enough; the Linux build never invokes gs.
@@ -178,5 +225,16 @@ case "$TARGET" in
     exit 1
     ;;
 esac
+
+# eng.traineddata — bundled Tesseract language pack. Architecture-
+# agnostic, so download once per build (skip if already present from a
+# prior target's fetch). Other languages download on demand at runtime
+# into the app's data dir (Settings → OCR Languages).
+if [ ! -f "$OUT_DIR/tesseract-data/eng.traineddata" ]; then
+  mkdir -p "$OUT_DIR/tesseract-data"
+  curl -L -o "$OUT_DIR/tesseract-data/eng.traineddata" \
+    "${TESSDATA_BASE}/eng.traineddata"
+fi
+
 echo "Sidecars written to $OUT_DIR/"
 ls -la "$OUT_DIR/"

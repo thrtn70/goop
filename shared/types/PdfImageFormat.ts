@@ -2,6 +2,8 @@
 
 /**
  * Output format for `PdfOperation::ExtractImages`. mutool's `draw` subcommand
- * supports both via `-F png` / `-F jpg`.
+ * supports both via `-F png` / `-F jpg`. Wire values are snake_case (`"png"`
+ * / `"jpeg"`); the `mutool_flag` helper converts to the CLI flag string
+ * because mutool spells JPEG as `jpg`, not `jpeg`.
  */
 export type PdfImageFormat = "png" | "jpeg";

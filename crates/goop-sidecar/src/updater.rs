@@ -72,6 +72,18 @@ impl<'a> UpdateChecker<'a> {
         }
     }
 
+    /// Version-only checker for tesseract. The CLI accepts `--version`
+    /// and writes the version banner to stderr (similar to mutool).
+    /// Bundled per-platform via fetch-sidecars.sh — no self-update.
+    pub fn for_tesseract(resolver: &'a BinaryResolver) -> Self {
+        Self {
+            resolver,
+            binary_name: "tesseract",
+            version_args: &["--version"],
+            update_args: &[],
+        }
+    }
+
     /// Backward-compatible constructor that defaults to yt-dlp. Kept
     /// so existing call sites compile without modification while we
     /// migrate them in stages.
@@ -153,8 +165,10 @@ impl<'a> UpdateChecker<'a> {
 /// Strip per-binary preamble from the `--version` / `-v` stdout so
 /// Settings → Sidecars displays a clean semver. mutool prints
 /// "mutool version 1.27.2" rather than just the version; gs prints
-/// "GPL Ghostscript 10.04.0 (...)" on the first line. Other binaries
-/// already print a bare semver and are passed through unchanged.
+/// "GPL Ghostscript 10.04.0 (...)" on the first line; tesseract prints
+/// "tesseract 5.5.0" on the first line followed by leptonica + image
+/// library banners. Other binaries already print a bare semver and are
+/// passed through unchanged.
 fn normalize_version(binary_name: &str, raw: String) -> String {
     match binary_name {
         "mutool" => raw
@@ -168,6 +182,16 @@ fn normalize_version(binary_name: &str, raw: String) -> String {
                 first
                     .strip_prefix("GPL Ghostscript ")
                     .and_then(|s| s.split_whitespace().next())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| first.to_string())
+            })
+            .unwrap_or(raw),
+        "tesseract" => raw
+            .lines()
+            .next()
+            .map(|first| {
+                first
+                    .strip_prefix("tesseract ")
                     .map(str::to_string)
                     .unwrap_or_else(|| first.to_string())
             })
@@ -237,6 +261,15 @@ mod tests {
     }
 
     #[test]
+    fn tesseract_constructor_uses_version_flag_and_has_no_self_update() {
+        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
+        let c = UpdateChecker::for_tesseract(&r);
+        assert_eq!(c.binary_name, "tesseract");
+        assert_eq!(c.version_args, &["--version"]);
+        assert!(c.update_args.is_empty(), "tesseract has no --update flag");
+    }
+
+    #[test]
     fn normalize_version_strips_mutool_preamble() {
         assert_eq!(
             normalize_version("mutool", "mutool version 1.27.2".into()),
@@ -259,6 +292,29 @@ mod tests {
             "2024.11.18"
         );
         assert_eq!(normalize_version("gallery-dl", "1.32.0".into()), "1.32.0");
+    }
+
+    #[test]
+    fn normalize_version_strips_tesseract_preamble() {
+        // tesseract --version writes "tesseract 5.5.0\n leptonica-1.85.0\n ..."
+        // to stderr. Only keep the first-line version after the prefix.
+        let raw = "tesseract 5.5.0\n leptonica-1.85.0\n  libgif 5.2.1 : libjpeg 8d : libpng 1.6.40";
+        assert_eq!(normalize_version("tesseract", raw.into()), "5.5.0");
+    }
+
+    #[test]
+    fn normalize_version_preserves_tesseract_dev_suffix() {
+        // Some upstream/distro builds emit "tesseract 5.5.0-dev" or
+        // "tesseract 5.4.1-20231212". Strip the prefix, keep the rest
+        // intact for display.
+        assert_eq!(
+            normalize_version("tesseract", "tesseract 5.5.0-dev\n leptonica-1.85.0".into()),
+            "5.5.0-dev"
+        );
+        assert_eq!(
+            normalize_version("tesseract", "tesseract 5.4.1-20231212".into()),
+            "5.4.1-20231212"
+        );
     }
 
     #[tokio::test]

@@ -58,6 +58,21 @@ pub fn run() {
                 .ok()
                 .map(|d| d.join("gs-resources"))
                 .filter(|p| p.exists());
+
+            // Tesseract language packs split across two directories:
+            //   - tessdata_user_dir: writable, holds user-downloaded packs
+            //   - tessdata_bundled_dir: read-only, ships eng.traineddata
+            // Phase 6 OCR passes both (in user-first order) to tesseract
+            // via --tessdata-dir; the user dir takes precedence so an
+            // updated download overrides the bundled file with the same
+            // language code.
+            let tessdata_user_dir = gpath::data_dir().join("tesseract-data");
+            let tessdata_bundled_dir: Option<PathBuf> = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join("tesseract-data"))
+                .filter(|p| p.exists());
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
             let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
@@ -444,6 +459,8 @@ pub fn run() {
                 thumbs,
                 encoders,
                 hw_enabled,
+                tessdata_user_dir,
+                tessdata_bundled_dir,
             });
             Ok(())
         })
@@ -470,6 +487,11 @@ pub fn run() {
             commands::sidecar::sidecar_ffmpeg_version,
             commands::sidecar::sidecar_ghostscript_version,
             commands::sidecar::sidecar_mutool_version,
+            commands::sidecar::sidecar_tesseract_version,
+            commands::sidecar::sidecar_tessdata_installed,
+            commands::sidecar::sidecar_tessdata_available,
+            commands::sidecar::sidecar_tessdata_download,
+            commands::sidecar::sidecar_tessdata_remove,
             commands::settings::settings_get,
             commands::settings::settings_set,
             commands::preset::preset_list,

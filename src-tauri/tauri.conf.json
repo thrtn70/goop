@@ -45,11 +45,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/yt-dlp", "bin/gallery-dl", "bin/gs", "bin/mutool"],
+    "externalBin": ["bin/ffmpeg", "bin/ffprobe", "bin/yt-dlp", "bin/gallery-dl", "bin/gs", "bin/mutool", "bin/tesseract"],
     "resources": {
       "bin/gs-resources/Resource": "gs-resources/Resource",
       "bin/gs-resources/lib": "gs-resources/lib",
-      "bin/gs-resources/iccprofiles": "gs-resources/iccprofiles"
+      "bin/gs-resources/iccprofiles": "gs-resources/iccprofiles",
+      "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata"
     }
   }
 }

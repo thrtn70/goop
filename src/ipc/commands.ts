@@ -7,6 +7,7 @@ import type {
   ImageOcrOutput,
   Job,
   JobId,
+  LanguagePack,
   PageRange,
   PageRotation,
   PdfImageFormat,
@@ -75,6 +76,15 @@ function presetToIpc(p: Preset): IpcPreset {
   };
 }
 
+// LanguagePack.size_bytes is u64 in Rust → bigint in the ts-rs-generated
+// type, but Tauri serializes u64 as a plain JSON number on the wire, so
+// the value the frontend receives is actually a JS number. Shim to a
+// number-typed mirror at the IPC boundary so consumers can do arithmetic
+// without dancing around BigInt vs Number coercion.
+export type IpcLanguagePack = Omit<LanguagePack, "size_bytes"> & {
+  size_bytes: number;
+};
+
 export const api = {
   convert: {
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
@@ -107,6 +117,18 @@ export const api = {
     ffmpegVersion: () => invoke<string>("sidecar_ffmpeg_version"),
     ghostscriptVersion: () => invoke<string>("sidecar_ghostscript_version"),
     mutoolVersion: () => invoke<string>("sidecar_mutool_version"),
+    tesseractVersion: () => invoke<string>("sidecar_tesseract_version"),
+    // tessdata* return IpcLanguagePack to expose size_bytes as `number`
+    // (the wire reality) rather than the bigint the ts-rs-generated
+    // LanguagePack claims. See IpcLanguagePack comment above.
+    tessdataInstalled: () =>
+      invoke<IpcLanguagePack[]>("sidecar_tessdata_installed"),
+    tessdataAvailable: () =>
+      invoke<IpcLanguagePack[]>("sidecar_tessdata_available"),
+    tessdataDownload: (code: string) =>
+      invoke<UpdateStatus>("sidecar_tessdata_download", { code }),
+    tessdataRemove: (code: string) =>
+      invoke<void>("sidecar_tessdata_remove", { code }),
   },
   settings: {
     get: () => invoke<Settings>("settings_get"),
