@@ -17,7 +17,7 @@ use goop_pdf::{
     extract_images as pdf_extract_images, extract_pages as pdf_extract_pages,
     extract_text as pdf_extract_text, images_to_pdf as pdf_images_to_pdf,
     insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
-    reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
+    ocr as pdf_ocr_mod, reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -170,10 +170,14 @@ pub fn run() {
             let r_for_pdf = resolver.clone();
             let gs_dir_for_pdf = gs_resource_dir.clone();
             let pids_for_pdf = pid_registry.clone();
+            let tessdata_user_for_pdf = tessdata_user_dir.clone();
+            let tessdata_bundled_for_pdf = tessdata_bundled_dir.clone();
             let pdf_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
                 let r = r_for_pdf.clone();
                 let gs_dir = gs_dir_for_pdf.clone();
                 let pids = pids_for_pdf.clone();
+                let tessdata_user = tessdata_user_for_pdf.clone();
+                let tessdata_bundled = tessdata_bundled_for_pdf.clone();
                 Box::pin(async move {
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
@@ -469,8 +473,36 @@ pub fn run() {
                                 1u32,
                             )
                         }
-                        PdfOperation::PdfOcr { .. } => {
-                            return Err(GoopError::Queue("pdf_ocr not yet implemented".into()));
+                        PdfOperation::PdfOcr {
+                            input,
+                            output_path,
+                            lang,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let mut dirs: Vec<&std::path::Path> = vec![tessdata_user.as_path()];
+                            if let Some(b) = tessdata_bundled.as_ref() {
+                                dirs.push(b.as_path());
+                            }
+                            pdf_ocr_mod::ocr(
+                                &r,
+                                &dirs,
+                                &in_path,
+                                &out,
+                                &lang,
+                                cancel,
+                                Some(pids),
+                                Some(id),
+                            )
+                            .await
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
                         }
                         PdfOperation::ImageOcr { .. } => {
                             return Err(GoopError::Queue("image_ocr not yet implemented".into()));

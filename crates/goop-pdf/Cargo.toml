@@ -15,6 +15,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 lopdf = { version = "0.34", default-features = false, features = ["nom_parser", "rayon"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

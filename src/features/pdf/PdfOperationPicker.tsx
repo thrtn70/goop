@@ -97,6 +97,12 @@ const OPTIONS: Option[] = [
     hint: "Combine images into a single PDF, one per page",
     multiFileOk: true,
   },
+  {
+    kind: "pdf_ocr",
+    label: "OCR",
+    hint: "Make a scanned PDF searchable",
+    multiFileOk: false,
+  },
 ];
 
 export default function PdfOperationPicker({

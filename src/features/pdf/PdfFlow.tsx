@@ -13,6 +13,7 @@ import PdfMetadataForm from "./PdfMetadataForm";
 import PdfTextExtractFlow from "./PdfTextExtractFlow";
 import PdfToImagesFlow from "./PdfToImagesFlow";
 import ImagesToPdfFlow from "./ImagesToPdfFlow";
+import PdfOcrFlow from "./PdfOcrFlow";
 import { api, pdfCompress, pdfMerge, pdfSplit } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -228,6 +229,9 @@ export default function PdfFlow({
         <PdfToImagesFlow file={files[0]} onDone={onDone} />
       )}
       {op === "images_to_pdf" && <ImagesToPdfFlow onDone={onDone} />}
+      {files.length === 1 && op === "pdf_ocr" && (
+        <PdfOcrFlow file={files[0]} onDone={onDone} />
+      )}
 
       {(op === "merge" || op === "split" || op === "compress") && (
         <div className="mt-2 flex items-center gap-3 border-t border-subtle pt-4">
