@@ -5,6 +5,7 @@
 pub mod compress;
 pub mod delete_pages;
 pub mod extract_pages;
+pub mod extract_text;
 pub mod insert_blank;
 pub mod merge;
 pub mod metadata;

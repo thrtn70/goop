@@ -7,7 +7,12 @@ export type PdfOperationKind =
   | "rotate"
   | "extract_pages"
   | "insert_blank"
-  | "set_metadata";
+  | "set_metadata"
+  | "extract_text"
+  | "extract_images"
+  | "images_to_pdf"
+  | "pdf_ocr"
+  | "image_ocr";
 
 interface PdfOperationPickerProps {
   selected: PdfOperationKind;
@@ -72,6 +77,12 @@ const OPTIONS: Option[] = [
     kind: "compress",
     label: "Compress",
     hint: "Reduce file size via Ghostscript",
+    multiFileOk: false,
+  },
+  {
+    kind: "extract_text",
+    label: "Extract text",
+    hint: "Save the PDF's text layer to a .txt file",
     multiFileOk: false,
   },
 ];

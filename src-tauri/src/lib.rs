@@ -14,8 +14,8 @@ use goop_core::{
 use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
     compress as pdf_compress, delete_pages as pdf_delete_pages, extract_pages as pdf_extract_pages,
-    insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
-    reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
+    extract_text as pdf_extract_text, insert_blank as pdf_insert_blank, merge as pdf_merge,
+    metadata as pdf_metadata, reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -388,13 +388,29 @@ pub fn run() {
                                 1u32,
                             )
                         }
-                        // Phase 1 stubs — replaced by real impls in Phases 3-7.
+                        // Remaining v0.2.4 stubs — replaced in Phases 4-7.
                         // Error messages use the snake_case wire discriminator so log
                         // scrapers can match against the same string they see on the IPC.
-                        PdfOperation::ExtractText { .. } => {
-                            return Err(GoopError::Queue(
-                                "extract_text not yet implemented".into(),
-                            ));
+                        PdfOperation::ExtractText { input, output_path } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            pdf_extract_text::extract_text(
+                                &r,
+                                &in_path,
+                                &out,
+                                cancel,
+                                Some(pids),
+                                Some(id),
+                            )
+                            .await
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
                         }
                         PdfOperation::ExtractImages { .. } => {
                             return Err(GoopError::Queue(

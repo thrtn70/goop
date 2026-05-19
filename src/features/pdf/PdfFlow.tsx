@@ -10,6 +10,7 @@ import PdfRotateFlow from "./PdfRotateFlow";
 import PdfExtractFlow from "./PdfExtractFlow";
 import PdfInsertBlankFlow from "./PdfInsertBlankFlow";
 import PdfMetadataForm from "./PdfMetadataForm";
+import PdfTextExtractFlow from "./PdfTextExtractFlow";
 import { api, pdfCompress, pdfMerge, pdfSplit } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -212,6 +213,9 @@ export default function PdfFlow({
       )}
       {files.length === 1 && op === "set_metadata" && (
         <PdfMetadataForm file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "extract_text" && (
+        <PdfTextExtractFlow file={files[0]} onDone={onDone} />
       )}
 
       {(op === "merge" || op === "split" || op === "compress") && (
