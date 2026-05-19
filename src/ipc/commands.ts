@@ -4,10 +4,12 @@ import type {
   ExtractRequest,
   HistoryCounts,
   HistoryFilter,
+  ImageOcrOutput,
   Job,
   JobId,
   PageRange,
   PageRotation,
+  PdfImageFormat,
   PdfMetadata,
   PdfOperation,
   PdfProbeResult,
@@ -212,4 +214,53 @@ export function pdfSetMetadata(
   outputPath: string,
 ): PdfOperation {
   return { kind: "set_metadata", input, metadata, output_path: outputPath };
+}
+
+export function pdfExtractText(input: string, outputPath: string): PdfOperation {
+  return { kind: "extract_text", input, output_path: outputPath };
+}
+
+export function pdfExtractImages(
+  input: string,
+  outputDir: string,
+  format: PdfImageFormat,
+  dpi: number,
+): PdfOperation {
+  return {
+    kind: "extract_images",
+    input,
+    output_dir: outputDir,
+    format,
+    dpi,
+  };
+}
+
+export function pdfImagesToPdf(
+  inputs: string[],
+  outputPath: string,
+): PdfOperation {
+  return { kind: "images_to_pdf", inputs, output_path: outputPath };
+}
+
+export function pdfOcr(
+  input: string,
+  outputPath: string,
+  lang: string,
+): PdfOperation {
+  return { kind: "pdf_ocr", input, output_path: outputPath, lang };
+}
+
+export function pdfImageOcr(
+  inputs: string[],
+  outputPath: string,
+  outputKind: ImageOcrOutput,
+  lang: string,
+): PdfOperation {
+  return {
+    kind: "image_ocr",
+    inputs,
+    output_path: outputPath,
+    output_kind: outputKind,
+    lang,
+  };
 }

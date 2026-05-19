@@ -37,6 +37,15 @@ pub enum PdfError {
     Mutool(String),
     #[error("mutool missing: {0}")]
     MutoolMissing(String),
+    #[error("tesseract failed: {0}")]
+    Tesseract(String),
+    #[error("ocr pipeline error: {0}")]
+    Ocr(String),
+    /// The wrapped `String` is the requested language code (e.g. `"fra"`),
+    /// not an OS error message. Raised when none of the configured tessdata
+    /// search directories contain `<lang>.traineddata`.
+    #[error("ocr language pack '{0}' not installed")]
+    OcrMissingLang(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

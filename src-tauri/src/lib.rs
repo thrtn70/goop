@@ -373,6 +373,30 @@ pub fn run() {
                                 1u32,
                             )
                         }
+                        // Phase 1 stubs — replaced by real impls in Phases 3-7.
+                        // Error messages use the snake_case wire discriminator so log
+                        // scrapers can match against the same string they see on the IPC.
+                        PdfOperation::ExtractText { .. } => {
+                            return Err(GoopError::Queue(
+                                "extract_text not yet implemented".into(),
+                            ));
+                        }
+                        PdfOperation::ExtractImages { .. } => {
+                            return Err(GoopError::Queue(
+                                "extract_images not yet implemented".into(),
+                            ));
+                        }
+                        PdfOperation::ImagesToPdf { .. } => {
+                            return Err(GoopError::Queue(
+                                "images_to_pdf not yet implemented".into(),
+                            ));
+                        }
+                        PdfOperation::PdfOcr { .. } => {
+                            return Err(GoopError::Queue("pdf_ocr not yet implemented".into()));
+                        }
+                        PdfOperation::ImageOcr { .. } => {
+                            return Err(GoopError::Queue("image_ocr not yet implemented".into()));
+                        }
                     };
                     Ok(JobResult {
                         output_path,

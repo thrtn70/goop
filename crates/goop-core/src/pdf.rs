@@ -59,6 +59,49 @@ pub struct PdfMetadata {
     pub keywords: Option<String>,
 }
 
+/// Output format for `PdfOperation::ExtractImages`. mutool's `draw` subcommand
+/// supports both via `-F png` / `-F jpg`. Wire values are snake_case (`"png"`
+/// / `"jpeg"`); the `mutool_flag` helper converts to the CLI flag string
+/// because mutool spells JPEG as `jpg`, not `jpeg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum PdfImageFormat {
+    Png,
+    Jpeg,
+}
+
+impl PdfImageFormat {
+    /// Format string mutool's `draw -F` flag expects. Diverges from the wire
+    /// value for `Jpeg` (mutool wants `jpg`, the wire format is `jpeg`).
+    pub fn mutool_flag(&self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+
+    /// File extension to use when naming output files. Matches `mutool_flag`
+    /// for `Png` (`.png`) and uses the short form for `Jpeg` (`.jpg`).
+    pub fn file_extension(&self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
+/// Output kind for `PdfOperation::ImageOcr`. Drives whether the tesseract
+/// pipeline produces a `.txt` (text) or a multi-page searchable PDF
+/// (searchable_pdf) from the supplied image inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOcrOutput {
+    Text,
+    SearchablePdf,
+}
+
 /// What to do with a PDF. The original three ops (Merge, Split, Compress)
 /// retain their wire shape — adding variants is additive only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -122,6 +165,41 @@ pub enum PdfOperation {
         input: String,
         metadata: PdfMetadata,
         output_path: String,
+    },
+    /// Extract the embedded text layer from a PDF into a plain `.txt` file.
+    /// Does NOT run OCR — for scanned PDFs with no text layer, use `PdfOcr`.
+    ExtractText { input: String, output_path: String },
+    /// Rasterize each PDF page into an image file in `output_dir`. Filenames
+    /// land as `page-{N}.{ext}` with N 1-indexed.
+    ExtractImages {
+        input: String,
+        output_dir: String,
+        format: PdfImageFormat,
+        dpi: u32,
+    },
+    /// Combine N input images into a single PDF, one image per page, in the
+    /// order supplied. Pure-Rust assembly via `lopdf`.
+    ImagesToPdf {
+        inputs: Vec<String>,
+        output_path: String,
+    },
+    /// Run OCR over each page of a (typically scanned) PDF and produce a new
+    /// PDF with a searchable text layer. Two-stage pipeline: mutool rasterizes
+    /// to TIFF, tesseract OCRs each page, lopdf merges. `lang` is a Tesseract
+    /// language code (e.g. "eng"); language pack must be installed.
+    PdfOcr {
+        input: String,
+        output_path: String,
+        lang: String,
+    },
+    /// Run OCR over one or more image inputs. `output_kind` selects between a
+    /// plain text concatenation (`.txt`) and a multi-page searchable PDF.
+    /// Same `lang` semantics as `PdfOcr`.
+    ImageOcr {
+        inputs: Vec<String>,
+        output_path: String,
+        output_kind: ImageOcrOutput,
+        lang: String,
     },
 }
 
@@ -239,6 +317,103 @@ mod tests {
         assert_eq!(v["metadata"]["author"], json!(null));
         assert_eq!(v["metadata"]["subject"], json!(""));
         assert_eq!(op, roundtrip(&op));
+    }
+
+    #[test]
+    fn extract_text_serializes_with_snake_case_kind() {
+        let op = PdfOperation::ExtractText {
+            input: "/in.pdf".into(),
+            output_path: "/out.txt".into(),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["kind"], json!("extract_text"));
+        assert_eq!(op, roundtrip(&op));
+    }
+
+    #[test]
+    fn extract_images_carries_format_and_dpi() {
+        let jpeg_op = PdfOperation::ExtractImages {
+            input: "/in.pdf".into(),
+            output_dir: "/out".into(),
+            format: PdfImageFormat::Jpeg,
+            dpi: 200,
+        };
+        let v = serde_json::to_value(&jpeg_op).unwrap();
+        assert_eq!(v["kind"], json!("extract_images"));
+        assert_eq!(v["format"], json!("jpeg"));
+        assert_eq!(v["dpi"], json!(200));
+        assert_eq!(jpeg_op, roundtrip(&jpeg_op));
+
+        let png_op = PdfOperation::ExtractImages {
+            input: "/in.pdf".into(),
+            output_dir: "/out".into(),
+            format: PdfImageFormat::Png,
+            dpi: 150,
+        };
+        let v = serde_json::to_value(&png_op).unwrap();
+        assert_eq!(v["format"], json!("png"));
+        assert_eq!(png_op, roundtrip(&png_op));
+    }
+
+    #[test]
+    fn pdf_image_format_mutool_flag_uses_jpg_not_jpeg() {
+        // Wire value is "jpeg" but mutool's `-F` flag wants "jpg" — guard
+        // against accidental drift between the serde rename and the CLI
+        // mapping in the OCR/extract-images backends.
+        assert_eq!(PdfImageFormat::Png.mutool_flag(), "png");
+        assert_eq!(PdfImageFormat::Jpeg.mutool_flag(), "jpg");
+        assert_eq!(PdfImageFormat::Png.file_extension(), "png");
+        assert_eq!(PdfImageFormat::Jpeg.file_extension(), "jpg");
+    }
+
+    #[test]
+    fn images_to_pdf_carries_ordered_inputs() {
+        let op = PdfOperation::ImagesToPdf {
+            inputs: vec!["/a.png".into(), "/b.jpg".into()],
+            output_path: "/out.pdf".into(),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["kind"], json!("images_to_pdf"));
+        assert_eq!(v["inputs"], json!(["/a.png", "/b.jpg"]));
+        assert_eq!(op, roundtrip(&op));
+    }
+
+    #[test]
+    fn pdf_ocr_carries_lang() {
+        let op = PdfOperation::PdfOcr {
+            input: "/scan.pdf".into(),
+            output_path: "/searchable.pdf".into(),
+            lang: "eng".into(),
+        };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v["kind"], json!("pdf_ocr"));
+        assert_eq!(v["lang"], json!("eng"));
+        assert_eq!(op, roundtrip(&op));
+    }
+
+    #[test]
+    fn image_ocr_carries_output_kind_and_lang() {
+        let text_op = PdfOperation::ImageOcr {
+            inputs: vec!["/photo.jpg".into()],
+            output_path: "/words.txt".into(),
+            output_kind: ImageOcrOutput::Text,
+            lang: "eng".into(),
+        };
+        let v = serde_json::to_value(&text_op).unwrap();
+        assert_eq!(v["kind"], json!("image_ocr"));
+        assert_eq!(v["output_kind"], json!("text"));
+        assert_eq!(text_op, roundtrip(&text_op));
+
+        let pdf_op = PdfOperation::ImageOcr {
+            inputs: vec!["/a.png".into(), "/b.png".into()],
+            output_path: "/out.pdf".into(),
+            output_kind: ImageOcrOutput::SearchablePdf,
+            lang: "fra".into(),
+        };
+        let v = serde_json::to_value(&pdf_op).unwrap();
+        assert_eq!(v["output_kind"], json!("searchable_pdf"));
+        assert_eq!(v["lang"], json!("fra"));
+        assert_eq!(pdf_op, roundtrip(&pdf_op));
     }
 
     #[test]

@@ -2,9 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   pdfCompress,
   pdfDeletePages,
+  pdfExtractImages,
   pdfExtractPages,
+  pdfExtractText,
+  pdfImageOcr,
+  pdfImagesToPdf,
   pdfInsertBlank,
   pdfMerge,
+  pdfOcr,
   pdfReorder,
   pdfRotate,
   pdfSetMetadata,
@@ -114,6 +119,71 @@ describe("PdfOperation builders emit the correct discriminator", () => {
       input: "/in.pdf",
       metadata: { title: "Hello", author: null, subject: "", keywords: null },
       output_path: "/out.pdf",
+    });
+  });
+
+  it("pdfExtractText → kind=extract_text", () => {
+    expect(pdfExtractText("/in.pdf", "/out.txt")).toEqual({
+      kind: "extract_text",
+      input: "/in.pdf",
+      output_path: "/out.txt",
+    });
+  });
+
+  it("pdfExtractImages → kind=extract_images with format and dpi", () => {
+    expect(pdfExtractImages("/in.pdf", "/out", "png", 150)).toEqual({
+      kind: "extract_images",
+      input: "/in.pdf",
+      output_dir: "/out",
+      format: "png",
+      dpi: 150,
+    });
+    // jpeg variant — wire value is "jpeg" even though mutool's CLI flag is
+    // "jpg"; the Rust-side helper handles the translation.
+    expect(pdfExtractImages("/in.pdf", "/out", "jpeg", 200)).toEqual({
+      kind: "extract_images",
+      input: "/in.pdf",
+      output_dir: "/out",
+      format: "jpeg",
+      dpi: 200,
+    });
+  });
+
+  it("pdfImagesToPdf → kind=images_to_pdf with ordered inputs", () => {
+    expect(pdfImagesToPdf(["/a.png", "/b.jpg"], "/out.pdf")).toEqual({
+      kind: "images_to_pdf",
+      inputs: ["/a.png", "/b.jpg"],
+      output_path: "/out.pdf",
+    });
+  });
+
+  it("pdfOcr → kind=pdf_ocr with lang", () => {
+    expect(pdfOcr("/scan.pdf", "/searchable.pdf", "eng")).toEqual({
+      kind: "pdf_ocr",
+      input: "/scan.pdf",
+      output_path: "/searchable.pdf",
+      lang: "eng",
+    });
+  });
+
+  it("pdfImageOcr → kind=image_ocr with output_kind and lang", () => {
+    expect(
+      pdfImageOcr(["/photo.jpg"], "/words.txt", "text", "eng"),
+    ).toEqual({
+      kind: "image_ocr",
+      inputs: ["/photo.jpg"],
+      output_path: "/words.txt",
+      output_kind: "text",
+      lang: "eng",
+    });
+    expect(
+      pdfImageOcr(["/a.png", "/b.png"], "/out.pdf", "searchable_pdf", "fra"),
+    ).toEqual({
+      kind: "image_ocr",
+      inputs: ["/a.png", "/b.png"],
+      output_path: "/out.pdf",
+      output_kind: "searchable_pdf",
+      lang: "fra",
     });
   });
 });
