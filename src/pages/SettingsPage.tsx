@@ -8,6 +8,7 @@ import { api } from "@/ipc/commands";
 import type { ExtractNamingScheme, Theme } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import SettingsSection from "@/components/SettingsSection";
+import OcrLanguagesSection from "@/components/OcrLanguagesSection";
 import PresetManager from "@/features/presets/PresetManager";
 import { useAppVersion } from "@/hooks/useAppVersion";
 
@@ -424,6 +425,8 @@ export default function SettingsPage() {
           )}
         </div>
       </SettingsSection>
+
+      <OcrLanguagesSection />
 
       <SettingsSection title="Presets" description="Named format + quality combinations for Convert and Compress.">
         <PresetManager />
