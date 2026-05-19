@@ -12,6 +12,7 @@ pub mod insert_blank;
 pub mod merge;
 pub mod metadata;
 pub mod ocr;
+pub mod ocr_image;
 pub mod page_thumbs;
 pub mod probe;
 pub mod range_parser;

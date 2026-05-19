@@ -103,6 +103,12 @@ const OPTIONS: Option[] = [
     hint: "Make a scanned PDF searchable",
     multiFileOk: false,
   },
+  {
+    kind: "image_ocr",
+    label: "OCR images",
+    hint: "Read text from one or more images",
+    multiFileOk: true,
+  },
 ];
 
 export default function PdfOperationPicker({
