@@ -13,7 +13,8 @@ use goop_core::{
 };
 use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
-    compress as pdf_compress, delete_pages as pdf_delete_pages, extract_pages as pdf_extract_pages,
+    compress as pdf_compress, delete_pages as pdf_delete_pages,
+    extract_images as pdf_extract_images, extract_pages as pdf_extract_pages,
     extract_text as pdf_extract_text, insert_blank as pdf_insert_blank, merge as pdf_merge,
     metadata as pdf_metadata, reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
 };
@@ -412,10 +413,36 @@ pub fn run() {
                                 1u32,
                             )
                         }
-                        PdfOperation::ExtractImages { .. } => {
-                            return Err(GoopError::Queue(
-                                "extract_images not yet implemented".into(),
-                            ));
+                        PdfOperation::ExtractImages {
+                            input,
+                            output_dir,
+                            format,
+                            dpi,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out_dir = PathBuf::from(output_dir);
+                            let outs = pdf_extract_images::extract_images(
+                                &r,
+                                &in_path,
+                                &out_dir,
+                                format,
+                                dpi,
+                                cancel,
+                                Some(pids),
+                                Some(id),
+                            )
+                            .await
+                            .map_err(GoopError::from)?;
+                            let total_bytes: u64 = outs
+                                .iter()
+                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                                .sum();
+                            (
+                                Some(out_dir.to_string_lossy().into_owned()),
+                                Some(total_bytes),
+                                ResultKind::Folder,
+                                outs.len() as u32,
+                            )
                         }
                         PdfOperation::ImagesToPdf { .. } => {
                             return Err(GoopError::Queue(

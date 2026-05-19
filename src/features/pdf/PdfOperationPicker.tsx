@@ -85,6 +85,12 @@ const OPTIONS: Option[] = [
     hint: "Save the PDF's text layer to a .txt file",
     multiFileOk: false,
   },
+  {
+    kind: "extract_images",
+    label: "Extract images",
+    hint: "Export every page as PNG or JPEG",
+    multiFileOk: false,
+  },
 ];
 
 export default function PdfOperationPicker({

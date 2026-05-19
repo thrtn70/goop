@@ -11,6 +11,7 @@ import PdfExtractFlow from "./PdfExtractFlow";
 import PdfInsertBlankFlow from "./PdfInsertBlankFlow";
 import PdfMetadataForm from "./PdfMetadataForm";
 import PdfTextExtractFlow from "./PdfTextExtractFlow";
+import PdfToImagesFlow from "./PdfToImagesFlow";
 import { api, pdfCompress, pdfMerge, pdfSplit } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -216,6 +217,9 @@ export default function PdfFlow({
       )}
       {files.length === 1 && op === "extract_text" && (
         <PdfTextExtractFlow file={files[0]} onDone={onDone} />
+      )}
+      {files.length === 1 && op === "extract_images" && (
+        <PdfToImagesFlow file={files[0]} onDone={onDone} />
       )}
 
       {(op === "merge" || op === "split" || op === "compress") && (
