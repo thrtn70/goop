@@ -91,6 +91,12 @@ const OPTIONS: Option[] = [
     hint: "Export every page as PNG or JPEG",
     multiFileOk: false,
   },
+  {
+    kind: "images_to_pdf",
+    label: "Images to PDF",
+    hint: "Combine images into a single PDF, one per page",
+    multiFileOk: true,
+  },
 ];
 
 export default function PdfOperationPicker({

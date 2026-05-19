@@ -15,8 +15,9 @@ use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
     compress as pdf_compress, delete_pages as pdf_delete_pages,
     extract_images as pdf_extract_images, extract_pages as pdf_extract_pages,
-    extract_text as pdf_extract_text, insert_blank as pdf_insert_blank, merge as pdf_merge,
-    metadata as pdf_metadata, reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
+    extract_text as pdf_extract_text, images_to_pdf as pdf_images_to_pdf,
+    insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
+    reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -444,10 +445,29 @@ pub fn run() {
                                 outs.len() as u32,
                             )
                         }
-                        PdfOperation::ImagesToPdf { .. } => {
-                            return Err(GoopError::Queue(
-                                "images_to_pdf not yet implemented".into(),
-                            ));
+                        PdfOperation::ImagesToPdf {
+                            inputs,
+                            output_path,
+                        } => {
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let in_paths: Vec<PathBuf> =
+                                    inputs.into_iter().map(PathBuf::from).collect();
+                                let refs: Vec<&std::path::Path> =
+                                    in_paths.iter().map(|p| p.as_path()).collect();
+                                pdf_images_to_pdf::images_to_pdf(&refs, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
                         }
                         PdfOperation::PdfOcr { .. } => {
                             return Err(GoopError::Queue("pdf_ocr not yet implemented".into()));

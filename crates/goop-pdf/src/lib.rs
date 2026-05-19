@@ -7,6 +7,7 @@ pub mod delete_pages;
 pub mod extract_images;
 pub mod extract_pages;
 pub mod extract_text;
+pub mod images_to_pdf;
 pub mod insert_blank;
 pub mod merge;
 pub mod metadata;

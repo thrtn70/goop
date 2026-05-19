@@ -12,6 +12,7 @@ import PdfInsertBlankFlow from "./PdfInsertBlankFlow";
 import PdfMetadataForm from "./PdfMetadataForm";
 import PdfTextExtractFlow from "./PdfTextExtractFlow";
 import PdfToImagesFlow from "./PdfToImagesFlow";
+import ImagesToPdfFlow from "./ImagesToPdfFlow";
 import { api, pdfCompress, pdfMerge, pdfSplit } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -58,9 +59,13 @@ export default function PdfFlow({
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   // Resolve the initial op against the multi-file constraint so a host page
   // that requests `compress` for two PDFs doesn't silently flip to `merge`
-  // on the first render via the auto-switch effect below.
+  // on the first render via the auto-switch effect below. images_to_pdf
+  // also accepts multi-file (in fact it ignores the dropped PDFs entirely
+  // and uses its own image picker), so it's treated alongside merge.
   const initialOp: PdfOperationKind =
-    files.length > 1 && defaultOp !== "merge" ? "merge" : defaultOp;
+    files.length > 1 && defaultOp !== "merge" && defaultOp !== "images_to_pdf"
+      ? "merge"
+      : defaultOp;
   const [op, setOp] = useState<PdfOperationKind>(initialOp);
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useState<PageRange[]>([]);
@@ -70,9 +75,10 @@ export default function PdfFlow({
   const multiFile = files.length > 1;
 
   // Auto-switch operation when the file count changes so we never land in
-  // an illegal state (every op except Merge requires a single file).
+  // an illegal state. merge + images_to_pdf accept multi-file selections;
+  // everything else needs a single PDF.
   useEffect(() => {
-    if (multiFile && op !== "merge") setOp("merge");
+    if (multiFile && op !== "merge" && op !== "images_to_pdf") setOp("merge");
   }, [multiFile, op]);
 
   // Probe the single file to get the page count for the split editor.
@@ -221,6 +227,7 @@ export default function PdfFlow({
       {files.length === 1 && op === "extract_images" && (
         <PdfToImagesFlow file={files[0]} onDone={onDone} />
       )}
+      {op === "images_to_pdf" && <ImagesToPdfFlow onDone={onDone} />}
 
       {(op === "merge" || op === "split" || op === "compress") && (
         <div className="mt-2 flex items-center gap-3 border-t border-subtle pt-4">
