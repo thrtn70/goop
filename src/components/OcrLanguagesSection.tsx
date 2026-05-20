@@ -58,11 +58,16 @@ export default function OcrLanguagesSection() {
   async function handleDownload(code: string) {
     setBusy((prev) => ({ ...prev, [code]: "Downloading…" }));
     try {
-      const status = await api.sidecar.tessdataDownload(code);
-      setBusy((prev) => ({
-        ...prev,
-        [code]: status.message || "Downloaded.",
-      }));
+      await api.sidecar.tessdataDownload(code);
+      // Mirror handleRemove: clear the busy entry on success so the
+      // refresh below isn't followed by a stale status message for a
+      // pack that has now moved into the installed list. Errors keep
+      // the entry so the message surfaces.
+      setBusy((prev) => {
+        const next = { ...prev };
+        delete next[code];
+        return next;
+      });
       await refresh();
     } catch (e) {
       setBusy((prev) => ({ ...prev, [code]: formatError(e) }));

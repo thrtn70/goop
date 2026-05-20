@@ -111,24 +111,32 @@ pub async fn ocr(
     }
     drop(_draw_guard);
 
-    // Collect rasters in page order.
-    let mut rasters: Vec<PathBuf> = std::fs::read_dir(work)
-        .map_err(PdfError::Io)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.starts_with("page-") && name.ends_with(".png")
-        })
-        .collect();
-    rasters.sort_by_key(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|s| s.strip_prefix("page-"))
-            .and_then(|s| s.split('.').next())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(u32::MAX)
-    });
+    // Collect rasters in page order. Walk the temp dir on the blocking
+    // pool — read_dir + per-entry stat are sync syscalls and we're
+    // inside an async fn that lives on the Tokio executor.
+    let work_owned = work.to_path_buf();
+    let rasters: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_owned)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.starts_with("page-") && name.ends_with(".png")
+            })
+            .collect();
+        paths.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| s.strip_prefix("page-"))
+                .and_then(|s| s.split('.').next())
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(u32::MAX)
+        });
+        Ok::<_, std::io::Error>(paths)
+    })
+    .await
+    .map_err(|e| PdfError::Ocr(e.to_string()))?
+    .map_err(PdfError::Io)?;
     if rasters.is_empty() {
         return Err(PdfError::Ocr("mutool draw produced no rasters".into()));
     }
@@ -191,12 +199,21 @@ pub async fn ocr(
         page_pdfs.push(page_pdf);
     }
 
-    // Stage 3: merge per-page PDFs into the final output.
+    // Stage 3: merge per-page PDFs into the final output. lopdf merge
+    // is sync — offload it (plus the dir-create) to the blocking pool.
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PdfError::Io)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(PdfError::Io)?;
     }
-    let merge_refs: Vec<&Path> = page_pdfs.iter().map(|p| p.as_path()).collect();
-    pdf_merge::merge(&merge_refs, output_path)?;
+    let merge_pdfs = page_pdfs.clone();
+    let merge_out = output_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let refs: Vec<&Path> = merge_pdfs.iter().map(|p| p.as_path()).collect();
+        pdf_merge::merge(&refs, &merge_out)
+    })
+    .await
+    .map_err(|e| PdfError::Ocr(e.to_string()))??;
 
     // work_dir drops here — temp TIFFs + per-page PDFs are cleaned up.
     Ok(output_path.to_path_buf())

@@ -84,7 +84,6 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfImagesToPdf(images, dest));

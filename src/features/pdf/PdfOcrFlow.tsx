@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfOcr } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -31,6 +32,7 @@ function stemOf(p: string): string {
  */
 export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
+  const navigate = useNavigate();
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [lang, setLang] = useState<string>("eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
@@ -72,7 +74,6 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfOcr(file, dest, lang));
@@ -102,12 +103,13 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
         ) : installed.length === 0 ? (
           <p className="text-sm text-fg-muted">
             No language packs installed. Visit{" "}
-            <a
-              href="/settings#ocr-languages"
+            <button
+              type="button"
+              onClick={() => navigate("/settings#ocr-languages")}
               className="text-accent underline hover:no-underline"
             >
               Settings → OCR Languages
-            </a>{" "}
+            </button>{" "}
             to add one.
           </p>
         ) : (

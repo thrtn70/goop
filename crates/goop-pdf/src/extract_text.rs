@@ -38,7 +38,9 @@ pub async fn extract_text(
         .map_err(|e| PdfError::MutoolMissing(format!("mutool: {e}")))?;
 
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PdfError::Io)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(PdfError::Io)?;
     }
     if cancel.is_cancelled() {
         return Err(PdfError::Mutool("cancelled before start".into()));

@@ -38,7 +38,6 @@ export default function PdfToImagesFlow({ file, onDone }: PdfToImagesFlowProps) 
       });
       const outDir = typeof dir === "string" ? dir : null;
       if (!outDir) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfExtractImages(file, outDir, format, dpi));

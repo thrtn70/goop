@@ -12,6 +12,107 @@ TARGET="${1:?target triple required}"
 OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
 mkdir -p "$OUT_DIR"
 
+# Bundle Mach-O dylib dependencies into OUT_DIR and rewrite the binary's
+# load commands to resolve them via @loader_path. This lets the bundled
+# tesseract (and its transitive leptonica + image libraries) run on a
+# user's Mac that doesn't have Homebrew installed at /opt/homebrew.
+#
+# BFS over the binary's non-system dylib deps:
+#   - copy each into OUT_DIR (preserving basename)
+#   - install_name_tool -id @loader_path/<basename> on the copy
+#   - install_name_tool -change <orig> @loader_path/<basename> on the
+#     binary/dylib that depends on it
+#   - recurse into the copied dylib's own deps
+# System paths (/usr/lib, /System) are universally available and skipped.
+bundle_macos_dylibs() {
+    local target_bin="$1"
+    local out_dir
+    out_dir="$(dirname "$target_bin")"
+    # Visited set keyed by absolute path string ; bash 3 has no
+    # associative arrays, so we serialise.
+    local visited=""
+    local queue=("$target_bin")
+    while [ "${#queue[@]}" -gt 0 ]; do
+        local current="${queue[0]}"
+        queue=("${queue[@]:1}")
+        case "$visited" in
+            *":$current:"*) continue ;;
+        esac
+        visited="${visited}:${current}:"
+
+        # Build the rpath search list for `current` so we can resolve any
+        # @rpath/<name> references (Homebrew libs use these heavily; e.g.
+        # libwebp depends on @rpath/libsharpyuv.0.dylib which only
+        # resolves against the binary's LC_RPATH entries).
+        local rpaths=()
+        while IFS= read -r rp; do
+            [ -n "$rp" ] && rpaths+=("$rp")
+        done < <(otool -l "$current" \
+            | awk '/LC_RPATH/{found=1; next} found && /path /{print $2; found=0}')
+
+        # otool first line is the binary itself; skip it. Each remaining
+        # line is "\tpath (compatibility ...)" — extract the path.
+        while IFS= read -r line; do
+            local dep_path
+            dep_path="$(printf '%s' "$line" | awk '{print $1}')"
+            case "$dep_path" in
+                ""|/usr/lib/*|/System/*) continue ;;
+            esac
+
+            # Resolve @rpath/<name> against the binary's LC_RPATH entries.
+            local resolved_path="$dep_path"
+            case "$dep_path" in
+                @rpath/*)
+                    local rel="${dep_path#@rpath/}"
+                    resolved_path=""
+                    for rp in "${rpaths[@]}"; do
+                        if [ -f "$rp/$rel" ]; then
+                            resolved_path="$rp/$rel"
+                            break
+                        fi
+                    done
+                    if [ -z "$resolved_path" ]; then
+                        # Last-resort fallback: scan Homebrew lib dirs. The
+                        # dylibs we care about all live somewhere under
+                        # /opt/homebrew/{lib,opt/*/lib}.
+                        resolved_path="$(find /opt/homebrew/opt -name "$rel" -type f 2>/dev/null | head -1)"
+                    fi
+                    [ -z "$resolved_path" ] && {
+                        echo "warning: could not resolve $dep_path for $current" >&2
+                        continue
+                    }
+                    ;;
+                @loader_path/*)
+                    # Already bundled — nothing to do, the rewrite happened
+                    # on an earlier pass over this `current`.
+                    continue
+                    ;;
+            esac
+
+            local dep_base
+            dep_base="$(basename "$resolved_path")"
+            local local_copy="$out_dir/$dep_base"
+
+            # Skip self-references (libleptonica.6.dylib lists itself as
+            # first dep in some Homebrew builds).
+            if [ "$dep_base" = "$(basename "$current")" ]; then
+                # Make sure the binary's own LC_ID_DYLIB points at the
+                # @loader_path form, not the original Homebrew path.
+                install_name_tool -id "@loader_path/$dep_base" "$current" 2>/dev/null || true
+                continue
+            fi
+
+            if [ ! -f "$local_copy" ]; then
+                cp "$resolved_path" "$local_copy"
+                chmod +w "$local_copy"
+                install_name_tool -id "@loader_path/$dep_base" "$local_copy"
+                queue+=("$local_copy")
+            fi
+            install_name_tool -change "$dep_path" "@loader_path/$dep_base" "$current" 2>/dev/null || true
+        done < <(otool -L "$current" | tail -n +2)
+    done
+}
+
 # Pinned gallery-dl release on Codeberg. The in-app `--update` flow lets
 # users move past this baseline once installed; bumping here is mostly
 # about keeping the bundled-out-of-the-box version reasonably fresh.
@@ -136,6 +237,7 @@ case "$TARGET" in
     GS_BREW=/opt/homebrew/bin/brew
     "$GS_BREW" install --quiet ghostscript || true
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
+    rm -f "$OUT_DIR/gs-$TARGET"
     cp "$GS_PREFIX/bin/gs" "$OUT_DIR/gs-$TARGET"
     chmod +x "$OUT_DIR/gs-$TARGET"
     # Copy the full share tree (Resource/, lib/, iccprofiles/) — only once,
@@ -160,16 +262,23 @@ case "$TARGET" in
     # macos-14 runners ship fresh — no pre-existing mupdf to collide.
     "$GS_BREW" install --quiet mupdf-tools || true
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
+    rm -f "$OUT_DIR/mutool-$TARGET"
     cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
     chmod +x "$OUT_DIR/mutool-$TARGET"
-    # tesseract — via Homebrew's tesseract formula. macOS arm64 builds
-    # are signed Mach-O binaries with their leptonica + image-format
-    # dylibs already resolved through Homebrew's rpath setup, so we
-    # don't need to co-locate dylibs (unlike the Windows DLL bundle).
+    # tesseract — via Homebrew's tesseract formula. The brew binary
+    # loads libtesseract / libleptonica / libarchive / libpng / libjpeg
+    # / libtiff / libwebp / libopenjp2 / libgif from /opt/homebrew —
+    # paths that don't exist on a clean Mac. bundle_macos_dylibs copies
+    # the transitive dylib graph next to the sidecar and rewrites every
+    # load command to @loader_path/<basename> so the bundled tesseract
+    # resolves them as siblings at runtime.
     "$GS_BREW" install --quiet tesseract || true
     TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
+    rm -f "$OUT_DIR/tesseract-$TARGET"
     cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
-    chmod +x "$OUT_DIR/tesseract-$TARGET"
+    chmod +wx "$OUT_DIR/tesseract-$TARGET"
+    bundle_macos_dylibs "$OUT_DIR/tesseract-$TARGET"
+    chmod -w "$OUT_DIR/tesseract-$TARGET"
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for

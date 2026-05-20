@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { X } from "lucide-react";
 import { api, pdfImageOcr } from "@/ipc/commands";
@@ -22,6 +23,7 @@ function basename(p: string): string {
  */
 export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
+  const navigate = useNavigate();
   const [images, setImages] = useState<string[]>([]);
   const [outputKind, setOutputKind] = useState<ImageOcrOutput>("text");
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
@@ -89,7 +91,6 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
         ],
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfImageOcr(images, dest, outputKind, lang));
@@ -182,12 +183,13 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
         ) : installed.length === 0 ? (
           <p className="text-sm text-fg-muted">
             No language packs installed. Visit{" "}
-            <a
-              href="/settings#ocr-languages"
+            <button
+              type="button"
+              onClick={() => navigate("/settings#ocr-languages")}
               className="text-accent underline hover:no-underline"
             >
               Settings → OCR Languages
-            </a>{" "}
+            </button>{" "}
             to add one.
           </p>
         ) : (

@@ -105,27 +105,38 @@ pub async fn ocr_image(
         produced.push(written);
     }
 
-    // Combine per-image outputs into the requested final form.
+    // Combine per-image outputs into the requested final form. Both the
+    // lopdf merge and the per-file read/write loop are sync — offload to
+    // the blocking pool so we don't stall the runtime thread.
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PdfError::Io)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(PdfError::Io)?;
     }
-    match output_kind {
-        ImageOcrOutput::SearchablePdf => {
-            let refs: Vec<&Path> = produced.iter().map(|p| p.as_path()).collect();
-            pdf_merge::merge(&refs, output_path)?;
-        }
-        ImageOcrOutput::Text => {
-            let mut combined = String::new();
-            for (i, txt) in produced.iter().enumerate() {
-                if i > 0 {
-                    combined.push_str("\n\n");
-                }
-                let body = std::fs::read_to_string(txt).map_err(PdfError::Io)?;
-                combined.push_str(body.trim_end_matches('\n'));
+    let out_owned = output_path.to_path_buf();
+    let produced_owned = produced.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), PdfError> {
+        match output_kind {
+            ImageOcrOutput::SearchablePdf => {
+                let refs: Vec<&Path> = produced_owned.iter().map(|p| p.as_path()).collect();
+                pdf_merge::merge(&refs, &out_owned)?;
             }
-            std::fs::write(output_path, combined).map_err(PdfError::Io)?;
+            ImageOcrOutput::Text => {
+                let mut combined = String::new();
+                for (i, txt) in produced_owned.iter().enumerate() {
+                    if i > 0 {
+                        combined.push_str("\n\n");
+                    }
+                    let body = std::fs::read_to_string(txt).map_err(PdfError::Io)?;
+                    combined.push_str(body.trim_end_matches('\n'));
+                }
+                std::fs::write(&out_owned, combined).map_err(PdfError::Io)?;
+            }
         }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|e| PdfError::Ocr(e.to_string()))??;
 
     Ok(output_path.to_path_buf())
 }

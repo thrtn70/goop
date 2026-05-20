@@ -39,7 +39,9 @@ pub async fn extract_images(
     let bin = resolver
         .resolve("mutool")
         .map_err(|e| PdfError::MutoolMissing(format!("mutool: {e}")))?;
-    std::fs::create_dir_all(output_dir).map_err(PdfError::Io)?;
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .map_err(PdfError::Io)?;
     if cancel.is_cancelled() {
         return Err(PdfError::Mutool("cancelled before start".into()));
     }
@@ -83,24 +85,32 @@ pub async fn extract_images(
     // mutool's `-o <dir>/page-%d.ext` is page-number substitution. Collect
     // the written files in order. We don't know the page count up-front
     // (the worker has it from probe but doesn't pass it here), so we
-    // walk the dir for the matching pattern.
-    let mut out_paths: Vec<PathBuf> = std::fs::read_dir(output_dir)
-        .map_err(PdfError::Io)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.starts_with("page-") && name.ends_with(&format!(".{ext}"))
-        })
-        .collect();
-    out_paths.sort_by_key(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|s| s.strip_prefix("page-"))
-            .and_then(|s| s.split('.').next())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(u32::MAX)
-    });
+    // walk the dir for the matching pattern. The walk is a blocking
+    // syscall — offload to the blocking pool so the runtime stays free.
+    let out_dir_owned = output_dir.to_path_buf();
+    let ext_owned = ext.to_string();
+    let out_paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&out_dir_owned)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.starts_with("page-") && name.ends_with(&format!(".{ext_owned}"))
+            })
+            .collect();
+        paths.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| s.strip_prefix("page-"))
+                .and_then(|s| s.split('.').next())
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(u32::MAX)
+        });
+        Ok::<_, std::io::Error>(paths)
+    })
+    .await
+    .map_err(|e| PdfError::Mutool(e.to_string()))?
+    .map_err(PdfError::Io)?;
     if out_paths.is_empty() {
         return Err(PdfError::Mutool(
             "mutool ran but no image files were written".into(),

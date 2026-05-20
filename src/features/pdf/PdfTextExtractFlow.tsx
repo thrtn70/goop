@@ -40,7 +40,6 @@ export default function PdfTextExtractFlow({ file, onDone }: PdfTextExtractFlowP
         filters: [{ name: "Text", extensions: ["txt"] }],
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfExtractText(file, dest));
