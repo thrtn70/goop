@@ -6,7 +6,10 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-22.04
+    # Bumped from ubuntu-22.04 to ubuntu-24.04 in v0.2.6: Noble
+    # ships libheif 1.17 which matches the libheif-rs v1_17 feature
+    # the crate is pinned to. 22.04's 1.12 is below that floor.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
@@ -14,8 +17,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-directories: ~/.cargo/bin
-      - name: System libs (Tauri 2)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: System libs (Tauri 2 + image codecs)
+        # v0.2.6: libheif-dev + cmake added.
+        #   * libheif-dev: libheif-rs probes via pkg-config and links
+        #     against the system libheif.
+        #   * cmake: jpegxl-sys uses the `vendored` feature which
+        #     builds libjxl from vendored source at compile time.
+        # libjxl-dev is NOT installed — we use jpegxl-rs's vendored
+        # feature to avoid the version-mismatch trap (apt ships 0.7,
+        # we want 0.11). cmake is preinstalled on github runners but
+        # we explicitly install it for resilience.
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libheif-dev pkg-config cmake
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"

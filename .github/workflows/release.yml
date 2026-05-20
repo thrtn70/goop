@@ -91,6 +91,30 @@ jobs:
           save-if: "false"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: "20", cache: "npm" }
+      # v0.2.6: per-platform C-lib install for libheif (libjxl is
+      # built from vendored source via jpegxl-rs's `vendored` feature
+      # — needs cmake, which is preinstalled on both runners).
+      - name: Install libheif (macOS)
+        if: matrix.os == 'macos-14'
+        run: brew install libheif pkg-config
+      - name: Install libheif (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          # vcpkg is preinstalled at C:/vcpkg on windows-latest runners.
+          # Install libheif via vcpkg; configure pkg-config to find
+          # libheif.pc inside the vcpkg installed tree so libheif-rs's
+          # build.rs probe succeeds.
+          /c/vcpkg/vcpkg.exe install libheif:x64-windows
+          # Install pkg-config so libheif-rs's build.rs probe works.
+          choco install pkgconfiglite -y
+          # Surface the vcpkg-installed libheif.pc on PKG_CONFIG_PATH
+          # for the cargo build below.
+          echo "PKG_CONFIG_PATH=C:/vcpkg/installed/x64-windows/lib/pkgconfig" >> $GITHUB_ENV
+          # Surface the vcpkg-installed lib + bin dirs so the linker
+          # and runtime loader can find libheif at build + load time.
+          echo "C:/vcpkg/installed/x64-windows/bin" >> $GITHUB_PATH
+          echo "LIB=C:/vcpkg/installed/x64-windows/lib;${LIB:-}" >> $GITHUB_ENV
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
@@ -101,3 +125,49 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      # v0.2.6: post-build per-platform C-lib bundling so the
+      # installed .app / .exe doesn't need the user's machine to have
+      # libheif installed. libjxl is statically linked via the vendored
+      # build so it doesn't need this step.
+      - name: Bundle libheif dylib (macOS)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Goop.app"
+          BIN="$APP/Contents/MacOS/Goop"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::expected Goop binary at $BIN"
+            exit 1
+          fi
+          # Re-use the same BFS dylib bundler that's been working for
+          # tesseract since v0.2.4 (defined in scripts/macos-dylib-bundle.sh).
+          # It walks the binary's non-system dylib deps, copies them
+          # into Contents/MacOS/, and rewrites install names to
+          # @loader_path/<basename>.
+          source ./scripts/macos-dylib-bundle.sh
+          bundle_macos_dylibs "$BIN"
+          # Ad-hoc resign so macOS Gatekeeper doesn't reject the
+          # modified binary on first launch.
+          codesign --force --deep --sign - "$APP"
+      - name: Bundle libheif DLL (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Copy libheif's runtime DLLs from vcpkg into the bundle
+          # staging dir so the NSIS / MSI installers carry them
+          # alongside Goop.exe.
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release"
+          # Required: libheif itself + its primary HEIC decoder. If
+          # either is missing the installer would ship a broken HEIC
+          # path; fail the build instead of silently producing one.
+          cp -v C:/vcpkg/installed/x64-windows/bin/libheif.dll "$BUNDLE_DIR/"
+          cp -v C:/vcpkg/installed/x64-windows/bin/libde265.dll "$BUNDLE_DIR/"
+          # Optional codec DLLs — vcpkg may not have built them
+          # depending on the libheif triplet's feature toggles.
+          # Missing optional codecs degrade gracefully (libheif
+          # returns a "codec not available" error for that input).
+          cp -v C:/vcpkg/installed/x64-windows/bin/libx265.dll "$BUNDLE_DIR/" || echo "warning: libx265.dll absent — HEVC encode path disabled"
+          cp -v C:/vcpkg/installed/x64-windows/bin/libsharpyuv.dll "$BUNDLE_DIR/" || echo "warning: libsharpyuv.dll absent"
+          cp -v C:/vcpkg/installed/x64-windows/bin/aom.dll "$BUNDLE_DIR/" || echo "warning: aom.dll absent — AVIF codec disabled in libheif"
