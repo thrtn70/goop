@@ -36,6 +36,7 @@ const ALL_TARGETS = [
   "bmp",
   "tiff",
   "avif",
+  "jpeg_xl",
 ] as const satisfies readonly TargetFormat[];
 
 const ALL_QUALITY = [

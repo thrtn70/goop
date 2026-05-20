@@ -70,7 +70,8 @@ pub fn decide(
         | TargetFormat::Webp
         | TargetFormat::Bmp
         | TargetFormat::Tiff
-        | TargetFormat::Avif => Plan {
+        | TargetFormat::Avif
+        | TargetFormat::JpegXl => Plan {
             args: vec![],
             video_filters: vec![],
             reencoded: false,
@@ -571,7 +572,8 @@ pub fn decide_compression(
         | TargetFormat::Webp
         | TargetFormat::Bmp
         | TargetFormat::Tiff
-        | TargetFormat::Avif => {
+        | TargetFormat::Avif
+        | TargetFormat::JpegXl => {
             unreachable!("image targets short-circuit at the top of decide_compression")
         }
     }

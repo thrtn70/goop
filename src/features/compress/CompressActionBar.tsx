@@ -71,6 +71,7 @@ function extFor(target: TargetFormat): string {
     bmp: "bmp",
     tiff: "tiff",
     avif: "avif",
+    jpeg_xl: "jxl",
   };
   return map[target];
 }

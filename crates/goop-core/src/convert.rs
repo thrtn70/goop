@@ -39,13 +39,23 @@ pub enum TargetFormat {
     /// Smaller than JPEG at equivalent quality. Encode via the `image`
     /// crate's `avif` feature (which pulls `ravif` / `rav1e`).
     Avif,
+    /// JPEG-XL: high-quality modern image codec. Both decode and encode
+    /// run through `jpegxl-rs` (binding to system libjxl) — the `image`
+    /// crate doesn't ship a JXL codec.
+    JpegXl,
 }
 
 impl TargetFormat {
     pub fn is_image(self) -> bool {
         matches!(
             self,
-            Self::Png | Self::Jpeg | Self::Webp | Self::Bmp | Self::Tiff | Self::Avif
+            Self::Png
+                | Self::Jpeg
+                | Self::Webp
+                | Self::Bmp
+                | Self::Tiff
+                | Self::Avif
+                | Self::JpegXl
         )
     }
 
@@ -71,6 +81,7 @@ impl TargetFormat {
             Self::Bmp => "bmp",
             Self::Tiff => "tiff",
             Self::Avif => "avif",
+            Self::JpegXl => "jxl",
         }
     }
 }
@@ -223,6 +234,7 @@ mod tests {
         assert!(TargetFormat::Bmp.is_image());
         assert!(TargetFormat::Tiff.is_image());
         assert!(TargetFormat::Avif.is_image());
+        assert!(TargetFormat::JpegXl.is_image());
         assert!(!TargetFormat::Mp4.is_image());
         assert!(!TargetFormat::Gif.is_image());
         assert!(!TargetFormat::Mp3.is_image());
@@ -237,6 +249,7 @@ mod tests {
         assert_eq!(TargetFormat::Flac.extension(), "flac");
         assert_eq!(TargetFormat::Tiff.extension(), "tiff");
         assert_eq!(TargetFormat::Avif.extension(), "avif");
+        assert_eq!(TargetFormat::JpegXl.extension(), "jxl");
     }
 
     #[test]

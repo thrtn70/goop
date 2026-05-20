@@ -32,6 +32,7 @@ const TARGETS: TargetOption[] = [
   { value: "jpeg", label: "JPEG", hint: "Small files, good for photos", group: "image" },
   { value: "webp", label: "WebP", hint: "Modern format, smallest files", group: "image" },
   { value: "avif", label: "AVIF", hint: "Modern format, smaller than JPEG", group: "image" },
+  { value: "jpeg_xl", label: "JXL", hint: "Modern format, great quality at small sizes", group: "image" },
   { value: "tiff", label: "TIFF", hint: "Lossless, great for editing", group: "image" },
   { value: "bmp", label: "BMP", hint: "Uncompressed bitmap", group: "image" },
 ];

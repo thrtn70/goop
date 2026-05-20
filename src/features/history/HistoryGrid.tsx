@@ -29,7 +29,7 @@ function kindOf(path: string | null): SourceKind {
   if (!path) return "video";
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "pdf") return "pdf";
-  if (["png", "jpg", "jpeg", "webp", "bmp", "gif"].includes(ext)) return "image";
+  if (["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif", "avif", "heic", "heif", "jxl"].includes(ext)) return "image";
   if (["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"].includes(ext)) return "audio";
   return "video";
 }

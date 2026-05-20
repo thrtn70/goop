@@ -13,6 +13,24 @@ Goop bundles several third-party binaries as **sidecars** — separate executabl
 | gallery-dl | GPL-2.0 | `src-tauri/bin/gallery-dl-<triple>[.exe]` |
 | Ghostscript (Artifex) | AGPL-3.0 | `src-tauri/bin/gs-<triple>[.exe]` |
 | mutool (Artifex MuPDF) | AGPL-3.0 | `src-tauri/bin/mutool-<triple>[.exe]` |
+| tesseract OCR | Apache-2.0 | `src-tauri/bin/tesseract-<triple>[.exe]` |
+
+## Dynamically-linked third-party libraries (v0.2.5+)
+
+Some image formats require system C libraries linked into goop's main binary at compile time. These are NOT sidecars — they're loaded into goop's process via the dynamic linker — so the linking compatibility of each library matters.
+
+| Library | License | Used for | Notes |
+|---|---|---|---|
+| libheif | LGPL-3.0 | HEIC / HEIF decode (v0.2.5) | LGPL allows dynamic linking from MIT host; we link, never modify. Bundled dylibs land in `Contents/MacOS/` on macOS via `install_name_tool` in `scripts/fetch-sidecars.sh`. |
+| libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.5) | Permissive; same dynamic-linking bundling. |
+| libx265 | GPL-2.0 | HEIC HEVC encode path (transitive via libheif) | GPL-2.0 linking from MIT host. Dynamic linking is the standard pattern for distros that ship both. v0.2.5 uses HEIC decode-only — see `docs/v0.2.5-format-spike.md` for the "drop libx265 from the bundle if decode-only is sufficient" follow-up. |
+| libde265 | LGPL-3.0 | HEIC HEVC decode (transitive via libheif) | Same LGPL-3.0 dynamic linking story as libheif itself. |
+| libaom | BSD-2-Clause-Patent | HEIC AV1 codec (transitive via libheif) | Permissive. |
+| libsharpyuv | BSD-3-Clause | YUV conversion (transitive via libheif's webp dep) | Permissive. |
+| libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
+| brotli | MIT | Compression (transitive via libjxl) | Permissive. |
+
+**Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). LGPL and GPL libraries unrelated to MuPDF can be dynamically linked under their own terms. The CI check still greps for `mupdf-*` only.
 
 The AGPL-licensed sidecars (Ghostscript and mutool from Artifex) are the strictest. **They are bundled and spawned only as subprocess executables.** The text below documents the rule that keeps the AGPL on their side of the spawn boundary.
 

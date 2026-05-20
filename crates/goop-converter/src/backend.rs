@@ -36,7 +36,7 @@ pub enum BackendKind {
 }
 
 const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico",
+    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico", "heic", "heif", "jxl",
 ];
 
 pub fn backend_for_extension(ext: &str) -> BackendKind {

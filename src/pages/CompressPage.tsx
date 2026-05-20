@@ -50,6 +50,7 @@ function targetFromPath(path: string): TargetFormat {
     tiff: "tiff",
     tif: "tiff",
     avif: "avif",
+    jxl: "jpeg_xl",
   };
   return map[ext] ?? "mp4";
 }
