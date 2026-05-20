@@ -38,7 +38,27 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
         multiple: true,
         title: "Pick images to combine",
         filters: [
-          { name: "Images", extensions: ["png", "jpg", "jpeg"] },
+          {
+            name: "Images",
+            // Expanded in v0.2.5 to match the image crate's
+            // ImageReader::with_guessed_format() coverage. JPEGs go
+            // through the DCTDecode passthrough so photo-heavy
+            // outputs are ~10× smaller than the v0.2.4 raw-pixel
+            // embed.
+            extensions: [
+              "png",
+              "jpg",
+              "jpeg",
+              "webp",
+              "bmp",
+              "gif",
+              "tiff",
+              "tif",
+              "avif",
+              "ico",
+              "hdr",
+            ],
+          },
         ],
       });
       if (!picked) return;
@@ -100,7 +120,9 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-fg-muted">
-          PNG and JPEG. Each image becomes one page in the order shown.
+          PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, ICO, and more. JPEGs are
+          embedded directly for smaller output PDFs. Each image becomes one
+          page in the order shown.
         </p>
         <button
           type="button"

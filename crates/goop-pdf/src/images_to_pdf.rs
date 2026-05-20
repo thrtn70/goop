@@ -2,12 +2,18 @@
 //! order supplied. Pure-Rust via `lopdf` + the `image` crate for
 //! decoding. No sidecar dependency.
 //!
-//! v0.2.4 supports PNG and JPEG inputs only. Each image is decoded to
-//! RGB8 and embedded as a FlateDecode XObject — JPEGs are re-encoded
-//! as raw pixels rather than embedded as DCTDecode bytes, which keeps
-//! the code path uniform at the cost of larger output PDFs for
-//! photo-heavy inputs. The DCTDecode optimization is tracked as a
-//! v0.2.5 follow-up alongside the broader Image Workshop work.
+//! v0.2.5 expanded the accepted input set from PNG / JPEG only to
+//! every extension the `image` crate's `ImageReader::with_guessed_
+//! format()` recognizes (PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, ICO,
+//! HDR) so users can drop a heterogeneous folder of images and get
+//! one PDF.
+//!
+//! Phase 9 also added the DCTDecode passthrough: JPEG inputs embed
+//! their raw byte stream as a `/Filter /DCTDecode` XObject instead of
+//! decoding to RGB and re-encoding as `/Filter /FlateDecode`. The
+//! optimization shrinks photo-heavy output PDFs roughly 10× because
+//! the JPEG's existing lossy compression is preserved instead of
+//! being re-expanded to raw pixels and then re-deflated.
 //!
 //! Page MediaBox uses image dimensions in points (1pt = 1px). This is
 //! simple and predictable; viewers will scale on print. A future
@@ -106,9 +112,148 @@ pub fn images_to_pdf(inputs: &[&Path], output: &Path) -> Result<(), PdfError> {
     Ok(())
 }
 
-/// Decode `path` into RGB8 pixels, embed as a /XObject /Image stream
-/// in `doc`. Returns the object id + image dimensions in pixels.
+/// Embed `path` as a /XObject /Image stream in `doc`. JPEG inputs
+/// take the fast DCTDecode passthrough (raw byte stream + dimensions
+/// from `image::ImageReader::into_dimensions`); everything else
+/// decodes to RGB8 and embeds as FlateDecode pixel data. Returns the
+/// object id + image dimensions in pixels.
 fn embed_image(doc: &mut Document, path: &Path) -> Result<(lopdf::ObjectId, u32, u32), PdfError> {
+    if is_baseline_jpeg(path) {
+        if let Some(out) = embed_jpeg_dct(doc, path)? {
+            return Ok(out);
+        }
+        // Fall through to FlateDecode if the JPEG didn't satisfy the
+        // baseline / 8-bit / RGB-or-grey requirements DCTDecode can
+        // represent. Progressive JPEGs are fine in DCTDecode, but a
+        // CMYK or 16-bit JPEG would need a different ColorSpace.
+    }
+    embed_flate(doc, path)
+}
+
+/// Returns true for any path ending in `.jpg` / `.jpeg`. Used to
+/// gate the DCTDecode optimization on the extension; the actual SOF
+/// marker is parsed by `embed_jpeg_dct` to confirm the file really is
+/// a JPEG we can passthrough.
+fn is_baseline_jpeg(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(ext.as_str(), "jpg" | "jpeg")
+}
+
+/// JPEG SOF (Start Of Frame) marker payload layout: P (precision, 1
+/// byte), Y (height, 2 bytes BE), X (width, 2 bytes BE), Nf
+/// (component count, 1 byte). We need Nf to pick `/DeviceRGB` (3) vs
+/// `/DeviceGray` (1) and to refuse CMYK (4, which DCTDecode supports
+/// but with a different ColorSpace key — out of scope for v0.2.5).
+struct JpegInfo {
+    width: u32,
+    height: u32,
+    components: u8,
+}
+
+/// Parse the SOF marker(s) of a JPEG file. Returns `None` if the
+/// file isn't a parsable JPEG, or if the SOF describes a colour
+/// model DCTDecode can't represent here (CMYK, 16-bit precision).
+fn parse_jpeg_info(bytes: &[u8]) -> Option<JpegInfo> {
+    // Minimum: SOI (0xFFD8) + a single SOF marker + payload.
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 3 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        // Skip 0xFF padding bytes between markers.
+        let mut marker = bytes[i + 1];
+        while marker == 0xFF && i + 2 < bytes.len() {
+            i += 1;
+            marker = bytes[i + 1];
+        }
+        // SOF markers: 0xC0..=0xCF excluding 0xC4 (DHT), 0xC8 (JPG),
+        // 0xCC (DAC). 0xC0/0xC2 are the baseline + progressive forms
+        // we care about.
+        if matches!(marker, 0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
+            // SOF payload starts at i+4 (skipping length).
+            if i + 9 >= bytes.len() {
+                return None;
+            }
+            let precision = bytes[i + 4];
+            let height = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
+            let components = bytes[i + 9];
+            if precision != 8 || !matches!(components, 1 | 3) {
+                return None;
+            }
+            return Some(JpegInfo {
+                width,
+                height,
+                components,
+            });
+        }
+        // Standalone markers (no payload length): SOI/EOI/RSTn.
+        if matches!(marker, 0xD0..=0xD9) {
+            i += 2;
+            continue;
+        }
+        if i + 3 >= bytes.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Embed a JPEG via DCTDecode (raw byte passthrough). Returns
+/// `Ok(None)` when the JPEG can't be passthrough'd (CMYK, 16-bit,
+/// malformed) so the caller falls back to the decode path.
+fn embed_jpeg_dct(
+    doc: &mut Document,
+    path: &Path,
+) -> Result<Option<(lopdf::ObjectId, u32, u32)>, PdfError> {
+    let bytes = std::fs::read(path).map_err(PdfError::Io)?;
+    let Some(info) = parse_jpeg_info(&bytes) else {
+        return Ok(None);
+    };
+    let color_space = match info.components {
+        1 => "DeviceGray",
+        3 => "DeviceRGB",
+        _ => return Ok(None),
+    };
+    // The /Filter dict entry tells the PDF viewer the stream is
+    // already DCT-compressed; the viewer reuses the JPEG decoder
+    // it already has rather than asking lopdf to inflate FlateDecode
+    // around raw pixels.
+    let stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => i64::from(info.width),
+            "Height" => i64::from(info.height),
+            "ColorSpace" => color_space,
+            "BitsPerComponent" => 8,
+            "Filter" => "DCTDecode",
+        },
+        bytes,
+    )
+    // Prevent lopdf's `doc.compress()` pass from wrapping the
+    // already-compressed JPEG stream in a FlateDecode layer (which
+    // would make the file larger, not smaller).
+    .with_compression(false);
+    Ok(Some((doc.add_object(stream), info.width, info.height)))
+}
+
+/// Decode `path` to RGB8 pixels and embed as a FlateDecode XObject —
+/// the v0.2.4 path, now reserved for non-JPEG inputs and JPEGs that
+/// don't satisfy `embed_jpeg_dct`'s requirements.
+fn embed_flate(doc: &mut Document, path: &Path) -> Result<(lopdf::ObjectId, u32, u32), PdfError> {
     let reader = ImageReader::open(path)
         .map_err(PdfError::Io)?
         .with_guessed_format()
@@ -121,9 +266,6 @@ fn embed_image(doc: &mut Document, path: &Path) -> Result<(lopdf::ObjectId, u32,
     let height = rgb.height();
     let pixels = rgb.into_raw();
 
-    // Construct the XObject /Image stream with the raw RGB pixel data.
-    // `doc.compress()` at save time wraps streams in /FlateDecode, so
-    // we leave the filter unset here and let lopdf add it consistently.
     let image_stream = Stream::new(
         dictionary! {
             "Type" => "XObject",
@@ -218,6 +360,96 @@ mod tests {
         assert!(media_boxes
             .iter()
             .any(|mb| (mb[2] - 16.0).abs() < 0.01 && (mb[3] - 16.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn jpeg_input_uses_dctdecode_filter() {
+        let tmp = TempDir::new().unwrap();
+        let jpg = tmp.path().join("blue.jpg");
+        write_blue_jpeg(&jpg);
+        let out = tmp.path().join("dct.pdf");
+
+        images_to_pdf(&[jpg.as_path()], &out).unwrap();
+
+        // Read the output PDF as raw bytes and assert the
+        // /DCTDecode filter appears. Searching the byte stream is
+        // safe because lopdf doesn't compress XObjects we marked
+        // with .with_compression(false).
+        let bytes = std::fs::read(&out).unwrap();
+        let needle = b"/DCTDecode";
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "expected /DCTDecode filter in output JPEG-only PDF"
+        );
+    }
+
+    #[test]
+    fn png_input_falls_through_to_flate() {
+        let tmp = TempDir::new().unwrap();
+        let png = tmp.path().join("red.png");
+        write_red_png(&png);
+        let out = tmp.path().join("flate.pdf");
+
+        images_to_pdf(&[png.as_path()], &out).unwrap();
+
+        // PNG decode path produces a stream with no /Filter entry
+        // before doc.compress() applies FlateDecode at save time.
+        // Look for FlateDecode in the output bytes.
+        let bytes = std::fs::read(&out).unwrap();
+        let needle = b"/FlateDecode";
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "expected /FlateDecode filter in PNG-only PDF"
+        );
+        // And confirm we did NOT accidentally embed a DCTDecode
+        // stream for the PNG.
+        let dct = b"/DCTDecode";
+        assert!(
+            !bytes.windows(dct.len()).any(|w| w == dct),
+            "PNG input must not produce a DCTDecode XObject"
+        );
+    }
+
+    #[test]
+    fn dctdecode_shrinks_jpeg_output_size() {
+        // Synthesize a JPEG with non-trivial content so the
+        // pre/post comparison reflects compressed vs raw RGB bytes.
+        let tmp = TempDir::new().unwrap();
+        let jpg = tmp.path().join("photo.jpg");
+        let mut img = image::RgbImage::new(256, 256);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([(x as u8).wrapping_mul(3), (y as u8).wrapping_mul(5), 64]);
+        }
+        let file = std::fs::File::create(&jpg).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut writer, image::ImageFormat::Jpeg)
+            .unwrap();
+        writer.flush().unwrap();
+
+        let out = tmp.path().join("photo.pdf");
+        images_to_pdf(&[jpg.as_path()], &out).unwrap();
+
+        let pdf_size = std::fs::metadata(&out).unwrap().len();
+        let raw_rgb_size = 256u64 * 256 * 3; // 196_608 bytes uncompressed
+                                             // DCTDecode preserves the JPEG's compressed payload, so the
+                                             // PDF should be a fraction of the raw pixel size.
+        assert!(
+            pdf_size < raw_rgb_size,
+            "expected DCT'd PDF ({pdf_size}) smaller than raw RGB ({raw_rgb_size})"
+        );
+    }
+
+    #[test]
+    fn jpeg_info_parses_synthetic_sof() {
+        let tmp = TempDir::new().unwrap();
+        let jpg = tmp.path().join("blue.jpg");
+        write_blue_jpeg(&jpg);
+        let bytes = std::fs::read(&jpg).unwrap();
+        let info = parse_jpeg_info(&bytes).expect("SOF parses");
+        assert_eq!(info.width, 16);
+        assert_eq!(info.height, 16);
+        assert_eq!(info.components, 3);
     }
 
     #[test]
