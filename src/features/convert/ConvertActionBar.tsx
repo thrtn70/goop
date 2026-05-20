@@ -3,13 +3,14 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
-import type { GifOptions, TargetFormat } from "@/types";
+import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
 
 export interface FileEntry {
   path: string;
   target: TargetFormat;
   sourceDir: string;
   gifOptions: GifOptions | null;
+  metadataPolicy: MetadataPolicy;
 }
 
 interface ConvertActionBarProps {
@@ -77,6 +78,7 @@ export default function ConvertActionBar({
           gif_options: f.gifOptions,
           compress_mode: null,
           batch_id: null,
+          metadata_policy: f.metadataPolicy,
         });
       } else {
         // Tag every enqueue in this batch with a shared id so toast
@@ -93,6 +95,7 @@ export default function ConvertActionBar({
               gif_options: f.gifOptions,
               compress_mode: null,
               batch_id: batchId,
+              metadata_policy: f.metadataPolicy,
             }),
           ),
         );

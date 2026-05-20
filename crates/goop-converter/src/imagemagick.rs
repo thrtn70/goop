@@ -1,5 +1,6 @@
 use crate::backend::ConversionBackend;
 use crate::imagemagick_probe::probe_image;
+use crate::metadata;
 use crate::naming::{allocate_output_path, stem_of};
 use goop_core::{
     CompressMode, ConvertRequest, ConvertResult, EventSink, GoopError, JobId, ProbeResult,
@@ -65,6 +66,9 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         let out = output_path.clone();
         let target = req.target;
         let compress_mode = req.compress_mode;
+        let metadata_policy = req.metadata_policy.unwrap_or_default();
+        let input_for_meta = input.clone();
+        let out_for_meta = output_path.clone();
 
         let convert_task =
             tokio::task::spawn_blocking(move || process_image(&input, &out, target, compress_mode));
@@ -83,6 +87,22 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
                 })??;
             }
         }
+
+        // Apply the metadata policy after the encode lands. For
+        // Preserve on JPEG↔JPEG and PNG↔PNG this copies EXIF + ICC
+        // chunks from the source; for StripAll this is a no-op (the
+        // encode already dropped them). Other paths emit Ok(false)
+        // and the metadata silently drops, which matches the v0.2.5
+        // documented preserve matrix.
+        let metadata_task = tokio::task::spawn_blocking(move || {
+            metadata::apply(&input_for_meta, &out_for_meta, metadata_policy)
+        });
+        let _propagated = metadata_task
+            .await
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "image".into(),
+                stderr: format!("metadata task panicked: {e}"),
+            })??;
 
         let bytes = std::fs::metadata(&output_path)
             .map(|m| m.len())

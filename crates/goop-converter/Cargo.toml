@@ -34,3 +34,8 @@ ab_glyph = "0.2"
 # the Windows icon container.
 icns = "0.3"
 ico = "0.4"
+# Phase 8 metadata: img-parts walks JPEG segment chains and PNG chunk
+# streams so we can copy EXIF (APP1) and ICC (APP2 / iCCP) bytes from
+# input to output. Pure-Rust; no system deps. PNG, JPEG, RIFF only —
+# matches the v0.2.5 supported preserve matrix.
+img-parts = "0.3"

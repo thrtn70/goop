@@ -175,6 +175,28 @@ pub enum CompressMode {
     TargetSizeBytes(u64),
 }
 
+/// What to do with the source image's metadata (EXIF + ICC profile)
+/// during a convert / compress op. Two policies in v0.2.5:
+///
+/// * `Preserve` — copy EXIF + ICC chunks from the input to the output
+///   when both formats support them (currently JPEG↔JPEG and PNG↔PNG).
+///   For cross-format converts (e.g. JPEG → AVIF) the metadata is
+///   dropped — v0.2.5.1 will broaden the supported matrix.
+/// * `StripAll` — drop all metadata regardless. Privacy default for
+///   shared photos; also gives the smallest output bytes.
+///
+/// `StripExifKeepIcc` (drop EXIF but keep the colour profile) was on
+/// the v0.2.5 plan but deferred per the explicit per-format-fragility
+/// trigger; arriving in v0.2.5.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, Default)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataPolicy {
+    #[default]
+    Preserve,
+    StripAll,
+}
+
 // ---------------------------------------------------------------------------
 // Request / Result / Probe
 // ---------------------------------------------------------------------------
@@ -190,6 +212,11 @@ pub struct ConvertRequest {
     pub gif_options: Option<GifOptions>,
     pub compress_mode: Option<CompressMode>,
     pub batch_id: Option<String>,
+    /// EXIF + ICC handling. `None` is treated as `Preserve` so older
+    /// callers / presets don't need to migrate; an explicit
+    /// `StripAll` opts in to scrubbing.
+    #[serde(default)]
+    pub metadata_policy: Option<MetadataPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

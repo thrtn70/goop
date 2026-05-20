@@ -124,6 +124,9 @@ export default function CompressActionBar({
           gif_options: null,
           compress_mode: normalizeCompressMode(f.mode),
           batch_id: null,
+          // Compress preserves source metadata by default — the user
+          // is asking for a smaller file, not a re-encoded clean copy.
+          metadata_policy: "preserve",
         });
       } else {
         const batchId = newBatchId();
@@ -138,6 +141,7 @@ export default function CompressActionBar({
               gif_options: null,
               compress_mode: normalizeCompressMode(f.mode),
               batch_id: batchId,
+              metadata_policy: "preserve",
             }),
           ),
         );

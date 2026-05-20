@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { GifOptions, TargetFormat } from "@/types";
+import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
 import TargetPicker, { smartDefault } from "./TargetPicker";
 import GifOptionsPanel from "./GifOptionsPanel";
@@ -7,11 +7,13 @@ import GifOptionsPanel from "./GifOptionsPanel";
 interface RowOptionsState {
   target: TargetFormat;
   gifOptions: GifOptions | null;
+  metadataPolicy: MetadataPolicy;
 }
 
 export interface FileRowOptions {
   target: TargetFormat;
   gifOptions: GifOptions | null;
+  metadataPolicy: MetadataPolicy;
 }
 
 interface FileRowProps {
@@ -57,6 +59,7 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
       const seeded: RowOptionsState = {
         target,
         gifOptions: target === "gif" ? defaultGifOptions() : null,
+        metadataPolicy: "preserve",
       };
       setOpts(seeded);
       onOptionsChange(path, seeded);
@@ -104,18 +107,20 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
   }
 
   const p = state.probe;
-  const { target, gifOptions } = opts;
+  const { target, gifOptions, metadataPolicy } = opts;
 
   const update = (partial: Partial<RowOptionsState>) => {
     const next: RowOptionsState = {
       target: partial.target ?? target,
       gifOptions: partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
+      metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
     };
     setOpts(next);
     onOptionsChange(path, next);
   };
 
   const showGifOpts = target === "gif" && p.source_kind === "video";
+  const showMetadataPolicy = p.source_kind === "image";
 
   const meta: string[] = [];
   if (Number(p.duration_ms) > 0) meta.push(formatDuration(Number(p.duration_ms)));
@@ -156,6 +161,37 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
           onChange={(o) => update({ gifOptions: o })}
           maxDurationMs={Number(p.duration_ms)}
         />
+      )}
+      {showMetadataPolicy && (
+        <div className="mt-2 flex items-center gap-2 text-xs">
+          <span className="text-fg-muted">Metadata:</span>
+          <button
+            type="button"
+            aria-pressed={metadataPolicy === "preserve"}
+            onClick={() => update({ metadataPolicy: "preserve" })}
+            className={`btn-press rounded-md px-2 py-1 transition duration-fast ease-out ${
+              metadataPolicy === "preserve"
+                ? "bg-accent text-accent-fg"
+                : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
+            }`}
+            title="Copy EXIF + ICC from source (JPEG↔JPEG and PNG↔PNG only)"
+          >
+            Preserve
+          </button>
+          <button
+            type="button"
+            aria-pressed={metadataPolicy === "strip_all"}
+            onClick={() => update({ metadataPolicy: "strip_all" })}
+            className={`btn-press rounded-md px-2 py-1 transition duration-fast ease-out ${
+              metadataPolicy === "strip_all"
+                ? "bg-accent text-accent-fg"
+                : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
+            }`}
+            title="Drop EXIF + ICC (smaller output, no GPS/camera info)"
+          >
+            Strip
+          </button>
+        </div>
       )}
     </div>
   );

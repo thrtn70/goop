@@ -10,7 +10,7 @@ import MediaBlob from "@/features/convert/MediaBlob";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
 import { useAppStore } from "@/store/appStore";
-import type { Preset, TargetFormat } from "@/types";
+import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -47,6 +47,7 @@ export default function ConvertPage() {
                 target: "mp4" as TargetFormat,
                 sourceDir: dirname(path),
                 gifOptions: null,
+                metadataPolicy: "preserve",
               },
             ],
       );
@@ -74,6 +75,7 @@ export default function ConvertPage() {
             target: "mp4" as TargetFormat,
             sourceDir: dirname(p),
             gifOptions: null,
+            metadataPolicy: "preserve" as MetadataPolicy,
           }));
         return [...prev, ...fresh];
       });
@@ -88,6 +90,7 @@ export default function ConvertPage() {
               ...f,
               target: opts.target,
               gifOptions: opts.gifOptions,
+              metadataPolicy: opts.metadataPolicy,
             }
           : f,
       ),
@@ -112,7 +115,14 @@ export default function ConvertPage() {
       if (prev.length < 2) return prev;
       const head = prev[0];
       return prev.map((f, i) =>
-        i === 0 ? f : { ...f, target: head.target, gifOptions: head.gifOptions },
+        i === 0
+          ? f
+          : {
+              ...f,
+              target: head.target,
+              gifOptions: head.gifOptions,
+              metadataPolicy: head.metadataPolicy,
+            },
       );
     });
   }, []);

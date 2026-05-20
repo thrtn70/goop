@@ -10,6 +10,7 @@ pub mod image_rotate;
 pub mod image_watermark;
 pub mod imagemagick;
 pub mod imagemagick_probe;
+pub mod metadata;
 pub mod naming;
 pub mod probe_json;
 pub mod progress;

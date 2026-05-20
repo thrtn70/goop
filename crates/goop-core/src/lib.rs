@@ -11,8 +11,8 @@ pub mod process_registry;
 pub mod update;
 
 pub use convert::{
-    CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, ProbeResult,
-    QualityPreset, ResolutionCap, SourceKind, TargetFormat,
+    CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, MetadataPolicy,
+    ProbeResult, QualityPreset, ResolutionCap, SourceKind, TargetFormat,
 };
 pub use error::{
     friendly_message, is_cookie_db_error, is_no_matching_extractor, GoopError, IpcError,
