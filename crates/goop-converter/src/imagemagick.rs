@@ -162,7 +162,13 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
 /// Decode an image at any supported input format into an in-memory
 /// `DynamicImage`. Routes HEIC + JPEG-XL inputs through their dedicated
 /// system-library bindings; everything else through the `image` crate.
-fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError> {
+///
+/// Exposed `pub(crate)` so the per-operation modules (`image_rotate`,
+/// `image_resize`, etc.) can reuse the same decode dispatch instead of
+/// duplicating extension-sniffing logic. Keeping a single decode entry
+/// point also means a future input format (e.g. RAW in v0.2.6) only
+/// needs to be added here.
+pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError> {
     let ext = input
         .extension()
         .and_then(|s| s.to_str())
@@ -307,7 +313,10 @@ fn decode_jxl(input: &Path) -> Result<image::DynamicImage, GoopError> {
 /// Preserves alpha when the source has it (RGBA8 encode); otherwise emits
 /// 8-bit RGB. Higher-bit-depth sources (16-bit, float, Luma) are
 /// downconverted to RGBA8 / RGB8 via the `image` crate before encoding.
-fn encode_jxl(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError> {
+///
+/// Exposed `pub(crate)` for the per-operation modules — same rationale as
+/// `decode_any`.
+pub(crate) fn encode_jxl(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError> {
     use image::ColorType;
     let has_alpha = matches!(
         img.color(),
@@ -351,6 +360,44 @@ fn encode_jxl(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError>
         binary: "libjxl".into(),
         stderr: format!("failed to write JXL output: {e}"),
     })
+}
+
+/// Encode a `DynamicImage` and write it to `output`, picking the codec from
+/// the output path extension. Used by the per-operation modules (rotate,
+/// resize, etc.) that share the "single in-memory image → file on disk"
+/// final step. JXL routes through `encode_jxl`; all other formats use
+/// `image::ImageFormat::from_path` to choose the codec the `image` crate
+/// already ships.
+pub(crate) fn save_image(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError> {
+    let ext = output
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if ext == "jxl" {
+        return encode_jxl(img, output);
+    }
+
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| GoopError::SubprocessFailed {
+                binary: "image".into(),
+                stderr: format!("failed to create output directory: {e}"),
+            })?;
+        }
+    }
+
+    let format =
+        image::ImageFormat::from_path(output).map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("unsupported output extension: {e}"),
+        })?;
+    img.save_with_format(output, format)
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to save image: {e}"),
+        })
 }
 
 /// Compress an image. Branches on (target_format, compress_mode):

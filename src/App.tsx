@@ -13,6 +13,7 @@ import { useWindowTitle } from "@/hooks/useWindowTitle";
 // and never visit Settings; shipping it eagerly was wasted bytes.
 const ConvertPage = lazy(() => import("@/pages/ConvertPage"));
 const CompressPage = lazy(() => import("@/pages/CompressPage"));
+const ImagePage = lazy(() => import("@/pages/ImagePage"));
 const HistoryPage = lazy(() => import("@/pages/HistoryPage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 
@@ -56,6 +57,14 @@ export default function App() {
               element={
                 <Suspense fallback={<PageFallback />}>
                   <CompressPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/image"
+              element={
+                <Suspense fallback={<PageFallback />}>
+                  <ImagePage />
                 </Suspense>
               }
             />

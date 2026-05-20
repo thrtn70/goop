@@ -71,18 +71,20 @@ describe("useHotkeys", () => {
     expect(useAppStore.getState().paletteOpen).toBe(false);
   });
 
-  it("Cmd+1..5 navigates to the matching route", () => {
+  it("Cmd+1..6 navigates to the matching route", () => {
     mountHost();
     pressMod("1");
     pressMod("2");
     pressMod("3");
     pressMod("4");
     pressMod("5");
+    pressMod("6");
     expect(navigateMock).toHaveBeenNthCalledWith(1, "/extract");
     expect(navigateMock).toHaveBeenNthCalledWith(2, "/convert");
-    expect(navigateMock).toHaveBeenNthCalledWith(3, "/compress");
-    expect(navigateMock).toHaveBeenNthCalledWith(4, "/history");
-    expect(navigateMock).toHaveBeenNthCalledWith(5, "/settings");
+    expect(navigateMock).toHaveBeenNthCalledWith(3, "/image");
+    expect(navigateMock).toHaveBeenNthCalledWith(4, "/compress");
+    expect(navigateMock).toHaveBeenNthCalledWith(5, "/history");
+    expect(navigateMock).toHaveBeenNthCalledWith(6, "/settings");
   });
 
   it("Cmd+, navigates to settings", () => {

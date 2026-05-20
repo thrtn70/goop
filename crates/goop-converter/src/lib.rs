@@ -2,6 +2,8 @@ pub mod backend;
 pub mod compat;
 pub mod encoders;
 pub mod ffmpeg;
+pub mod image_resize;
+pub mod image_rotate;
 pub mod imagemagick;
 pub mod imagemagick_probe;
 pub mod naming;

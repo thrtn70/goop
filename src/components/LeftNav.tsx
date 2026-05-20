@@ -6,9 +6,10 @@ import { modKeyLabel } from "@/lib/platform";
 const items = [
   { to: "/extract", label: "Extract", shortcut: "1" },
   { to: "/convert", label: "Convert", shortcut: "2" },
-  { to: "/compress", label: "Compress", shortcut: "3" },
-  { to: "/history", label: "History", shortcut: "4" },
-  { to: "/settings", label: "Settings", shortcut: "5" },
+  { to: "/image", label: "Image", shortcut: "3" },
+  { to: "/compress", label: "Compress", shortcut: "4" },
+  { to: "/history", label: "History", shortcut: "5" },
+  { to: "/settings", label: "Settings", shortcut: "6" },
 ];
 
 export default function LeftNav() {

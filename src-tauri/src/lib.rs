@@ -6,10 +6,13 @@ pub mod thumbnail;
 
 use events::TauriSink;
 use goop_config as cfg;
-use goop_converter::{detect_encoders, ConversionBackend, FfmpegBackend, ImageMagickBackend};
+use goop_converter::{
+    detect_encoders, image_resize as image_resize_mod, image_rotate as image_rotate_mod,
+    ConversionBackend, FfmpegBackend, ImageMagickBackend,
+};
 use goop_core::{
-    path as gpath, ConvertRequest, EventSink, GoopError, JobResult, PdfOperation, PidRegistry,
-    ResultKind,
+    path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult, PdfOperation,
+    PidRegistry, ResultKind,
 };
 use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
@@ -552,19 +555,89 @@ pub fn run() {
                 })
             });
 
-            // Phase 1 (v0.2.5) image worker stub. Each ImageOperation variant
-            // lands in a later phase (Rotate+Resize in Phase 4, Crop in Phase 5,
-            // Watermark+Recompress in Phase 6, AppIcon in Phase 7). Until then
-            // the worker errors out with a clear message so the queue surface
-            // shows "image ops not yet implemented" instead of silently
-            // succeeding or panicking.
-            let image_worker: WorkerFn = Arc::new(move |_id, _payload, _cancel| {
+            // Phase 4 (v0.2.5) image worker. Rotate + Resize land here.
+            // Crop / Watermark / Recompress / AppIcon variants still return a
+            // clear "not yet implemented" error so the queue surface signals
+            // progress instead of silently succeeding or panicking — they're
+            // wired up in Phases 5–7.
+            let image_worker: WorkerFn = Arc::new(move |_id, payload, _cancel| {
                 Box::pin(async move {
-                    Err(GoopError::Queue(
-                        "image operation worker is not yet implemented \
-                         (lands in v0.2.5 Phase 4+)"
-                            .into(),
-                    ))
+                    let op: ImageOperation = serde_json::from_value(payload)
+                        .map_err(|e| GoopError::Queue(format!("bad image payload: {e}")))?;
+                    let started = std::time::Instant::now();
+                    let (output_path, bytes) = match op {
+                        ImageOperation::Rotate {
+                            input,
+                            degrees,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                image_rotate_mod::rotate(&in_path, degrees, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
+                        }
+                        ImageOperation::Resize {
+                            input,
+                            width,
+                            height,
+                            mode,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                image_resize_mod::resize(
+                                    &in_path,
+                                    width,
+                                    height,
+                                    mode,
+                                    &out_for_task,
+                                )
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
+                        }
+                        ImageOperation::Crop { .. } => {
+                            return Err(GoopError::Queue(
+                                "image crop is not yet implemented (lands in v0.2.5 Phase 5)"
+                                    .into(),
+                            ));
+                        }
+                        ImageOperation::Watermark { .. } => {
+                            return Err(GoopError::Queue(
+                                "image watermark is not yet implemented (lands in v0.2.5 Phase 6)"
+                                    .into(),
+                            ));
+                        }
+                        ImageOperation::Recompress { .. } => {
+                            return Err(GoopError::Queue(
+                                "image recompress is not yet implemented (lands in v0.2.5 Phase 6)"
+                                    .into(),
+                            ));
+                        }
+                        ImageOperation::AppIcon { .. } => {
+                            return Err(GoopError::Queue(
+                                "image app_icon is not yet implemented (lands in v0.2.5 Phase 7)"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    Ok(JobResult {
+                        output_path,
+                        bytes,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        result_kind: ResultKind::File,
+                        file_count: 1,
+                    })
                 })
             });
 

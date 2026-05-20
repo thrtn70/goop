@@ -37,13 +37,17 @@ export function useHotkeys(): void {
       },
       "$mod+3": (e) => {
         e.preventDefault();
-        nav("/compress");
+        nav("/image");
       },
       "$mod+4": (e) => {
         e.preventDefault();
-        nav("/history");
+        nav("/compress");
       },
       "$mod+5": (e) => {
+        e.preventDefault();
+        nav("/history");
+      },
+      "$mod+6": (e) => {
         e.preventDefault();
         nav("/settings");
       },
