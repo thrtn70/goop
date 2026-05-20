@@ -13,7 +13,8 @@
 //!   the `iCCP` chunk.
 //!
 //! Cross-format conversions (e.g. JPEG → AVIF) drop the metadata for
-//! v0.2.5; v0.2.5.1 broadens the supported matrix.
+//! v0.2.5 / v0.2.6; broadening the supported matrix is a v0.2.7+
+//! candidate.
 
 use goop_core::{GoopError, MetadataPolicy};
 use img_parts::jpeg::Jpeg;

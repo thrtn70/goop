@@ -13,6 +13,10 @@ import ImageAppIconFlow from "@/features/image/ImageAppIconFlow";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 
+// Extensions accepted by the Image Workshop ops (rotate/resize/crop/
+// watermark/recompress/appicon). Subset of ImagesToPdfFlow's filter —
+// that flow also accepts `ico` and `hdr` for PDF page composition,
+// but those formats aren't meaningful inputs for image-editing ops.
 const IMAGE_EXTENSIONS = [
   "png",
   "jpg",
@@ -23,6 +27,9 @@ const IMAGE_EXTENSIONS = [
   "tiff",
   "tif",
   "avif",
+  "jxl",
+  "heic",
+  "heif",
 ];
 
 function isImage(p: string): boolean {
@@ -125,7 +132,7 @@ export default function ImagePage() {
             Pick images…
           </button>
           <p className="text-[11px] text-fg-muted">
-            PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF (HEIC + JPEG-XL in v0.2.5.1)
+            PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, JXL, HEIC/HEIF
           </p>
         </div>
       </DropZone>

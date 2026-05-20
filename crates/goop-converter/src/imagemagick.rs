@@ -141,16 +141,20 @@ fn process_image(
     }
 }
 
-/// Default image format swap (no compression options). Everything goes
-/// through the `image` crate's codec set (PNG/JPEG/WebP/BMP/TIFF/AVIF/
-/// GIF/HDR/ICO).
+/// Default image format swap (no compression options).
 ///
-/// `JpegXl` and `Heic` are reserved on the `TargetFormat` enum but
-/// the encode/decode paths defer to v0.2.5.1 — see
-/// `Cargo.toml` notes for the bundling story. Callers that select
-/// either get a clear "format not bundled" error here, not a panic.
+/// Decode dispatch: HEIC and JPEG-XL inputs route to the dedicated
+/// `libheif-rs` / `jpegxl-rs` decoders before re-entering the common
+/// `image`-crate encode path. Everything else (PNG/JPEG/WebP/BMP/TIFF/
+/// AVIF/GIF/HDR/ICO) goes through `image::open`. Encode dispatch: JXL
+/// outputs run through `jpegxl-rs::encoder_builder` (the `image` crate
+/// has no JXL codec). Everything else uses `image::save_with_format`.
 fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<(), GoopError> {
     let img = decode_any(input)?;
+
+    if matches!(target, TargetFormat::JpegXl) {
+        return encode_jxl(&img, output);
+    }
 
     let format = match target {
         TargetFormat::Png => image::ImageFormat::Png,
@@ -159,14 +163,7 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
         TargetFormat::Bmp => image::ImageFormat::Bmp,
         TargetFormat::Tiff => image::ImageFormat::Tiff,
         TargetFormat::Avif => image::ImageFormat::Avif,
-        TargetFormat::JpegXl => {
-            return Err(GoopError::SubprocessFailed {
-                binary: "image".into(),
-                stderr: "JPEG-XL output is not bundled in v0.2.5 — coming in v0.2.5.1. \
-                         Convert to PNG, JPEG, AVIF, or WebP for now."
-                    .into(),
-            });
-        }
+        // JpegXl handled above
         other => {
             return Err(GoopError::SubprocessFailed {
                 binary: "image".into(),
@@ -183,10 +180,8 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
 }
 
 /// Decode an image at any supported input format into an in-memory
-/// `DynamicImage`. v0.2.5 routes everything through `image::open`;
-/// HEIC + JPEG-XL inputs return a clear "format not bundled" error
-/// (the libheif-rs / jpegxl-rs paths are scaffolded but not wired
-/// into this release — see Cargo.toml).
+/// `DynamicImage`. Routes HEIC + JPEG-XL inputs through their dedicated
+/// system-library bindings; everything else through the `image` crate.
 ///
 /// Exposed `pub(crate)` so the per-operation modules (`image_rotate`,
 /// `image_resize`, etc.) can reuse the same decode dispatch instead of
@@ -201,16 +196,8 @@ pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError>
         .unwrap_or_default();
 
     match ext.as_str() {
-        "heic" | "heif" => Err(GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: "HEIC/HEIF input is not bundled in v0.2.5 — coming in v0.2.5.1. \
-                     Convert to PNG or JPEG first via Apple Photos / Preview."
-                .into(),
-        }),
-        "jxl" => Err(GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: "JPEG-XL input is not bundled in v0.2.5 — coming in v0.2.5.1.".into(),
-        }),
+        "heic" | "heif" => decode_heic(input),
+        "jxl" => decode_jxl(input),
         _ => image::open(input).map_err(|e| GoopError::SubprocessFailed {
             binary: "image".into(),
             stderr: format!("failed to open image: {e}"),
@@ -218,11 +205,189 @@ pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError>
     }
 }
 
+/// Decode a HEIC/HEIF file via libheif-rs into an RGB DynamicImage.
+fn decode_heic(input: &Path) -> Result<image::DynamicImage, GoopError> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+
+    let lib = LibHeif::new();
+    let path_str = input.to_str().ok_or_else(|| GoopError::SubprocessFailed {
+        binary: "libheif".into(),
+        stderr: "input path is not valid UTF-8".into(),
+    })?;
+    let ctx = HeifContext::read_from_file(path_str).map_err(|e| GoopError::SubprocessFailed {
+        binary: "libheif".into(),
+        stderr: format!("failed to read HEIC: {e}"),
+    })?;
+    let handle = ctx
+        .primary_image_handle()
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "libheif".into(),
+            stderr: format!("failed to get primary HEIC image: {e}"),
+        })?;
+    let width = handle.width();
+    let height = handle.height();
+    let heif_image = lib
+        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "libheif".into(),
+            stderr: format!("failed to decode HEIC pixels: {e}"),
+        })?;
+    let planes = heif_image.planes();
+    let interleaved = planes
+        .interleaved
+        .ok_or_else(|| GoopError::SubprocessFailed {
+            binary: "libheif".into(),
+            stderr: "HEIC decode returned no interleaved RGB plane".into(),
+        })?;
+    let stride = interleaved.stride;
+    let row_bytes = width as usize * 3;
+    // libheif may add padding bytes; copy row-by-row to a packed buffer.
+    let mut buf = Vec::with_capacity(row_bytes * height as usize);
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        let row_end = row_start + row_bytes;
+        if row_end > interleaved.data.len() {
+            return Err(GoopError::SubprocessFailed {
+                binary: "libheif".into(),
+                stderr: format!(
+                    "HEIC row out of bounds: y={y} stride={stride} data_len={}",
+                    interleaved.data.len()
+                ),
+            });
+        }
+        buf.extend_from_slice(&interleaved.data[row_start..row_end]);
+    }
+    image::ImageBuffer::from_raw(width, height, buf)
+        .map(image::DynamicImage::ImageRgb8)
+        .ok_or_else(|| GoopError::SubprocessFailed {
+            binary: "libheif".into(),
+            stderr: "failed to construct DynamicImage from HEIC pixels".into(),
+        })
+}
+
+/// Decode a JPEG-XL file via jpegxl-rs into a DynamicImage.
+/// Uses `decode_with::<u8>()` to force u8 output regardless of the file's
+/// native pixel format (which may be 16-bit or float for HDR sources).
+///
+/// Supports greyscale (1 channel), greyscale + alpha (2 channels), RGB
+/// (3 channels), and RGBA (4 channels). Wider colour formats (CMYK etc.)
+/// are rejected with a clear message.
+fn decode_jxl(input: &Path) -> Result<image::DynamicImage, GoopError> {
+    let bytes = std::fs::read(input).map_err(|e| GoopError::SubprocessFailed {
+        binary: "libjxl".into(),
+        stderr: format!("failed to read JXL bytes: {e}"),
+    })?;
+    let decoder =
+        jpegxl_rs::decoder_builder()
+            .build()
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: format!("failed to build JXL decoder: {e}"),
+            })?;
+    let (metadata, pixels) =
+        decoder
+            .decode_with::<u8>(&bytes)
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: format!("failed to decode JXL: {e}"),
+            })?;
+    let width = metadata.width;
+    let height = metadata.height;
+    let channels = metadata.num_color_channels + u32::from(metadata.has_alpha_channel);
+    match channels {
+        1 => image::ImageBuffer::from_raw(width, height, pixels)
+            .map(image::DynamicImage::ImageLuma8)
+            .ok_or_else(|| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: "JXL: failed to build greyscale buffer".into(),
+            }),
+        2 => image::ImageBuffer::from_raw(width, height, pixels)
+            .map(image::DynamicImage::ImageLumaA8)
+            .ok_or_else(|| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: "JXL: failed to build greyscale + alpha buffer".into(),
+            }),
+        3 => image::ImageBuffer::from_raw(width, height, pixels)
+            .map(image::DynamicImage::ImageRgb8)
+            .ok_or_else(|| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: "JXL: failed to build RGB8 buffer".into(),
+            }),
+        4 => image::ImageBuffer::from_raw(width, height, pixels)
+            .map(image::DynamicImage::ImageRgba8)
+            .ok_or_else(|| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: "JXL: failed to build RGBA8 buffer".into(),
+            }),
+        n => Err(GoopError::SubprocessFailed {
+            binary: "libjxl".into(),
+            stderr: format!(
+                "JXL: unsupported channel count {n} (CMYK and wider colour spaces aren't supported yet — convert to RGB or RGBA first)"
+            ),
+        }),
+    }
+}
+
+/// Encode a DynamicImage as JPEG-XL via jpegxl-rs and write to `output`.
+///
+/// Preserves alpha when the source has it (RGBA8 encode); otherwise emits
+/// 8-bit RGB. Higher-bit-depth sources (16-bit, float, Luma) are
+/// downconverted to RGBA8 / RGB8 via the `image` crate before encoding.
+///
+/// Exposed `pub(crate)` for the per-operation modules — same rationale as
+/// `decode_any`.
+pub(crate) fn encode_jxl(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError> {
+    use image::ColorType;
+    let has_alpha = matches!(
+        img.color(),
+        ColorType::La8 | ColorType::Rgba8 | ColorType::La16 | ColorType::Rgba16
+    );
+    let buf = if has_alpha {
+        let rgba = img.to_rgba8();
+        let mut encoder = jpegxl_rs::encoder_builder()
+            .has_alpha(true)
+            .build()
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: format!("failed to build JXL encoder: {e}"),
+            })?;
+        // jpegxl-rs's EncoderFrame defaults to 3 channels; for RGBA we
+        // have to set 4 explicitly via num_channels.
+        let frame = jpegxl_rs::encode::EncoderFrame::new(rgba.as_raw()).num_channels(4);
+        encoder
+            .encode_frame::<u8, u8>(&frame, rgba.width(), rgba.height())
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: format!("failed to encode JXL (RGBA): {e}"),
+            })?
+    } else {
+        let rgb = img.to_rgb8();
+        let mut encoder =
+            jpegxl_rs::encoder_builder()
+                .build()
+                .map_err(|e| GoopError::SubprocessFailed {
+                    binary: "libjxl".into(),
+                    stderr: format!("failed to build JXL encoder: {e}"),
+                })?;
+        encoder
+            .encode::<u8, u8>(rgb.as_raw(), rgb.width(), rgb.height())
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "libjxl".into(),
+                stderr: format!("failed to encode JXL (RGB): {e}"),
+            })?
+    };
+    std::fs::write(output, &buf.data).map_err(|e| GoopError::SubprocessFailed {
+        binary: "libjxl".into(),
+        stderr: format!("failed to write JXL output: {e}"),
+    })
+}
+
 /// Encode a `DynamicImage` and write it to `output`, picking the codec from
 /// the output path extension. Used by the per-operation modules (rotate,
 /// resize, etc.) that share the "single in-memory image → file on disk"
-/// final step. JXL output is rejected with a clear "not bundled" error
-/// until v0.2.5.1 wires up libjxl + the per-platform CI bundling.
+/// final step. JXL routes through `encode_jxl`; all other formats use
+/// `image::ImageFormat::from_path` to choose the codec the `image` crate
+/// already ships.
 pub(crate) fn save_image(img: &image::DynamicImage, output: &Path) -> Result<(), GoopError> {
     let ext = output
         .extension()
@@ -231,10 +396,7 @@ pub(crate) fn save_image(img: &image::DynamicImage, output: &Path) -> Result<(),
         .unwrap_or_default();
 
     if ext == "jxl" {
-        return Err(GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: "JPEG-XL output is not bundled in v0.2.5 — coming in v0.2.5.1.".into(),
-        });
+        return encode_jxl(img, output);
     }
 
     if let Some(parent) = output.parent() {
@@ -682,49 +844,66 @@ mod tests {
     }
 
     #[test]
-    fn jxl_target_returns_clear_not_bundled_error() {
-        // v0.2.5 ships without libjxl. The convert path must surface a
-        // friendly "format not bundled" error instead of panicking or
-        // producing a malformed output. v0.2.5.1 wires up the encoder.
-        let dir = tmp_dir("jxl-not-bundled");
+    fn jxl_round_trip_via_jpegxl_rs() {
+        // PNG -> JXL -> PNG. Exercises the dedicated jpegxl-rs encoder
+        // and decoder branches in convert_image. Requires libjxl at
+        // link time (Homebrew on macOS dev, apt-get on Ubuntu CI,
+        // vcpkg on Windows CI).
+        let dir = tmp_dir("jxl-round-trip");
         let png_in = dir.join("in.png");
-        write_test_png(&png_in, 16, 16);
+        write_test_png(&png_in, 32, 32);
         let jxl_out = dir.join("out.jxl");
-        let err = convert_image(&png_in, &jxl_out, TargetFormat::JpegXl).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not bundled") || msg.contains("v0.2.5.1"),
-            "expected deferral message, got: {msg}"
-        );
+        convert_image(&png_in, &jxl_out, TargetFormat::JpegXl).unwrap();
+        assert!(std::fs::metadata(&jxl_out).unwrap().len() > 0);
+
+        // Now decode the JXL back to PNG.
+        let png_back = dir.join("back.png");
+        convert_image(&jxl_out, &png_back, TargetFormat::Png).unwrap();
+        let img = image::open(&png_back).unwrap();
+        assert_eq!(img.width(), 32);
+        assert_eq!(img.height(), 32);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn jxl_input_returns_clear_not_bundled_error() {
-        // Symmetric to the encode path: a .jxl input dispatches to a
-        // friendly error, not image::open which would say "unsupported
-        // format" with no breadcrumb.
-        let dir = tmp_dir("jxl-input-deferred");
-        let jxl_in = dir.join("missing.jxl");
-        // The file doesn't need to exist — decode_any rejects on the
-        // extension before any I/O.
-        let err = decode_any(&jxl_in).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not bundled") || msg.contains("v0.2.5.1"),
-            "expected deferral message, got: {msg}"
-        );
+    fn jxl_rgba_round_trip_preserves_alpha() {
+        // Build a PNG with non-trivial alpha; round-trip via JXL and
+        // verify that the resulting decoded image is RGBA8 with the
+        // original alpha pattern intact.
+        let dir = tmp_dir("jxl-rgba");
+        let png_in = dir.join("in.png");
+        let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(16, 16, |x, y| {
+            Rgba([(x as u8) * 16, (y as u8) * 16, 64, 128])
+        });
+        img.save(&png_in).unwrap();
+
+        let jxl_out = dir.join("rgba.jxl");
+        convert_image(&png_in, &jxl_out, TargetFormat::JpegXl).unwrap();
+        assert!(std::fs::metadata(&jxl_out).unwrap().len() > 0);
+
+        let decoded = decode_any(&jxl_out).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgba8);
+        assert_eq!(decoded.width(), 16);
+        assert_eq!(decoded.height(), 16);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn heic_input_returns_clear_not_bundled_error() {
-        let dir = tmp_dir("heic-input-deferred");
-        let heic_in = dir.join("missing.heic");
-        let err = decode_any(&heic_in).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not bundled") || msg.contains("v0.2.5.1"),
-            "expected deferral message, got: {msg}"
-        );
+    fn decode_any_routes_jxl_to_jpegxl_rs() {
+        // Without the .jxl extension dispatch, `image::open` would fail
+        // with "unsupported format" since the `image` crate has no JXL
+        // codec. The round-trip test above already covers the happy
+        // path; this one is just a defensive check that decode_any
+        // doesn't try image::open on .jxl.
+        let dir = tmp_dir("jxl-dispatch");
+        let png_in = dir.join("in.png");
+        write_test_png(&png_in, 16, 16);
+        let jxl_out = dir.join("out.jxl");
+        convert_image(&png_in, &jxl_out, TargetFormat::JpegXl).unwrap();
+        // Call decode_any directly to verify the routing.
+        let decoded = decode_any(&jxl_out).unwrap();
+        assert_eq!(decoded.width(), 16);
+        assert_eq!(decoded.height(), 16);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

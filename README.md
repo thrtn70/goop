@@ -35,7 +35,7 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 | Category | Details |
 |---|---|
 | **Extract** | yt-dlp + gallery-dl, ~600 supported sites between them. URL routed automatically; bidirectional fallback if the first extractor misses. |
-| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including **AVIF** and **TIFF** in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. (HEIC + JPEG-XL coming in v0.2.5.1.) |
+| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including AVIF, JPEG-XL, HEIC, and TIFF in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. |
 | **Compress** | Quality-slider mode (1–100) or target-size mode (KB/MB). Works on video, audio, images, and PDFs. Source-vs-target preview before launch. |
 | **Image Workshop** | (v0.2.5) Rotate, resize (fit-within / fit-exact / scale %), interactive crop with aspect-ratio presets, text watermark with five anchor positions, batch recompress, and one-shot App Icon export to `.icns` + `.ico` + a favicon PNG set. |
 | **PDF** | 14 ops including Merge, Split, Compress (Ghostscript), Extract pages / Reorder / Rotate / Delete / Insert blank, Edit metadata, Extract text, Extract images, Images→PDF (now with JPEG passthrough for ~10× smaller photo PDFs), PDF OCR + Image OCR. |

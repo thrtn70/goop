@@ -176,18 +176,17 @@ pub enum CompressMode {
 }
 
 /// What to do with the source image's metadata (EXIF + ICC profile)
-/// during a convert / compress op. Two policies in v0.2.5:
+/// during a convert / compress op. Two policies as of v0.2.6:
 ///
 /// * `Preserve` — copy EXIF + ICC chunks from the input to the output
 ///   when both formats support them (currently JPEG↔JPEG and PNG↔PNG).
 ///   For cross-format converts (e.g. JPEG → AVIF) the metadata is
-///   dropped — v0.2.5.1 will broaden the supported matrix.
+///   dropped. Broadening the supported matrix is a v0.2.7+ candidate.
 /// * `StripAll` — drop all metadata regardless. Privacy default for
 ///   shared photos; also gives the smallest output bytes.
 ///
-/// `StripExifKeepIcc` (drop EXIF but keep the colour profile) was on
-/// the v0.2.5 plan but deferred per the explicit per-format-fragility
-/// trigger; arriving in v0.2.5.1.
+/// `StripExifKeepIcc` (drop EXIF but keep the colour profile) is a
+/// v0.2.7+ candidate per the explicit per-format-fragility trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, Default)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]

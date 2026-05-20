@@ -4,10 +4,21 @@ import type { ImageFormatSupport } from "./ImageFormatSupport";
 /**
  * Decoder status summary surfaced in Settings → Image Formats. The
  * version strings reflect the pinned dependency versions at build
- * time; goop bundles all decoders statically and doesn't ask the
- * user to install anything, so these are read-only.
+ * time; goop bundles the C libs and doesn't ask the user to
+ * install anything, so these are read-only.
  */
 export type ImageDecoderStatus = { 
+/**
+ * libheif-rs / libheif-sys versions (the wrapper crate +
+ * bundled C lib version pinned via per-platform package
+ * manager in CI — apt-get on Ubuntu, brew on macOS, vcpkg
+ * on Windows).
+ */
+libheif_version: string, 
+/**
+ * jpegxl-rs / libjxl versions (same pattern).
+ */
+libjxl_version: string, 
 /**
  * Bundled font for watermark rasterization.
  */
@@ -15,9 +26,4 @@ watermark_font: string,
 /**
  * Per-format support rows.
  */
-formats: Array<ImageFormatSupport>, 
-/**
- * Free-form line about formats that are coming but not yet
- * shipped. Surfaced below the table in the Settings UI.
- */
-coming_soon: string, };
+formats: Array<ImageFormatSupport>, };
