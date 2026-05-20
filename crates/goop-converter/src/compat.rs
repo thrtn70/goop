@@ -65,7 +65,12 @@ pub fn decide(
         TargetFormat::Aac => plan_audio_only(acodec, audio_aac_raw),
         TargetFormat::ExtractAudioKeepCodec => plan_extract_audio(acodec),
         // Image targets are handled by ImageMagick, not ffmpeg.
-        TargetFormat::Png | TargetFormat::Jpeg | TargetFormat::Webp | TargetFormat::Bmp => Plan {
+        TargetFormat::Png
+        | TargetFormat::Jpeg
+        | TargetFormat::Webp
+        | TargetFormat::Bmp
+        | TargetFormat::Tiff
+        | TargetFormat::Avif => Plan {
             args: vec![],
             video_filters: vec![],
             reencoded: false,
@@ -561,7 +566,12 @@ pub fn decide_compression(
         }
         TargetFormat::ExtractAudioKeepCodec => plan_extract_audio(acodec),
         // Image targets handled above.
-        TargetFormat::Png | TargetFormat::Jpeg | TargetFormat::Webp | TargetFormat::Bmp => {
+        TargetFormat::Png
+        | TargetFormat::Jpeg
+        | TargetFormat::Webp
+        | TargetFormat::Bmp
+        | TargetFormat::Tiff
+        | TargetFormat::Avif => {
             unreachable!("image targets short-circuit at the top of decide_compression")
         }
     }

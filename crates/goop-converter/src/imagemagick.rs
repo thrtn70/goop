@@ -133,6 +133,8 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
         TargetFormat::Jpeg => image::ImageFormat::Jpeg,
         TargetFormat::Webp => image::ImageFormat::WebP,
         TargetFormat::Bmp => image::ImageFormat::Bmp,
+        TargetFormat::Tiff => image::ImageFormat::Tiff,
+        TargetFormat::Avif => image::ImageFormat::Avif,
         other => {
             return Err(GoopError::SubprocessFailed {
                 binary: "image".into(),
@@ -170,6 +172,26 @@ fn compress_image(
                         .into(),
             }),
         },
+        TargetFormat::Tiff => match mode {
+            // TIFF compression in v0.2.5: re-save losslessly via the
+            // image crate's default encoder. Quality / target-size are
+            // accepted but treated as no-ops; the codec is fundamentally
+            // lossless for the image-crate code path.
+            CompressMode::LosslessReoptimize => convert_image(input, output, TargetFormat::Tiff),
+            _ => Err(GoopError::SubprocessFailed {
+                binary: "image".into(),
+                stderr: "TIFF compression only supports Lossless Re-optimize. \
+                         Convert to JPEG, WebP, or AVIF for lossy compression."
+                    .into(),
+            }),
+        },
+        TargetFormat::Avif => Err(GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: "AVIF compression knobs are not yet available. \
+                     To compress an AVIF, convert it to JPEG or WebP \
+                     from the Convert tab."
+                .into(),
+        }),
         TargetFormat::Bmp => Err(GoopError::SubprocessFailed {
             binary: "image".into(),
             stderr: "BMP compression is not supported. Convert to PNG or JPEG first.".into(),
@@ -471,6 +493,78 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("BMP"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tiff_round_trip_via_convert_image() {
+        // TIFF was listed in IMAGE_EXTENSIONS pre-v0.2.5 but the image
+        // crate's `tiff` feature was off — a TIFF conversion request
+        // would panic at runtime. Phase 2 enables the feature; this test
+        // locks the no-panic round-trip.
+        let dir = tmp_dir("tiff-round-trip");
+        let png_in = dir.join("in.png");
+        write_test_png(&png_in, 32, 32);
+        let tiff_out = dir.join("out.tiff");
+        convert_image(&png_in, &tiff_out, TargetFormat::Tiff).unwrap();
+        assert!(std::fs::metadata(&tiff_out).unwrap().len() > 0);
+
+        // And TIFF → PNG so the decode path is exercised too.
+        let png_out = dir.join("out.png");
+        convert_image(&tiff_out, &png_out, TargetFormat::Png).unwrap();
+        assert!(std::fs::metadata(&png_out).unwrap().len() > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn avif_encode_produces_nonempty_output() {
+        let dir = tmp_dir("avif-encode");
+        let png_in = dir.join("in.png");
+        write_test_png(&png_in, 32, 32);
+        let avif_out = dir.join("out.avif");
+        convert_image(&png_in, &avif_out, TargetFormat::Avif).unwrap();
+        assert!(std::fs::metadata(&avif_out).unwrap().len() > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tiff_lossless_reoptimize_succeeds() {
+        let dir = tmp_dir("tiff-lossless");
+        let png_in = dir.join("in.png");
+        write_test_png(&png_in, 16, 16);
+        // First produce a TIFF input.
+        let tiff_in = dir.join("in.tiff");
+        convert_image(&png_in, &tiff_in, TargetFormat::Tiff).unwrap();
+        // Then re-optimize lossless.
+        let tiff_out = dir.join("out.tiff");
+        compress_image(
+            &tiff_in,
+            &tiff_out,
+            TargetFormat::Tiff,
+            CompressMode::LosslessReoptimize,
+        )
+        .unwrap();
+        assert!(std::fs::metadata(&tiff_out).unwrap().len() > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tiff_quality_rejected_with_helpful_message() {
+        let dir = tmp_dir("tiff-quality-rejected");
+        let png_in = dir.join("in.png");
+        write_test_png(&png_in, 16, 16);
+        let tiff_in = dir.join("in.tiff");
+        convert_image(&png_in, &tiff_in, TargetFormat::Tiff).unwrap();
+        let tiff_out = dir.join("out.tiff");
+        let err = compress_image(
+            &tiff_in,
+            &tiff_out,
+            TargetFormat::Tiff,
+            CompressMode::Quality(50),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Lossless") || msg.contains("AVIF"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

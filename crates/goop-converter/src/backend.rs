@@ -35,7 +35,9 @@ pub enum BackendKind {
     ImageMagick,
 }
 
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico",
+];
 
 pub fn backend_for_extension(ext: &str) -> BackendKind {
     let lower = ext.to_ascii_lowercase();

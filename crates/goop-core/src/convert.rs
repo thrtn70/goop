@@ -30,11 +30,23 @@ pub enum TargetFormat {
     Jpeg,
     Webp,
     Bmp,
+    /// Tagged Image File Format. Lossless, widely supported by editing
+    /// tools. Enabled by the `image` crate's `tiff` feature in v0.2.5
+    /// (was previously routed-but-unsupported — pre-v0.2.5 inputs would
+    /// panic at runtime).
+    Tiff,
+    /// AV1-based modern web image format (HEIF container, AV1 codec).
+    /// Smaller than JPEG at equivalent quality. Encode via the `image`
+    /// crate's `avif` feature (which pulls `ravif` / `rav1e`).
+    Avif,
 }
 
 impl TargetFormat {
     pub fn is_image(self) -> bool {
-        matches!(self, Self::Png | Self::Jpeg | Self::Webp | Self::Bmp)
+        matches!(
+            self,
+            Self::Png | Self::Jpeg | Self::Webp | Self::Bmp | Self::Tiff | Self::Avif
+        )
     }
 
     pub fn extension(self) -> &'static str {
@@ -57,6 +69,8 @@ impl TargetFormat {
             Self::Jpeg => "jpg",
             Self::Webp => "webp",
             Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
+            Self::Avif => "avif",
         }
     }
 }
@@ -207,6 +221,8 @@ mod tests {
         assert!(TargetFormat::Jpeg.is_image());
         assert!(TargetFormat::Webp.is_image());
         assert!(TargetFormat::Bmp.is_image());
+        assert!(TargetFormat::Tiff.is_image());
+        assert!(TargetFormat::Avif.is_image());
         assert!(!TargetFormat::Mp4.is_image());
         assert!(!TargetFormat::Gif.is_image());
         assert!(!TargetFormat::Mp3.is_image());
@@ -219,6 +235,8 @@ mod tests {
         assert_eq!(TargetFormat::Jpeg.extension(), "jpg");
         assert_eq!(TargetFormat::Webp.extension(), "webp");
         assert_eq!(TargetFormat::Flac.extension(), "flac");
+        assert_eq!(TargetFormat::Tiff.extension(), "tiff");
+        assert_eq!(TargetFormat::Avif.extension(), "avif");
     }
 
     #[test]

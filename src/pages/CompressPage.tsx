@@ -47,6 +47,9 @@ function targetFromPath(path: string): TargetFormat {
     jpeg: "jpeg",
     webp: "webp",
     bmp: "bmp",
+    tiff: "tiff",
+    tif: "tiff",
+    avif: "avif",
   };
   return map[ext] ?? "mp4";
 }

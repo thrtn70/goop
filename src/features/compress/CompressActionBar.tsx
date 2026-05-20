@@ -69,6 +69,8 @@ function extFor(target: TargetFormat): string {
     jpeg: "jpg",
     webp: "webp",
     bmp: "bmp",
+    tiff: "tiff",
+    avif: "avif",
   };
   return map[target];
 }

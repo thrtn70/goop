@@ -19,6 +19,8 @@ const IMAGE_TARGETS: ReadonlySet<TargetFormat> = new Set<TargetFormat>([
   "jpeg",
   "webp",
   "bmp",
+  "tiff",
+  "avif",
 ]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
