@@ -57,6 +57,8 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
               "avif",
               "ico",
               "hdr",
+              // HEIC / JPEG-XL inputs ship in v0.2.5.1 — currently
+              // surface a friendly "not bundled" error if dropped.
             ],
           },
         ],

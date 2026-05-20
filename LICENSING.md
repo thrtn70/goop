@@ -17,18 +17,10 @@ Goop bundles several third-party binaries as **sidecars** — separate executabl
 
 ## Dynamically-linked third-party libraries (v0.2.5+)
 
-Some image formats require system C libraries linked into goop's main binary at compile time. These are NOT sidecars — they're loaded into goop's process via the dynamic linker — so the linking compatibility of each library matters.
+Pure-Rust permissive crates added for the v0.2.5 "Image Workshop" image-op surface. None require system libraries at runtime; everything links statically into goop's binary at compile time.
 
 | Library | License | Used for | Notes |
 |---|---|---|---|
-| libheif | LGPL-3.0 | HEIC / HEIF decode (v0.2.5) | LGPL allows dynamic linking from MIT host; we link, never modify. Bundled dylibs land in `Contents/MacOS/` on macOS via `install_name_tool` in `scripts/fetch-sidecars.sh`. |
-| libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.5) | Permissive; same dynamic-linking bundling. |
-| libx265 | GPL-2.0 | HEIC HEVC encode path (transitive via libheif) | GPL-2.0 linking from MIT host. Dynamic linking is the standard pattern for distros that ship both. v0.2.5 uses HEIC decode-only — see `docs/v0.2.5-format-spike.md` for the "drop libx265 from the bundle if decode-only is sufficient" follow-up. |
-| libde265 | LGPL-3.0 | HEIC HEVC decode (transitive via libheif) | Same LGPL-3.0 dynamic linking story as libheif itself. |
-| libaom | BSD-2-Clause-Patent | HEIC AV1 codec (transitive via libheif) | Permissive. |
-| libsharpyuv | BSD-3-Clause | YUV conversion (transitive via libheif's webp dep) | Permissive. |
-| libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
-| brotli | MIT | Compression (transitive via libjxl) | Permissive. |
 | Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
 | imageproc | MIT | Watermark glyph compositing (`draw_text_mut` on top of the `image` crate's RgbaImage). | Permissive. |
 | ab_glyph | Apache-2.0 OR MIT | Font loader for `imageproc`. Reads the bundled Roboto TTF. | Permissive. |
@@ -36,6 +28,8 @@ Some image formats require system C libraries linked into goop's main binary at 
 | icns | MIT | Apple icon container writer for App Icon export (`crates/goop-converter/src/image_app_icon.rs`). | Permissive. |
 | ico | MIT | Windows icon container writer for App Icon export. | Permissive. |
 | react-easy-crop | MIT | Frontend crop editor (`src/features/image/CropEditor.tsx`). | Permissive. |
+
+> **HEIC + JPEG-XL deferred to v0.2.5.1.** The `libheif-rs` / `jpegxl-rs` Phase 3 work was reverted in the v0.2.5 final commit because the per-platform CI bundling (`apt-get install libheif-dev libjxl-dev` on Ubuntu, `brew install` on macOS, vcpkg on Windows) and post-build dylib/DLL rewriting needed more iteration than fit in this release window. v0.2.5.1 brings them back with the LGPL/GPL linkage notes restored to this table.
 
 **Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). LGPL and GPL libraries unrelated to MuPDF can be dynamically linked under their own terms. The CI check still greps for `mupdf-*` only.
 

@@ -14,14 +14,14 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff", "avif", "hdr", "ico"] }
-# HEIC + JPEG-XL via C-binding crates that link at compile time against
-# system libraries (Homebrew on macOS, vcpkg on Windows). Production
-# bundling of libheif + libjxl dylibs lands in v0.2.5.1; for now the
-# dev build relies on system libs at runtime. Camera RAW (`rawler`)
-# also defers to v0.2.5.1 — its develop pipeline is heavier than a
-# single phase's worth of work.
-libheif-rs = "2.4"
-jpegxl-rs = "0.11"
+# HEIC + JPEG-XL via libheif-rs / jpegxl-rs were spike'd in Phase 3
+# but the release-time bundling story (system-lib install on every
+# CI runner + dylib/DLL rewriting next to the bundled binary) needs
+# more work than fit in v0.2.5. Decoders defer to v0.2.5.1, which
+# will ship the build-time apt/brew/vcpkg setup + post-build dylib
+# bundling in one focused release. The `imagemagick.rs` dispatch
+# still routes HEIC / JXL inputs through a "format not bundled in
+# this build" error so callers see the deferral, not a panic.
 # Phase 6 text watermark: imageproc owns the high-level draw_text_mut
 # helper that composites a rasterized glyph buffer onto a DynamicImage
 # via the `image` crate's pixel types. ab_glyph is its font loader.

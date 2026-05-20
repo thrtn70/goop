@@ -37,31 +37,30 @@ pub struct ImageFormatSupport {
 
 /// Decoder status summary surfaced in Settings → Image Formats. The
 /// version strings reflect the pinned dependency versions at build
-/// time; goop bundles the C libs and doesn't ask the user to
-/// install anything, so these are read-only.
+/// time; goop bundles all decoders statically and doesn't ask the
+/// user to install anything, so these are read-only.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ImageDecoderStatus {
-    /// libheif-rs / libheif-sys versions (the wrapper crate +
-    /// bundled C lib version pinned in `scripts/fetch-sidecars.sh`).
-    pub libheif_version: String,
-    /// jpegxl-rs / libjxl versions (same pattern).
-    pub libjxl_version: String,
     /// Bundled font for watermark rasterization.
     pub watermark_font: String,
     /// Per-format support rows.
     pub formats: Vec<ImageFormatSupport>,
+    /// Free-form line about formats that are coming but not yet
+    /// shipped. Surfaced below the table in the Settings UI.
+    pub coming_soon: String,
 }
 
 #[tauri::command]
 pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
     // Pinned per Cargo.toml + the v0.2.5 Phase 0 format spike memo.
-    // The C lib versions match the Homebrew formulae rebundled into
-    // the dylib payload during `scripts/fetch-sidecars.sh`.
+    // HEIC + JPEG-XL are deferred to v0.2.5.1 while the per-platform
+    // CI bundling story is finished (apt-get / brew / vcpkg setup +
+    // post-build dylib/DLL rewriting). The codepath surfaces a
+    // friendly "not bundled in v0.2.5" error in the meantime.
     Ok(ImageDecoderStatus {
-        libheif_version: "libheif-rs 2.4 (libheif 1.21)".into(),
-        libjxl_version: "jpegxl-rs 0.11 (libjxl 0.11)".into(),
         watermark_font: "Roboto Regular (Apache-2.0)".into(),
+        coming_soon: "HEIC, JPEG-XL, and camera RAW arrive in v0.2.5.1.".into(),
         formats: vec![
             ImageFormatSupport {
                 label: "PNG".into(),
@@ -91,18 +90,6 @@ pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
                 label: "AVIF".into(),
                 extensions: vec!["avif".into()],
                 provenance: "image crate 0.25 + ravif (bundled)".into(),
-                capability: "Decode + encode".into(),
-            },
-            ImageFormatSupport {
-                label: "HEIC / HEIF".into(),
-                extensions: vec!["heic".into(), "heif".into()],
-                provenance: "libheif 1.21 (bundled via libheif-rs)".into(),
-                capability: "Decode only".into(),
-            },
-            ImageFormatSupport {
-                label: "JPEG-XL".into(),
-                extensions: vec!["jxl".into()],
-                provenance: "libjxl 0.11 (bundled via jpegxl-rs)".into(),
                 capability: "Decode + encode".into(),
             },
         ],
