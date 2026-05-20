@@ -57,6 +57,17 @@ pub fn resize(
             }
             let new_w = ((u64::from(img.width()) * u64::from(pct)) / 100).max(1) as u32;
             let new_h = ((u64::from(img.height()) * u64::from(pct)) / 100).max(1) as u32;
+            // Mirror the 32_768 cap on the other two modes so a huge
+            // input + large percentage can't OOM the resampler with a
+            // dimensions value the user couldn't enter directly.
+            if new_w > 32_768 || new_h > 32_768 {
+                return Err(GoopError::SubprocessFailed {
+                    binary: "image".into(),
+                    stderr: format!(
+                        "resize scale result too large (max 32768; got {new_w}×{new_h} at {pct}%)"
+                    ),
+                });
+            }
             img.resize_exact(new_w, new_h, FILTER)
         }
     };

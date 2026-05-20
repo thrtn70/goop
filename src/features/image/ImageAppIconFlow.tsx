@@ -102,7 +102,7 @@ export default function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps
         result — non-square inputs will be stretched to fit each slot.
       </p>
 
-      <div aria-label="App icon platforms" className="flex flex-col gap-2">
+      <div role="group" aria-label="App icon platforms" className="flex flex-col gap-2">
         {PLATFORMS.map((opt) => {
           const active = selected.has(opt.value);
           return (

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "Goop",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "identifier": "dev.goop.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,11 @@
           "$DATA/goop/page-thumbs/**",
           "$HOME/Library/Application Support/goop/page-thumbs/**",
           "$APPDATA/goop/page-thumbs/**",
-          "**"
+          "$HOME/**",
+          "$DESKTOP/**",
+          "$DOWNLOAD/**",
+          "$DOCUMENT/**",
+          "$PICTURE/**"
         ]
       }
     }

@@ -77,7 +77,7 @@ export default function ImageOperationPicker({
   multiFile,
 }: ImageOperationPickerProps) {
   return (
-    <div aria-label="Image operation" className="flex flex-col gap-2">
+    <div role="group" aria-label="Image operation" className="flex flex-col gap-2">
       {OPTIONS.map((opt) => {
         const disabled = (multiFile && !opt.multiFileOk) || opt.comingSoon;
         const active = selected === opt.kind;

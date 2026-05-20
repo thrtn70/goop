@@ -35,9 +35,10 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 | Category | Details |
 |---|---|
 | **Extract** | yt-dlp + gallery-dl, ~600 supported sites between them. URL routed automatically; bidirectional fallback if the first extractor misses. |
-| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate (no extra sidecar). |
+| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including AVIF, JPEG-XL, HEIC, and TIFF in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. |
 | **Compress** | Quality-slider mode (1–100) or target-size mode (KB/MB). Works on video, audio, images, and PDFs. Source-vs-target preview before launch. |
-| **PDF** | Merge (drag-to-reorder), Split (range strings like `1-3, 7-10`), Compress (Ghostscript with Screen / Ebook / Printer presets). |
+| **Image Workshop** | (v0.2.5) Rotate, resize (fit-within / fit-exact / scale %), interactive crop with aspect-ratio presets, text watermark with five anchor positions, batch recompress, and one-shot App Icon export to `.icns` + `.ico` + a favicon PNG set. |
+| **PDF** | 14 ops including Merge, Split, Compress (Ghostscript), Extract pages / Reorder / Rotate / Delete / Insert blank, Edit metadata, Extract text, Extract images, Images→PDF (now with JPEG passthrough for ~10× smaller photo PDFs), PDF OCR + Image OCR. |
 | **Queue** | Pause / resume on running ffmpeg + Ghostscript jobs (CPU drops to ~0; partial output preserved). Drag-to-reorder, batch cancel, resizable + collapsible sidebar, total-ETA in the header. |
 | **History** | List or grid view with thumbnails, sort by date / size / name, filter by job kind, full-text search, multi-select for batch reveal / remove / move-to-trash. Slide-out preview panel + Quick View modal. |
 | **Hardware acceleration** | Auto-detects VideoToolbox (macOS), NVENC / QSV / AMF (Windows). 2–5× faster re-encodes when available; transparently falls back to software on encoder errors. |

@@ -30,6 +30,12 @@ Some image formats require system C libraries linked into goop's main binary at 
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
 | Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
+| imageproc | MIT | Watermark glyph compositing (`draw_text_mut` on top of the `image` crate's RgbaImage). | Permissive. |
+| ab_glyph | Apache-2.0 OR MIT | Font loader for `imageproc`. Reads the bundled Roboto TTF. | Permissive. |
+| img-parts | MIT OR Apache-2.0 | JPEG segment + PNG chunk walker for EXIF / ICC preserve / strip (`crates/goop-converter/src/metadata.rs`). | Permissive. |
+| icns | MIT | Apple icon container writer for App Icon export (`crates/goop-converter/src/image_app_icon.rs`). | Permissive. |
+| ico | MIT | Windows icon container writer for App Icon export. | Permissive. |
+| react-easy-crop | MIT | Frontend crop editor (`src/features/image/CropEditor.tsx`). | Permissive. |
 
 **Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). LGPL and GPL libraries unrelated to MuPDF can be dynamically linked under their own terms. The CI check still greps for `mupdf-*` only.
 

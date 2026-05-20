@@ -103,7 +103,7 @@ export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowP
         />
       </label>
 
-      <div aria-label="Watermark position" className="flex flex-col gap-2">
+      <div role="group" aria-label="Watermark position" className="flex flex-col gap-2">
         <span className="text-xs text-fg-muted">Position</span>
         <div className="flex flex-wrap items-center gap-2">
           {POSITIONS.map((opt) => (

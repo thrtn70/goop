@@ -110,8 +110,8 @@ export default function ImagePage() {
           Image Workshop
         </h2>
         <p className="text-sm text-fg-muted">
-          Rotate, resize, and (soon) crop / watermark / app-icon export. Drop
-          one or more images, pick an operation, and run.
+          Rotate, resize, crop, watermark, recompress in batch, or export an
+          app icon set. Drop one or more images, pick an operation, and run.
         </p>
       </div>
 
