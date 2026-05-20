@@ -2,6 +2,7 @@ pub mod backend;
 pub mod compat;
 pub mod encoders;
 pub mod ffmpeg;
+pub mod image_app_icon;
 pub mod image_crop;
 pub mod image_recompress;
 pub mod image_resize;

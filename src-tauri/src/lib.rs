@@ -7,9 +7,10 @@ pub mod thumbnail;
 use events::TauriSink;
 use goop_config as cfg;
 use goop_converter::{
-    detect_encoders, image_crop as image_crop_mod, image_recompress as image_recompress_mod,
-    image_resize as image_resize_mod, image_rotate as image_rotate_mod,
-    image_watermark as image_watermark_mod, ConversionBackend, FfmpegBackend, ImageMagickBackend,
+    detect_encoders, image_app_icon as image_app_icon_mod, image_crop as image_crop_mod,
+    image_recompress as image_recompress_mod, image_resize as image_resize_mod,
+    image_rotate as image_rotate_mod, image_watermark as image_watermark_mod, ConversionBackend,
+    FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult, PdfOperation,
@@ -670,11 +671,30 @@ pub fn run() {
                                 file_count: outputs.len() as u32,
                             });
                         }
-                        ImageOperation::AppIcon { .. } => {
-                            return Err(GoopError::Queue(
-                                "image app_icon is not yet implemented (lands in v0.2.5 Phase 7)"
-                                    .into(),
-                            ));
+                        ImageOperation::AppIcon {
+                            input,
+                            output_dir,
+                            platforms,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out_dir = PathBuf::from(output_dir);
+                            let out_for_task = out_dir.clone();
+                            let outputs = tokio::task::spawn_blocking(move || {
+                                image_app_icon_mod::app_icon(&in_path, &out_for_task, &platforms)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let total_bytes: u64 = outputs
+                                .iter()
+                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                                .sum();
+                            return Ok(JobResult {
+                                output_path: Some(out_dir.to_string_lossy().into_owned()),
+                                bytes: Some(total_bytes),
+                                duration_ms: started.elapsed().as_millis() as u64,
+                                result_kind: ResultKind::Folder,
+                                file_count: outputs.len() as u32,
+                            });
                         }
                     };
                     Ok(JobResult {

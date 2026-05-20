@@ -9,6 +9,7 @@ import ImageResizeFlow from "@/features/image/ImageResizeFlow";
 import ImageCropFlow from "@/features/image/ImageCropFlow";
 import ImageWatermarkFlow from "@/features/image/ImageWatermarkFlow";
 import ImageRecompressFlow from "@/features/image/ImageRecompressFlow";
+import ImageAppIconFlow from "@/features/image/ImageAppIconFlow";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 
@@ -178,6 +179,9 @@ export default function ImagePage() {
           )}
           {op === "recompress" && files.length > 0 && (
             <ImageRecompressFlow files={files} onDone={handleDone} />
+          )}
+          {files.length === 1 && op === "app_icon" && (
+            <ImageAppIconFlow file={files[0]} onDone={handleDone} />
           )}
         </>
       )}

@@ -68,7 +68,6 @@ const OPTIONS: Option[] = [
     label: "App icon",
     hint: ".icns / .ico / favicon PNG set from one source image",
     multiFileOk: false,
-    comingSoon: true,
   },
 ];
 
