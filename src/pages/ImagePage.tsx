@@ -6,6 +6,7 @@ import ImageOperationPicker, {
 } from "@/features/image/ImageOperationPicker";
 import ImageRotateFlow from "@/features/image/ImageRotateFlow";
 import ImageResizeFlow from "@/features/image/ImageResizeFlow";
+import ImageCropFlow from "@/features/image/ImageCropFlow";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 
@@ -160,6 +161,9 @@ export default function ImagePage() {
           )}
           {files.length === 1 && op === "resize" && (
             <ImageResizeFlow file={files[0]} onDone={handleDone} />
+          )}
+          {files.length === 1 && op === "crop" && (
+            <ImageCropFlow file={files[0]} onDone={handleDone} />
           )}
         </>
       )}

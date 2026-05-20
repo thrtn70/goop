@@ -7,8 +7,8 @@ pub mod thumbnail;
 use events::TauriSink;
 use goop_config as cfg;
 use goop_converter::{
-    detect_encoders, image_resize as image_resize_mod, image_rotate as image_rotate_mod,
-    ConversionBackend, FfmpegBackend, ImageMagickBackend,
+    detect_encoders, image_crop as image_crop_mod, image_resize as image_resize_mod,
+    image_rotate as image_rotate_mod, ConversionBackend, FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult, PdfOperation,
@@ -606,11 +606,21 @@ pub fn run() {
                             let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
                             (Some(out.to_string_lossy().into_owned()), bytes)
                         }
-                        ImageOperation::Crop { .. } => {
-                            return Err(GoopError::Queue(
-                                "image crop is not yet implemented (lands in v0.2.5 Phase 5)"
-                                    .into(),
-                            ));
+                        ImageOperation::Crop {
+                            input,
+                            rect,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                image_crop_mod::crop(&in_path, rect, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
                         }
                         ImageOperation::Watermark { .. } => {
                             return Err(GoopError::Queue(

@@ -30,7 +30,8 @@
           "$APPDATA/goop/thumbs/**",
           "$DATA/goop/page-thumbs/**",
           "$HOME/Library/Application Support/goop/page-thumbs/**",
-          "$APPDATA/goop/page-thumbs/**"
+          "$APPDATA/goop/page-thumbs/**",
+          "**"
         ]
       }
     }

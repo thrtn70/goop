@@ -50,7 +50,6 @@ const OPTIONS: Option[] = [
     label: "Crop",
     hint: "Trim to a rectangle with aspect-ratio presets",
     multiFileOk: false,
-    comingSoon: true,
   },
   {
     kind: "watermark",
