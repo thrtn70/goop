@@ -22,3 +22,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # single phase's worth of work.
 libheif-rs = "2.4"
 jpegxl-rs = "0.11"
+# Phase 6 text watermark: imageproc owns the high-level draw_text_mut
+# helper that composites a rasterized glyph buffer onto a DynamicImage
+# via the `image` crate's pixel types. ab_glyph is its font loader.
+# The bundled font file is `assets/Roboto-Regular.ttf` (Apache-2.0) —
+# loaded via `include_bytes!` so it ships as part of the crate binary.
+imageproc = "0.25"
+ab_glyph = "0.2"

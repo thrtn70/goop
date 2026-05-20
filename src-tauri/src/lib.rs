@@ -7,8 +7,9 @@ pub mod thumbnail;
 use events::TauriSink;
 use goop_config as cfg;
 use goop_converter::{
-    detect_encoders, image_crop as image_crop_mod, image_resize as image_resize_mod,
-    image_rotate as image_rotate_mod, ConversionBackend, FfmpegBackend, ImageMagickBackend,
+    detect_encoders, image_crop as image_crop_mod, image_recompress as image_recompress_mod,
+    image_resize as image_resize_mod, image_rotate as image_rotate_mod,
+    image_watermark as image_watermark_mod, ConversionBackend, FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult, PdfOperation,
@@ -622,17 +623,52 @@ pub fn run() {
                             let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
                             (Some(out.to_string_lossy().into_owned()), bytes)
                         }
-                        ImageOperation::Watermark { .. } => {
-                            return Err(GoopError::Queue(
-                                "image watermark is not yet implemented (lands in v0.2.5 Phase 6)"
-                                    .into(),
-                            ));
+                        ImageOperation::Watermark {
+                            input,
+                            spec,
+                            output_path,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let out_for_task = out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                image_watermark_mod::watermark(&in_path, &spec, &out_for_task)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (Some(out.to_string_lossy().into_owned()), bytes)
                         }
-                        ImageOperation::Recompress { .. } => {
-                            return Err(GoopError::Queue(
-                                "image recompress is not yet implemented (lands in v0.2.5 Phase 6)"
-                                    .into(),
-                            ));
+                        ImageOperation::Recompress {
+                            inputs,
+                            output_dir,
+                            quality,
+                        } => {
+                            let out_dir = PathBuf::from(output_dir);
+                            let out_for_task = out_dir.clone();
+                            let outputs = tokio::task::spawn_blocking(move || {
+                                let in_paths: Vec<PathBuf> =
+                                    inputs.into_iter().map(PathBuf::from).collect();
+                                let refs: Vec<&std::path::Path> =
+                                    in_paths.iter().map(|p| p.as_path()).collect();
+                                image_recompress_mod::recompress(&refs, &out_for_task, quality)
+                            })
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))??;
+                            let total_bytes: u64 = outputs
+                                .iter()
+                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                                .sum();
+                            // Recompress is the first image op to produce
+                            // a folder result. Same shape as the PDF
+                            // ExtractImages branch above.
+                            return Ok(JobResult {
+                                output_path: Some(out_dir.to_string_lossy().into_owned()),
+                                bytes: Some(total_bytes),
+                                duration_ms: started.elapsed().as_millis() as u64,
+                                result_kind: ResultKind::Folder,
+                                file_count: outputs.len() as u32,
+                            });
                         }
                         ImageOperation::AppIcon { .. } => {
                             return Err(GoopError::Queue(

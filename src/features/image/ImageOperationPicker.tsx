@@ -56,14 +56,12 @@ const OPTIONS: Option[] = [
     label: "Watermark",
     hint: "Overlay text in a corner of the image",
     multiFileOk: false,
-    comingSoon: true,
   },
   {
     kind: "recompress",
     label: "Recompress",
     hint: "Re-encode several images at the same quality",
     multiFileOk: true,
-    comingSoon: true,
   },
   {
     kind: "app_icon",

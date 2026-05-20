@@ -29,6 +29,7 @@ Some image formats require system C libraries linked into goop's main binary at 
 | libsharpyuv | BSD-3-Clause | YUV conversion (transitive via libheif's webp dep) | Permissive. |
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
+| Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
 
 **Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). LGPL and GPL libraries unrelated to MuPDF can be dynamically linked under their own terms. The CI check still greps for `mupdf-*` only.
 

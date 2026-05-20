@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import ImageOperationPicker, {
@@ -7,6 +7,8 @@ import ImageOperationPicker, {
 import ImageRotateFlow from "@/features/image/ImageRotateFlow";
 import ImageResizeFlow from "@/features/image/ImageResizeFlow";
 import ImageCropFlow from "@/features/image/ImageCropFlow";
+import ImageWatermarkFlow from "@/features/image/ImageWatermarkFlow";
+import ImageRecompressFlow from "@/features/image/ImageRecompressFlow";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 
@@ -52,11 +54,17 @@ export default function ImagePage() {
   const [op, setOp] = useState<ImageOperationKind>("rotate");
   const multiFile = files.length > 1;
 
-  // Phase 4 ships only single-file ops. When multiFile is true the
-  // picker shows the current op as disabled with a "drop a single
-  // image" hint; the op-specific flow guards on `files.length === 1`
-  // and renders nothing in that state. An auto-switch lands in
-  // Phase 6 with `recompress` (the first `multiFileOk` op).
+  // Multi-file selections route to `recompress` automatically — it's
+  // the only `multiFileOk` op as of Phase 6. Single-file selections
+  // restore `rotate` as the default. The picker also reflects this
+  // by greying out the single-file ops when multiFile is true.
+  useEffect(() => {
+    if (multiFile && op !== "recompress") {
+      setOp("recompress");
+    } else if (!multiFile && op === "recompress") {
+      setOp("rotate");
+    }
+  }, [multiFile, op]);
 
   const addPaths = useCallback((paths: string[]) => {
     const fresh = paths.filter(isImage);
@@ -164,6 +172,12 @@ export default function ImagePage() {
           )}
           {files.length === 1 && op === "crop" && (
             <ImageCropFlow file={files[0]} onDone={handleDone} />
+          )}
+          {files.length === 1 && op === "watermark" && (
+            <ImageWatermarkFlow file={files[0]} onDone={handleDone} />
+          )}
+          {op === "recompress" && files.length > 0 && (
+            <ImageRecompressFlow files={files} onDone={handleDone} />
           )}
         </>
       )}
