@@ -1,4 +1,4 @@
-use goop_core::{path::expand, GoopError, HistoryViewMode};
+use goop_core::{path::expand, GoopError, HistoryViewMode, MetadataPolicy};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ts_rs::TS;
@@ -86,6 +86,12 @@ pub struct Settings {
     /// the extract command boundary.
     #[serde(default)]
     pub extract_naming_scheme: ExtractNamingScheme,
+    /// Default `MetadataPolicy` for new image convert / compress
+    /// rows. Defaults to `Preserve`. Per-file overrides on FileRow
+    /// always win — this only seeds the initial value when a row
+    /// first mounts.
+    #[serde(default)]
+    pub default_metadata_policy: MetadataPolicy,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -132,6 +138,7 @@ impl Default for Settings {
             notifications_enabled: false,
             output_dir_extract: None,
             extract_naming_scheme: ExtractNamingScheme::default(),
+            default_metadata_policy: MetadataPolicy::default(),
         }
     }
 }
@@ -188,6 +195,7 @@ pub struct SettingsPatch {
     #[serde(default, deserialize_with = "double_option::deserialize")]
     pub output_dir_extract: Option<Option<String>>,
     pub extract_naming_scheme: Option<ExtractNamingScheme>,
+    pub default_metadata_policy: Option<MetadataPolicy>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -261,6 +269,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.extract_naming_scheme {
         next.extract_naming_scheme = v;
+    }
+    if let Some(v) = patch.default_metadata_policy {
+        next.default_metadata_policy = v;
     }
     next
 }

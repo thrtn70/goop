@@ -173,6 +173,7 @@ describe("UpdateBanner", () => {
     notifications_enabled: false,
     output_dir_extract: null,
     extract_naming_scheme: "title",
+    default_metadata_policy: "preserve",
   };
 
   it("renders nothing when no update is available", () => {

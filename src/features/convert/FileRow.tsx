@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
+import { useAppStore } from "@/store/appStore";
 import TargetPicker, { smartDefault } from "./TargetPicker";
 import GifOptionsPanel from "./GifOptionsPanel";
 
@@ -51,6 +52,10 @@ function defaultGifOptions(): GifOptions {
 export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: FileRowProps) {
   const { state, retry } = useProbe(path);
   const [opts, setOpts] = useState<RowOptionsState | null>(null);
+  // Read the global default once at seed time so a later Settings
+  // change doesn't unexpectedly mutate an active row's choice.
+  const defaultPolicy: MetadataPolicy =
+    useAppStore((s) => s.settings?.default_metadata_policy) ?? "preserve";
 
   // Seed options once the probe lands; derive smart defaults from the probe.
   useEffect(() => {
@@ -59,7 +64,7 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
       const seeded: RowOptionsState = {
         target,
         gifOptions: target === "gif" ? defaultGifOptions() : null,
-        metadataPolicy: "preserve",
+        metadataPolicy: defaultPolicy,
       };
       setOpts(seeded);
       onOptionsChange(path, seeded);

@@ -6,6 +6,7 @@ import type {
   HistoryCounts,
   HistoryFilter,
   IconPlatform,
+  ImageDecoderStatus,
   ImageOcrOutput,
   ImageOperation,
   Job,
@@ -160,6 +161,7 @@ export const api = {
   },
   image: {
     run: (op: ImageOperation) => invoke<JobId>("image_run", { op }),
+    decoders: () => invoke<ImageDecoderStatus>("image_decoders"),
   },
   history: {
     list: (filter: HistoryFilter) => invoke<Job[]>("history_list", { filter }),

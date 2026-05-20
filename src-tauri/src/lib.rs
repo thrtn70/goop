@@ -801,6 +801,7 @@ pub fn run() {
             commands::pdf::pdf_run,
             commands::pdf::pdf_page_thumbs,
             commands::image::image_run,
+            commands::image::image_decoders,
             commands::history::history_list,
             commands::history::history_counts,
             commands::thumbnail::thumbnail_get,

@@ -15,6 +15,8 @@ export * from './HistoryFilter';
 export * from './HistorySort';
 export * from './HistoryViewMode';
 export * from './IconPlatform';
+export * from './ImageDecoderStatus';
+export * from './ImageFormatSupport';
 export * from './ImageOcrOutput';
 export * from './ImageOperation';
 export * from './IpcError';

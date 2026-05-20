@@ -244,6 +244,7 @@ function emptyPatch(): NoopPatch {
     has_seen_onboarding: null,
     notifications_enabled: null,
     extract_naming_scheme: null,
+    default_metadata_policy: null,
   };
 }
 

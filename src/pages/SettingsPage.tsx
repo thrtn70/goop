@@ -9,6 +9,7 @@ import type { ExtractNamingScheme, Theme } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import SettingsSection from "@/components/SettingsSection";
 import OcrLanguagesSection from "@/components/OcrLanguagesSection";
+import ImageFormatsSection from "@/components/ImageFormatsSection";
 import PresetManager from "@/features/presets/PresetManager";
 import { useAppVersion } from "@/hooks/useAppVersion";
 
@@ -427,6 +428,8 @@ export default function SettingsPage() {
       </SettingsSection>
 
       <OcrLanguagesSection />
+
+      <ImageFormatsSection />
 
       <SettingsSection title="Presets" description="Named format + quality combinations for Convert and Compress.">
         <PresetManager />

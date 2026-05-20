@@ -78,6 +78,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     notifications_enabled: false,
     output_dir_extract: null,
     extract_naming_scheme: "title",
+    default_metadata_policy: "preserve",
     ...overrides,
   };
 }
