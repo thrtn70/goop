@@ -552,15 +552,39 @@ pub fn run() {
                 })
             });
 
+            // Phase 1 (v0.2.5) image worker stub. Each ImageOperation variant
+            // lands in a later phase (Rotate+Resize in Phase 4, Crop in Phase 5,
+            // Watermark+Recompress in Phase 6, AppIcon in Phase 7). Until then
+            // the worker errors out with a clear message so the queue surface
+            // shows "image ops not yet implemented" instead of silently
+            // succeeding or panicking.
+            let image_worker: WorkerFn = Arc::new(move |_id, _payload, _cancel| {
+                Box::pin(async move {
+                    Err(GoopError::Queue(
+                        "image operation worker is not yet implemented \
+                         (lands in v0.2.5 Phase 4+)"
+                            .into(),
+                    ))
+                })
+            });
+
+            // Image jobs reuse `convert_concurrency` for now: both are
+            // CPU-bound, in-process pure-Rust work with similar resource
+            // characteristics. A dedicated `image_concurrency` Settings field
+            // can land later if user feedback suggests image ops need a
+            // distinct budget (e.g. RAW decoding is heavier than typical
+            // convert jobs).
             let scheduler = Scheduler::with_pids(
                 store.clone(),
                 sink,
                 settings.extract_concurrency,
                 settings.convert_concurrency,
                 1,
+                settings.convert_concurrency,
                 extract_worker,
                 convert_worker,
                 pdf_worker,
+                image_worker,
                 pid_registry,
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
@@ -577,6 +601,10 @@ pub fn run() {
             tauri::async_runtime::spawn(
                 async move { s_pdf.run_kind(goop_core::JobKind::Pdf).await },
             );
+            let s_image = scheduler.clone();
+            tauri::async_runtime::spawn(async move {
+                s_image.run_kind(goop_core::JobKind::Image).await
+            });
 
             let thumbs = ThumbnailService::new(gpath::data_dir(), gs_resource_dir.clone());
             app.manage(AppState {
@@ -633,6 +661,7 @@ pub fn run() {
             commands::pdf::pdf_probe,
             commands::pdf::pdf_run,
             commands::pdf::pdf_page_thumbs,
+            commands::image::image_run,
             commands::history::history_list,
             commands::history::history_counts,
             commands::thumbnail::thumbnail_get,

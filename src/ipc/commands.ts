@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
+  CropRect,
   ExtractRequest,
   HistoryCounts,
   HistoryFilter,
+  IconPlatform,
   ImageOcrOutput,
+  ImageOperation,
   Job,
   JobId,
   LanguagePack,
@@ -17,12 +20,15 @@ import type {
   PdfQuality,
   Preset,
   ProbeResult,
+  ResizeMode,
+  RotationDegrees,
   Settings,
   SettingsPatch,
   SidecarStatus,
   UpdateInfo,
   UpdateStatus,
   UrlProbe,
+  WatermarkSpec,
 } from "@/types";
 
 // The ts-rs-generated `CompressMode` declares `value: bigint` for
@@ -151,6 +157,9 @@ export const api = {
     probe: (path: string) => invoke<PdfProbeResult>("pdf_probe", { path }),
     run: (op: PdfOperation) => invoke<JobId>("pdf_run", { op }),
     pageThumbs: (path: string) => invoke<string[]>("pdf_page_thumbs", { path }),
+  },
+  image: {
+    run: (op: ImageOperation) => invoke<JobId>("image_run", { op }),
   },
   history: {
     list: (filter: HistoryFilter) => invoke<Job[]>("history_list", { filter }),
@@ -284,5 +293,72 @@ export function pdfImageOcr(
     output_path: outputPath,
     output_kind: outputKind,
     lang,
+  };
+}
+
+// ImageOperation builders. Same pattern as the PdfOperation builders above:
+// the discriminator/field names lock onto the Rust serde tag layout
+// (`#[serde(tag = "kind", rename_all = "snake_case")]`) in
+// crates/goop-core/src/image.rs. Wire-canary tests in commands.test.ts.
+
+export function imageRotate(
+  input: string,
+  degrees: RotationDegrees,
+  outputPath: string,
+): ImageOperation {
+  return { kind: "rotate", input, degrees, output_path: outputPath };
+}
+
+export function imageResize(
+  input: string,
+  width: number,
+  height: number,
+  mode: ResizeMode,
+  outputPath: string,
+): ImageOperation {
+  return {
+    kind: "resize",
+    input,
+    width,
+    height,
+    mode,
+    output_path: outputPath,
+  };
+}
+
+export function imageCrop(
+  input: string,
+  rect: CropRect,
+  outputPath: string,
+): ImageOperation {
+  return { kind: "crop", input, rect, output_path: outputPath };
+}
+
+export function imageWatermark(
+  input: string,
+  spec: WatermarkSpec,
+  outputPath: string,
+): ImageOperation {
+  return { kind: "watermark", input, spec, output_path: outputPath };
+}
+
+export function imageRecompress(
+  inputs: string[],
+  outputDir: string,
+  quality: number,
+): ImageOperation {
+  return { kind: "recompress", inputs, output_dir: outputDir, quality };
+}
+
+export function imageAppIcon(
+  input: string,
+  outputDir: string,
+  platforms: IconPlatform[],
+): ImageOperation {
+  return {
+    kind: "app_icon",
+    input,
+    output_dir: outputDir,
+    platforms,
   };
 }

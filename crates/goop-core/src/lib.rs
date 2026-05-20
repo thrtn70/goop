@@ -2,6 +2,7 @@ pub mod convert;
 pub mod error;
 pub mod events;
 pub mod history;
+pub mod image;
 pub mod job;
 pub mod path;
 pub mod pdf;
@@ -18,6 +19,9 @@ pub use error::{
 };
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
+pub use image::{
+    CropRect, IconPlatform, ImageOperation, ResizeMode, WatermarkPosition, WatermarkSpec,
+};
 pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
 pub use pdf::{
     PageRange, PageRotation, PdfMetadata, PdfOperation, PdfProbeResult, PdfQuality, RotationDegrees,

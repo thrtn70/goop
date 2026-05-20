@@ -22,10 +22,12 @@ pub enum PdfQuality {
     Printer,
 }
 
-/// Clockwise rotation applied to a PDF page. The PDF spec stores `/Rotate`
-/// in 90-degree increments; only these three are useful (0 is no-op).
-/// The backend composes the new rotation with any existing `/Rotate` value
-/// modulo 360, so a single rotation that lands a page back at 0 is fine.
+/// Clockwise rotation in 90-degree increments. Shared between PDF page
+/// rotation (`PdfOperation::Rotate`) and single-image rotation
+/// (`ImageOperation::Rotate`). 0 is the no-op identity and is intentionally
+/// excluded so callers must pick a real rotation. For PDF pages, the
+/// backend composes this with any existing `/Rotate` value modulo 360, so
+/// a rotation that lands a page back at 0 is fine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]

@@ -30,6 +30,7 @@ pub enum JobKind {
     Extract,
     Convert,
     Pdf,
+    Image,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

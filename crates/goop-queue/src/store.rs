@@ -403,6 +403,7 @@ fn kind_to_str(k: &JobKind) -> &'static str {
         JobKind::Extract => "extract",
         JobKind::Convert => "convert",
         JobKind::Pdf => "pdf",
+        JobKind::Image => "image",
     }
 }
 
@@ -411,6 +412,7 @@ fn str_to_kind(s: &str) -> Option<JobKind> {
         "extract" => Some(JobKind::Extract),
         "convert" => Some(JobKind::Convert),
         "pdf" => Some(JobKind::Pdf),
+        "image" => Some(JobKind::Image),
         _ => None,
     }
 }

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  imageAppIcon,
+  imageCrop,
+  imageRecompress,
+  imageResize,
+  imageRotate,
+  imageWatermark,
   pdfCompress,
   pdfDeletePages,
   pdfExtractImages,
@@ -184,6 +190,110 @@ describe("PdfOperation builders emit the correct discriminator", () => {
       output_path: "/out.pdf",
       output_kind: "searchable_pdf",
       lang: "fra",
+    });
+  });
+});
+
+// Mirror the canary tests for ImageOperation builders. Same justification:
+// the Rust side uses #[serde(tag = "kind", rename_all = "snake_case")] in
+// crates/goop-core/src/image.rs; drift here means image jobs silently fail
+// at runtime.
+describe("ImageOperation builders emit the correct discriminator", () => {
+  it("imageRotate → kind=rotate with cw90/cw180/cw270 degrees", () => {
+    expect(imageRotate("/in.png", "cw90", "/out.png")).toEqual({
+      kind: "rotate",
+      input: "/in.png",
+      degrees: "cw90",
+      output_path: "/out.png",
+    });
+    expect(imageRotate("/in.jpg", "cw180", "/out.jpg")).toEqual({
+      kind: "rotate",
+      input: "/in.jpg",
+      degrees: "cw180",
+      output_path: "/out.jpg",
+    });
+    expect(imageRotate("/in.jpg", "cw270", "/out.jpg")).toEqual({
+      kind: "rotate",
+      input: "/in.jpg",
+      degrees: "cw270",
+      output_path: "/out.jpg",
+    });
+  });
+
+  it("imageResize → kind=resize covering all three modes", () => {
+    expect(imageResize("/in.png", 800, 600, "fit_within", "/out.png")).toEqual({
+      kind: "resize",
+      input: "/in.png",
+      width: 800,
+      height: 600,
+      mode: "fit_within",
+      output_path: "/out.png",
+    });
+    expect(imageResize("/in.png", 800, 600, "fit_exact", "/out.png")).toEqual({
+      kind: "resize",
+      input: "/in.png",
+      width: 800,
+      height: 600,
+      mode: "fit_exact",
+      output_path: "/out.png",
+    });
+    expect(imageResize("/in.png", 50, 0, "scale", "/out.png")).toEqual({
+      kind: "resize",
+      input: "/in.png",
+      width: 50,
+      height: 0,
+      mode: "scale",
+      output_path: "/out.png",
+    });
+  });
+
+  it("imageCrop → kind=crop with pixel-coord rect", () => {
+    expect(
+      imageCrop(
+        "/in.png",
+        { x: 10, y: 20, width: 100, height: 200 },
+        "/out.png",
+      ),
+    ).toEqual({
+      kind: "crop",
+      input: "/in.png",
+      rect: { x: 10, y: 20, width: 100, height: 200 },
+      output_path: "/out.png",
+    });
+  });
+
+  it("imageWatermark → kind=watermark with text-only spec", () => {
+    expect(
+      imageWatermark(
+        "/in.png",
+        { text: "© 2026", position: "bottom_right", opacity: 80 },
+        "/out.png",
+      ),
+    ).toEqual({
+      kind: "watermark",
+      input: "/in.png",
+      spec: { text: "© 2026", position: "bottom_right", opacity: 80 },
+      output_path: "/out.png",
+    });
+  });
+
+  it("imageRecompress → kind=recompress with ordered inputs + output_dir + quality", () => {
+    expect(imageRecompress(["/a.jpg", "/b.jpg"], "/out", 75)).toEqual({
+      kind: "recompress",
+      inputs: ["/a.jpg", "/b.jpg"],
+      output_dir: "/out",
+      quality: 75,
+    });
+  });
+
+  it("imageAppIcon → kind=app_icon with platform list", () => {
+    expect(
+      imageAppIcon("/logo.png", "/icons", ["macos", "windows", "web"]),
+    ).toEqual({
+      kind: "app_icon",
+      input: "/logo.png",
+      output_dir: "/icons",
+      platforms: ["macos", "windows", "web"],
     });
   });
 });
