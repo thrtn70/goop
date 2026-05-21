@@ -23,11 +23,11 @@ pub async fn image_run(state: State<'_, AppState>, op: ImageOperation) -> Result
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ImageFormatSupport {
-    /// Human label (e.g. "HEIC / HEIF", "JPEG-XL").
+    /// Human label (e.g. "JPEG-XL", "AVIF").
     pub label: String,
-    /// File extensions this row covers (e.g. `["heic", "heif"]`).
+    /// File extensions this row covers (e.g. `["jpg", "jpeg"]`).
     pub extensions: Vec<String>,
-    /// Free-form provenance string (e.g. "libheif 1.21", "image crate
+    /// Free-form provenance string (e.g. "libjxl 0.11", "image crate
     /// 0.25 feature: avif"). Surfaced as a small caption under the
     /// label so the user can confirm the format is bundled.
     pub provenance: String,
@@ -42,12 +42,9 @@ pub struct ImageFormatSupport {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ImageDecoderStatus {
-    /// libheif-rs / libheif-sys versions (the wrapper crate +
-    /// bundled C lib version pinned via per-platform package
-    /// manager in CI — apt-get on Ubuntu, brew on macOS, vcpkg
-    /// on Windows).
-    pub libheif_version: String,
-    /// jpegxl-rs / libjxl versions (same pattern).
+    /// jpegxl-rs / libjxl versions (libjxl 0.11 built from vendored
+    /// source via jpegxl-rs's `vendored` feature — statically linked
+    /// into goop's binary, identical across all release targets).
     pub libjxl_version: String,
     /// Bundled font for watermark rasterization.
     pub watermark_font: String,
@@ -58,13 +55,11 @@ pub struct ImageDecoderStatus {
 #[tauri::command]
 pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
     // Pinned per Cargo.toml + the v0.2.5 Phase 0 format spike memo.
-    // libheif is system-linked per platform (Ubuntu audit pins to
-    // 1.17, macOS Homebrew + Windows vcpkg ship 1.21+) so we hedge
-    // the displayed range rather than claim a specific build. libjxl
-    // is vendored at 0.11 via jpegxl-rs's `vendored` feature so its
-    // version is uniform across all release targets.
+    // libjxl is vendored at 0.11 via jpegxl-rs's `vendored` feature so
+    // its version is uniform across all release targets. HEIC support
+    // still defers — see LICENSING.md for the libheif distribution
+    // story we want to close out before re-introducing it.
     Ok(ImageDecoderStatus {
-        libheif_version: "libheif-rs 2.7 (libheif 1.17+, system-linked)".into(),
         libjxl_version: "jpegxl-rs 0.11 (libjxl 0.11, vendored)".into(),
         watermark_font: "Roboto Regular (Apache-2.0)".into(),
         formats: vec![
@@ -97,12 +92,6 @@ pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
                 extensions: vec!["avif".into()],
                 provenance: "image crate 0.25 + ravif (bundled)".into(),
                 capability: "Decode + encode".into(),
-            },
-            ImageFormatSupport {
-                label: "HEIC / HEIF".into(),
-                extensions: vec!["heic".into(), "heif".into()],
-                provenance: "libheif 1.21 (bundled via libheif-rs)".into(),
-                capability: "Decode only".into(),
             },
             ImageFormatSupport {
                 label: "JPEG-XL".into(),

@@ -143,12 +143,12 @@ fn process_image(
 
 /// Default image format swap (no compression options).
 ///
-/// Decode dispatch: HEIC and JPEG-XL inputs route to the dedicated
-/// `libheif-rs` / `jpegxl-rs` decoders before re-entering the common
-/// `image`-crate encode path. Everything else (PNG/JPEG/WebP/BMP/TIFF/
-/// AVIF/GIF/HDR/ICO) goes through `image::open`. Encode dispatch: JXL
-/// outputs run through `jpegxl-rs::encoder_builder` (the `image` crate
-/// has no JXL codec). Everything else uses `image::save_with_format`.
+/// Decode dispatch: JPEG-XL inputs route to the dedicated `jpegxl-rs`
+/// decoder before re-entering the common `image`-crate encode path.
+/// Everything else (PNG/JPEG/WebP/BMP/TIFF/AVIF/GIF/HDR/ICO) goes
+/// through `image::open`. Encode dispatch: JXL outputs run through
+/// `jpegxl-rs::encoder_builder` (the `image` crate has no JXL codec).
+/// Everything else uses `image::save_with_format`.
 fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<(), GoopError> {
     let img = decode_any(input)?;
 
@@ -180,14 +180,14 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
 }
 
 /// Decode an image at any supported input format into an in-memory
-/// `DynamicImage`. Routes HEIC + JPEG-XL inputs through their dedicated
-/// system-library bindings; everything else through the `image` crate.
+/// `DynamicImage`. Routes JPEG-XL inputs through `jpegxl-rs`; everything
+/// else through the `image` crate.
 ///
 /// Exposed `pub(crate)` so the per-operation modules (`image_rotate`,
 /// `image_resize`, etc.) can reuse the same decode dispatch instead of
 /// duplicating extension-sniffing logic. Keeping a single decode entry
-/// point also means a future input format (e.g. RAW in v0.2.6) only
-/// needs to be added here.
+/// point also means a future input format (e.g. HEIC once the libheif
+/// distribution story is settled, or RAW) only needs to be added here.
 pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError> {
     let ext = input
         .extension()
@@ -196,73 +196,24 @@ pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError>
         .unwrap_or_default();
 
     match ext.as_str() {
-        "heic" | "heif" => decode_heic(input),
         "jxl" => decode_jxl(input),
+        // HEIC/HEIF: scope was pulled from v0.2.6 (see LICENSING.md
+        // and .release-notes/v0.2.6.md). Surface a clear error here
+        // instead of routing to image::open, which would return
+        // "format not recognized" — equally unhelpful but missing
+        // the "we know about this format, it's just not bundled" hint.
+        "heic" | "heif" => Err(GoopError::SubprocessFailed {
+            binary: "libheif".into(),
+            stderr:
+                "HEIC / HEIF decoding is not bundled in this build of goop. Convert via Preview \
+                 (macOS) or Photos (Windows) and drop the resulting JPEG/PNG back in."
+                    .into(),
+        }),
         _ => image::open(input).map_err(|e| GoopError::SubprocessFailed {
             binary: "image".into(),
             stderr: format!("failed to open image: {e}"),
         }),
     }
-}
-
-/// Decode a HEIC/HEIF file via libheif-rs into an RGB DynamicImage.
-fn decode_heic(input: &Path) -> Result<image::DynamicImage, GoopError> {
-    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
-
-    let lib = LibHeif::new();
-    let path_str = input.to_str().ok_or_else(|| GoopError::SubprocessFailed {
-        binary: "libheif".into(),
-        stderr: "input path is not valid UTF-8".into(),
-    })?;
-    let ctx = HeifContext::read_from_file(path_str).map_err(|e| GoopError::SubprocessFailed {
-        binary: "libheif".into(),
-        stderr: format!("failed to read HEIC: {e}"),
-    })?;
-    let handle = ctx
-        .primary_image_handle()
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "libheif".into(),
-            stderr: format!("failed to get primary HEIC image: {e}"),
-        })?;
-    let width = handle.width();
-    let height = handle.height();
-    let heif_image = lib
-        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "libheif".into(),
-            stderr: format!("failed to decode HEIC pixels: {e}"),
-        })?;
-    let planes = heif_image.planes();
-    let interleaved = planes
-        .interleaved
-        .ok_or_else(|| GoopError::SubprocessFailed {
-            binary: "libheif".into(),
-            stderr: "HEIC decode returned no interleaved RGB plane".into(),
-        })?;
-    let stride = interleaved.stride;
-    let row_bytes = width as usize * 3;
-    // libheif may add padding bytes; copy row-by-row to a packed buffer.
-    let mut buf = Vec::with_capacity(row_bytes * height as usize);
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        let row_end = row_start + row_bytes;
-        if row_end > interleaved.data.len() {
-            return Err(GoopError::SubprocessFailed {
-                binary: "libheif".into(),
-                stderr: format!(
-                    "HEIC row out of bounds: y={y} stride={stride} data_len={}",
-                    interleaved.data.len()
-                ),
-            });
-        }
-        buf.extend_from_slice(&interleaved.data[row_start..row_end]);
-    }
-    image::ImageBuffer::from_raw(width, height, buf)
-        .map(image::DynamicImage::ImageRgb8)
-        .ok_or_else(|| GoopError::SubprocessFailed {
-            binary: "libheif".into(),
-            stderr: "failed to construct DynamicImage from HEIC pixels".into(),
-        })
 }
 
 /// Decode a JPEG-XL file via jpegxl-rs into a DynamicImage.
@@ -904,6 +855,27 @@ mod tests {
         let decoded = decode_any(&jxl_out).unwrap();
         assert_eq!(decoded.width(), 16);
         assert_eq!(decoded.height(), 16);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn decode_any_returns_clear_error_for_heic() {
+        // v0.2.6 ships without HEIC decode. Verify decode_any surfaces
+        // a clear "not bundled" message rather than letting the file
+        // fall through to image::open's generic "format not recognized".
+        let dir = tmp_dir("heic-defer");
+        // Empty file is fine — we never get past the extension dispatch.
+        let heic_in = dir.join("photo.heic");
+        std::fs::write(&heic_in, b"").unwrap();
+        let err = decode_any(&heic_in).unwrap_err();
+        let GoopError::SubprocessFailed { binary, stderr } = err else {
+            panic!("expected SubprocessFailed, got {err:?}");
+        };
+        assert_eq!(binary, "libheif");
+        assert!(
+            stderr.contains("not bundled"),
+            "expected 'not bundled' in error, got: {stderr}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

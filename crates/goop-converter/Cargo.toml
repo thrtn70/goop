@@ -14,22 +14,16 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff", "avif", "hdr", "ico"] }
-# HEIC + JPEG-XL via C-binding crates. v0.2.6 hybrid strategy:
-#   * jpegxl-rs uses `vendored` — jpegxl-src builds libjxl 0.11 from
-#     vendored source via cmake at build time. Static link. Avoids
-#     the per-platform libjxl version mismatch (Ubuntu apt's 0.7
-#     vs Homebrew/vcpkg's 0.11) that broke the v0.2.5 release matrix.
-#   * libheif-rs is system-linked. apt-get/brew/vcpkg install libheif
-#     per platform; libheif-rs probes via pkg-config. `v1_17` feature
-#     pins to the lowest libheif API we need (Ubuntu 24.04 ships 1.17,
-#     macOS Homebrew ships 1.21, Windows vcpkg ships 1.21+).
-# Build prereqs (handled in CI workflows):
-#   * cmake + C/C++ compiler everywhere (jpegxl vendored build needs it)
-#   * libheif-dev (Ubuntu 24.04+), libheif (brew), libheif (vcpkg)
-#   * pkg-config / pkgconfiglite for libheif lookup
-# Camera RAW (`rawler`) still defers — its develop pipeline is
-# heavier than a single release window can absorb.
-libheif-rs = { version = "2.4", default-features = false, features = ["v1_17", "image"] }
+# JPEG-XL via jpegxl-rs's `vendored` feature: jpegxl-src builds libjxl
+# 0.11 from vendored source via cmake at build time, statically linking
+# the result into our binary. Avoids the per-platform libjxl version
+# mismatch (Ubuntu apt's 0.7 vs Homebrew/vcpkg's 0.11) that broke the
+# v0.2.5 release matrix. Build prereq (handled in CI): cmake + a C/C++
+# compiler on each runner.
+# HEIC still defers — the libheif distribution story (LGPL dylib +
+# system-linked via brew/vcpkg + post-build install_name_tool / DLL
+# co-location on every platform) was deeper than this release window
+# could absorb. Camera RAW (`rawler`) defers for the same reason.
 jpegxl-rs = { version = "0.11", features = ["vendored"] }
 # Phase 6 text watermark: imageproc owns the high-level draw_text_mut
 # helper that composites a rasterized glyph buffer onto a DynamicImage

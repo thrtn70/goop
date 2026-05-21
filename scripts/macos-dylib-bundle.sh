@@ -2,9 +2,11 @@
 # scripts/macos-dylib-bundle.sh
 #
 # Sourceable helper that defines bundle_macos_dylibs(). Called by
-# scripts/fetch-sidecars.sh (for sidecar binaries) and
-# .github/workflows/release.yml (for the post-tauri-build .app bundle,
-# specifically for libheif's dylib graph added in v0.2.6).
+# scripts/fetch-sidecars.sh (for sidecar binaries — primarily tesseract
+# since v0.2.4). Originally factored out for an in-flight libheif
+# bundle step that v0.2.6 deferred; the helper itself stays useful for
+# any future Homebrew-installed dylib graph we need to bundle into the
+# .app.
 #
 # Bundle Mach-O dylib dependencies into the binary's directory and
 # rewrite the binary's load commands to resolve them via @loader_path.

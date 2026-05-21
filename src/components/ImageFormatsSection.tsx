@@ -89,8 +89,7 @@ export default function ImageFormatsSection() {
               ))}
             </ul>
             <p className="text-xs text-fg-muted">
-              libheif: {status.libheif_version}. libjxl: {status.libjxl_version}.
-              Watermark font: {status.watermark_font}.
+              libjxl: {status.libjxl_version}. Watermark font: {status.watermark_font}.
             </p>
           </>
         )}

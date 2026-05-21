@@ -12,10 +12,11 @@ TARGET="${1:?target triple required}"
 OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
 mkdir -p "$OUT_DIR"
 
-# bundle_macos_dylibs lives in scripts/macos-dylib-bundle.sh so that
-# .github/workflows/release.yml can source the same definition for
-# the post-tauri-build libheif bundling step (v0.2.6). Sourcing
-# fetch-sidecars.sh directly is unsafe because of its main body below.
+# bundle_macos_dylibs lives in scripts/macos-dylib-bundle.sh as a
+# sourceable helper. Used here for sidecar dylib bundling (tesseract
+# since v0.2.4); also intended for any future post-tauri-build dylib
+# bundling step we add to release.yml. Sourcing fetch-sidecars.sh
+# directly is unsafe because of its main body below.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/macos-dylib-bundle.sh"
 

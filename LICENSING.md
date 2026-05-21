@@ -15,18 +15,13 @@ Goop bundles several third-party binaries as **sidecars** — separate executabl
 | mutool (Artifex MuPDF) | AGPL-3.0 | `src-tauri/bin/mutool-<triple>[.exe]` |
 | tesseract OCR | Apache-2.0 | `src-tauri/bin/tesseract-<triple>[.exe]` |
 
-## Dynamically-linked third-party libraries (v0.2.5+)
+## Statically-linked + vendored third-party libraries (v0.2.6)
 
-Some image formats require system C libraries linked into goop's main binary at compile time. These are NOT sidecars — they're loaded into goop's process via the dynamic linker — so the linking compatibility of each library matters. The remainder are pure-Rust permissive crates that link statically.
+Goop's main binary statically links a handful of native libraries via vendored Rust crates. All of these compile from source at build time (`jpegxl-src`'s `vendored` feature builds libjxl from C++ source via cmake; the rest are pure-Rust). None of them require a system package on the user's machine — there's no `Cargo.toml` entry for a system-linked codec in v0.2.6.
 
 | Library | License | Used for | Notes |
 |---|---|---|---|
-| libheif | LGPL-3.0 | HEIC / HEIF decode (v0.2.6) | LGPL allows dynamic linking from MIT host; we link, never modify. Bundled dylibs land in `Contents/MacOS/` on macOS via `install_name_tool` post-build, and as runtime DLLs alongside `Goop.exe` on Windows via vcpkg. |
-| libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.6) | Permissive; same dynamic-linking bundling. |
-| libx265 | GPL-2.0 | HEIC HEVC encode path (transitive via libheif) | GPL-2.0 linking from MIT host. Dynamic linking is the standard pattern for distros that ship both. v0.2.6 uses HEIC decode-only — see `docs/v0.2.5-format-spike.md` for the "drop libx265 from the bundle if decode-only is sufficient" follow-up. |
-| libde265 | LGPL-3.0 | HEIC HEVC decode (transitive via libheif) | Same LGPL-3.0 dynamic linking story as libheif itself. |
-| libaom | BSD-2-Clause-Patent | HEIC AV1 codec (transitive via libheif) | Permissive. |
-| libsharpyuv | BSD-3-Clause | YUV conversion (transitive via libheif's webp dep) | Permissive. |
+| libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.6) | Built from vendored source via `jpegxl-rs`'s `vendored` feature → statically linked. Permissive. |
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
 | Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
@@ -37,7 +32,9 @@ Some image formats require system C libraries linked into goop's main binary at 
 | ico | MIT | Windows icon container writer for App Icon export. | Permissive. |
 | react-easy-crop | MIT | Frontend crop editor (`src/features/image/CropEditor.tsx`). | Permissive. |
 
-**Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). LGPL and GPL libraries unrelated to MuPDF can be dynamically linked under their own terms. The CI check still greps for `mupdf-*` only.
+**HEIC support deferred.** v0.2.6 originally planned to ship HEIC decode via `libheif-rs` (LGPL-3.0 dynamically-linked dylib + per-platform install_name_tool / DLL co-location). The release CI ran into structural issues (tauri-action uploads bundle artifacts before our post-build dylib bundling can run; Windows DLLs need to be in the installer at bundle time, not after). HEIC defers to a future release with a properly restructured CI bundling pipeline.
+
+**Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). The libraries above are all permissive (BSD / MIT / Apache-2.0) and statically linked from vendored source. The CI check still greps for `mupdf-*` only.
 
 The AGPL-licensed sidecars (Ghostscript and mutool from Artifex) are the strictest. **They are bundled and spawned only as subprocess executables.** The text below documents the rule that keeps the AGPL on their side of the spawn boundary.
 

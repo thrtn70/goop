@@ -7,15 +7,15 @@
  */
 export type ImageFormatSupport = { 
 /**
- * Human label (e.g. "HEIC / HEIF", "JPEG-XL").
+ * Human label (e.g. "JPEG-XL", "AVIF").
  */
 label: string, 
 /**
- * File extensions this row covers (e.g. `["heic", "heif"]`).
+ * File extensions this row covers (e.g. `["jpg", "jpeg"]`).
  */
 extensions: Array<string>, 
 /**
- * Free-form provenance string (e.g. "libheif 1.21", "image crate
+ * Free-form provenance string (e.g. "libjxl 0.11", "image crate
  * 0.25 feature: avif"). Surfaced as a small caption under the
  * label so the user can confirm the format is bundled.
  */

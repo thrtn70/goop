@@ -35,8 +35,12 @@ pub enum BackendKind {
     ImageMagick,
 }
 
+// HEIC + HEIF are intentionally listed here even though v0.2.6 doesn't
+// decode them. Routing them to ImageMagick lets `decode_any` return a
+// clear "HEIC not supported in this build" error instead of letting
+// ffmpeg produce an opaque codec-not-found message.
 const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico", "heic", "heif", "jxl",
+    "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico", "jxl", "heic", "heif",
 ];
 
 pub fn backend_for_extension(ext: &str) -> BackendKind {
@@ -59,6 +63,12 @@ mod tests {
         assert_eq!(backend_for_extension("webp"), BackendKind::ImageMagick);
         assert_eq!(backend_for_extension("bmp"), BackendKind::ImageMagick);
         assert_eq!(backend_for_extension("tiff"), BackendKind::ImageMagick);
+        assert_eq!(backend_for_extension("jxl"), BackendKind::ImageMagick);
+        // HEIC/HEIF route here so decode_any can return a clear
+        // "not supported in this build" error rather than letting
+        // ffmpeg produce an opaque demuxer failure.
+        assert_eq!(backend_for_extension("heic"), BackendKind::ImageMagick);
+        assert_eq!(backend_for_extension("HEIF"), BackendKind::ImageMagick);
     }
 
     #[test]

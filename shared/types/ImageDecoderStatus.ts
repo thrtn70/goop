@@ -9,14 +9,9 @@ import type { ImageFormatSupport } from "./ImageFormatSupport";
  */
 export type ImageDecoderStatus = { 
 /**
- * libheif-rs / libheif-sys versions (the wrapper crate +
- * bundled C lib version pinned via per-platform package
- * manager in CI — apt-get on Ubuntu, brew on macOS, vcpkg
- * on Windows).
- */
-libheif_version: string, 
-/**
- * jpegxl-rs / libjxl versions (same pattern).
+ * jpegxl-rs / libjxl versions (libjxl 0.11 built from vendored
+ * source via jpegxl-rs's `vendored` feature — statically linked
+ * into goop's binary, identical across all release targets).
  */
 libjxl_version: string, 
 /**
