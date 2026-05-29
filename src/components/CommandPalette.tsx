@@ -62,6 +62,14 @@ export default function CommandPalette() {
       run: () => nav("/image"),
     },
     {
+      id: "nav-recognize",
+      label: "Go to Recognize",
+      hint: "Pull text out of a PDF or image",
+      shortcut: `${mod}7`,
+      group: "Navigate",
+      run: () => nav("/recognize"),
+    },
+    {
       id: "nav-compress",
       label: "Go to Compress",
       shortcut: `${mod}4`,

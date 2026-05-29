@@ -203,6 +203,19 @@ pub enum PdfOperation {
         output_kind: ImageOcrOutput,
         lang: String,
     },
+    /// Smart "Recognize text" entry point (v0.2.7). The backend probes the
+    /// input and auto-routes: a PDF with an embedded text layer takes the fast
+    /// `ExtractText` path, a scanned PDF (or an image) takes the `PdfOcr` /
+    /// `ImageOcr` path. `output_kind` selects `.txt` vs searchable PDF exactly
+    /// like `ImageOcr`. This is the orchestration layer over the existing PDF
+    /// text primitives — the explicit `ExtractText` / `PdfOcr` / `ImageOcr`
+    /// ops stay available for callers who want to force a specific path.
+    RecognizeText {
+        input: String,
+        output_path: String,
+        output_kind: ImageOcrOutput,
+        lang: String,
+    },
 }
 
 /// Result of `pdf_probe` — used by the UI before it picks an operation so
@@ -415,6 +428,32 @@ mod tests {
         let v = serde_json::to_value(&pdf_op).unwrap();
         assert_eq!(v["output_kind"], json!("searchable_pdf"));
         assert_eq!(v["lang"], json!("fra"));
+        assert_eq!(pdf_op, roundtrip(&pdf_op));
+    }
+
+    #[test]
+    fn recognize_text_carries_output_kind_and_lang() {
+        let text_op = PdfOperation::RecognizeText {
+            input: "/doc.pdf".into(),
+            output_path: "/doc.txt".into(),
+            output_kind: ImageOcrOutput::Text,
+            lang: "eng".into(),
+        };
+        let v = serde_json::to_value(&text_op).unwrap();
+        assert_eq!(v["kind"], json!("recognize_text"));
+        assert_eq!(v["output_kind"], json!("text"));
+        assert_eq!(v["lang"], json!("eng"));
+        assert_eq!(text_op, roundtrip(&text_op));
+
+        let pdf_op = PdfOperation::RecognizeText {
+            input: "/scan.png".into(),
+            output_path: "/scan.pdf".into(),
+            output_kind: ImageOcrOutput::SearchablePdf,
+            lang: "deu".into(),
+        };
+        let v = serde_json::to_value(&pdf_op).unwrap();
+        assert_eq!(v["output_kind"], json!("searchable_pdf"));
+        assert_eq!(v["lang"], json!("deu"));
         assert_eq!(pdf_op, roundtrip(&pdf_op));
     }
 

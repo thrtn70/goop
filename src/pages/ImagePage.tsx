@@ -10,6 +10,7 @@ import ImageCropFlow from "@/features/image/ImageCropFlow";
 import ImageWatermarkFlow from "@/features/image/ImageWatermarkFlow";
 import ImageRecompressFlow from "@/features/image/ImageRecompressFlow";
 import ImageAppIconFlow from "@/features/image/ImageAppIconFlow";
+import RecognizeChip from "@/features/recognize/RecognizeChip";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 
@@ -137,8 +138,11 @@ export default function ImagePage() {
 
       {files.length > 0 && (
         <>
-          <div className="text-xs text-fg-muted">
-            {files.length} image{files.length !== 1 ? "s" : ""}
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs text-fg-muted">
+              {files.length} image{files.length !== 1 ? "s" : ""}
+            </span>
+            {files.length === 1 && <RecognizeChip path={files[0]} />}
           </div>
           <ul className="flex flex-col gap-1 text-sm text-fg-secondary">
             {files.map((p) => (

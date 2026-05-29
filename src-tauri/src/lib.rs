@@ -22,8 +22,8 @@ use goop_pdf::{
     extract_images as pdf_extract_images, extract_pages as pdf_extract_pages,
     extract_text as pdf_extract_text, images_to_pdf as pdf_images_to_pdf,
     insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
-    ocr as pdf_ocr_mod, ocr_image as pdf_ocr_image, reorder as pdf_reorder, rotate as pdf_rotate,
-    split as pdf_split,
+    ocr as pdf_ocr_mod, ocr_image as pdf_ocr_image, recognize as pdf_recognize,
+    reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
@@ -546,6 +546,40 @@ pub fn run() {
                                 1u32,
                             )
                         }
+                        PdfOperation::RecognizeText {
+                            input,
+                            output_path,
+                            output_kind,
+                            lang,
+                        } => {
+                            let in_path = PathBuf::from(input);
+                            let out = PathBuf::from(output_path);
+                            let mut dirs: Vec<&std::path::Path> = vec![tessdata_user.as_path()];
+                            if let Some(b) = tessdata_bundled.as_ref() {
+                                dirs.push(b.as_path());
+                            }
+                            let (_out, method) = pdf_recognize::recognize_text(
+                                &r,
+                                &dirs,
+                                &in_path,
+                                &out,
+                                output_kind,
+                                &lang,
+                                cancel,
+                                Some(pids),
+                                Some(id),
+                            )
+                            .await
+                            .map_err(GoopError::from)?;
+                            tracing::info!(?method, "recognize_text routed input");
+                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
+                            (
+                                Some(out.to_string_lossy().into_owned()),
+                                bytes,
+                                ResultKind::File,
+                                1u32,
+                            )
+                        }
                     };
                     Ok(JobResult {
                         output_path,
@@ -800,6 +834,7 @@ pub fn run() {
             commands::pdf::pdf_probe,
             commands::pdf::pdf_run,
             commands::pdf::pdf_page_thumbs,
+            commands::pdf::recognize_peek_text,
             commands::image::image_run,
             commands::image::image_decoders,
             commands::history::history_list,

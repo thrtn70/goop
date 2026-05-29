@@ -16,6 +16,7 @@ pub mod ocr_image;
 pub mod page_thumbs;
 pub mod probe;
 pub mod range_parser;
+pub mod recognize;
 pub mod reorder;
 pub mod rotate;
 pub mod split;

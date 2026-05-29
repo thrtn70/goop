@@ -158,6 +158,11 @@ export const api = {
     probe: (path: string) => invoke<PdfProbeResult>("pdf_probe", { path }),
     run: (op: PdfOperation) => invoke<JobId>("pdf_run", { op }),
     pageThumbs: (path: string) => invoke<string[]>("pdf_page_thumbs", { path }),
+    // Read-only preview of a completed Recognize job's output. Returns
+    // the .txt contents directly, or the extracted text layer of a
+    // searchable PDF. Capped server-side. See commands/pdf.rs.
+    recognizePeekText: (path: string) =>
+      invoke<string>("recognize_peek_text", { path }),
   },
   image: {
     run: (op: ImageOperation) => invoke<JobId>("image_run", { op }),
@@ -292,6 +297,25 @@ export function pdfImageOcr(
   return {
     kind: "image_ocr",
     inputs,
+    output_path: outputPath,
+    output_kind: outputKind,
+    lang,
+  };
+}
+
+// Smart "Recognize text" (v0.2.7). The backend auto-detects whether the
+// input is a text-layer PDF (fast mutool extraction) or a scanned PDF /
+// image (tesseract OCR) and routes accordingly. `outputKind` selects
+// `.txt` vs searchable PDF exactly like `pdfImageOcr`.
+export function pdfRecognizeText(
+  input: string,
+  outputPath: string,
+  outputKind: ImageOcrOutput,
+  lang: string,
+): PdfOperation {
+  return {
+    kind: "recognize_text",
+    input,
     output_path: outputPath,
     output_kind: outputKind,
     lang,

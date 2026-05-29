@@ -9,6 +9,7 @@ import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import MediaBlob from "@/features/convert/MediaBlob";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
+import RecognizeChip from "@/features/recognize/RecognizeChip";
 import { useAppStore } from "@/store/appStore";
 import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
 
@@ -157,17 +158,20 @@ export default function ConvertPage() {
       <div className="flex h-full flex-col p-6">
         <DropZone onFiles={addPaths}>
           <div className="p-3">
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex items-center justify-between gap-3">
               <span className="text-xs text-fg-muted">
                 PDF operations — {pdfs.length} file{pdfs.length !== 1 ? "s" : ""}
               </span>
-              <button
-                type="button"
-                onClick={() => void handleBrowse()}
-                className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
-              >
-                Add more...
-              </button>
+              <div className="flex items-center gap-3">
+                {pdfs.length === 1 && <RecognizeChip path={pdfs[0]} />}
+                <button
+                  type="button"
+                  onClick={() => void handleBrowse()}
+                  className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
+                >
+                  Add more...
+                </button>
+              </div>
             </div>
           </div>
         </DropZone>
