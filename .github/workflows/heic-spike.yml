@@ -3,7 +3,13 @@
 # runner images before any feature work merges. Deleted before the
 # v0.2.8 branch merges; the permanent equivalents land in audit.yml.
 name: heic-spike
-on: workflow_dispatch
+# workflow_dispatch can't target a workflow that doesn't exist on the
+# default branch, so the spike also triggers on pushes to its own
+# branch. Both trigger paths die with the workflow before merge.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/v0.2.8-heic-static"]
 
 jobs:
   unix:
