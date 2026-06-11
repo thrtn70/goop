@@ -23,6 +23,18 @@ jobs:
         # we want 0.11). cmake is preinstalled on github runners but
         # we explicitly install it for resilience.
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev pkg-config cmake
+      # v0.2.8: static HEIC decode stack. Pinned libde265 + libheif
+      # built static by the script (every other codec OFF); apt's
+      # libheif-dev is NOT used (it would dynamic-link and drift).
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        with:
+          path: .heif-deps
+          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      - name: Static HEIC decode stack (libde265 + libheif)
+        run: |
+          ./scripts/build-static-heif-deps.sh
+          echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
@@ -98,6 +110,52 @@ jobs:
           "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
           "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/gallery-dl-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+      # v0.2.8: per-OS static HEIC stack + link guards. These graduated
+      # from the Phase 0 spike (.github/workflows/heic-spike.yml,
+      # deleted after the gate passed) so every PR re-proves the
+      # static-link property the release builders rely on.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'macos-14'
+        with:
+          path: .heif-deps
+          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      - name: Static HEIC stack (macOS)
+        if: matrix.os == 'macos-14'
+        run: |
+          ./scripts/build-static-heif-deps.sh
+          echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      - name: HEIC static link guard (macOS)
+        if: matrix.os == 'macos-14'
+        run: |
+          set -euo pipefail
+          cargo test -p goop-converter heic
+          BIN=$(cargo test -p goop-converter --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.executable != null) | .executable' | head -1)
+          # Strong form: nothing outside /usr/lib + /System may appear —
+          # guards against any codec dylib leaking back into the link.
+          LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
+          if [ -n "$LEAKS" ]; then
+            echo "::error::non-system dylib references found:"
+            echo "$LEAKS"
+            exit 1
+          fi
+          echo "static link guard passed."
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'windows-latest'
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-archives-${{ runner.os }}-libheif-core-static
+      - name: Static HEIC stack (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          # [core] suppresses the port's default 'hevc' feature (x265
+          # GPL encoder); libde265 is a core dependency so decode works.
+          # x64-windows-static matches the repo's crt-static RUSTFLAGS.
+          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+          echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
+          echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
       # Compile-check the Windows-only Rust paths on a real Windows
       # runner. cfg(windows) code in goop-queue::process_control was
       # not exercised by the Linux audit job, so v0.2.0 hit two
@@ -105,8 +163,16 @@ jobs:
       # ntdll exports). Cross-compiling on Linux is blocked by C-deps
       # (sqlite3, ring) requiring a Windows toolchain we don't want
       # to install in CI; running natively here is cheaper and 100%
-      # faithful to the release builder.
-      - name: Cargo check (Windows-only path)
+      # faithful to the release builder. v0.2.8 extends it: the HEIC
+      # decode tests run here (exercising the vcpkg static link), and
+      # goop-tauri is checked so the crt-static flip is validated
+      # across the full dependency tree (sqlite, ring, tauri) on every
+      # PR instead of first failing at tag time.
+      - name: Cargo check (Windows-only paths)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: cargo check -p goop-queue --all-features
+        run: |
+          cargo check -p goop-queue --all-features
+          cargo test -p goop-converter heic
+          mkdir -p dist
+          cargo check -p goop-tauri --all-features

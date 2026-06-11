@@ -4,7 +4,9 @@
 // avoiding a dead-end where a chip routes to a file the page discards).
 //
 // Note this is intentionally narrower than the Image Workshop's accepted
-// set — GIF/AVIF/JXL are editable images but not OCR inputs here.
+// set — GIF/AVIF/JXL/HEIC are editable images but not OCR inputs here
+// (tesseract can't read them directly; a decode-to-PNG pre-step for
+// HEIC is a noted v0.2.9+ follow-up).
 export const RECOGNIZE_EXTENSIONS = [
   "pdf",
   "png",

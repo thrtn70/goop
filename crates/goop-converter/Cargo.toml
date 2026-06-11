@@ -31,10 +31,11 @@ jpegxl-rs = { version = "0.11", features = ["vendored"] }
 #     which non-deterministically dynamic-links x265 (GPL!), aom, dav1d
 #     etc. on Homebrew machines. Our script pins the exact stack.
 #   * On Windows MSVC the crate resolves libheif via vcpkg —
-#     "libheif[core]:x64-windows-static-md" with VCPKGRS_TRIPLET set
+#     "libheif[core]:x64-windows-static" with VCPKGRS_TRIPLET set
 #     gives the same minimal static stack ([core] suppresses the
 #     default 'hevc' feature = GPL x265 encoder; libde265 is a core
-#     dependency of the port). Zero DLLs ship.
+#     dependency of the port; the pure static triplet matches the
+#     repo-wide crt-static in .cargo/config.toml). Zero DLLs ship.
 # Decode-only: libde265 is the only codec in the link. No x265 (encode-
 # only → no GPL-2.0 component), no aom (AVIF is native via `image`).
 # See LICENSING.md for the static-LGPL rationale.

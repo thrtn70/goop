@@ -58,6 +58,8 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
               "ico",
               "hdr",
               "jxl",
+              "heic",
+              "heif",
             ],
           },
         ],

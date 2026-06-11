@@ -4,10 +4,17 @@ import type { ImageFormatSupport } from "./ImageFormatSupport";
 /**
  * Decoder status summary surfaced in Settings → Image Formats. The
  * version strings reflect the pinned dependency versions at build
- * time; goop bundles the C libs and doesn't ask the user to
+ * time; goop statically links the C libs and doesn't ask the user to
  * install anything, so these are read-only.
  */
 export type ImageDecoderStatus = { 
+/**
+ * libheif + libde265 versions (v0.2.8: statically linked,
+ * decode-only). macOS/Linux pin exact versions via
+ * scripts/build-static-heif-deps.sh; Windows builds from vcpkg's
+ * current libheif port, so the string hedges there.
+ */
+libheif_version: string, 
 /**
  * jpegxl-rs / libjxl versions (libjxl 0.11 built from vendored
  * source via jpegxl-rs's `vendored` feature — statically linked

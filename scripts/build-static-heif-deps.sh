@@ -25,10 +25,13 @@
 # already populated, which also makes a CI cache restore a no-op).
 #
 # Windows is NOT handled here: libheif-sys resolves libheif via vcpkg on
-# MSVC. Install "libheif[core]:x64-windows-static-md" — [core] suppresses
+# MSVC. Install "libheif[core]:x64-windows-static" — [core] suppresses
 # the port's DEFAULT 'hevc' feature, which is the x265 GPL *encoder*
 # (libde265 is an unconditional core dependency, so HEIC decode always
-# works). Set VCPKGRS_TRIPLET=x64-windows-static-md.
+# works). Set VCPKGRS_TRIPLET=x64-windows-static. The pure static
+# triplet (/MT) matches the repo's crt-static RUSTFLAGS — the -md
+# variant would reintroduce the duplicate-CRT link errors documented
+# in .cargo/config.toml.
 #
 # After running, export for the cargo build (printed below; in GitHub
 # Actions append to $GITHUB_ENV):
@@ -81,6 +84,8 @@ cmake -S "${WORK}/libde265-${DE265_VERSION}" -B "${WORK}/de265-build" \
   -DENABLE_SDL=OFF \
   -DENABLE_DECODER=OFF \
   -DENABLE_ENCODER=OFF \
+  `# ENABLE_DECODER/ENCODER gate the dec265/enc265 CLI example apps,` \
+  `# not the library's codec capability — libde265.a always decodes.` \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
   -DCMAKE_INSTALL_LIBDIR=lib \
   >/dev/null

@@ -91,6 +91,37 @@ jobs:
           save-if: "false"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: "20", cache: "npm" }
+      # v0.2.8: static HEIC decode stack (libheif + libde265, no other
+      # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
+      # upload flow below are untouched. Nothing needs bundling at
+      # packaging time because the link is fully static; audit.yml's
+      # per-PR link guards enforce that property stays true.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'macos-14'
+        with:
+          path: .heif-deps
+          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      - name: Static HEIC decode stack (macOS)
+        if: matrix.os == 'macos-14'
+        run: |
+          ./scripts/build-static-heif-deps.sh
+          echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'windows-latest'
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-archives-${{ runner.os }}-libheif-core-static
+      - name: Static HEIC decode stack (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          # [core] = no default 'hevc' feature (x265 GPL encoder);
+          # libde265 rides as a core dependency. The static triplet
+          # matches the repo-wide crt-static RUSTFLAGS.
+          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+          echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
+          echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"

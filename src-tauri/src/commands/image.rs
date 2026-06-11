@@ -37,11 +37,16 @@ pub struct ImageFormatSupport {
 
 /// Decoder status summary surfaced in Settings → Image Formats. The
 /// version strings reflect the pinned dependency versions at build
-/// time; goop bundles the C libs and doesn't ask the user to
+/// time; goop statically links the C libs and doesn't ask the user to
 /// install anything, so these are read-only.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ImageDecoderStatus {
+    /// libheif + libde265 versions (v0.2.8: statically linked,
+    /// decode-only). macOS/Linux pin exact versions via
+    /// scripts/build-static-heif-deps.sh; Windows builds from vcpkg's
+    /// current libheif port, so the string hedges there.
+    pub libheif_version: String,
     /// jpegxl-rs / libjxl versions (libjxl 0.11 built from vendored
     /// source via jpegxl-rs's `vendored` feature — statically linked
     /// into goop's binary, identical across all release targets).
@@ -54,12 +59,17 @@ pub struct ImageDecoderStatus {
 
 #[tauri::command]
 pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
-    // Pinned per Cargo.toml + the v0.2.5 Phase 0 format spike memo.
-    // libjxl is vendored at 0.11 via jpegxl-rs's `vendored` feature so
-    // its version is uniform across all release targets. HEIC support
-    // still defers — see LICENSING.md for the libheif distribution
-    // story we want to close out before re-introducing it.
+    // Pinned per Cargo.toml + scripts/build-static-heif-deps.sh.
+    // libjxl is vendored at 0.11 via jpegxl-rs's `vendored` feature;
+    // libheif + libde265 are statically linked (decode-only, v0.2.8).
+    // Windows resolves libheif via vcpkg's port, which tracks its own
+    // version — hedge the displayed string there.
     Ok(ImageDecoderStatus {
+        libheif_version: if cfg!(windows) {
+            "libheif (vcpkg, static, decode-only)".into()
+        } else {
+            "libheif 1.23.0 + libde265 1.1.1 (static, decode-only)".into()
+        },
         libjxl_version: "jpegxl-rs 0.11 (libjxl 0.11, vendored)".into(),
         watermark_font: "Roboto Regular (Apache-2.0)".into(),
         formats: vec![
@@ -92,6 +102,12 @@ pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
                 extensions: vec!["avif".into()],
                 provenance: "image crate 0.25 + ravif (bundled)".into(),
                 capability: "Decode + encode".into(),
+            },
+            ImageFormatSupport {
+                label: "HEIC / HEIF".into(),
+                extensions: vec!["heic".into(), "heif".into()],
+                provenance: "libheif + libde265 (statically linked)".into(),
+                capability: "Decode only".into(),
             },
             ImageFormatSupport {
                 label: "JPEG-XL".into(),

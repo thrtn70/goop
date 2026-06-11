@@ -29,6 +29,8 @@ const IMAGE_EXTENSIONS = [
   "tif",
   "avif",
   "jxl",
+  "heic",
+  "heif",
 ];
 
 function isImage(p: string): boolean {
@@ -131,7 +133,7 @@ export default function ImagePage() {
             Pick images…
           </button>
           <p className="text-[11px] text-fg-muted">
-            PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, JXL
+            PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, JXL, HEIC/HEIF
           </p>
         </div>
       </DropZone>

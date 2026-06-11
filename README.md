@@ -35,7 +35,7 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 | Category | Details |
 |---|---|
 | **Extract** | yt-dlp + gallery-dl, ~600 supported sites between them. URL routed automatically; bidirectional fallback if the first extractor misses. |
-| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including AVIF, JPEG-XL, and TIFF in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. |
+| **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including AVIF, JPEG-XL, HEIC, and TIFF in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. |
 | **Compress** | Quality-slider mode (1–100) or target-size mode (KB/MB). Works on video, audio, images, and PDFs. Source-vs-target preview before launch. |
 | **Image Workshop** | (v0.2.5) Rotate, resize (fit-within / fit-exact / scale %), interactive crop with aspect-ratio presets, text watermark with five anchor positions, batch recompress, and one-shot App Icon export to `.icns` + `.ico` + a favicon PNG set. |
 | **PDF** | 14 ops including Merge, Split, Compress (Ghostscript), Extract pages / Reorder / Rotate / Delete / Insert blank, Edit metadata, Extract text, Extract images, Images→PDF (now with JPEG passthrough for ~10× smaller photo PDFs), PDF OCR + Image OCR. |
@@ -129,6 +129,9 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 - **Rust** 1.75+ (`rustup install stable`)
 - **Node** 20+ (`nvm install 20`)
 - **npm** 10+ (ships with Node 20)
+- **cmake** 3.23+ (`brew install cmake` / preinstalled on most Linux distros) — builds the vendored image codecs (libjxl, libheif)
+- macOS / Linux: run `./scripts/build-static-heif-deps.sh` once before the first build — it compiles the static HEIC decode stack (libde265 + libheif) into `.heif-deps/` and prints the two `export` lines the cargo build needs
+- Windows: `vcpkg install "libheif[core]:x64-windows-static"` and set `VCPKGRS_TRIPLET=x64-windows-static`
 - macOS: Xcode Command Line Tools (`xcode-select --install`)
 - Windows: Microsoft Visual Studio Build Tools 2022 with the "Desktop development with C++" workload
 

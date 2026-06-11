@@ -89,6 +89,18 @@ describe("RecognizeChip", () => {
       state: { recognizeInput: "/docs/scan.pdf" },
     });
   });
+
+  it("renders nothing for non-recognizable inputs (HEIC)", () => {
+    // HEIC decodes in the Image Workshop (v0.2.8) but tesseract can't
+    // read it, so the chip must self-hide rather than route to a page
+    // that would silently discard the file.
+    const { container } = render(
+      <MemoryRouter>
+        <RecognizeChip path="/photos/IMG_0001.heic" />
+      </MemoryRouter>,
+    );
+    expect(container.firstChild).toBeNull();
+  });
 });
 
 describe("RecognizeResultPane", () => {

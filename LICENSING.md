@@ -15,12 +15,14 @@ Goop bundles several third-party binaries as **sidecars** — separate executabl
 | mutool (Artifex MuPDF) | AGPL-3.0 | `src-tauri/bin/mutool-<triple>[.exe]` |
 | tesseract OCR | Apache-2.0 | `src-tauri/bin/tesseract-<triple>[.exe]` |
 
-## Statically-linked + vendored third-party libraries (v0.2.6)
+## Statically-linked third-party libraries (v0.2.6+)
 
-Goop's main binary statically links a handful of native libraries via vendored Rust crates. All of these compile from source at build time (`jpegxl-src`'s `vendored` feature builds libjxl from C++ source via cmake; the rest are pure-Rust). None of them require a system package on the user's machine — there's no `Cargo.toml` entry for a system-linked codec in v0.2.6.
+Goop's main binary statically links a handful of native libraries. All of them compile from source at build time. None of them require a system package on the user's machine — goop ships no runtime codec dylibs or DLLs.
 
 | Library | License | Used for | Notes |
 |---|---|---|---|
+| libheif | LGPL-3.0 | HEIC / HEIF decode (v0.2.8) | Built static from the pinned v1.23.0 release tarball by `scripts/build-static-heif-deps.sh` on macOS/Linux (every codec except libde265 disabled); via vcpkg's `libheif[core]:x64-windows-static` on Windows. See "Static linking of LGPL libraries" below. |
+| libde265 | LGPL-3.0 | HEVC decode (the one codec libheif needs for HEIC) | Same static build path; pinned v1.1.1, checksum-verified. Same LGPL rationale below. |
 | libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.6) | Built from vendored source via `jpegxl-rs`'s `vendored` feature → statically linked. Permissive. |
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
@@ -32,9 +34,17 @@ Goop's main binary statically links a handful of native libraries via vendored R
 | ico | MIT | Windows icon container writer for App Icon export. | Permissive. |
 | react-easy-crop | MIT | Frontend crop editor (`src/features/image/CropEditor.tsx`). | Permissive. |
 
-**HEIC support deferred.** v0.2.6 originally planned to ship HEIC decode via `libheif-rs` (LGPL-3.0 dynamically-linked dylib + per-platform install_name_tool / DLL co-location). The release CI ran into structural issues (tauri-action uploads bundle artifacts before our post-build dylib bundling can run; Windows DLLs need to be in the installer at bundle time, not after). HEIC defers to a future release with a properly restructured CI bundling pipeline.
+### Static linking of LGPL libraries
 
-**Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). The libraries above are all permissive (BSD / MIT / Apache-2.0) and statically linked from vendored source. The CI check still greps for `mupdf-*` only.
+libheif and libde265 are LGPL-3.0 and statically linked into goop's MIT binary (v0.2.8). LGPL §4 requires that users be able to modify the LGPL components and relink the combined work. Goop satisfies this the way open-source applications do: the entire application source, the pinned library versions, and the exact build scripts (`scripts/build-static-heif-deps.sh`, `.github/workflows/release.yml`) are public — anyone can modify libheif or libde265, rebuild, and relink the complete application from source.
+
+Scope guarantees, enforced by per-PR CI link guards (`audit.yml`):
+
+- **Decode-only.** libde265 (HEVC decode) is the only codec compiled into libheif. There is no x265 and no x264 — no GPL-licensed code anywhere in the link. HEIC *encode* is permanently out of scope on this path for exactly that reason.
+- **No host-codec bleed.** The build disables every other libheif backend by flag and blocks discovery of system codecs (`PKG_CONFIG_LIBDIR`, `CMAKE_IGNORE_PREFIX_PATH`); a CI assert fails any build whose binary references a non-system dylib.
+- The vendored libheif/libde265 sources are fetched as pinned, checksum-verified release tarballs (macOS/Linux) or built by vcpkg's manifest-locked port (Windows).
+
+**Why this isn't a violation of the MuPDF firewall.** The AGPL firewall is specifically about Artifex / MuPDF-derived code (`gs`, `mutool`). The libraries above are permissive or LGPL (with the §4 compliance route documented above) and contain no AGPL code. The CI check still greps for `mupdf-*` only.
 
 The AGPL-licensed sidecars (Ghostscript and mutool from Artifex) are the strictest. **They are bundled and spawned only as subprocess executables.** The text below documents the rule that keeps the AGPL on their side of the spawn boundary.
 
