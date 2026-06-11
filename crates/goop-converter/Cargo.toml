@@ -20,11 +20,25 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # mismatch (Ubuntu apt's 0.7 vs Homebrew/vcpkg's 0.11) that broke the
 # v0.2.5 release matrix. Build prereq (handled in CI): cmake + a C/C++
 # compiler on each runner.
-# HEIC still defers — the libheif distribution story (LGPL dylib +
-# system-linked via brew/vcpkg + post-build install_name_tool / DLL
-# co-location on every platform) was deeper than this release window
-# could absorb. Camera RAW (`rawler`) defers for the same reason.
 jpegxl-rs = { version = "0.11", features = ["vendored"] }
+# HEIC decode (v0.2.8) follows the same static pattern:
+#   * scripts/build-static-heif-deps.sh builds pinned, checksum-verified
+#     libde265 + libheif as static libs (every other codec explicitly
+#     OFF) into .heif-deps/; the build probes them via PKG_CONFIG_PATH
+#     with SYSTEM_DEPS_LIBHEIF_LINK=static.
+#   * Deliberately NOT using libheif-sys's `embedded-libheif` feature:
+#     its cmake config enables every codec it finds on the build host,
+#     which non-deterministically dynamic-links x265 (GPL!), aom, dav1d
+#     etc. on Homebrew machines. Our script pins the exact stack.
+#   * On Windows MSVC the crate resolves libheif via vcpkg —
+#     "libheif[core]:x64-windows-static-md" with VCPKGRS_TRIPLET set
+#     gives the same minimal static stack ([core] suppresses the
+#     default 'hevc' feature = GPL x265 encoder; libde265 is a core
+#     dependency of the port). Zero DLLs ship.
+# Decode-only: libde265 is the only codec in the link. No x265 (encode-
+# only → no GPL-2.0 component), no aom (AVIF is native via `image`).
+# See LICENSING.md for the static-LGPL rationale.
+libheif-rs = { version = "2.4", default-features = false, features = ["v1_17", "image"] }
 # Phase 6 text watermark: imageproc owns the high-level draw_text_mut
 # helper that composites a rasterized glyph buffer onto a DynamicImage
 # via the `image` crate's pixel types. ab_glyph is its font loader.

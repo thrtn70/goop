@@ -47,3 +47,4 @@ CLAUDE.md
 # Release notes are applied via gh release edit; not tracked
 .release-notes/
 .gstack/
+/.heif-deps/

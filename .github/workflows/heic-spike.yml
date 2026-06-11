@@ -1,0 +1,76 @@
+# TEMPORARY — v0.2.8 Phase 0 spike. Proves the static HEIC decode stack
+# (libheif + libde265, no other codecs) links and decodes on all three
+# runner images before any feature work merges. Deleted before the
+# v0.2.8 branch merges; the permanent equivalents land in audit.yml.
+name: heic-spike
+on: workflow_dispatch
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: Build static HEIC deps (pinned libde265 + libheif)
+        run: |
+          ./scripts/build-static-heif-deps.sh
+          echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      - name: HEIC decode tests (fixture round-trip + corrupt input)
+        run: cargo test -p goop-converter heic
+      - name: Assert fully static (no codec dylib refs)
+        run: |
+          set -euo pipefail
+          BIN=$(cargo test -p goop-converter --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.executable != null) | .executable' | head -1)
+          echo "test binary: $BIN"
+          if [ "${{ matrix.os }}" = "macos-14" ]; then
+            # Strong form: nothing outside /usr/lib + /System may appear.
+            LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
+          else
+            LEAKS=$(ldd "$BIN" | grep -Ei "heif|de265|x264|x265|aom|dav1d|svt|openjp|kvazaar" || true)
+          fi
+          if [ -n "$LEAKS" ]; then
+            echo "::error::non-static codec references found:"
+            echo "$LEAKS"
+            exit 1
+          fi
+          echo "static assert passed."
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: Install static libheif via vcpkg ([core] = no GPL x265)
+        shell: bash
+        run: |
+          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static-md"
+          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> "$GITHUB_ENV"
+          echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
+      - name: HEIC decode tests (fixture round-trip + corrupt input)
+        shell: bash
+        run: cargo test -p goop-converter heic
+      - name: Assert no heif/de265 DLL dependencies
+        shell: pwsh
+        run: |
+          $lines = cargo test -p goop-converter --no-run --message-format=json 2>$null
+          $exe = ($lines | ForEach-Object { $_ | ConvertFrom-Json } |
+                  Where-Object { $_.executable } | Select-Object -First 1).executable
+          Write-Host "test binary: $exe"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = & $dumpbin /dependents $exe | Out-String
+          Write-Host $deps
+          if ($deps -match "(?i)(heif|de265|x264|x265|aom|dav1d)") {
+            Write-Error "non-static codec DLL dependency found"
+            exit 1
+          }
+          Write-Host "static assert passed."

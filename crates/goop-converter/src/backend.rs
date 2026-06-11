@@ -35,10 +35,6 @@ pub enum BackendKind {
     ImageMagick,
 }
 
-// HEIC + HEIF are intentionally listed here even though v0.2.6 doesn't
-// decode them. Routing them to ImageMagick lets `decode_any` return a
-// clear "HEIC not supported in this build" error instead of letting
-// ffmpeg produce an opaque codec-not-found message.
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "avif", "hdr", "ico", "jxl", "heic", "heif",
 ];
