@@ -1,0 +1,18 @@
+# Windows: link the MSVC C runtime statically (/MT family).
+#
+# The vendored libjxl build (jpegxl-src) compiles with the static CRT on
+# MSVC, which historically rode along harmlessly. v0.2.8's statically-
+# linked libheif made the mismatch real: a dynamic-CRT (/MD) heif.lib
+# pulls msvcprt while jxl's objects demand libcpmt → LNK2005 duplicate
+# C++ runtime symbols. Making the whole target static-CRT keeps every
+# native dep (jxl, heif, de265, sqlite, ring) on one runtime.
+#
+# Distribution bonus: the shipped Goop.exe no longer needs the VC++
+# redistributable present on user machines — Tauri's recommended
+# posture for Windows.
+#
+# vcpkg pairing: the `vcpkg` crate auto-selects the x64-windows-static
+# triplet when crt-static is set (CI also sets VCPKGRS_TRIPLET
+# explicitly for clarity).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

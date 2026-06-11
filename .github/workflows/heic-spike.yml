@@ -57,22 +57,13 @@ jobs:
       - name: Install static libheif via vcpkg ([core] = no GPL x265)
         shell: bash
         run: |
-          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static-md"
-          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> "$GITHUB_ENV"
+          # x64-windows-static (/MT) matches the repo's crt-static
+          # RUSTFLAGS (.cargo/config.toml) and vendored libjxl's static
+          # CRT — mixing /MD heif libs with them caused LNK2005
+          # duplicate C++ runtime symbols (diagnosed in spike run 2).
+          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+          echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
           echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
-      - name: Diagnose CRT directives in vcpkg libs
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          $dumpbin = (Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1).FullName
-          Get-ChildItem C:/vcpkg/installed/x64-windows-static-md/lib/*.lib | ForEach-Object {
-            Write-Host "=== $($_.Name) ==="
-            & $dumpbin /directives $_.FullName 2>$null |
-              Select-String -Pattern "DEFAULTLIB" |
-              Group-Object Line | Sort-Object Count -Descending |
-              Select-Object -First 5 | ForEach-Object { Write-Host "  $($_.Count)x $($_.Name.Trim())" }
-          }
       - name: HEIC decode tests (fixture round-trip + corrupt input)
         shell: bash
         run: cargo test -p goop-converter heic
