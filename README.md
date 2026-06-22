@@ -216,9 +216,17 @@ cargo llvm-cov --html
 
 ## Troubleshooting
 
-### "Goop.app can't be opened because Apple cannot check it for malicious software" (macOS)
+### "Goop.app is damaged and can't be opened" / "Apple cannot check it for malicious software" (macOS)
 
-Run the `sudo xattr -cr /Applications/Goop.app` command in the installation section above. Goop is not signed with an Apple Developer ID, so macOS quarantines it on first launch.
+The app is not actually damaged. Goop is signed with an ad-hoc signature rather than a paid Apple Developer ID, so when your browser downloads it, macOS tags it with a quarantine flag and Gatekeeper blocks the first launch. Depending on your macOS version the dialog reads either *"is damaged and can't be opened"* or *"Apple cannot check it for malicious software."*
+
+**Do not click "Move to Trash."** Instead, clear the quarantine flag (the step 3 command from the macOS install section above):
+
+```bash
+sudo xattr -cr /Applications/Goop.app
+```
+
+Then open Goop normally. This only needs to be done once per install.
 
 ### "Permission denied" when running `xattr -cr` (macOS)
 

@@ -56,6 +56,9 @@
       "bin/gs-resources/lib": "gs-resources/lib",
       "bin/gs-resources/iccprofiles": "gs-resources/iccprofiles",
       "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata"
+    },
+    "macOS": {
+      "signingIdentity": "-"
     }
   }
 }
