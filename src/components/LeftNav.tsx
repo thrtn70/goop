@@ -10,6 +10,7 @@ const items = [
   // Recognize keeps shortcut 7 so the established 1–6 bindings don't
   // shift; it sits beside the other content tools in the list.
   { to: "/recognize", label: "Recognize", shortcut: "7" },
+  { to: "/metadata", label: "Metadata", shortcut: "8" },
   { to: "/compress", label: "Compress", shortcut: "4" },
   { to: "/history", label: "History", shortcut: "5" },
   { to: "/settings", label: "Settings", shortcut: "6" },

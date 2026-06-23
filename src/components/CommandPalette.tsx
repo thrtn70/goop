@@ -70,6 +70,14 @@ export default function CommandPalette() {
       run: () => nav("/recognize"),
     },
     {
+      id: "nav-metadata",
+      label: "Go to Metadata",
+      hint: "Edit audio tags & cover art, view EXIF/PDF info",
+      shortcut: `${mod}8`,
+      group: "Navigate",
+      run: () => nav("/metadata"),
+    },
+    {
       id: "nav-compress",
       label: "Go to Compress",
       shortcut: `${mod}4`,

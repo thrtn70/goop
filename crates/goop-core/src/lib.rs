@@ -4,6 +4,7 @@ pub mod events;
 pub mod history;
 pub mod image;
 pub mod job;
+pub mod metadata;
 pub mod path;
 pub mod pdf;
 pub mod preset;
@@ -23,6 +24,10 @@ pub use image::{
     CropRect, IconPlatform, ImageOperation, ResizeMode, WatermarkPosition, WatermarkSpec,
 };
 pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
+pub use metadata::{
+    AudioTags, CoverArt, CoverArtOp, MetadataDomain, MetadataOperation, MetadataView,
+    MetadataWriteItem, RawTag,
+};
 pub use pdf::{
     PageRange, PageRotation, PdfMetadata, PdfOperation, PdfProbeResult, PdfQuality, RotationDegrees,
 };

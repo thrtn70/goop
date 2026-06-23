@@ -1,0 +1,26 @@
+[package]
+name = "goop-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+goop-core = { path = "../goop-core" }
+goop-sidecar = { path = "../goop-sidecar" }
+goop-pdf = { path = "../goop-pdf" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Audio tag read/write + cover art across MP3/FLAC/OGG/Opus/M4A/WAV/AIFF.
+# Pure-Rust, in-process; chosen over exiftool which can't write MP3/FLAC.
+lofty = "0.24"
+# Read-only EXIF for the universal image viewer (imported as `exif`).
+kamadak-exif = "0.6"
+# Cover-art bytes are base64-encoded into MetadataView for the webview.
+base64 = "0.22"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"

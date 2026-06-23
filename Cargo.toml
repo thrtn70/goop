@@ -8,6 +8,7 @@ members = [
     "crates/goop-queue",
     "crates/goop-config",
     "crates/goop-pdf",
+    "crates/goop-metadata",
     "src-tauri",
 ]
 

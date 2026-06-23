@@ -33,6 +33,41 @@ pub fn set_metadata(
     Ok(())
 }
 
+/// Read the document's `/Info` string fields plus the page count, for the
+/// read-only metadata viewer. Returns `(field, value)` pairs in a stable
+/// order; missing fields are simply omitted. Blocking — run on `spawn_blocking`.
+pub fn read_info(input: &Path) -> Result<Vec<(String, String)>, PdfError> {
+    let doc = Document::load(input).map_err(|e| PdfError::Parse(e.to_string()))?;
+    let mut out = Vec::new();
+
+    out.push(("Pages".to_string(), doc.get_pages().len().to_string()));
+
+    if let Ok(info_id) = doc.trailer.get(b"Info").and_then(Object::as_reference) {
+        if let Ok(info) = doc.get_object(info_id).and_then(Object::as_dict) {
+            for key in [
+                "Title",
+                "Author",
+                "Subject",
+                "Keywords",
+                "Creator",
+                "Producer",
+                "CreationDate",
+                "ModDate",
+            ] {
+                if let Ok(obj) = info.get(key.as_bytes()) {
+                    if let Ok(bytes) = obj.as_str() {
+                        let value = String::from_utf8_lossy(bytes).into_owned();
+                        if !value.is_empty() {
+                            out.push((key.to_string(), value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn ensure_info_dict(doc: &mut Document) -> Result<ObjectId, PdfError> {
     if let Ok(existing) = doc.trailer.get(b"Info").and_then(Object::as_reference) {
         return Ok(existing);

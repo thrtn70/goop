@@ -12,6 +12,9 @@ import type {
   Job,
   JobId,
   LanguagePack,
+  MetadataOperation,
+  MetadataView,
+  MetadataWriteItem,
   PageRange,
   PageRotation,
   PdfImageFormat,
@@ -168,6 +171,15 @@ export const api = {
     run: (op: ImageOperation) => invoke<JobId>("image_run", { op }),
     decoders: () => invoke<ImageDecoderStatus>("image_decoders"),
   },
+  metadata: {
+    // Synchronous-feeling read of one or more files' metadata (no job
+    // queued). Never rejects per file — a failed read comes back as a
+    // MetadataView carrying an `Error` raw tag. See commands/metadata.rs.
+    read: (paths: string[]) =>
+      invoke<MetadataView[]>("metadata_read", { paths }),
+    // Enqueue a batch metadata write as a single JobKind::Metadata job.
+    run: (op: MetadataOperation) => invoke<JobId>("metadata_run", { op }),
+  },
   history: {
     list: (filter: HistoryFilter) => invoke<Job[]>("history_list", { filter }),
     counts: () => invoke<HistoryCounts>("history_counts"),
@@ -256,6 +268,14 @@ export function pdfSetMetadata(
 
 export function pdfExtractText(input: string, outputPath: string): PdfOperation {
   return { kind: "extract_text", input, output_path: outputPath };
+}
+
+/** Build a batch metadata write op from per-file items. */
+export function metadataWrite(
+  items: MetadataWriteItem[],
+  backup: boolean,
+): MetadataOperation {
+  return { kind: "write", items, backup };
 }
 
 export function pdfExtractImages(

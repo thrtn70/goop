@@ -40,10 +40,12 @@ pub struct Scheduler {
     convert_sem: Arc<Semaphore>,
     pdf_sem: Arc<Semaphore>,
     image_sem: Arc<Semaphore>,
+    metadata_sem: Arc<Semaphore>,
     extract_worker: WorkerFn,
     convert_worker: WorkerFn,
     pdf_worker: WorkerFn,
     image_worker: WorkerFn,
+    metadata_worker: WorkerFn,
     cancels: Arc<DashMap<JobId, CancellationToken>>,
     /// PIDs of currently-running, signal-pausable child processes (ffmpeg,
     /// Ghostscript). Shared with worker closures (constructed in
@@ -64,10 +66,12 @@ impl Scheduler {
         convert_concurrency: usize,
         pdf_concurrency: usize,
         image_concurrency: usize,
+        metadata_concurrency: usize,
         extract_worker: WorkerFn,
         convert_worker: WorkerFn,
         pdf_worker: WorkerFn,
         image_worker: WorkerFn,
+        metadata_worker: WorkerFn,
     ) -> Arc<Self> {
         Self::with_pids(
             store,
@@ -76,10 +80,12 @@ impl Scheduler {
             convert_concurrency,
             pdf_concurrency,
             image_concurrency,
+            metadata_concurrency,
             extract_worker,
             convert_worker,
             pdf_worker,
             image_worker,
+            metadata_worker,
             Arc::new(SchedulerPidRegistry::new()),
         )
     }
@@ -96,10 +102,12 @@ impl Scheduler {
         convert_concurrency: usize,
         pdf_concurrency: usize,
         image_concurrency: usize,
+        metadata_concurrency: usize,
         extract_worker: WorkerFn,
         convert_worker: WorkerFn,
         pdf_worker: WorkerFn,
         image_worker: WorkerFn,
+        metadata_worker: WorkerFn,
         pids: Arc<dyn PidRegistry>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -109,10 +117,12 @@ impl Scheduler {
             convert_sem: Arc::new(Semaphore::new(convert_concurrency.max(1))),
             pdf_sem: Arc::new(Semaphore::new(pdf_concurrency.max(1))),
             image_sem: Arc::new(Semaphore::new(image_concurrency.max(1))),
+            metadata_sem: Arc::new(Semaphore::new(metadata_concurrency.max(1))),
             extract_worker,
             convert_worker,
             pdf_worker,
             image_worker,
+            metadata_worker,
             cancels: Arc::new(DashMap::new()),
             pids,
         })
@@ -141,6 +151,8 @@ impl Scheduler {
         tokio::spawn(async move { s3.run_kind(JobKind::Pdf).await });
         let s4 = self.clone();
         tokio::spawn(async move { s4.run_kind(JobKind::Image).await });
+        let s5 = self.clone();
+        tokio::spawn(async move { s5.run_kind(JobKind::Metadata).await });
     }
 
     /// One worker loop for a given kind. Public so callers that aren't inside a
@@ -152,12 +164,14 @@ impl Scheduler {
             JobKind::Convert => self.convert_sem.clone(),
             JobKind::Pdf => self.pdf_sem.clone(),
             JobKind::Image => self.image_sem.clone(),
+            JobKind::Metadata => self.metadata_sem.clone(),
         };
         let worker = match kind {
             JobKind::Extract => self.extract_worker.clone(),
             JobKind::Convert => self.convert_worker.clone(),
             JobKind::Pdf => self.pdf_worker.clone(),
             JobKind::Image => self.image_worker.clone(),
+            JobKind::Metadata => self.metadata_worker.clone(),
         };
         loop {
             let Ok(permit) = sem.clone().acquire_owned().await else {
@@ -355,7 +369,9 @@ mod tests {
             1,
             1,
             1,
+            1,
             extract_worker,
+            noop.clone(),
             noop.clone(),
             noop.clone(),
             noop,
@@ -398,6 +414,8 @@ mod tests {
             1,
             1,
             1,
+            1,
+            noop.clone(),
             noop.clone(),
             noop.clone(),
             noop.clone(),

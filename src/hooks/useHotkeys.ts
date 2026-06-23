@@ -55,6 +55,10 @@ export function useHotkeys(): void {
         e.preventDefault();
         nav("/recognize");
       },
+      "$mod+8": (e) => {
+        e.preventDefault();
+        nav("/metadata");
+      },
       "$mod+,": (e) => {
         e.preventDefault();
         nav("/settings");

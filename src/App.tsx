@@ -14,6 +14,7 @@ import { useWindowTitle } from "@/hooks/useWindowTitle";
 const ConvertPage = lazy(() => import("@/pages/ConvertPage"));
 const CompressPage = lazy(() => import("@/pages/CompressPage"));
 const ImagePage = lazy(() => import("@/pages/ImagePage"));
+const MetadataPage = lazy(() => import("@/pages/MetadataPage"));
 const RecognizePage = lazy(() => import("@/pages/RecognizePage"));
 const HistoryPage = lazy(() => import("@/pages/HistoryPage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
@@ -66,6 +67,14 @@ export default function App() {
               element={
                 <Suspense fallback={<PageFallback />}>
                   <ImagePage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/metadata"
+              element={
+                <Suspense fallback={<PageFallback />}>
+                  <MetadataPage />
                 </Suspense>
               }
             />

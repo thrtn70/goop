@@ -13,8 +13,8 @@ use goop_converter::{
     FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
-    path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult, PdfOperation,
-    PidRegistry, ResultKind,
+    path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult,
+    MetadataOperation, PdfOperation, PidRegistry, ProgressEvent, ResultKind,
 };
 use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
@@ -741,8 +741,72 @@ pub fn run() {
                 })
             });
 
-            // Image jobs reuse `convert_concurrency` for now: both are
-            // CPU-bound, in-process pure-Rust work with similar resource
+            // Metadata worker (v0.2.9). A batch "Apply" is one job carrying
+            // every selected file; we write each in turn (pure-Rust, in-process
+            // via goop-metadata) and emit N/total progress so an album-sized
+            // batch shows as a single queue row instead of dozens.
+            let sink_for_meta = sink.clone();
+            let metadata_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+                let s = sink_for_meta.clone();
+                Box::pin(async move {
+                    let MetadataOperation::Write { items, backup } =
+                        serde_json::from_value::<MetadataOperation>(payload)
+                            .map_err(|e| GoopError::Queue(format!("bad metadata payload: {e}")))?;
+                    if items.is_empty() {
+                        return Err(GoopError::Queue("metadata write: no files in batch".into()));
+                    }
+                    let started = std::time::Instant::now();
+                    let total = items.len();
+                    for (i, item) in items.iter().enumerate() {
+                        if cancel.is_cancelled() {
+                            return Err(GoopError::Cancelled);
+                        }
+                        s.emit_progress(ProgressEvent {
+                            job_id: id,
+                            percent: (i as f32 / total as f32) * 100.0,
+                            eta_secs: None,
+                            speed_hr: None,
+                            stage: format!("Writing tags ({}/{})", i + 1, total),
+                            encoder: None,
+                        });
+                        let it = item.clone();
+                        tokio::task::spawn_blocking(move || goop_metadata::write_item(&it, backup))
+                            .await
+                            .map_err(|e| GoopError::Queue(e.to_string()))?
+                            .map_err(GoopError::from)?;
+                    }
+                    s.emit_progress(ProgressEvent {
+                        job_id: id,
+                        percent: 100.0,
+                        eta_secs: None,
+                        speed_hr: None,
+                        stage: "Done".into(),
+                        encoder: None,
+                    });
+                    // A single edit reveals the file; a batch reveals the
+                    // containing folder with a file-count.
+                    let (output_path, result_kind, file_count) = if items.len() == 1 {
+                        (Some(items[0].path.clone()), ResultKind::File, 1u32)
+                    } else {
+                        let folder = items.first().and_then(|it| {
+                            std::path::Path::new(&it.path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        });
+                        (folder, ResultKind::Folder, items.len() as u32)
+                    };
+                    Ok(JobResult {
+                        output_path,
+                        bytes: None,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        result_kind,
+                        file_count,
+                    })
+                })
+            });
+
+            // Image + Metadata jobs reuse `convert_concurrency` for now: all
+            // are CPU/IO-bound, in-process pure-Rust work with similar resource
             // characteristics. A dedicated `image_concurrency` Settings field
             // can land later if user feedback suggests image ops need a
             // distinct budget (e.g. RAW decoding is heavier than typical
@@ -754,10 +818,12 @@ pub fn run() {
                 settings.convert_concurrency,
                 1,
                 settings.convert_concurrency,
+                settings.convert_concurrency,
                 extract_worker,
                 convert_worker,
                 pdf_worker,
                 image_worker,
+                metadata_worker,
                 pid_registry,
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
@@ -777,6 +843,10 @@ pub fn run() {
             let s_image = scheduler.clone();
             tauri::async_runtime::spawn(async move {
                 s_image.run_kind(goop_core::JobKind::Image).await
+            });
+            let s_metadata = scheduler.clone();
+            tauri::async_runtime::spawn(async move {
+                s_metadata.run_kind(goop_core::JobKind::Metadata).await
             });
 
             let thumbs = ThumbnailService::new(gpath::data_dir(), gs_resource_dir.clone());
@@ -837,6 +907,8 @@ pub fn run() {
             commands::pdf::recognize_peek_text,
             commands::image::image_run,
             commands::image::image_decoders,
+            commands::metadata::metadata_read,
+            commands::metadata::metadata_run,
             commands::history::history_list,
             commands::history::history_counts,
             commands::thumbnail::thumbnail_get,
