@@ -58,7 +58,8 @@
       "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata"
     },
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "entitlements.plist"
     }
   }
 }

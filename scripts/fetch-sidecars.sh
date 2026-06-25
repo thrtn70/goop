@@ -13,10 +13,15 @@ OUT_DIR="$(git rev-parse --show-toplevel)/src-tauri/bin"
 mkdir -p "$OUT_DIR"
 
 # bundle_macos_dylibs lives in scripts/macos-dylib-bundle.sh as a
-# sourceable helper. Used here for sidecar dylib bundling (tesseract
-# since v0.2.4); also intended for any future post-tauri-build dylib
-# bundling step we add to release.yml. Sourcing fetch-sidecars.sh
-# directly is unsafe because of its main body below.
+# sourceable helper. Used here for sidecar dylib bundling (gs + tesseract):
+# it copies each sidecar's transitive Homebrew dylib graph next to the
+# binary and rewrites every load command to @loader_path/<name>. Those
+# dylibs reach the packaged .app via bundle.macOS.files in the GENERATED
+# src-tauri/tauri.macos.conf.json overlay, which Tauri auto-merges over
+# tauri.conf.json for macOS builds — externalBin packaging copies only the
+# named binary, not its siblings. See the overlay generator and the
+# load-command sweep after the tesseract fetch below. Sourcing
+# fetch-sidecars.sh directly is unsafe because of its main body below.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/macos-dylib-bundle.sh"
 
@@ -123,16 +128,32 @@ case "$TARGET" in
     rm -rf /tmp/tesseract.exe /tmp/tesseract_extract
     ;;
   aarch64-apple-darwin)
-    # ffmpeg — evermeet.cx
-    curl -L -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-    unzip -o /tmp/ffmpeg.zip -d /tmp/
-    mv /tmp/ffmpeg "$OUT_DIR/ffmpeg-$TARGET"
+    # Start from a clean dylib slate. bundle_macos_dylibs only ever ADDS
+    # (it skips a basename that's already present), so a *.dylib left over
+    # from an earlier run on a since-upgraded Homebrew would persist: the
+    # freshly-copied sidecar gets rewritten to point at a stale sibling, a
+    # newly-introduced transitive dep is never walked, and the generated
+    # overlay below would list a basename the current closure no longer
+    # contains. CI checks out fresh so this is mostly a local-iteration
+    # hazard, but clearing here makes every run reproduce the CI closure
+    # exactly. (gs/tesseract binaries are rm'd at their own steps; only the
+    # dylibs accumulate.)
+    rm -f "$OUT_DIR"/*.dylib
+    # ffmpeg + ffprobe — osxexperts.net static arm64 builds. evermeet.cx's
+    # default getrelease URL served x86_64 binaries which ran under Rosetta
+    # and triggered Apple's Intel-deprecation warning. osxexperts.net
+    # explicitly publishes arm64 (Apple Silicon) static builds; verified via
+    # `lipo -archs` before switching.
+    curl -L -o /tmp/ffmpeg7arm.zip "https://osxexperts.net/ffmpeg7arm.zip"
+    unzip -o /tmp/ffmpeg7arm.zip -d /tmp/ffmpeg7arm/
+    mv /tmp/ffmpeg7arm/ffmpeg "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
-    # ffprobe — same source
-    curl -L -o /tmp/ffprobe.zip "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
-    unzip -o /tmp/ffprobe.zip -d /tmp/
-    mv /tmp/ffprobe "$OUT_DIR/ffprobe-$TARGET"
+    rm -rf /tmp/ffmpeg7arm.zip /tmp/ffmpeg7arm/
+    curl -L -o /tmp/ffprobe7arm.zip "https://osxexperts.net/ffprobe7arm.zip"
+    unzip -o /tmp/ffprobe7arm.zip -d /tmp/ffprobe7arm/
+    mv /tmp/ffprobe7arm/ffprobe "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
+    rm -rf /tmp/ffprobe7arm.zip /tmp/ffprobe7arm/
     # yt-dlp
     curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
@@ -146,7 +167,18 @@ case "$TARGET" in
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
     rm -f "$OUT_DIR/gs-$TARGET"
     cp "$GS_PREFIX/bin/gs" "$OUT_DIR/gs-$TARGET"
-    chmod +x "$OUT_DIR/gs-$TARGET"
+    # gs links its imaging/font dylibs (libtiff, libpng16, libjpeg, liblcms2,
+    # libfreetype, libfontconfig, libjbig2dec, libidn, libintl, libopenjp2 —
+    # and, because Homebrew builds ghostscript with OCR, libtesseract /
+    # libleptonica and their whole graph) from /opt/homebrew. Same gap as
+    # tesseract: externalBin ships only the binary, so bundle the transitive
+    # closure next to it and rewrite every load command to @loader_path.
+    # bundle_macos_dylibs keys copies by basename, so the dylibs gs shares
+    # with the tesseract sidecar bundled below are written once and reused
+    # (both binaries end up pointing at the same @loader_path/<name> sibling).
+    chmod +wx "$OUT_DIR/gs-$TARGET"
+    bundle_macos_dylibs "$OUT_DIR/gs-$TARGET"
+    chmod -w "$OUT_DIR/gs-$TARGET"
     # Copy the full share tree (Resource/, lib/, iccprofiles/) — only once,
     # it's architecture-agnostic. Homebrew's layout varies: newer
     # ghostscript drops the version subdirectory and puts Resource/, lib/,
@@ -172,13 +204,13 @@ case "$TARGET" in
     rm -f "$OUT_DIR/mutool-$TARGET"
     cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
     chmod +x "$OUT_DIR/mutool-$TARGET"
-    # tesseract — via Homebrew's tesseract formula. The brew binary
-    # loads libtesseract / libleptonica / libarchive / libpng / libjpeg
-    # / libtiff / libwebp / libopenjp2 / libgif from /opt/homebrew —
-    # paths that don't exist on a clean Mac. bundle_macos_dylibs copies
-    # the transitive dylib graph next to the sidecar and rewrites every
-    # load command to @loader_path/<basename> so the bundled tesseract
-    # resolves them as siblings at runtime.
+    # tesseract — via Homebrew's tesseract formula. The brew binary loads
+    # libtesseract / libleptonica / libarchive / libwebp / libtiff /
+    # libopenjp2 / libgif / ... from /opt/homebrew — paths that don't
+    # exist on a clean Mac. bundle_macos_dylibs copies that transitive
+    # dylib graph next to the sidecar, rewrites every load command to
+    # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
+    # tesseract resolves and loads them as siblings at runtime.
     "$GS_BREW" install --quiet tesseract || true
     TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
     rm -f "$OUT_DIR/tesseract-$TARGET"
@@ -186,6 +218,79 @@ case "$TARGET" in
     chmod +wx "$OUT_DIR/tesseract-$TARGET"
     bundle_macos_dylibs "$OUT_DIR/tesseract-$TARGET"
     chmod -w "$OUT_DIR/tesseract-$TARGET"
+
+    # Tauri's externalBin packaging copies ONLY the named binary into the
+    # .app's Contents/MacOS — not the sibling dylibs we bundled for gs and
+    # tesseract above. Each dylib rides in via bundle.macOS.files, mapping
+    # MacOS/<name> -> bin/<name> so it lands beside the sidecars where
+    # @loader_path resolves.
+    #
+    # That map is GENERATED here from the dylib set Homebrew actually
+    # produced — never hand-maintained. The transitive closure shifts with
+    # Homebrew bumps (libtiff.6 -> libtiff.7, a dep added or dropped), and a
+    # committed list would hard-fail the release on every such drift. We write
+    # the map to src-tauri/tauri.macos.conf.json, which Tauri auto-merges over
+    # tauri.conf.json for macOS builds (JSON Merge Patch, RFC 7396). The base
+    # tauri.conf.json deliberately carries NO bundle.macOS.files key: a merge
+    # unions object keys, so a stale base entry would survive and point at a
+    # bin/<name>.dylib that no longer exists. The overlay is gitignored — CI
+    # regenerates it each run, a local `tauri build` after fetch-sidecars picks
+    # it up the same way, and the tracked working tree stays clean.
+    #
+    # $OUT_DIR/*.dylib here is the UNION of every sidecar's closure (gs and
+    # tesseract share most of it; Homebrew's gs links libtesseract). If a
+    # future dylib-emitting sidecar is added, bundle it before this point.
+    MACOS_OVERLAY="$(git rev-parse --show-toplevel)/src-tauri/tauri.macos.conf.json"
+    TAURI_CONF_BASE="$(git rev-parse --show-toplevel)/src-tauri/tauri.conf.json"
+    node -e '
+      const fs = require("fs");
+      const [outDir, confPath, basePath] = process.argv.slice(1);
+      // The base config must NOT carry bundle.macOS.files. RFC 7396 UNIONS
+      // object keys, so a base entry would survive the merge with this
+      // generated overlay and point at a bin/<name>.dylib the current
+      // Homebrew closure no longer produces — resurrecting the drift
+      // hard-fail this generator exists to remove. Fail closed if one creeps
+      // back in (the JSON itself can carry no comment to warn the editor).
+      const base = JSON.parse(fs.readFileSync(basePath, "utf8"));
+      if (base.bundle && base.bundle.macOS && base.bundle.macOS.files) {
+        console.error("::error::src-tauri/tauri.conf.json must not contain bundle.macOS.files — the macOS dylib map is generated into tauri.macos.conf.json; a base entry would union with it. Remove bundle.macOS.files from the base config.");
+        process.exit(1);
+      }
+      const dylibs = fs.readdirSync(outDir).filter((f) => f.endsWith(".dylib")).sort();
+      if (dylibs.length === 0) {
+        console.error("::error::no *.dylib were bundled into bin/ — the gs/tesseract dylib closure came back empty");
+        process.exit(1);
+      }
+      const files = Object.fromEntries(dylibs.map((n) => ["MacOS/" + n, "bin/" + n]));
+      fs.writeFileSync(confPath, JSON.stringify({ bundle: { macOS: { files } } }, null, 2) + "\n");
+      console.log("generated tauri.macos.conf.json mapping " + dylibs.length + " sidecar dylibs into Contents/MacOS:");
+      for (const n of dylibs) console.log("  " + n);
+    ' "$OUT_DIR" "$MACOS_OVERLAY" "$TAURI_CONF_BASE"
+
+    # Load-command sweep — the generated map proves the right FILES are
+    # bundled, not that every load command resolves inside the bundle. An
+    # install_name_tool -change that silently failed (it is run with
+    # `2>/dev/null || true`) would leave an absolute /opt/homebrew path that
+    # loads fine on this Homebrew-equipped runner but dyld-faults on a clean
+    # user Mac. An @rpath/<name> is fine only if <name> is a co-located
+    # sibling (the @loader_path rpath resolves it); otherwise it dangles.
+    # This is the real correctness gate now that the file map is generated.
+    for f in "$OUT_DIR/gs-$TARGET" "$OUT_DIR/tesseract-$TARGET" "$OUT_DIR"/*.dylib; do
+      [ -f "$f" ] || continue
+      while IFS= read -r ref; do
+        case "$ref" in
+          /opt/homebrew/*)
+            echo "::error::$(basename "$f") keeps a Homebrew load command: $ref" >&2
+            exit 1 ;;
+          @rpath/*)
+            [ -f "$OUT_DIR/${ref#@rpath/}" ] || {
+              echo "::error::$(basename "$f") has an unresolved load command: $ref (no co-located sibling)" >&2
+              exit 1
+            } ;;
+        esac
+      done < <(otool -L "$f" | tail -n +2 | awk '{print $1}')
+    done
+    echo "load-command sweep clean — every bundled Mach-O resolves inside the .app"
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for
