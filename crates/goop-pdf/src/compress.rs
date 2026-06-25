@@ -58,6 +58,7 @@ pub async fn compress(
     let mut cmd = Command::new(&bin.path);
     if let Some(dir) = gs_resource_dir {
         cmd.env("GS_LIB", dir);
+        cmd.arg(gs_generic_resource_dir_arg(dir));
     }
     cmd.arg("-sDEVICE=pdfwrite")
         .arg("-dCompatibilityLevel=1.4")
@@ -108,6 +109,23 @@ fn gs_output_arg(output: &Path) -> String {
     format!("-sOutputFile={escaped}")
 }
 
+/// Ghostscript's `GenericResourceDir` is where it looks for CMaps, fonts,
+/// and ICC profiles. With only `GS_LIB` set, gs still finds `gs_init.ps`
+/// and renders, but it warns that GenericResourceDir is invalid and can
+/// miss resources for exotic PDFs (CJK CMaps, non-embedded fonts, specific
+/// color spaces). Point it at the bundled `<gs-resources>/Resource/` tree.
+/// gs appends category subdirs (`Init/`, `Font/`, `CMap/`, …), so the value
+/// must end in a separator. We use `/` (not `MAIN_SEPARATOR`): gs accepts
+/// forward slashes on every platform, and a trailing `\` on Windows would be
+/// swallowed by `CreateProcess` arg-quoting when the path contains spaces
+/// (the `\"` escapes the closing quote and mangles the argument).
+fn gs_generic_resource_dir_arg(gs_resource_dir: &Path) -> String {
+    format!(
+        "-sGenericResourceDir={}/",
+        gs_resource_dir.join("Resource").display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +141,17 @@ mod tests {
     fn output_arg_escapes_percent_for_ghostscript() {
         let path = Path::new("/tmp/goop 100%/out.pdf");
         assert_eq!(gs_output_arg(path), "-sOutputFile=/tmp/goop 100%%/out.pdf");
+    }
+
+    #[test]
+    fn generic_resource_dir_arg_targets_resource_subdir_with_trailing_separator() {
+        let arg = gs_generic_resource_dir_arg(Path::new("/opt/app/gs-resources"));
+        assert!(arg.starts_with("-sGenericResourceDir="));
+        assert!(arg.contains("gs-resources"));
+        assert!(arg.contains("Resource"));
+        // gs needs a trailing separator so it can append category dirs; we
+        // always emit '/' (portable + safe under Windows arg-quoting).
+        assert!(arg.ends_with('/'));
     }
 
     /// Ghostscript-gated: only runs when a gs binary is on PATH. CI without
