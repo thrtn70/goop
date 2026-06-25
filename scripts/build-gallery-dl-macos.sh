@@ -8,8 +8,9 @@
 # gallery-dl + pyinstaller into an isolated venv and freeze.
 #
 # Pinned to the same gallery-dl version as fetch-sidecars.sh so all
-# platforms ship the same baseline. The in-app updater lets users move
-# past it after install.
+# platforms ship the same baseline. gallery-dl ships no macOS binary and
+# can't self-update in-app, so this pin (bumped per release) is how macOS
+# users get a newer gallery-dl — keep it in sync with fetch-sidecars.sh.
 set -euo pipefail
 TARGET="${1:?target triple required}"
 
@@ -18,7 +19,7 @@ if [ "$TARGET" != "aarch64-apple-darwin" ]; then
   exit 1
 fi
 
-GALLERY_DL_VERSION="${GALLERY_DL_VERSION:-1.32.0}"
+GALLERY_DL_VERSION="${GALLERY_DL_VERSION:-1.32.4}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 OUT_DIR="$REPO_ROOT/src-tauri/bin"
 WORK_DIR="$(mktemp -d)"

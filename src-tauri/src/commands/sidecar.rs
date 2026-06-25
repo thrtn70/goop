@@ -138,8 +138,13 @@ pub async fn sidecar_update_yt_dlp(state: State<'_, AppState>) -> Result<UpdateS
 pub async fn sidecar_update_gallery_dl(
     state: State<'_, AppState>,
 ) -> Result<UpdateStatus, IpcError> {
-    let checker = UpdateChecker::for_gallery_dl(&state.resolver);
-    checker.update_in_place().await.map_err(Into::into)
+    // gallery-dl's own `--update` is dead (GitHub assets gone, no macOS
+    // build), so Goop downloads the latest stable binary from Codeberg itself
+    // on Windows/Linux; macOS stays a ship-with-Goop no-op. See
+    // goop_sidecar::gallery_dl_update.
+    goop_sidecar::gallery_dl_update::update(&state.resolver)
+        .await
+        .map_err(Into::into)
 }
 
 /// Run `yt-dlp --version` and return the trimmed stdout. Used by the

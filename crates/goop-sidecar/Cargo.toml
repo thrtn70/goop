@@ -18,3 +18,6 @@ which = "6"
 
 [dev-dependencies]
 tempfile = "3"
+# Mock HTTP server for the gallery-dl Codeberg updater tests (latest-release
+# lookup + asset download) so they run without network access.
+wiremock = "0.6"

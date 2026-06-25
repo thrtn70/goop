@@ -54,7 +54,12 @@ pub fn run() {
                 .ok()
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let resolver = Arc::new(BinaryResolver::new(sidecar_dir));
+            // Updated sidecars (currently just gallery-dl, via its Codeberg
+            // self-updater) land in a writable app-data dir that the resolver
+            // prefers over the read-only bundled copy inside the signed app.
+            let resolver = Arc::new(
+                BinaryResolver::new(sidecar_dir).with_update_dir(gpath::data_dir().join("bin")),
+            );
 
             // Ghostscript ships its Resource/lib/iccprofiles tree via
             // `bundle.resources` in tauri.conf.json. Resolve the runtime
