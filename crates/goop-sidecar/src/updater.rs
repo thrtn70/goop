@@ -25,6 +25,11 @@ pub struct UpdateChecker<'a> {
     binary_name: &'static str,
     version_args: &'static [&'static str],
     update_args: &'static [&'static str],
+    /// Status message returned when there's no usable self-update
+    /// (`update_args` empty). Lets each bundled tool explain itself
+    /// instead of sharing one generic string. Unused for tools that do
+    /// self-update (non-empty `update_args`).
+    no_update_message: &'static str,
 }
 
 impl<'a> UpdateChecker<'a> {
@@ -35,17 +40,26 @@ impl<'a> UpdateChecker<'a> {
             binary_name: "yt-dlp",
             version_args: &["--version"],
             update_args: &["-U", "--update-to", "latest"],
+            no_update_message: "yt-dlp has no self-update mechanism",
         }
     }
 
-    /// Updater configured for gallery-dl. The PyInstaller bundle
-    /// supports `--update` to self-fetch the latest stable release.
+    /// Version-only checker for gallery-dl (used by Settings → About and by
+    /// the updater to read the current version). gallery-dl's own `--update`
+    /// is unusable for us — it targets GitHub, which no longer hosts the
+    /// release binaries (they moved to Codeberg), and there's no macOS build —
+    /// so updates go through the goop-native `gallery_dl_update` module
+    /// instead, which downloads from Codeberg on Windows/Linux and is a
+    /// ship-with-Goop no-op on macOS. `update_args` is therefore empty here;
+    /// `no_update_message` is only the fallback if `update_in_place` is ever
+    /// called directly on this checker.
     pub fn for_gallery_dl(resolver: &'a BinaryResolver) -> Self {
         Self {
             resolver,
             binary_name: "gallery-dl",
             version_args: &["--version"],
-            update_args: &["--update"],
+            update_args: &[],
+            no_update_message: "gallery-dl ships with Goop and updates when you update Goop.",
         }
     }
 
@@ -57,6 +71,7 @@ impl<'a> UpdateChecker<'a> {
             binary_name: "gs",
             version_args: &["--version"],
             update_args: &[],
+            no_update_message: "gs has no self-update mechanism",
         }
     }
 
@@ -69,6 +84,7 @@ impl<'a> UpdateChecker<'a> {
             binary_name: "mutool",
             version_args: &["-v"],
             update_args: &[],
+            no_update_message: "mutool has no self-update mechanism",
         }
     }
 
@@ -81,6 +97,7 @@ impl<'a> UpdateChecker<'a> {
             binary_name: "tesseract",
             version_args: &["--version"],
             update_args: &[],
+            no_update_message: "tesseract has no self-update mechanism",
         }
     }
 
@@ -128,7 +145,7 @@ impl<'a> UpdateChecker<'a> {
                 attempted: false,
                 previous_version: self.current_version().await.ok(),
                 new_version: None,
-                message: format!("{} has no self-update mechanism", self.binary_name),
+                message: self.no_update_message.to_string(),
             });
         }
         let prev = self.current_version().await.ok();
@@ -235,11 +252,29 @@ mod tests {
     }
 
     #[test]
-    fn gallery_dl_constructor_uses_correct_binary_and_args() {
+    fn gallery_dl_constructor_has_no_self_update() {
         let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
         let c = UpdateChecker::for_gallery_dl(&r);
         assert_eq!(c.binary_name, "gallery-dl");
-        assert_eq!(c.update_args, &["--update"]);
+        assert!(
+            c.update_args.is_empty(),
+            "gallery-dl can't self-update in our bundle: --update targets GitHub \
+             (no longer hosts the assets) and there's no macOS binary"
+        );
+    }
+
+    #[tokio::test]
+    async fn gallery_dl_update_reports_ships_with_app() {
+        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
+        let c = UpdateChecker::for_gallery_dl(&r);
+        let status = c.update_in_place().await.expect("noop must not error");
+        assert!(!status.attempted);
+        // gallery-dl gets a tailored message, not the generic bundled-tool one.
+        assert!(
+            status.message.contains("ships with Goop"),
+            "unexpected message: {}",
+            status.message
+        );
     }
 
     #[test]

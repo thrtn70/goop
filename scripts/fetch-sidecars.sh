@@ -25,10 +25,13 @@ mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/macos-dylib-bundle.sh"
 
-# Pinned gallery-dl release on Codeberg. The in-app `--update` flow lets
-# users move past this baseline once installed; bumping here is mostly
-# about keeping the bundled-out-of-the-box version reasonably fresh.
-GALLERY_DL_VERSION="v1.32.0"
+# Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
+# binary and its own `--update` targets GitHub (which no longer hosts the
+# release assets — they moved to Codeberg), so the bundled gallery-dl can't
+# self-update; it ships with Goop and is refreshed by bumping this pin. Keep
+# in sync with build-gallery-dl-macos.sh (which PyInstaller-builds the same
+# version for macOS).
+GALLERY_DL_VERSION="v1.32.4"
 GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLERY_DL_VERSION}"
 
 # Pinned MuPDF release. Artifex publishes Windows binaries on
