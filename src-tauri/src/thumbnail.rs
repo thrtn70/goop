@@ -310,6 +310,7 @@ async fn generate_pdf(
     if let Some(dir) = gs_resource_dir {
         // Gs searches these dirs for Resource/, lib/, iccprofiles/.
         cmd.env("GS_LIB", dir);
+        cmd.arg(gs_generic_resource_dir_arg(dir));
     }
     let status = cmd
         .arg("-sDEVICE=pngalpha")
@@ -337,6 +338,21 @@ fn gs_output_arg(output: &Path) -> String {
     format!("-sOutputFile={escaped}")
 }
 
+/// Point Ghostscript at the bundled `<gs-resources>/Resource/` tree for its
+/// CMaps/fonts/ICC profiles. Without it, gs renders (it finds `gs_init.ps`
+/// via `GS_LIB`) but warns that GenericResourceDir is invalid and can miss
+/// resources for exotic PDFs. The value must end in a separator — gs appends
+/// category subdirs (`Init/`, `Font/`, `CMap/`, …). We use `/` (not
+/// `MAIN_SEPARATOR`): gs accepts it on every platform, and a trailing `\` on
+/// Windows would be swallowed by `CreateProcess` arg-quoting on a path with
+/// spaces (the `\"` escapes the closing quote).
+fn gs_generic_resource_dir_arg(gs_resource_dir: &Path) -> String {
+    format!(
+        "-sGenericResourceDir={}/",
+        gs_resource_dir.join("Resource").display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +375,17 @@ mod tests {
             gs_output_arg(path),
             "-sOutputFile=/tmp/goop 100%%/thumb.png"
         );
+    }
+
+    #[test]
+    fn generic_resource_dir_arg_targets_resource_subdir_with_trailing_separator() {
+        let arg = gs_generic_resource_dir_arg(Path::new("/opt/app/gs-resources"));
+        assert!(arg.starts_with("-sGenericResourceDir="));
+        assert!(arg.contains("gs-resources"));
+        assert!(arg.contains("Resource"));
+        // gs needs a trailing separator so it can append category dirs; we
+        // always emit '/' (portable + safe under Windows arg-quoting).
+        assert!(arg.ends_with('/'));
     }
 
     #[test]
