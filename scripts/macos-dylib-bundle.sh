@@ -71,11 +71,38 @@ bundle_macos_dylibs() {
                         # Last-resort fallback: scan Homebrew lib dirs. The
                         # dylibs we care about all live somewhere under
                         # /opt/homebrew/{lib,opt/*/lib}.
-                        resolved_path="$(find /opt/homebrew/opt -name "$rel" -type f 2>/dev/null | head -1)"
+                        #
+                        # -L is load-bearing: /opt/homebrew/opt/<formula> are
+                        # symlinks into ../Cellar, and plain `find` will not
+                        # descend through a symlink. Without it the scan never
+                        # reaches the real lib dirs, so @rpath deps that live in
+                        # a sibling formula (e.g. libwebp's
+                        # @rpath/libsharpyuv.0.dylib under opt/webp/lib) silently
+                        # go unresolved — they never get copied and their load
+                        # commands are left pointing at a path absent from the
+                        # bundle.
+                        # -maxdepth bounds the walk (opt/<formula>/lib/<file>
+                        # is 3 levels) so a pathological formula symlink can't
+                        # send `find -L` on a long chase.
+                        #
+                        # `head -1` assumes the basename is unique under
+                        # /opt/homebrew/opt. It is for the current gs+tesseract
+                        # closure; if a future formula bump introduces a
+                        # same-basename collision the wrong (still arm64) copy
+                        # could win. The whole scheme is basename-keyed, so a
+                        # collision is worth a deliberate look — the load-command
+                        # sweep in fetch-sidecars.sh is the runtime backstop.
+                        resolved_path="$(find -L /opt/homebrew/opt -maxdepth 6 -name "$rel" -type f 2>/dev/null | head -1)"
                     fi
                     [ -z "$resolved_path" ] && {
-                        echo "warning: could not resolve $dep_path for $current" >&2
-                        continue
+                        # Unresolvable @rpath dep: we cannot co-locate it, so the
+                        # parent's load command would dangle on a clean Mac. Fail
+                        # the build loudly rather than ship a dyld-fault — the
+                        # basename drift guard can't see a dep that was never
+                        # copied. (Sourced under `set -euo pipefail`; `return 1`
+                        # aborts the caller.)
+                        echo "::error::cannot resolve $dep_path for $current — not bundleable as a sibling" >&2
+                        return 1
                     }
                     ;;
                 @loader_path/*)
@@ -106,5 +133,29 @@ bundle_macos_dylibs() {
             fi
             install_name_tool -change "$dep_path" "@loader_path/$dep_base" "$current" 2>/dev/null || true
         done < <(otool -L "$current" | tail -n +2)
+    done
+
+    # Two hardening passes over everything we just bundled.
+    #
+    # 1. Add @loader_path to each Mach-O's rpath list. The rewrites above
+    #    turn every dep we resolved into @loader_path/<name>, but a file
+    #    can still carry an @rpath/<name> reference we failed to resolve
+    #    at copy time. With the whole dependency closure now sitting in
+    #    one directory, an @loader_path rpath makes any such lookup fall
+    #    back to the co-located sibling instead of a missing Homebrew
+    #    path. (-add_rpath errors if the entry already exists; ignore it.)
+    #
+    # 2. install_name_tool invalidates each file's ad-hoc code signature,
+    #    and a *stale* signature is fatal under the hardened runtime — the
+    #    kernel SIGKILLs the sidecar before it runs. Re-sign ad-hoc so the
+    #    signatures are valid again. Tauri re-signs the sidecar binary with
+    #    the app entitlements during bundling; the sibling dylibs keep this
+    #    ad-hoc signature, which the disable-library-validation entitlement
+    #    on the binary permits it to load.
+    local f
+    for f in "$target_bin" "$out_dir"/*.dylib; do
+        [ -f "$f" ] || continue
+        install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true
+        codesign --force --sign - "$f"
     done
 }

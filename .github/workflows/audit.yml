@@ -96,6 +96,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      # fetch-sidecars.sh's macOS path generates src-tauri/tauri.macos.conf.json
+      # (the sidecar dylib bundle map) with `node`. Declare the dependency
+      # rather than leaning on the runner image happening to preinstall Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: "20" }
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
@@ -110,6 +115,12 @@ jobs:
           "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
           "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/gallery-dl-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+          # gs + tesseract load co-located libraries — bundled dylibs via
+          # @loader_path on macOS, sibling DLLs on Windows. --version exercises
+          # that graph per-PR on both runners (release.yml covers the signed,
+          # in-.app variant on macOS only, and only on tags).
+          "./src-tauri/bin/gs-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+          "./src-tauri/bin/tesseract-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
       # v0.2.8: per-OS static HEIC stack + link guards. These graduated
       # from the Phase 0 spike (.github/workflows/heic-spike.yml,
       # deleted after the gate passed) so every PR re-proves the

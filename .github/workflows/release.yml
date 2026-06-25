@@ -126,9 +126,77 @@ jobs:
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
       - run: npm ci
+      # The macOS sidecar fixes (gallery-dl/yt-dlp Library Validation, plus the
+      # gs/tesseract @loader_path sibling dylibs) all depend on Tauri signing
+      # every sidecar with the disable-library-validation entitlement. That
+      # entitlement lives in the plist referenced by bundle.macOS.entitlements;
+      # if it's absent from the checkout, Tauri signs the sidecars WITHOUT it
+      # and the release silently ships binaries that SIGKILL on launch. The
+      # plist is easy to leave untracked — fail loud here before building.
+      - name: Verify macOS entitlements file is present
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          ent=$(node -e 'const c=JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json","utf8")); process.stdout.write((c.bundle&&c.bundle.macOS&&c.bundle.macOS.entitlements)||"")')
+          [ -n "$ent" ] || { echo "::error::bundle.macOS.entitlements is unset in tauri.conf.json"; exit 1; }
+          [ -f "src-tauri/$ent" ] || { echo "::error::entitlements file 'src-tauri/$ent' (referenced by tauri.conf.json) is missing from the checkout — sidecars would be signed without disable-library-validation"; exit 1; }
+          echo "entitlements present: src-tauri/$ent"
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      # Smoke-test the PyInstaller sidecars INSIDE the signed .app. Tauri
+      # ad-hoc-signs every sidecar with hardened runtime; the gallery-dl and
+      # yt-dlp --onefile bundles can't load their embedded Python.framework
+      # under Library Validation unless the disable-library-validation
+      # entitlement is applied (see src-tauri/entitlements.plist). The
+      # fetch-sidecars smoke check only ever runs the UNsigned binaries, so it
+      # can't catch a signing regression — verify the post-signing binaries
+      # here against the exact failure mode users hit (bootloader dlopen of the
+      # extracted Python).
+      - name: Verify signed sidecars run (macOS)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          # The Cargo workspace root is the repo root, so `tauri build` writes
+          # the bundle under ./target — not ./src-tauri/target. Search both so
+          # the check is robust to the workspace layout.
+          APP=$(find target src-tauri/target -type d -path "*/${{ matrix.target }}/release/bundle/macos/*.app" 2>/dev/null | head -1)
+          [ -n "$APP" ] || { echo "::error::no .app bundle found under (src-tauri/)target/${{ matrix.target }}/release/bundle/macos"; exit 1; }
+          # gs and tesseract load their imaging/OCR dylibs (libtiff, libpng16,
+          # libfreetype, libtesseract, libleptonica, libwebp, ...) via
+          # @loader_path. Tauri's externalBin packaging copies only the binary,
+          # so the dylibs ride in through bundle.macOS.files; confirm they
+          # actually landed in Contents/MacOS before running the sidecars —
+          # a missing dylib is the exact dyld-fault this guards against.
+          dylibs=$(find "$APP/Contents/MacOS" -maxdepth 1 -name '*.dylib' | wc -l | tr -d ' ')
+          echo "== $dylibs sibling dylib(s) in Contents/MacOS =="
+          [ "$dylibs" -gt 0 ] || { echo "::error::no .dylib in Contents/MacOS — @loader_path deps were dropped from the bundle"; exit 1; }
+          # gallery-dl/yt-dlp exercise the Python.framework load path; gs and
+          # tesseract --version exercise the @loader_path dylib graph (they
+          # dlopen libtiff/libfreetype/libleptonica/... to print their versions).
+          for bin in gallery-dl yt-dlp tesseract gs; do
+            exe="$APP/Contents/MacOS/$bin"
+            [ -x "$exe" ] || { echo "::error::$bin missing from Contents/MacOS"; exit 1; }
+            echo "== $bin --version (signed, in-bundle) =="
+            "$exe" --version
+          done
+          # `gs --version` exercises the dylib graph but NOT the bundled
+          # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
+          # PDF compress/thumbnail features reach via GS_LIB (set to the
+          # gs-resources dir in src-tauri/src/lib.rs). A broken/missing
+          # gs-resources bundle — invisible to --version — would only fault in
+          # a user's hands ("Can't find initialization file gs_init.ps").
+          # Assert the tree is actually in the bundle, then do one real render
+          # with that exact GS_LIB.
+          GSRES="$APP/Contents/Resources/gs-resources"
+          for need in "Resource/Init/gs_init.ps" "Resource/Font"; do
+            [ -e "$GSRES/$need" ] || { echo "::error::bundled gs-resources is missing $need"; exit 1; }
+          done
+          printf '%%!PS\n/Helvetica findfont 24 scalefont setfont 72 700 moveto (gs render smoke) show showpage\n' > "$RUNNER_TEMP/gs-smoke.ps"
+          echo "== gs pngalpha render (GS_LIB=gs-resources) =="
+          GS_LIB="$GSRES" "$APP/Contents/MacOS/gs" -q -dNOPAUSE -dBATCH -sDEVICE=pngalpha -r72 -o "$RUNNER_TEMP/gs-smoke.png" "$RUNNER_TEMP/gs-smoke.ps"
+          [ -s "$RUNNER_TEMP/gs-smoke.png" ] || { echo "::error::gs produced no PNG — the bundled gs-resources / GS_LIB path is broken"; exit 1; }
+          echo "gs rendered $(wc -c < "$RUNNER_TEMP/gs-smoke.png" | tr -d ' ') bytes from the bundled resource tree"
