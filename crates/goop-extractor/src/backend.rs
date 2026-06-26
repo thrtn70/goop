@@ -18,6 +18,7 @@ use crate::ytdlp::{ExtractRequest, YtDlp};
 /// Uniform result the IPC layer turns into a `JobResult`. `result_kind`
 /// here is the corresponding `goop_core::ResultKind` variant — we keep
 /// the dispatch crate decoupled from that enum by stringifying.
+#[derive(Debug)]
 pub struct BackendOutcome {
     pub output_path: String,
     pub bytes: u64,
@@ -46,22 +47,42 @@ pub async fn dispatch(
     req: &ExtractRequest,
     cancel: CancellationToken,
 ) -> Result<BackendOutcome, GoopError> {
+    // Fast path: the probe already determined this is a plain file neither
+    // extractor handles, so skip the two doomed extractor spawns.
+    if req.direct {
+        return crate::direct::download(sink, job_id, req, cancel).await;
+    }
     let primary = classify_extractor(&req.url);
     let result = run_one(resolver, sink.clone(), job_id, req, cancel.clone(), primary).await;
     match result {
         Ok(outcome) => Ok(outcome),
         Err(err) => {
-            if cancel.is_cancelled() {
-                return Err(err);
-            }
-            if !is_no_matching_extractor_err(&err) {
+            if cancel.is_cancelled() || !is_no_matching_extractor_err(&err) {
                 return Err(err);
             }
             let fallback = match primary {
                 ExtractorChoice::YtDlp => ExtractorChoice::GalleryDl,
                 ExtractorChoice::GalleryDl => ExtractorChoice::YtDlp,
             };
-            run_one(resolver, sink, job_id, req, cancel, fallback).await
+            match run_one(
+                resolver,
+                sink.clone(),
+                job_id,
+                req,
+                cancel.clone(),
+                fallback,
+            )
+            .await
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(err2) => {
+                    if cancel.is_cancelled() || !is_no_matching_extractor_err(&err2) {
+                        return Err(err2);
+                    }
+                    // Neither extractor recognised the URL: stream it directly.
+                    crate::direct::download(sink, job_id, req, cancel).await
+                }
+            }
         }
     }
 }

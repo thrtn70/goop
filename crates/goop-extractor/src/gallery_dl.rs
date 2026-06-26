@@ -119,6 +119,7 @@ impl<'a> GalleryDl<'a> {
             // way video URLs do; surface an empty list so the frontend
             // skips the format picker.
             formats: Vec::new(),
+            direct: None,
         })
     }
 

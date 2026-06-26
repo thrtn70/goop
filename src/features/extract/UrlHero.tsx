@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { UrlProbe, FormatOption } from "@/types";
+import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
-import ProbeCard from "./ProbeCard";
+import ProbeCard, { type StartOptions } from "./ProbeCard";
 
 function looksLikeCookieError(message: string | null): boolean {
   return message != null && message.toLowerCase().includes("cookie");
@@ -50,7 +50,7 @@ export default function UrlHero({ url }: { url?: string }) {
     setError(null);
   }
 
-  async function handleStart(format: FormatOption | null, audioOnly: boolean) {
+  async function handleStart({ format, audioOnly, checksum }: StartOptions) {
     if (!probe) return;
     try {
       await api.extract.fromUrl({
@@ -63,6 +63,11 @@ export default function UrlHero({ url }: { url?: string }) {
         // alongside every extract.
         cookies_from_browser: null,
         output_template: null,
+        // Set for plain-file links the extractors don't handle: skip the
+        // doomed extractor spawns and stream the file directly, optionally
+        // verifying a user-provided checksum.
+        direct: probe.direct != null,
+        checksum,
       });
     } catch (e) {
       setError(formatError(e));
@@ -153,7 +158,7 @@ export default function UrlHero({ url }: { url?: string }) {
             <path d="M24 8v32M16 32l8 8 8-8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <p className="mt-3 text-sm text-fg-secondary">Paste a URL above and press Enter.</p>
-          <p className="mt-1 text-xs text-fg-muted">YouTube, SoundCloud, TikTok, Instagram, Vimeo, and more.</p>
+          <p className="mt-1 text-xs text-fg-muted">YouTube, SoundCloud, TikTok, Instagram, Vimeo, or any direct file link.</p>
         </div>
       )}
     </div>

@@ -16,3 +16,19 @@ ts-rs.workspace = true
 regex = "1.10"
 tracing.workspace = true
 url = "2.5"
+# Direct-URL fallback downloader (crates/goop-extractor/src/direct.rs):
+# streams an arbitrary file when neither yt-dlp nor gallery-dl matches.
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+percent-encoding = "2"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+# Mock HTTP server for the direct-downloader tests (range/resume, checksum,
+# filename derivation) so they run without network access.
+wiremock = "0.6"
+# Enables goop-core's RecordingSink for asserting emitted progress events.
+goop-core = { path = "../goop-core", features = ["test-util"] }

@@ -1,9 +1,34 @@
 import { useState } from "react";
-import type { UrlProbe, FormatOption } from "@/types";
+import type {
+  ChecksumAlgo,
+  ChecksumSpec,
+  DirectFileInfo,
+  FormatOption,
+  UrlProbe,
+} from "@/types";
 
-type Props = { probe: UrlProbe; onStart: (format: FormatOption | null, audioOnly: boolean) => void };
+export interface StartOptions {
+  format: FormatOption | null;
+  audioOnly: boolean;
+  checksum: ChecksumSpec | null;
+}
+
+const CHECKSUM_ALGOS = ["sha256", "sha1", "md5"] as const;
+
+function isChecksumAlgo(v: string): v is ChecksumAlgo {
+  return (CHECKSUM_ALGOS as readonly string[]).includes(v);
+}
+
+type Props = { probe: UrlProbe; onStart: (opts: StartOptions) => void };
 
 export default function ProbeCard({ probe, onStart }: Props) {
+  if (probe.direct) {
+    return <DirectCard info={probe.direct} onStart={onStart} />;
+  }
+  return <MediaCard probe={probe} onStart={onStart} />;
+}
+
+function MediaCard({ probe, onStart }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [audioOnly, setAudioOnly] = useState(false);
   const fmt = probe.formats.find((f) => f.format_id === selected) ?? null;
@@ -49,9 +74,95 @@ export default function ProbeCard({ probe, onStart }: Props) {
         <button
           type="button"
           className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart(fmt, audioOnly)}
+          onClick={() => onStart({ format: fmt, audioOnly, checksum: null })}
         >
           Start
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: StartOptions) => void }) {
+  const [showChecksum, setShowChecksum] = useState(false);
+  const [algo, setAlgo] = useState<ChecksumAlgo>("sha256");
+  const [hex, setHex] = useState("");
+  const trimmed = hex.trim();
+  // Only attach a checksum when the panel is open AND a hash was entered, so
+  // collapsing "Hide checksum" reliably skips verification.
+  const checksum: ChecksumSpec | null =
+    showChecksum && trimmed ? { algo, hex: trimmed } : null;
+
+  const meta = [
+    "Direct download",
+    info.content_type,
+    info.size_bytes != null ? humanSize(info.size_bytes) : null,
+  ]
+    .filter((s): s is string => s != null)
+    .join(" · ");
+
+  return (
+    <div className="rounded-lg bg-surface-1 p-4">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" focusable="false">
+            <path d="M14 3v5h5M14 3l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8z" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate font-display text-lg font-semibold text-fg">{info.filename}</h3>
+          <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
+          {!info.resumable && (
+            <p className="mt-1 text-xs text-fg-muted">This server may not support resuming.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <button
+          type="button"
+          aria-expanded={showChecksum}
+          aria-controls="direct-checksum-panel"
+          className="btn-press text-xs text-fg-muted transition duration-fast ease-out hover:text-fg-secondary"
+          onClick={() => setShowChecksum((v) => !v)}
+        >
+          {showChecksum ? "Hide checksum" : "Verify checksum (optional)"}
+        </button>
+        {showChecksum && (
+          <div id="direct-checksum-panel" className="mt-2 flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Hash algorithm"
+              className="rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+              value={algo}
+              onChange={(e) => {
+                if (isChecksumAlgo(e.target.value)) setAlgo(e.target.value);
+              }}
+            >
+              <option value="sha256">SHA-256</option>
+              <option value="sha1">SHA-1</option>
+              <option value="md5">MD5</option>
+            </select>
+            <input
+              type="text"
+              aria-label="Expected hash (hex)"
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="expected hash (hex)"
+              value={hex}
+              onChange={(e) => setHex(e.target.value)}
+              className="min-w-0 flex-1 rounded-md bg-surface-2 px-3 py-1.5 font-mono text-xs text-fg transition duration-fast ease-out placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex">
+        <button
+          type="button"
+          className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+          onClick={() => onStart({ format: null, audioOnly: false, checksum })}
+        >
+          Download
         </button>
       </div>
     </div>
@@ -66,4 +177,18 @@ function formatSecs(s: number): string {
 
 function humanMB(b: number): string {
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function humanSize(bytes: bigint): string {
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
+  // Reduce on bigint first so a u64 above Number.MAX_SAFE_INTEGER doesn't lose
+  // precision; only convert to Number once it's safely in range for the
+  // one-decimal display.
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024n && i < units.length - 1) {
+    v /= 1024n;
+    i += 1;
+  }
+  return `${i === 0 ? v.toString() : Number(v).toFixed(1)} ${units[i]}`;
 }
