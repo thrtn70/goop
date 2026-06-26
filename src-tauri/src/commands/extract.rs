@@ -2,7 +2,7 @@ use crate::state::AppState;
 use goop_core::{is_no_matching_extractor, GoopError, IpcError, Job, JobId, JobKind};
 use goop_extractor::classify::{classify_extractor, ExtractorChoice};
 use goop_extractor::gallery_dl::GalleryDl;
-use goop_extractor::ytdlp::{ExtractRequest, UrlProbe, YtDlp};
+use goop_extractor::ytdlp::{DirectFileInfo, ExtractRequest, UrlProbe, YtDlp};
 use std::path::PathBuf;
 use tauri::State;
 
@@ -21,11 +21,33 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
                 ExtractorChoice::YtDlp => ExtractorChoice::GalleryDl,
                 ExtractorChoice::GalleryDl => ExtractorChoice::YtDlp,
             };
-            probe_with(fallback, &state, &url, cookies.as_deref())
-                .await
-                .map_err(Into::into)
+            match probe_with(fallback, &state, &url, cookies.as_deref()).await {
+                Ok(probe) => Ok(probe),
+                Err(err2) if is_unsupported(&err2) => {
+                    // Neither extractor recognised the URL — try a plain HTTP
+                    // probe so the UI can still offer a direct download.
+                    let info = goop_extractor::direct::probe(&url).await?;
+                    Ok(direct_url_probe(url, info))
+                }
+                Err(err2) => Err(err2.into()),
+            }
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Build a `UrlProbe` for a plain file the extractors don't handle. The
+/// filename stands in for the title; format choices are empty so the UI
+/// renders the simplified "Direct download" card.
+fn direct_url_probe(url: String, info: DirectFileInfo) -> UrlProbe {
+    UrlProbe {
+        url,
+        title: info.filename.clone(),
+        uploader: None,
+        duration_secs: None,
+        thumbnail_url: None,
+        formats: Vec::new(),
+        direct: Some(info),
     }
 }
 

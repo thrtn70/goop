@@ -63,6 +63,53 @@ pub struct ExtractRequest {
     /// to keep a stale or tampered payload from injecting arbitrary args.
     #[serde(default)]
     pub output_template: Option<String>,
+    /// Optional integrity check for the direct-URL fallback download
+    /// (`crate::direct`). Ignored by the yt-dlp / gallery-dl paths. When
+    /// set, the streamed bytes are hashed and compared before the file is
+    /// finalized; a mismatch fails the job and discards the partial.
+    #[serde(default)]
+    pub checksum: Option<ChecksumSpec>,
+    /// Hint, set by the probe step, that the URL is a plain file neither
+    /// extractor handles. Lets `dispatch` skip the two doomed extractor
+    /// spawns and go straight to the direct downloader. Defaults to
+    /// `false`; the dispatch-level no-match fallback still covers the
+    /// un-hinted case, so this is purely an optimisation.
+    #[serde(default)]
+    pub direct: bool,
+}
+
+/// Hash algorithm for an optional direct-download integrity check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "lowercase")]
+pub enum ChecksumAlgo {
+    Sha256,
+    Sha1,
+    Md5,
+}
+
+/// A user-provided expected hash for a direct download. `hex` is compared
+/// case-insensitively (whitespace trimmed) against the digest of the
+/// streamed bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub struct ChecksumSpec {
+    pub algo: ChecksumAlgo,
+    pub hex: String,
+}
+
+/// Metadata for a plain file the extractors don't handle, surfaced by the
+/// probe step so the UI can offer a direct download. Populated via an HTTP
+/// `HEAD` (or ranged `GET`) by `crate::direct::probe`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub struct DirectFileInfo {
+    pub filename: String,
+    pub size_bytes: Option<u64>,
+    pub content_type: Option<String>,
+    /// `true` when the server advertised `Accept-Ranges: bytes`, so an
+    /// interrupted download can resume.
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -82,6 +129,12 @@ pub struct UrlProbe {
     pub duration_secs: Option<u64>,
     pub thumbnail_url: Option<String>,
     pub formats: Vec<FormatOption>,
+    /// Set only when neither extractor recognised the URL and a direct
+    /// HTTP `HEAD`/`GET` probe found a plain downloadable file. The UI
+    /// renders a simplified "Direct download" card in this case. `None`
+    /// for normal yt-dlp / gallery-dl results.
+    #[serde(default)]
+    pub direct: Option<DirectFileInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -169,6 +222,7 @@ impl<'a> YtDlp<'a> {
                 .as_array()
                 .map(|fs| fs.iter().filter_map(parse_format).collect())
                 .unwrap_or_default(),
+            direct: None,
         })
     }
 
@@ -565,6 +619,8 @@ mod tests {
             audio_only: false,
             cookies_from_browser: None,
             output_template: None,
+            checksum: None,
+            direct: false,
         };
         assert!(req_no_cookies.cookies_from_browser.is_none());
     }
