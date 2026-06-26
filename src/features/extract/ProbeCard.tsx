@@ -19,6 +19,13 @@ function isChecksumAlgo(v: string): v is ChecksumAlgo {
   return (CHECKSUM_ALGOS as readonly string[]).includes(v);
 }
 
+// Expected hex-digest length per algorithm, used for client-side validation.
+const EXPECTED_HEX_LEN: Record<ChecksumAlgo, number> = {
+  sha256: 64,
+  sha1: 40,
+  md5: 32,
+};
+
 type Props = { probe: UrlProbe; onStart: (opts: StartOptions) => void };
 
 export default function ProbeCard({ probe, onStart }: Props) {
@@ -87,11 +94,22 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
   const [showChecksum, setShowChecksum] = useState(false);
   const [algo, setAlgo] = useState<ChecksumAlgo>("sha256");
   const [hex, setHex] = useState("");
-  const trimmed = hex.trim();
-  // Only attach a checksum when the panel is open AND a hash was entered, so
-  // collapsing "Hide checksum" reliably skips verification.
+  // Strip a common `0x` prefix and whitespace before validating/sending.
+  const trimmed = hex.trim().replace(/^0x/i, "");
+  // Validate the hash client-side so a malformed paste produces an inline
+  // hint instead of a confusing post-download "checksum mismatch".
+  const hexError: string | null =
+    showChecksum && trimmed
+      ? !/^[0-9a-fA-F]+$/.test(trimmed)
+        ? "Hash must be hex characters only (0–9, a–f)."
+        : trimmed.length !== EXPECTED_HEX_LEN[algo]
+          ? `Expected ${EXPECTED_HEX_LEN[algo]} hex chars for ${algo.toUpperCase()}, got ${trimmed.length}.`
+          : null
+      : null;
+  // Only attach a checksum when the panel is open, a hash was entered, and it
+  // is well-formed — so collapsing "Hide checksum" reliably skips verification.
   const checksum: ChecksumSpec | null =
-    showChecksum && trimmed ? { algo, hex: trimmed } : null;
+    showChecksum && trimmed && !hexError ? { algo, hex: trimmed } : null;
 
   const meta = [
     "Direct download",
@@ -145,6 +163,8 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
             <input
               type="text"
               aria-label="Expected hash (hex)"
+              aria-invalid={hexError != null}
+              aria-describedby={hexError ? "direct-checksum-error" : undefined}
               spellCheck={false}
               autoComplete="off"
               placeholder="expected hash (hex)"
@@ -152,6 +172,11 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
               onChange={(e) => setHex(e.target.value)}
               className="min-w-0 flex-1 rounded-md bg-surface-2 px-3 py-1.5 font-mono text-xs text-fg transition duration-fast ease-out placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"
             />
+            {hexError && (
+              <p id="direct-checksum-error" className="w-full text-xs text-error">
+                {hexError}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -179,16 +204,17 @@ function humanMB(b: number): string {
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function humanSize(bytes: bigint): string {
+// `size_bytes` is `u64` in Rust → typed `bigint` by ts-rs, but Tauri serializes
+// it as a plain JSON number on the wire (same as duration_secs/filesize, which
+// the rest of this file already passes through `Number(...)`). Accept both and
+// normalize, so bigint arithmetic never runs against a runtime number.
+function humanSize(bytes: number | bigint): string {
   const units = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
-  // Reduce on bigint first so a u64 above Number.MAX_SAFE_INTEGER doesn't lose
-  // precision; only convert to Number once it's safely in range for the
-  // one-decimal display.
-  let v = bytes;
+  let v = Number(bytes);
   let i = 0;
-  while (v >= 1024n && i < units.length - 1) {
-    v /= 1024n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
     i += 1;
   }
-  return `${i === 0 ? v.toString() : Number(v).toFixed(1)} ${units[i]}`;
+  return `${i === 0 ? Math.round(v).toString() : v.toFixed(1)} ${units[i]}`;
 }
