@@ -35,16 +35,22 @@ use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Per-read timeout: aborts a stalled mid-stream connection without capping
-/// the total time a large but healthy download may take.
+/// Per-read (per-chunk) idle timeout: the clock resets after each successfully
+/// delivered frame, so it aborts a fully stalled connection without capping
+/// the total time a large but healthy download may take. A server that
+/// trickles bytes slower than this interval will not trip it — `cancel` is the
+/// only bound on total transfer time (the cancel-only model is intentional).
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Throttle progress emits so a fast download doesn't flood the IPC channel.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(300);
+/// Window for folding an existing partial into the checksum on resume, so a
+/// huge partial isn't slurped into memory all at once.
+const HASH_SEED_CHUNK: usize = 64 * 1024;
 
 fn build_client() -> Result<Client, GoopError> {
     Client::builder()
@@ -55,11 +61,25 @@ fn build_client() -> Result<Client, GoopError> {
         .map_err(|e| GoopError::Queue(format!("direct download: http client: {e}")))
 }
 
+/// Reject anything that isn't `http`/`https` before issuing a request, giving a
+/// clear error instead of an opaque transport failure and mirroring the
+/// https-only posture of the app self-updater.
+fn require_http_scheme(url: &str) -> Result<(), GoopError> {
+    match url::Url::parse(url).as_ref().map(|u| u.scheme()) {
+        Ok("http" | "https") => Ok(()),
+        Ok(scheme) => Err(GoopError::Queue(format!(
+            "direct download: unsupported URL scheme {scheme:?}; only http and https are supported"
+        ))),
+        Err(_) => Err(GoopError::Queue("direct download: invalid URL".into())),
+    }
+}
+
 /// Probe a plain file via HTTP so the UI can offer a direct download. Tries
 /// `HEAD` first and falls back to a one-byte ranged `GET` for servers that
 /// reject `HEAD`. Returns the derived filename, size, content-type, and
 /// whether the server supports resuming.
 pub async fn probe(url: &str) -> Result<DirectFileInfo, GoopError> {
+    require_http_scheme(url)?;
     let client = build_client()?;
     let head = client.head(url).timeout(PROBE_TIMEOUT).send().await;
     let resp = match head {
@@ -102,6 +122,7 @@ pub async fn download(
     req: &ExtractRequest,
     cancel: CancellationToken,
 ) -> Result<BackendOutcome, GoopError> {
+    require_http_scheme(&req.url)?;
     let start = Instant::now();
     let output_dir = PathBuf::from(&req.output_dir);
     let client = build_client()?;
@@ -113,7 +134,7 @@ pub async fn download(
     let part_path = output_dir.join(format!(".{hash}.goopdl.part"));
     let meta_path = output_dir.join(format!(".{hash}.goopdl.meta"));
 
-    let existing_len = tokio::fs::metadata(&part_path)
+    let mut existing_len = tokio::fs::metadata(&part_path)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
@@ -123,8 +144,17 @@ pub async fn download(
         None
     };
 
-    // Request the remainder when a partial exists; If-Range makes the server
-    // send a full 200 (instead of a 206) if the file changed under us.
+    // Resuming is only safe with a stored validator: an `If-Range`-guarded
+    // request makes the server send a full `200` if the resource changed, so a
+    // stale prefix is never fused onto a new tail. Without a validator we can't
+    // detect a changed remote file, so discard the partial and start clean
+    // rather than risk silent corruption.
+    if existing_len > 0 && validator.is_none() {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        let _ = tokio::fs::remove_file(&meta_path).await;
+        existing_len = 0;
+    }
+
     let mut request = client.get(&req.url);
     if existing_len > 0 {
         request = request.header(RANGE, format!("bytes={existing_len}-"));
@@ -138,10 +168,19 @@ pub async fn download(
         .map_err(|e| GoopError::Queue(format!("direct download: request: {e}")))?;
 
     let status = resp.status();
-    let (resp, append, resume_from) = if existing_len > 0 && status == StatusCode::PARTIAL_CONTENT {
+    // Append ONLY when the server resumed from exactly our offset (verified via
+    // the 206's Content-Range start). Anything else — a 206 from the wrong/
+    // missing offset, a 416, or any partial we can't trust — falls through to a
+    // clean unconditioned refetch that overwrites from scratch.
+    let (resp, append, resume_from) = if existing_len > 0
+        && status == StatusCode::PARTIAL_CONTENT
+        && content_range_start(resp.headers()) == Some(existing_len)
+    {
         (resp, true, existing_len)
-    } else if status == StatusCode::RANGE_NOT_SATISFIABLE {
-        // Our partial is at least as large as the server's view — start clean.
+    } else if status == StatusCode::PARTIAL_CONTENT || status == StatusCode::RANGE_NOT_SATISFIABLE {
+        // An untrustworthy partial response (wrong/absent Content-Range start)
+        // or a 416 (our partial is past the server's size): refetch the whole
+        // file unconditionally so we never append misaligned bytes.
         let fresh = client
             .get(&req.url)
             .send()
@@ -156,8 +195,8 @@ pub async fn download(
         }
         (fresh, false, 0)
     } else if status.is_success() {
-        // 200 OK: no prior partial, server ignored the range, or the
-        // validator changed — (over)write from the start.
+        // 200 OK: a full body — no prior partial, or the server sent the whole
+        // file (e.g. the If-Range validator changed). Overwrite from the start.
         (resp, false, 0)
     } else {
         return Err(GoopError::Queue(format!(
@@ -184,9 +223,20 @@ pub async fn download(
     if append {
         if let Some(h) = hasher.as_mut() {
             // Fold the already-downloaded bytes into the digest so the final
-            // hash covers the whole file, not just the resumed tail.
-            let existing = tokio::fs::read(&part_path).await.map_err(GoopError::Io)?;
-            h.update(&existing);
+            // hash covers the whole file, not just the resumed tail. Stream
+            // through a fixed window so resuming a huge partial never slurps
+            // the whole file into memory.
+            let mut seed = tokio::fs::File::open(&part_path)
+                .await
+                .map_err(GoopError::Io)?;
+            let mut buf = vec![0u8; HASH_SEED_CHUNK];
+            loop {
+                let n = seed.read(&mut buf).await.map_err(GoopError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
         }
     }
 
@@ -240,7 +290,17 @@ pub async fn download(
         }
     }
 
-    let dest = unique_dest(&output_dir, &filename)?;
+    let dest = match unique_dest(&output_dir, &filename) {
+        Ok(d) => d,
+        Err(e) => {
+            // No usable destination name: the finished .part is unreachable,
+            // so clean it up rather than leave a hidden orphan behind. (A
+            // rename failure below is left alone — the .part is a resume seed.)
+            let _ = tokio::fs::remove_file(&part_path).await;
+            let _ = tokio::fs::remove_file(&meta_path).await;
+            return Err(e);
+        }
+    };
     tokio::fs::rename(&part_path, &dest)
         .await
         .map_err(GoopError::Io)?;
@@ -324,6 +384,17 @@ fn content_range_total(headers: &HeaderMap) -> Option<u64> {
         cr.rsplit('/')
             .next()
             .and_then(|t| t.trim().parse::<u64>().ok())
+    })
+}
+
+/// Start byte from a `Content-Range: bytes start-end/total` header, used to
+/// confirm a 206 actually resumed from the offset we requested.
+fn content_range_start(headers: &HeaderMap) -> Option<u64> {
+    header_str(headers, CONTENT_RANGE).and_then(|cr| {
+        cr.trim()
+            .strip_prefix("bytes ")
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
     })
 }
 
@@ -414,8 +485,11 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 /// Non-clobbering destination: `name.ext`, then `name (1).ext`, `name (2).ext`…
-/// Errors rather than returning a colliding path so finalizing never
-/// overwrites an existing file.
+/// Errors after exhausting the counter rather than returning a colliding path.
+/// Best-effort: the returned path is free at check time, but the subsequent
+/// `rename` is not atomic with this check, so two downloads finishing the same
+/// instant with the same name could still race (the single Extract job lane
+/// makes that practically impossible).
 fn unique_dest(dir: &Path, filename: &str) -> Result<PathBuf, GoopError> {
     let base = dir.join(filename);
     if !base.exists() {
@@ -766,8 +840,10 @@ mod tests {
     #[tokio::test]
     async fn download_restarts_when_server_ignores_range() {
         let server = MockServer::start().await;
-        // No range matcher: server always returns the full body with 200,
-        // even though the client sends a Range header for the seeded partial.
+        // No range matcher: server returns the full body with 200 even though
+        // the client sent a Range + If-Range for the seeded (validated) partial
+        // — e.g. the validator changed. The partial must be overwritten, not
+        // appended to.
         Mock::given(method("GET"))
             .and(path("/x.bin"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"FULLBODY".to_vec()))
@@ -777,6 +853,11 @@ mod tests {
         let url = format!("{}/x.bin", server.uri());
         let hash = url_hash(&url);
         std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"STALE").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
+        )
+        .unwrap();
 
         let outcome = download(
             sink(),
@@ -787,6 +868,146 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"FULLBODY");
+    }
+
+    #[tokio::test]
+    async fn download_discards_unvalidated_partial_instead_of_appending() {
+        let server = MockServer::start().await;
+        let url = format!("{}/u.bin", server.uri());
+        // If the code wrongly sent a Range for a partial with no validator,
+        // this 206 would corrupt the result by appending "APPENDED". The
+        // correct behaviour discards the partial, sends no Range, and gets the
+        // clean 200 body.
+        Mock::given(method("GET"))
+            .and(path("/u.bin"))
+            .and(header("range", "bytes=5-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 5-12/13")
+                    .set_body_bytes(b"APPENDED".to_vec()),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/u.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"clean body".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let hash = url_hash(&url);
+        // Partial with NO .meta sidecar (server gave no validator last time).
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"STALE").unwrap();
+
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&url, dir.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"clean body");
+    }
+
+    #[tokio::test]
+    async fn download_restarts_when_206_offset_mismatches() {
+        let server = MockServer::start().await;
+        let url = format!("{}/m.bin", server.uri());
+        // Server returns 206 but from byte 0, not the requested byte 5. The
+        // start mismatch must trigger a clean refetch, not a corrupt append.
+        Mock::given(method("GET"))
+            .and(path("/m.bin"))
+            .and(header("range", "bytes=5-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-9/10")
+                    .set_body_bytes(b"0123456789".to_vec()),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/m.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"0123456789".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"STALE").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
+        )
+        .unwrap();
+
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&url, dir.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // Exactly the full body, not 15 bytes (stale prefix + body).
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"0123456789");
+        assert_eq!(outcome.bytes, 10);
+    }
+
+    #[tokio::test]
+    async fn download_resume_with_checksum_covers_whole_file() {
+        let server = MockServer::start().await;
+        let url = format!("{}/h.bin", server.uri());
+        let full = b"hello world!".to_vec();
+        let good = {
+            let mut h = sha2::Sha256::new();
+            h.update(&full);
+            hex_lower(h.finalize().as_slice())
+        };
+        // Resume: server returns the tail for the validated partial.
+        Mock::given(method("GET"))
+            .and(path("/h.bin"))
+            .and(header("range", "bytes=6-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 6-11/12")
+                    .set_body_bytes(b"world!".to_vec()),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"hello ").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
+        )
+        .unwrap();
+
+        let mut r = req(&url, dir.path());
+        r.checksum = Some(ChecksumSpec {
+            algo: ChecksumAlgo::Sha256,
+            hex: good,
+        });
+        let outcome = download(sink(), JobId::new(), &r, CancellationToken::new())
+            .await
+            .expect("resumed checksum must cover the whole file");
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), full);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_scheme() {
+        let dir = TempDir::new().unwrap();
+        let err = download(
+            sink(),
+            JobId::new(),
+            &req("ftp://example.com/file.bin", dir.path()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("ftp must be rejected");
+        assert!(matches!(err, GoopError::Queue(_)));
+        assert!(probe("ftp://example.com/file.bin").await.is_err());
     }
 
     #[tokio::test]
@@ -812,6 +1033,11 @@ mod tests {
         std::fs::write(
             dir.path().join(format!(".{hash}.goopdl.part")),
             vec![0u8; 20],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
         )
         .unwrap();
 
