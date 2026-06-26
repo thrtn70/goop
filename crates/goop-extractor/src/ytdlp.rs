@@ -212,6 +212,26 @@ impl<'a> YtDlp<'a> {
             });
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+        // When yt-dlp's only plan is a dumb direct download (its `generic`
+        // extractor over plain HTTP), prefer Goop's own downloader — it adds
+        // resume + checksum and reports real progress, which yt-dlp's generic
+        // path does not. A HEAD probe gives the filename/size for the Direct
+        // card; if it fails we fall through to the normal yt-dlp card. Real
+        // extractions, playlists, and streaming manifests are excluded, so
+        // they keep the normal card and yt-dlp's download path.
+        if is_generic_direct(&v) {
+            if let Ok(info) = crate::direct::probe(url).await {
+                return Ok(UrlProbe {
+                    url: url.to_string(),
+                    title: info.filename.clone(),
+                    uploader: None,
+                    duration_secs: None,
+                    thumbnail_url: None,
+                    formats: Vec::new(),
+                    direct: Some(info),
+                });
+            }
+        }
         Ok(UrlProbe {
             url: url.to_string(),
             title: v["title"].as_str().unwrap_or("").to_string(),
@@ -311,6 +331,11 @@ impl<'a> YtDlp<'a> {
     ) -> Result<ExtractResult, GoopError> {
         let mut cmd = Command::new(bin_path);
         cmd.arg("--newline") // each progress line on its own
+            // `--print` puts yt-dlp into implicit quiet mode, which otherwise
+            // suppresses every `[download] N%` line — leaving the queue bar
+            // stuck at 0% until the job jumps to done. `--progress` forces the
+            // progress output back on so `parse_progress` can drive the UI.
+            .arg("--progress")
             .arg("--no-warnings")
             .arg("--continue") // resume .part files on restart
             .arg("-o")
@@ -428,6 +453,21 @@ impl<'a> YtDlp<'a> {
             duration_ms: started.elapsed().as_millis() as u64,
         })
     }
+}
+
+/// True when a yt-dlp `-J` result is just a generic direct file download (no
+/// real extraction) over a plain HTTP(S) transfer — the case where Goop's own
+/// downloader (resume + checksum + live progress) is strictly better. The
+/// protocol allowlist is kept in lockstep with `direct::probe`'s http(s)-only
+/// scheme guard. Streaming manifests (m3u8/DASH protocols) and playlists are
+/// excluded so they stay on yt-dlp's path.
+fn is_generic_direct(v: &serde_json::Value) -> bool {
+    let generic = v["extractor"].as_str() == Some("generic")
+        || v["extractor_key"].as_str() == Some("Generic");
+    let direct = v["direct"].as_bool() == Some(true);
+    let plain_protocol = matches!(v["protocol"].as_str(), Some("http" | "https"));
+    let is_playlist = v["_type"].as_str() == Some("playlist") || v["entries"].is_array();
+    generic && direct && plain_protocol && !is_playlist
 }
 
 fn parse_format(v: &serde_json::Value) -> Option<FormatOption> {
@@ -557,6 +597,41 @@ mod tests {
     #[test]
     fn rejects_non_download_lines() {
         assert!(parse_progress(JobId::new(), "[info] Something").is_none());
+    }
+
+    #[test]
+    fn is_generic_direct_routes_plain_files_to_direct_downloader() {
+        // The real shape yt-dlp emits for a plain direct file (e.g. a .zip/.dat).
+        let plain = serde_json::json!({
+            "extractor": "generic", "extractor_key": "Generic",
+            "direct": true, "protocol": "https", "_type": "video"
+        });
+        assert!(is_generic_direct(&plain));
+    }
+
+    #[test]
+    fn is_generic_direct_excludes_real_extractions_manifests_and_playlists() {
+        // A real site extraction (YouTube etc.) — keep yt-dlp.
+        assert!(!is_generic_direct(&serde_json::json!({
+            "extractor": "youtube", "direct": false, "protocol": "https"
+        })));
+        // Generic HTML page with embedded media (not a direct file).
+        assert!(!is_generic_direct(&serde_json::json!({
+            "extractor": "generic", "direct": false, "protocol": "https"
+        })));
+        // Generic but a streaming manifest — must stay on yt-dlp.
+        assert!(!is_generic_direct(&serde_json::json!({
+            "extractor": "generic", "direct": true, "protocol": "m3u8_native"
+        })));
+        // FTP — direct::probe only accepts http(s), so never reroute it.
+        assert!(!is_generic_direct(&serde_json::json!({
+            "extractor": "generic", "direct": true, "protocol": "ftp"
+        })));
+        // A playlist — never reroute.
+        assert!(!is_generic_direct(&serde_json::json!({
+            "extractor": "generic", "direct": true, "protocol": "https",
+            "_type": "playlist"
+        })));
     }
 
     #[test]
