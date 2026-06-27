@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  ChecksumSpec,
   ConvertRequest,
   CropRect,
   ExtractRequest,
@@ -51,12 +50,11 @@ export type IpcConvertRequest = Omit<ConvertRequest, "compress_mode"> & {
   compress_mode: IpcCompressMode | null;
 };
 
-// `checksum` and `direct` are optional on the wire: the Rust `ExtractRequest`
-// defaults them (`#[serde(default)]`), so a normal extract can omit both. A
-// direct-file download sets `direct: true` and may carry a `checksum`.
-// `cookies_from_browser` is already carried (required) by the base `Omit<>`.
-export type IpcExtractRequest = Omit<ExtractRequest, "checksum" | "direct"> & {
-  checksum?: ChecksumSpec | null;
+// `direct` is optional on the wire: the Rust `ExtractRequest` defaults it
+// (`#[serde(default)]`), so a normal extract can omit it. A direct-file
+// download sets `direct: true`. `cookies_from_browser` is carried by the
+// base `Omit<>`.
+export type IpcExtractRequest = Omit<ExtractRequest, "direct"> & {
   direct?: boolean;
 };
 

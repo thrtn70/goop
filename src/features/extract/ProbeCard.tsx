@@ -1,30 +1,10 @@
 import { useState } from "react";
-import type {
-  ChecksumAlgo,
-  ChecksumSpec,
-  DirectFileInfo,
-  FormatOption,
-  UrlProbe,
-} from "@/types";
+import type { DirectFileInfo, FormatOption, UrlProbe } from "@/types";
 
 export interface StartOptions {
   format: FormatOption | null;
   audioOnly: boolean;
-  checksum: ChecksumSpec | null;
 }
-
-const CHECKSUM_ALGOS = ["sha256", "sha1", "md5"] as const;
-
-function isChecksumAlgo(v: string): v is ChecksumAlgo {
-  return (CHECKSUM_ALGOS as readonly string[]).includes(v);
-}
-
-// Expected hex-digest length per algorithm, used for client-side validation.
-const EXPECTED_HEX_LEN: Record<ChecksumAlgo, number> = {
-  sha256: 64,
-  sha1: 40,
-  md5: 32,
-};
 
 type Props = { probe: UrlProbe; onStart: (opts: StartOptions) => void };
 
@@ -81,7 +61,7 @@ function MediaCard({ probe, onStart }: Props) {
         <button
           type="button"
           className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart({ format: fmt, audioOnly, checksum: null })}
+          onClick={() => onStart({ format: fmt, audioOnly })}
         >
           Start
         </button>
@@ -91,26 +71,6 @@ function MediaCard({ probe, onStart }: Props) {
 }
 
 function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: StartOptions) => void }) {
-  const [showChecksum, setShowChecksum] = useState(false);
-  const [algo, setAlgo] = useState<ChecksumAlgo>("sha256");
-  const [hex, setHex] = useState("");
-  // Strip a common `0x` prefix and whitespace before validating/sending.
-  const trimmed = hex.trim().replace(/^0x/i, "");
-  // Validate the hash client-side so a malformed paste produces an inline
-  // hint instead of a confusing post-download "checksum mismatch".
-  const hexError: string | null =
-    showChecksum && trimmed
-      ? !/^[0-9a-fA-F]+$/.test(trimmed)
-        ? "Hash must be hex characters only (0–9, a–f)."
-        : trimmed.length !== EXPECTED_HEX_LEN[algo]
-          ? `Expected ${EXPECTED_HEX_LEN[algo]} hex chars for ${algo.toUpperCase()}, got ${trimmed.length}.`
-          : null
-      : null;
-  // Only attach a checksum when the panel is open, a hash was entered, and it
-  // is well-formed — so collapsing "Hide checksum" reliably skips verification.
-  const checksum: ChecksumSpec | null =
-    showChecksum && trimmed && !hexError ? { algo, hex: trimmed } : null;
-
   const meta = [
     "Direct download",
     info.content_type,
@@ -136,56 +96,11 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
         </div>
       </div>
 
-      <div className="mt-4">
-        <button
-          type="button"
-          aria-expanded={showChecksum}
-          aria-controls="direct-checksum-panel"
-          className="btn-press text-xs text-fg-muted transition duration-fast ease-out hover:text-fg-secondary"
-          onClick={() => setShowChecksum((v) => !v)}
-        >
-          {showChecksum ? "Hide checksum" : "Verify checksum (optional)"}
-        </button>
-        {showChecksum && (
-          <div id="direct-checksum-panel" className="mt-2 flex flex-wrap items-center gap-2">
-            <select
-              aria-label="Hash algorithm"
-              className="rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-              value={algo}
-              onChange={(e) => {
-                if (isChecksumAlgo(e.target.value)) setAlgo(e.target.value);
-              }}
-            >
-              <option value="sha256">SHA-256</option>
-              <option value="sha1">SHA-1</option>
-              <option value="md5">MD5</option>
-            </select>
-            <input
-              type="text"
-              aria-label="Expected hash (hex)"
-              aria-invalid={hexError != null}
-              aria-describedby={hexError ? "direct-checksum-error" : undefined}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="expected hash (hex)"
-              value={hex}
-              onChange={(e) => setHex(e.target.value)}
-              className="min-w-0 flex-1 rounded-md bg-surface-2 px-3 py-1.5 font-mono text-xs text-fg transition duration-fast ease-out placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"
-            />
-            {hexError && (
-              <p id="direct-checksum-error" className="w-full text-xs text-error">
-                {hexError}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
       <div className="mt-4 flex">
         <button
           type="button"
           className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart({ format: null, audioOnly: false, checksum })}
+          onClick={() => onStart({ format: null, audioOnly: false })}
         >
           Download
         </button>

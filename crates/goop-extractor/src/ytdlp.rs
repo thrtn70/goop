@@ -63,12 +63,6 @@ pub struct ExtractRequest {
     /// to keep a stale or tampered payload from injecting arbitrary args.
     #[serde(default)]
     pub output_template: Option<String>,
-    /// Optional integrity check for the direct-URL fallback download
-    /// (`crate::direct`). Ignored by the yt-dlp / gallery-dl paths. When
-    /// set, the streamed bytes are hashed and compared before the file is
-    /// finalized; a mismatch fails the job and discards the partial.
-    #[serde(default)]
-    pub checksum: Option<ChecksumSpec>,
     /// Hint, set by the probe step, that the URL is a plain file neither
     /// extractor handles. Lets `dispatch` skip the two doomed extractor
     /// spawns and go straight to the direct downloader. Defaults to
@@ -76,26 +70,6 @@ pub struct ExtractRequest {
     /// un-hinted case, so this is purely an optimisation.
     #[serde(default)]
     pub direct: bool,
-}
-
-/// Hash algorithm for an optional direct-download integrity check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../shared/types/")]
-#[serde(rename_all = "lowercase")]
-pub enum ChecksumAlgo {
-    Sha256,
-    Sha1,
-    Md5,
-}
-
-/// A user-provided expected hash for a direct download. `hex` is compared
-/// case-insensitively (whitespace trimmed) against the digest of the
-/// streamed bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "../../shared/types/")]
-pub struct ChecksumSpec {
-    pub algo: ChecksumAlgo,
-    pub hex: String,
 }
 
 /// Metadata for a plain file the extractors don't handle, surfaced by the
@@ -214,8 +188,8 @@ impl<'a> YtDlp<'a> {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
         // When yt-dlp's only plan is a dumb direct download (its `generic`
         // extractor over plain HTTP), prefer Goop's own downloader — it adds
-        // resume + checksum and reports real progress, which yt-dlp's generic
-        // path does not. A HEAD probe gives the filename/size for the Direct
+        // resume and reports real progress, which yt-dlp's generic path does
+        // not. A HEAD probe gives the filename/size for the Direct
         // card; if it fails we fall through to the normal yt-dlp card. Real
         // extractions, playlists, and streaming manifests are excluded, so
         // they keep the normal card and yt-dlp's download path.
@@ -457,7 +431,7 @@ impl<'a> YtDlp<'a> {
 
 /// True when a yt-dlp `-J` result is just a generic direct file download (no
 /// real extraction) over a plain HTTP(S) transfer — the case where Goop's own
-/// downloader (resume + checksum + live progress) is strictly better. The
+/// downloader (resume + live progress) is strictly better. The
 /// protocol allowlist is kept in lockstep with `direct::probe`'s http(s)-only
 /// scheme guard. Streaming manifests (m3u8/DASH protocols) and playlists are
 /// excluded so they stay on yt-dlp's path.
@@ -694,7 +668,6 @@ mod tests {
             audio_only: false,
             cookies_from_browser: None,
             output_template: None,
-            checksum: None,
             direct: false,
         };
         assert!(req_no_cookies.cookies_from_browser.is_none());

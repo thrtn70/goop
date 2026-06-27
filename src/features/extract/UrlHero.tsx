@@ -50,7 +50,7 @@ export default function UrlHero({ url }: { url?: string }) {
     setError(null);
   }
 
-  async function handleStart({ format, audioOnly, checksum }: StartOptions) {
+  async function handleStart({ format, audioOnly }: StartOptions) {
     if (!probe) return;
     try {
       await api.extract.fromUrl({
@@ -64,10 +64,8 @@ export default function UrlHero({ url }: { url?: string }) {
         cookies_from_browser: null,
         output_template: null,
         // Set for plain-file links the extractors don't handle: skip the
-        // doomed extractor spawns and stream the file directly, optionally
-        // verifying a user-provided checksum.
+        // doomed extractor spawns and stream the file directly.
         direct: probe.direct != null,
-        checksum,
       });
     } catch (e) {
       setError(formatError(e));

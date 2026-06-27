@@ -16,13 +16,11 @@
 //! automatic retry/backoff are intentionally out of scope here (roadmap
 //! item #4).
 //!
-//! Integrity: no checksum is verified by default (HTTPS to the origin plus
-//! the atomic-rename barrier mirror the posture of the sidecar updater). A
-//! caller may pass an optional [`ChecksumSpec`]; the streamed bytes are then
-//! hashed and compared before the file is finalized.
+//! Integrity barrier: HTTPS to the origin plus the atomic-rename of a fully
+//! written `.part` — the same posture as the sidecar updater.
 
 use crate::backend::{BackendOutcome, ResultKindTag};
-use crate::ytdlp::{ChecksumAlgo, DirectFileInfo, ExtractRequest};
+use crate::ytdlp::{DirectFileInfo, ExtractRequest};
 use futures_util::StreamExt;
 use goop_core::{EventSink, GoopError, JobId, ProgressEvent};
 use percent_encoding::percent_decode_str;
@@ -35,7 +33,7 @@ use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,9 +46,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Throttle progress emits so a fast download doesn't flood the IPC channel.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(300);
-/// Window for folding an existing partial into the checksum on resume, so a
-/// huge partial isn't slurped into memory all at once.
-const HASH_SEED_CHUNK: usize = 64 * 1024;
 
 fn build_client() -> Result<Client, GoopError> {
     Client::builder()
@@ -115,7 +110,7 @@ pub async fn probe(url: &str) -> Result<DirectFileInfo, GoopError> {
 }
 
 /// Stream `req.url` directly to `req.output_dir`, resuming a prior `.part`
-/// when possible and verifying an optional checksum before finalizing.
+/// when possible and atomically renaming it into place on success.
 pub async fn download(
     sink: Arc<dyn EventSink>,
     job_id: JobId,
@@ -219,26 +214,6 @@ pub async fn download(
     }
 
     let mut file = open_part(&part_path, append).await?;
-    let mut hasher = req.checksum.as_ref().map(|c| Hasher::new(c.algo));
-    if append {
-        if let Some(h) = hasher.as_mut() {
-            // Fold the already-downloaded bytes into the digest so the final
-            // hash covers the whole file, not just the resumed tail. Stream
-            // through a fixed window so resuming a huge partial never slurps
-            // the whole file into memory.
-            let mut seed = tokio::fs::File::open(&part_path)
-                .await
-                .map_err(GoopError::Io)?;
-            let mut buf = vec![0u8; HASH_SEED_CHUNK];
-            loop {
-                let n = seed.read(&mut buf).await.map_err(GoopError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-        }
-    }
 
     let mut downloaded = resume_from;
     let mut last_emit = Instant::now();
@@ -256,9 +231,6 @@ pub async fn download(
             chunk = stream.next() => match chunk {
                 Some(Ok(bytes)) => {
                     file.write_all(&bytes).await.map_err(GoopError::Io)?;
-                    if let Some(h) = hasher.as_mut() {
-                        h.update(&bytes);
-                    }
                     downloaded += bytes.len() as u64;
                     if last_emit.elapsed() >= PROGRESS_INTERVAL {
                         emit_progress(&sink, job_id, downloaded, total, start);
@@ -277,18 +249,6 @@ pub async fn download(
     file.flush().await.map_err(GoopError::Io)?;
     let _ = file.sync_all().await;
     drop(file);
-
-    if let (Some(spec), Some(h)) = (req.checksum.as_ref(), hasher) {
-        let got = h.finalize_hex();
-        let want = spec.hex.trim().to_ascii_lowercase();
-        if got != want {
-            let _ = tokio::fs::remove_file(&part_path).await;
-            let _ = tokio::fs::remove_file(&meta_path).await;
-            return Err(GoopError::Queue(format!(
-                "direct download: checksum mismatch (expected {want}, got {got})"
-            )));
-        }
-    }
 
     let dest = match unique_dest(&output_dir, &filename) {
         Ok(d) => d,
@@ -543,44 +503,9 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-// --- streaming checksum ----------------------------------------------------
-
-enum Hasher {
-    Sha256(sha2::Sha256),
-    Sha1(sha1::Sha1),
-    Md5(md5::Md5),
-}
-
-impl Hasher {
-    fn new(algo: ChecksumAlgo) -> Self {
-        match algo {
-            ChecksumAlgo::Sha256 => Hasher::Sha256(sha2::Sha256::new()),
-            ChecksumAlgo::Sha1 => Hasher::Sha1(sha1::Sha1::new()),
-            ChecksumAlgo::Md5 => Hasher::Md5(md5::Md5::new()),
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Hasher::Sha256(h) => h.update(data),
-            Hasher::Sha1(h) => h.update(data),
-            Hasher::Md5(h) => h.update(data),
-        }
-    }
-
-    fn finalize_hex(self) -> String {
-        match self {
-            Hasher::Sha256(h) => hex_lower(h.finalize().as_slice()),
-            Hasher::Sha1(h) => hex_lower(h.finalize().as_slice()),
-            Hasher::Md5(h) => hex_lower(h.finalize().as_slice()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ytdlp::ChecksumSpec;
     use goop_core::events::RecordingSink;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -595,7 +520,6 @@ mod tests {
             audio_only: false,
             cookies_from_browser: None,
             output_template: None,
-            checksum: None,
             direct: true,
         }
     }
@@ -955,47 +879,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_resume_with_checksum_covers_whole_file() {
-        let server = MockServer::start().await;
-        let url = format!("{}/h.bin", server.uri());
-        let full = b"hello world!".to_vec();
-        let good = {
-            let mut h = sha2::Sha256::new();
-            h.update(&full);
-            hex_lower(h.finalize().as_slice())
-        };
-        // Resume: server returns the tail for the validated partial.
-        Mock::given(method("GET"))
-            .and(path("/h.bin"))
-            .and(header("range", "bytes=6-"))
-            .respond_with(
-                ResponseTemplate::new(206)
-                    .insert_header("content-range", "bytes 6-11/12")
-                    .set_body_bytes(b"world!".to_vec()),
-            )
-            .mount(&server)
-            .await;
-        let dir = TempDir::new().unwrap();
-        let hash = url_hash(&url);
-        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"hello ").unwrap();
-        std::fs::write(
-            dir.path().join(format!(".{hash}.goopdl.meta")),
-            "\"etag-1\"",
-        )
-        .unwrap();
-
-        let mut r = req(&url, dir.path());
-        r.checksum = Some(ChecksumSpec {
-            algo: ChecksumAlgo::Sha256,
-            hex: good,
-        });
-        let outcome = download(sink(), JobId::new(), &r, CancellationToken::new())
-            .await
-            .expect("resumed checksum must cover the whole file");
-        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), full);
-    }
-
-    #[tokio::test]
     async fn rejects_non_http_scheme() {
         let dir = TempDir::new().unwrap();
         let err = download(
@@ -1050,49 +933,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"fresh body");
-    }
-
-    #[tokio::test]
-    async fn download_verifies_checksum_and_rejects_mismatch() {
-        let server = MockServer::start().await;
-        let body = b"verify me".to_vec();
-        // sha256("verify me")
-        let good = {
-            let mut h = sha2::Sha256::new();
-            h.update(&body);
-            hex_lower(h.finalize().as_slice())
-        };
-        Mock::given(method("GET"))
-            .and(path("/v"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
-            .mount(&server)
-            .await;
-        let url = format!("{}/v", server.uri());
-
-        // Match → success.
-        let dir = TempDir::new().unwrap();
-        let mut r = req(&url, dir.path());
-        r.checksum = Some(ChecksumSpec {
-            algo: ChecksumAlgo::Sha256,
-            hex: good.to_uppercase(), // case-insensitive
-        });
-        download(sink(), JobId::new(), &r, CancellationToken::new())
-            .await
-            .expect("matching checksum should pass");
-
-        // Mismatch → error, partial discarded.
-        let dir2 = TempDir::new().unwrap();
-        let mut bad = req(&url, dir2.path());
-        bad.checksum = Some(ChecksumSpec {
-            algo: ChecksumAlgo::Sha256,
-            hex: "00".repeat(32),
-        });
-        let err = download(sink(), JobId::new(), &bad, CancellationToken::new())
-            .await
-            .expect_err("mismatch must fail");
-        assert!(matches!(err, GoopError::Queue(_)));
-        let any_file = std::fs::read_dir(dir2.path()).unwrap().next().is_some();
-        assert!(!any_file, "mismatched download must leave no file behind");
     }
 
     #[tokio::test]
