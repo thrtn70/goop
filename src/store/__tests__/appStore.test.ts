@@ -213,3 +213,62 @@ describe("app store queue and settings operations", () => {
     expect(useAppStore.getState().toasts.length).toBe(before);
   });
 });
+
+describe("applyProgress retry-stage percent hold", () => {
+  it("holds the previous percent when a retrying stage arrives with percent 0", () => {
+    const id = "00000000-0000-7000-8000-0000000000aa" as JobId;
+    useAppStore.setState({ progressById: {} });
+    useAppStore.getState().applyProgress({
+      job_id: id,
+      percent: 42.5,
+      eta_secs: 10n,
+      speed_hr: "1.2MiB/s",
+      stage: "downloading",
+      encoder: null,
+    });
+    useAppStore.getState().applyProgress({
+      job_id: id,
+      percent: 0,
+      eta_secs: 8n,
+      speed_hr: null,
+      stage: "retrying (attempt 2/5)",
+      encoder: null,
+    });
+    const entry = useAppStore.getState().progressById[jobIdKey(id)];
+    expect(entry.percent).toBe(42.5);
+    expect(entry.stage).toBe("retrying (attempt 2/5)");
+    expect(entry.eta_secs).toBe(8);
+  });
+
+  it("resumes normal percent updates once downloading restarts", () => {
+    const id = "00000000-0000-7000-8000-0000000000ab" as JobId;
+    useAppStore.setState({ progressById: {} });
+    useAppStore.getState().applyProgress({
+      job_id: id,
+      percent: 42.5,
+      eta_secs: null,
+      speed_hr: null,
+      stage: "downloading",
+      encoder: null,
+    });
+    useAppStore.getState().applyProgress({
+      job_id: id,
+      percent: 0,
+      eta_secs: 8n,
+      speed_hr: null,
+      stage: "retrying (attempt 2/5)",
+      encoder: null,
+    });
+    useAppStore.getState().applyProgress({
+      job_id: id,
+      percent: 43.1,
+      eta_secs: null,
+      speed_hr: null,
+      stage: "downloading",
+      encoder: null,
+    });
+    const entry = useAppStore.getState().progressById[jobIdKey(id)];
+    expect(entry.percent).toBe(43.1);
+    expect(entry.stage).toBe("downloading");
+  });
+});

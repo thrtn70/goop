@@ -9,10 +9,12 @@ import { useSpringValue } from "@/hooks/useSpringValue";
 type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
 
 /**
- * Phase G: image targets are NOT pausable (ImageMagick runs in-process via
- * the `image` crate — no child PID to signal). yt-dlp downloads are also
- * not pausable (long pauses can drop the connection). Mirrors
- * `TargetFormat::is_image` in `crates/goop-core/src/convert.rs`.
+ * Pausability by kind. Extract (download) jobs pause via a graceful stop
+ * that keeps partial files on disk, so all three download paths qualify.
+ * Video/audio conversions and PDF compress pause via OS suspension of the
+ * registered child process. Image targets run in-process (no child PID,
+ * no partial-file protocol), so they stay unpausable. The image-target
+ * set mirrors `TargetFormat::is_image` in `crates/goop-core/src/convert.rs`.
  */
 const IMAGE_TARGETS: ReadonlySet<TargetFormat> = new Set<TargetFormat>([
   "png",
@@ -30,6 +32,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 function isPausable(job: Job): boolean {
   if (!isPlainObject(job.payload)) return false;
+  if (job.kind === "extract") return true;
   if (job.kind === "pdf") {
     return job.payload.kind === "compress";
   }
@@ -38,6 +41,21 @@ function isPausable(job: Job): boolean {
     return typeof target === "string" && !IMAGE_TARGETS.has(target as TargetFormat);
   }
   return false;
+}
+
+/**
+ * Failed download rows get a Retry button: download failures are usually
+ * transient (network) and the partial files on disk turn the re-run into
+ * a resume. Other kinds stay retry-less in the UI — their failures are
+ * typically deterministic — though the backend command is kind-generic.
+ */
+function isRetryable(job: Job): boolean {
+  return job.kind === "extract" && stateName(job.state) === "error";
+}
+
+function errorText(state: JobState): string | null {
+  if (typeof state === "string") return null;
+  return "error" in state && state.error.message ? state.error.message : null;
 }
 
 /**
@@ -121,7 +139,10 @@ function isPidRaceError(err: unknown): boolean {
 /**
  * Pause IPC can race with the worker's PID registration in the ~1ms window
  * between scheduler->Running and `register_pid`. Retry briefly on the race
- * error only — surface every other error immediately.
+ * error only — surface every other error immediately. Download jobs have
+ * no PID race (their signals exist before the Running event), so for them
+ * `job_not_running` just means the job finished or was cancelled while the
+ * click was in flight; the brief retry is harmless there.
  */
 async function pauseWithRetry(jobId: Job["id"]): Promise<void> {
   const delays = [0, 100, 200];
@@ -158,14 +179,39 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
   const outputPath = job.result?.output_path ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // Download pauses are asynchronous: the IPC returns once the pause is
+  // initiated and the row only flips when the worker yields (usually
+  // <1s, up to a slow connect's timeout). Disable the button and show
+  // "pausing…" in between so a second click has nothing to do. Cleared
+  // when the row leaves `running` (the event landed or the job ended)
+  // or the IPC fails.
+  const [pausePending, setPausePending] = useState(false);
+  useEffect(() => {
+    if (name !== "running") setPausePending(false);
+  }, [name]);
 
   async function handlePauseClick(): Promise<void> {
+    if (pausePending) return;
+    setPausePending(true);
     try {
       await pauseWithRetry(job.id);
     } catch (err) {
+      setPausePending(false);
       enqueueToast({
         variant: "error",
         title: "Couldn't pause",
+        detail: formatError(err),
+      });
+    }
+  }
+
+  async function handleRetryClick(): Promise<void> {
+    try {
+      await api.queue.retry(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't retry",
         detail: formatError(err),
       });
     }
@@ -279,11 +325,12 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             {isPausable(job) && (
               <button
                 type="button"
+                disabled={pausePending}
                 onClick={() => void handlePauseClick()}
                 aria-label={`Pause ${shortLabel(job)}`}
-                className="btn-press rounded-md px-2 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:bg-surface-3 hover:text-fg"
+                className="btn-press rounded-md px-2 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:bg-surface-3 hover:text-fg disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent"
               >
-                pause
+                {pausePending ? "pausing…" : "pause"}
               </button>
             )}
             <button
@@ -326,7 +373,25 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             reveal
           </button>
         )}
+        {isRetryable(job) && (
+          <button
+            type="button"
+            onClick={() => void handleRetryClick()}
+            aria-label={`Retry ${shortLabel(job)}`}
+            className="btn-press shrink-0 rounded-md px-2 py-1 text-xs text-accent transition duration-fast ease-out hover:bg-accent-subtle hover:text-accent-hover"
+          >
+            retry
+          </button>
+        )}
       </div>
+      {name === "error" && errorText(job.state) && (
+        <div
+          className="mt-1 truncate text-xs text-error/80"
+          title={errorText(job.state) ?? undefined}
+        >
+          {errorText(job.state)}
+        </div>
+      )}
       {menuOpen && name === "queued" && (
         <div
           ref={menuRef}
@@ -396,15 +461,19 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           <div className="mt-1 flex justify-between tabular-nums text-xs text-fg-muted">
             {/* gallery-dl jobs emit stage like "downloaded 12 file(s)"
              *  with percent always 0; surface that count instead of a
-             *  meaningless 0.0% reading. yt-dlp jobs keep the original
-             *  percent + speed + ETA layout. The prefix-based check is
-             *  intentional: the Rust side controls both ends of this
-             *  contract, and adding a structured "is_indeterminate"
-             *  flag for one consumer felt heavier than the prefix.
-             *  `progress?.` guards undefined slots (no event for the
-             *  job yet); `.stage` is non-nullable on the wire so no
-             *  inner optional chain is needed. */}
-            {progress?.stage.startsWith("downloaded ") ? (
+             *  meaningless 0.0% reading. Auto-retry backoff emits stage
+             *  like "retrying (attempt 2/5)" — shown the same way, with
+             *  the bar holding its last percent (the store pins it).
+             *  yt-dlp jobs keep the original percent + speed + ETA
+             *  layout. The prefix-based check is intentional: the Rust
+             *  side controls both ends of this contract, and adding a
+             *  structured "is_indeterminate" flag for one consumer felt
+             *  heavier than the prefix. `progress?.` guards undefined
+             *  slots (no event for the job yet); `.stage` is
+             *  non-nullable on the wire so no inner optional chain is
+             *  needed. */}
+            {progress?.stage.startsWith("downloaded ") ||
+            progress?.stage.startsWith("retrying") ? (
               <span>{progress.stage}</span>
             ) : (
               <>

@@ -85,6 +85,13 @@ export function useToastTriggers(): void {
         const currentTerm = terminalName(job.state);
         const prevTerm = prev.get(key) ?? null;
 
+        // A retried job leaves its terminal state (error -> queued).
+        // Clear the memo so a second failure toasts again; without this,
+        // error -> queued -> error would be silently swallowed.
+        if (!currentTerm && prevTerm) {
+          prev.delete(key);
+        }
+
         if (currentTerm && currentTerm !== prevTerm) {
           prev.set(key, currentTerm);
 

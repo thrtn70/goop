@@ -31,8 +31,10 @@ function clampWidth(w: number): number {
   return Math.round(w);
 }
 
-/** Active = running or paused. Paused is in-flight (semaphore slot held)
- *  and the user can resume from this group. */
+/** Active = running or paused. Paused rows stay in this group so the
+ *  user can resume them; whether the job still holds its concurrency
+ *  slot while paused depends on the kind (suspended children do,
+ *  gracefully-stopped downloads don't). */
 function isActive(s: JobState): boolean {
   return typeof s === "string" && (s === "running" || s === "paused");
 }

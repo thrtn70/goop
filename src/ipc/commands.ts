@@ -115,6 +115,7 @@ export const api = {
     cancelMany: (jobIds: JobId[]) => invoke<number>("queue_cancel_many", { jobIds }),
     pause: (jobId: JobId) => invoke<void>("queue_pause", { jobId }),
     resume: (jobId: JobId) => invoke<void>("queue_resume", { jobId }),
+    retry: (jobId: JobId) => invoke<void>("queue_retry", { jobId }),
     reorder: (orderedIds: JobId[]) => invoke<number>("queue_reorder", { orderedIds }),
     moveToTop: (jobId: JobId) => invoke<number>("queue_move_to_top", { jobId }),
     clearCompleted: () => invoke<number>("queue_clear_completed"),

@@ -310,7 +310,13 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       progressById: {
         ...s.progressById,
         [key]: {
-          percent: e.percent,
+          // Retry-status events ("retrying (attempt N/M)") carry percent 0
+          // — the retry layer doesn't know the transfer offset. Hold the
+          // last rendered percent so the bar doesn't collapse during the
+          // backoff wait; the next real downloading event overwrites it.
+          percent: e.stage.startsWith("retrying")
+            ? (s.progressById[key]?.percent ?? e.percent)
+            : e.percent,
           eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
           speed_hr: e.speed_hr ?? null,
           encoder: e.encoder ?? null,

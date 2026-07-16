@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invokeMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 import {
   imageAppIcon,
   imageCrop,
@@ -21,6 +24,7 @@ import {
   pdfSetMetadata,
   pdfSplit,
 } from "./commands";
+import { api } from "./commands";
 
 // Lock the discriminator + field names emitted by each PdfOperation
 // builder. The Rust side uses #[serde(tag = "kind", rename_all =
@@ -295,5 +299,29 @@ describe("ImageOperation builders emit the correct discriminator", () => {
       output_dir: "/icons",
       platforms: ["macos", "windows", "web"],
     });
+  });
+});
+
+// Wire-name canaries for the queue job-control commands: the invoke name
+// and argument key must match the #[tauri::command] fn name and parameter
+// (camelCased) on the Rust side, or the call fails only at runtime.
+describe("queue job-control wire canaries", () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+  });
+
+  it("api.queue.retry invokes queue_retry with { jobId }", async () => {
+    await api.queue.retry("abc");
+    expect(invokeMock).toHaveBeenCalledWith("queue_retry", { jobId: "abc" });
+  });
+
+  it("api.queue.pause invokes queue_pause with { jobId }", async () => {
+    await api.queue.pause("abc");
+    expect(invokeMock).toHaveBeenCalledWith("queue_pause", { jobId: "abc" });
+  });
+
+  it("api.queue.resume invokes queue_resume with { jobId }", async () => {
+    await api.queue.resume("abc");
+    expect(invokeMock).toHaveBeenCalledWith("queue_resume", { jobId: "abc" });
   });
 });
