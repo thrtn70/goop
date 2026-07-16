@@ -31,11 +31,34 @@ pub fn queue_cancel(job_id: JobId, state: State<'_, AppState>) -> Result<(), Ipc
     let paused_extract_req = paused_extract_request(&state, job_id);
     state.scheduler.cancel(job_id).map_err(map_scheduler_err)?;
     if let Some(req) = paused_extract_req {
+        spawn_paused_partial_cleanup(&state, job_id, req);
+    }
+    Ok(())
+}
+
+/// Run `cleanup_partials_for` off-thread — but only after re-checking
+/// that the row actually finalized as Cancelled. The pre-cancel "was it
+/// a paused extract job" read can go stale: if a concurrent resume won
+/// the race, the job is queued/running again and its worker owns the
+/// partials (unlinking them here could rip a fresh in-flight `.part`
+/// out from under the resumed download). Cancelled is terminal, so a
+/// row that passes this check can't come back to life afterwards.
+fn spawn_paused_partial_cleanup(
+    state: &State<'_, AppState>,
+    job_id: JobId,
+    req: goop_extractor::ytdlp::ExtractRequest,
+) {
+    let finalized = state
+        .store
+        .get_by_id(job_id)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.state == JobState::Cancelled);
+    if finalized {
         tauri::async_runtime::spawn_blocking(move || {
             goop_extractor::cleanup_partials_for(&req);
         });
     }
-    Ok(())
 }
 
 /// The parsed `ExtractRequest` of `job_id` IF it is a paused extract job,
@@ -96,9 +119,7 @@ pub fn queue_cancel_many(
             Ok(()) => {
                 cancelled += 1;
                 if let Some(req) = paused_extract_req {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        goop_extractor::cleanup_partials_for(&req);
-                    });
+                    spawn_paused_partial_cleanup(&state, *id, req);
                 }
             }
             // Best-effort batch: keep going, report how many took.

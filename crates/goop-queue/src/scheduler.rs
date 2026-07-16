@@ -206,11 +206,24 @@ impl Scheduler {
             // cancel issued against a visibly-running row always finds them.
             let sig = JobSignals::new();
             self.signals.insert(job.id, (kind.clone(), sig.clone()));
-            if let Err(e) = self
-                .store
-                .update_state(job.id, &JobState::Running, None, now_ms())
-            {
-                tracing::warn!(?job.id, error = %e, "failed to persist Running state; in-memory event still emitted");
+            // Atomic, state-guarded claim: only a still-queued row may
+            // start running. A cancel that landed between the poll above
+            // and this claim already finalized the row via cancel_inactive
+            // — the claim misses and the job must not run.
+            match self.store.claim_queued(job.id, now_ms()) {
+                Ok(0) => {
+                    self.signals.remove(&job.id);
+                    drop(permit);
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(?job.id, error = %e, "failed to claim queued job; backing off");
+                    self.signals.remove(&job.id);
+                    drop(permit);
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
             }
             self.sink.emit_queue(QueueEvent {
                 job_id: job.id,
@@ -310,8 +323,15 @@ impl Scheduler {
         // wrap (~32k+ spawns), so reuse-then-pause is vanishingly rare.
         if let Some(pid) = self.pids.lookup(id) {
             process_control::pause(pid)?;
-            self.store
-                .update_state(id, &JobState::Paused, None, now_ms())?;
+            if let Err(e) = self
+                .store
+                .update_state(id, &JobState::Paused, None, now_ms())
+            {
+                // Roll the child back so OS state and DB/UI state don't
+                // diverge on a store failure.
+                let _ = process_control::resume(pid);
+                return Err(e.into());
+            }
             self.sink.emit_queue(QueueEvent {
                 job_id: id,
                 state: JobState::Paused,
@@ -349,8 +369,15 @@ impl Scheduler {
     pub fn resume(&self, id: JobId) -> Result<(), SchedulerError> {
         if let Some(pid) = self.pids.lookup(id) {
             process_control::resume(pid)?;
-            self.store
-                .update_state(id, &JobState::Running, None, now_ms())?;
+            if let Err(e) = self
+                .store
+                .update_state(id, &JobState::Running, None, now_ms())
+            {
+                // Re-suspend so OS state and DB/UI state don't diverge on
+                // a store failure.
+                let _ = process_control::pause(pid);
+                return Err(e.into());
+            }
             self.sink.emit_queue(QueueEvent {
                 job_id: id,
                 state: JobState::Running,

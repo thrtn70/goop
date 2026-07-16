@@ -356,6 +356,10 @@ impl<'a> YtDlp<'a> {
 
         loop {
             tokio::select! {
+                // biased: a fired stop signal must win over further
+                // subprocess output, deterministically — same discipline
+                // as the direct downloader's loop.
+                biased;
                 int = signals.interrupted() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;

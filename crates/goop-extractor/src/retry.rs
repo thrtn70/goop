@@ -41,10 +41,12 @@ pub(crate) const DEFAULT_RETRY_POLICY: RetryPolicy = RetryPolicy {
 
 impl RetryPolicy {
     /// Doubling backoff, capped: with the defaults, the delay before
-    /// attempt N+1 is 2s, 4s, 8s, 16s for N = 1..=4. The shift width is
-    /// clamped so a pathological attempt count can't overflow.
+    /// attempt N+1 is 2s, 4s, 8s, 16s for N = 1..=4. Attempts are
+    /// 1-based; the saturating subtraction and clamped shift keep a
+    /// misuse (attempt 0, huge attempt counts) from underflowing or
+    /// overflowing.
     fn delay_for(&self, attempt: u32) -> Duration {
-        let factor = 1u32 << (attempt - 1).min(16);
+        let factor = 1u32 << attempt.saturating_sub(1).min(16);
         self.base_delay.saturating_mul(factor).min(self.max_delay)
     }
 }

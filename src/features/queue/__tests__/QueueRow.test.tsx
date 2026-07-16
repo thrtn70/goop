@@ -151,6 +151,32 @@ describe("QueueRow pause/resume controls", () => {
     rerender(<QueueRow job={{ ...job, state: "paused" }} index={0} />);
     expect(screen.getByRole("button", { name: /^Resume/ })).toBeTruthy();
     expect(screen.queryByText("pausing…")).toBeNull();
+    // Resume path brings the row back to running: the pause button must
+    // be usable again, not stuck disabled from the previous click.
+    rerender(<QueueRow job={{ ...job, state: "running" }} index={0} />);
+    const btn = screen.getByRole("button", { name: /^Pause/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(screen.getByText("pause")).toBeTruthy();
+  });
+
+  it("stays quiet when pause fails because the job already left running", async () => {
+    const user = userEvent.setup();
+    queueMocks.pause.mockRejectedValue({ code: "queue", message: "job_not_running" });
+    const job = makeJob({
+      state: "running",
+      kind: "extract",
+      payload: { url: "https://example.com/video" },
+    });
+    // Store shows the job already finished: pausing is moot, not an error.
+    useAppStore.setState({ jobs: [{ ...job, state: "done" }] });
+    render(<QueueRow job={job} index={0} />);
+    await user.click(screen.getByRole("button", { name: /^Pause/ }));
+    await waitFor(() => {
+      expect(queueMocks.pause).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      useAppStore.getState().toasts.some((t) => t.title === "Couldn't pause"),
+    ).toBe(false);
   });
 
   it("re-enables the pause button when the pause IPC fails", async () => {
@@ -180,6 +206,8 @@ describe("QueueRow pause/resume controls", () => {
       kind: "extract",
       payload: { url: "https://example.com/video" },
     });
+    // Store still says running: the failure is real, not a moot action.
+    useAppStore.setState({ jobs: [job] });
     render(<QueueRow job={job} index={0} />);
     await user.click(screen.getByRole("button", { name: /^Pause/ }));
     await waitFor(() => {
@@ -459,6 +487,31 @@ describe("QueueRow auto-retry stage rendering", () => {
     render(<QueueRow job={job} index={0} />);
     expect(screen.getByText("retrying (attempt 2/5)")).toBeTruthy();
     expect(screen.queryByText("37.2%")).toBeNull();
+  });
+
+  it("drops the retrying stage once the job is paused", () => {
+    // Pausing during backoff aborts the retry loop backend-side; the row
+    // must not keep claiming a retry is pending.
+    const job = makeJob({
+      kind: "extract",
+      state: "paused",
+      payload: { url: "https://example.com/video" },
+    });
+    useAppStore.setState({
+      progressById: {
+        [job.id]: {
+          percent: 37.2,
+          eta_secs: 8,
+          speed_hr: null,
+          encoder: null,
+          stage: "retrying (attempt 2/5)",
+        },
+      },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.queryByText("retrying (attempt 2/5)")).toBeNull();
+    expect(screen.getByText("37.2%")).toBeTruthy();
+    expect(screen.getByText("ETA —")).toBeTruthy();
   });
 
   it("keeps the progress bar at the held percent during backoff", () => {

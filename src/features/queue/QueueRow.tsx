@@ -177,6 +177,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
     name === "paused" ? null : progress?.eta_secs != null ? progress.eta_secs : null;
   const settledEta = useSpringValue(targetEta);
   const outputPath = job.result?.output_path ?? null;
+  const failureText = name === "error" ? errorText(job.state) : null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Download pauses are asynchronous: the IPC returns once the pause is
@@ -197,6 +198,17 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
       await pauseWithRetry(job.id);
     } catch (err) {
       setPausePending(false);
+      // job_not_running after the retries usually means the job left the
+      // running state while the click was in flight (a short download
+      // finished, or a cancel landed first). The row already shows the
+      // truth; an error toast for a moot action would be noise. Only
+      // stay quiet when the fresh store state confirms the job moved on.
+      if (isPidRaceError(err)) {
+        const fresh = useAppStore
+          .getState()
+          .jobs.find((j) => jobIdKey(j.id) === jobIdKey(job.id));
+        if (!fresh || stateName(fresh.state) !== "running") return;
+      }
       enqueueToast({
         variant: "error",
         title: "Couldn't pause",
@@ -384,12 +396,9 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         )}
       </div>
-      {name === "error" && errorText(job.state) && (
-        <div
-          className="mt-1 truncate text-xs text-error/80"
-          title={errorText(job.state) ?? undefined}
-        >
-          {errorText(job.state)}
+      {failureText && (
+        <div className="mt-1 truncate text-xs text-error/80" title={failureText}>
+          {failureText}
         </div>
       )}
       {menuOpen && name === "queued" && (
@@ -473,7 +482,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
              *  non-nullable on the wire so no inner optional chain is
              *  needed. */}
             {progress?.stage.startsWith("downloaded ") ||
-            progress?.stage.startsWith("retrying") ? (
+            (name === "running" && progress?.stage.startsWith("retrying")) ? (
               <span>{progress.stage}</span>
             ) : (
               <>

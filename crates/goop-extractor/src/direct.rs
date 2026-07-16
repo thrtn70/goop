@@ -309,6 +309,12 @@ pub(crate) fn remove_partials(output_dir: &Path, url: &str) {
 /// transient; TLS trust failures are not — a bad certificate doesn't heal
 /// on retry — and everything else (builder errors, redirect loops) stays
 /// a plain queue error.
+///
+/// Deliberate coarseness: DNS failures ride the connect-error bucket, so
+/// a typo'd hostname burns the retry budget (~30s) before failing. The
+/// side-effect-free retries make that an accepted cost — telling NXDOMAIN
+/// apart from a transient resolver failure through reqwest's opaque error
+/// chain isn't worth the string-matching fragility.
 fn classify_reqwest(context: &str, e: &reqwest::Error) -> GoopError {
     let msg = format!("direct download: {context}: {e}");
     let tls_failure = format!("{e:?}")

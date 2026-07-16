@@ -111,10 +111,17 @@ export function useToastTriggers(): void {
               lastOutputPath: null,
               kind: null,
             };
-            batch.ids.add(key);
-            if (currentTerm === "done") batch.done += 1;
-            else if (currentTerm === "error") batch.failed += 1;
-            else batch.cancelled += 1;
+            // Count each job once per batch lifetime. A retried job
+            // reaches a terminal state twice (error -> queued -> done);
+            // recounting it would put it in two buckets. Batched kinds
+            // don't expose Retry in the UI today, but the backend
+            // command is kind-generic, so guard the invariant here.
+            if (!batch.ids.has(key)) {
+              batch.ids.add(key);
+              if (currentTerm === "done") batch.done += 1;
+              else if (currentTerm === "error") batch.failed += 1;
+              else batch.cancelled += 1;
+            }
             if (outputPath) batch.lastOutputPath = outputPath;
             batch.kind = job.kind;
             batchesRef.current.set(batchId, batch);

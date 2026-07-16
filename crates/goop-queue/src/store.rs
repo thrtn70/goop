@@ -227,6 +227,24 @@ impl QueueStore {
         Ok(n)
     }
 
+    /// Atomically claim a queued job for execution: `queued` → `running`
+    /// with `started_at` set, in one state-guarded UPDATE. Returns 0 when
+    /// the row is no longer `queued` — a cancel (or anything else) that
+    /// landed between the scheduler's poll and this claim finalized the
+    /// row, and the job must not run. This is the claim-side counterpart
+    /// of `cancel_inactive`'s guard.
+    pub fn claim_queued(&self, id: JobId, now_ms: i64) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?2, started_at = ?3
+                 WHERE id = ?1 AND state = 'queued'",
+                params![id.0.to_string(), state_to_str(&JobState::Running), now_ms],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
     /// Finalize a job that has no live worker to report for it: queued
     /// and paused rows flip straight to `cancelled` with `finished_at`
     /// set, so they land in History like any other cancel. Running rows
@@ -777,6 +795,31 @@ mod tests {
         assert!(after.finished_at.is_none());
         // A previously cleared-from-queue row must reappear in the queue tab.
         assert!(s.list().unwrap().iter().any(|j| j.id == job.id));
+    }
+
+    #[test]
+    fn claim_queued_transitions_to_running_and_sets_started_at() {
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        assert_eq!(s.claim_queued(job.id, 4242).unwrap(), 1);
+        let after = s.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(after.state, JobState::Running);
+        assert_eq!(after.started_at, Some(4242));
+    }
+
+    #[test]
+    fn claim_queued_misses_rows_that_left_the_queued_state() {
+        // The cancel-vs-claim race: a job cancelled between the scheduler's
+        // poll and its claim must not be resurrected to running.
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        assert_eq!(s.cancel_inactive(job.id).unwrap(), 1);
+        assert_eq!(s.claim_queued(job.id, 4242).unwrap(), 0);
+        let after = s.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(after.state, JobState::Cancelled, "cancel must stick");
+        assert!(after.finished_at.is_some());
     }
 
     #[test]

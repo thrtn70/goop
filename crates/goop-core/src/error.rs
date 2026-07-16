@@ -94,7 +94,12 @@ impl From<GoopError> for IpcError {
             // consumed before any IPC boundary. If it ever leaks, surface
             // it as a queue-domain message rather than "unknown".
             GoopError::Paused => Self::Queue("paused".into()),
-            other => Self::Unknown(other.to_string()),
+            // Deliberately exhaustive from here — no wildcard, so adding
+            // a GoopError variant forces an explicit decision about its
+            // IPC shape instead of silently landing in Unknown.
+            e @ GoopError::Network(_) => Self::Unknown(e.to_string()),
+            e @ GoopError::Io(_) => Self::Unknown(e.to_string()),
+            e @ GoopError::Serde(_) => Self::Unknown(e.to_string()),
         }
     }
 }
