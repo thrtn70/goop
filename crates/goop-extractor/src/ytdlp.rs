@@ -1,4 +1,7 @@
-use goop_core::{is_cookie_db_error, EventSink, GoopError, JobId, ProgressEvent, SidecarEvent};
+use goop_core::{
+    is_cookie_db_error, EventSink, GoopError, Interrupt, JobId, JobSignals, ProgressEvent,
+    SidecarEvent,
+};
 use goop_sidecar::BinaryResolver;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -7,7 +10,6 @@ use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 /// yt-dlp browser names this crate is willing to forward to
@@ -224,7 +226,7 @@ impl<'a> YtDlp<'a> {
         &self,
         job_id: JobId,
         req: &ExtractRequest,
-        cancel: CancellationToken,
+        signals: JobSignals,
     ) -> Result<ExtractResult, GoopError> {
         let bin = self.resolver.resolve("yt-dlp")?;
         let output_dir = canonical_output_dir(&req.output_dir)?;
@@ -249,7 +251,7 @@ impl<'a> YtDlp<'a> {
                 &bin.path,
                 &output_dir,
                 &out_template,
-                cancel.clone(),
+                signals.clone(),
                 /* with_cookies: */ true,
             )
             .await;
@@ -258,12 +260,12 @@ impl<'a> YtDlp<'a> {
         // without the flag and surface a one-shot warning. Public videos
         // and most yt-dlp-supported sites work without cookies, so the
         // fallback turns "extract fails" into "extract works, with a
-        // heads-up". Cancellation short-circuits the retry.
+        // heads-up". A fired cancel or pause short-circuits the retry.
         match first {
             Err(GoopError::SubprocessFailed { ref stderr, .. })
                 if is_cookie_db_error(stderr)
                     && req.cookies_from_browser.is_some()
-                    && !cancel.is_cancelled() =>
+                    && signals.check().is_none() =>
             {
                 let browser = req.cookies_from_browser.as_deref().unwrap_or("the browser");
                 self.sink.emit_sidecar(SidecarEvent::Warning {
@@ -279,7 +281,7 @@ impl<'a> YtDlp<'a> {
                     &bin.path,
                     &output_dir,
                     &out_template,
-                    cancel,
+                    signals,
                     /* with_cookies: */ false,
                 )
                 .await
@@ -300,7 +302,7 @@ impl<'a> YtDlp<'a> {
         bin_path: &Path,
         output_dir: &Path,
         out_template: &Path,
-        cancel: CancellationToken,
+        signals: JobSignals,
         with_cookies: bool,
     ) -> Result<ExtractResult, GoopError> {
         let mut cmd = Command::new(bin_path);
@@ -354,11 +356,10 @@ impl<'a> YtDlp<'a> {
 
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
+                int = signals.interrupted() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    cleanup_partials(output_dir, last_progress_line.as_deref());
-                    return Err(GoopError::Cancelled);
+                    return Err(finish_interrupt(int, output_dir, last_progress_line.as_deref()));
                 }
                 line = out_reader.next_line() => {
                     match line? {
@@ -512,11 +513,32 @@ fn canonical_output_dir(raw: &str) -> Result<PathBuf, GoopError> {
     Ok(dir)
 }
 
+/// Cancel: the user is done — best-effort removal of yt-dlp's partials.
+/// Pause: KEEP them. `--continue` (always passed) resumes the `.part` via
+/// a Range request for plain formats, and the `.ytdl` fragment-state file
+/// lets fragmented (dash/hls-native) downloads pick up at the last
+/// completed fragment. Formats yt-dlp hands to its internal ffmpeg
+/// downloader can't resume and restart from scratch — cosmetic, the
+/// resumed run's own progress lines drive the bar.
+fn finish_interrupt(
+    int: Interrupt,
+    output_dir: &Path,
+    last_progress_line: Option<&str>,
+) -> GoopError {
+    match int {
+        Interrupt::Cancel => {
+            cleanup_partials(output_dir, last_progress_line);
+            GoopError::Cancelled
+        }
+        Interrupt::Pause => GoopError::Paused,
+    }
+}
+
 /// Best-effort removal of yt-dlp's `.part` / `.ytdl` partial files on cancel.
 /// yt-dlp doesn't emit the target filename until the move step, so we scan
 /// the output directory for recently-modified `.part` / `.ytdl` files. This
 /// is a best-effort cleanup — failures are silent by design (logged at debug).
-fn cleanup_partials(output_dir: &Path, _last_progress_line: Option<&str>) {
+pub(crate) fn cleanup_partials(output_dir: &Path, _last_progress_line: Option<&str>) {
     let Ok(entries) = std::fs::read_dir(output_dir) else {
         return;
     };
@@ -688,5 +710,26 @@ mod tests {
                 assert_ne!(a, b, "duplicate template at indices {i}/{j}");
             }
         }
+    }
+
+    #[test]
+    fn finish_interrupt_pause_keeps_partials_cancel_cleans_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("video.mp4.part");
+        let ytdl = dir.path().join("video.mp4.ytdl");
+        std::fs::write(&part, b"x").unwrap();
+        std::fs::write(&ytdl, b"y").unwrap();
+
+        let err = finish_interrupt(Interrupt::Cancel, dir.path(), None);
+        assert!(matches!(err, GoopError::Cancelled));
+        assert!(!part.exists(), "cancel removes the .part");
+        assert!(!ytdl.exists(), "cancel removes the .ytdl fragment state");
+
+        std::fs::write(&part, b"x").unwrap();
+        std::fs::write(&ytdl, b"y").unwrap();
+        let err = finish_interrupt(Interrupt::Pause, dir.path(), None);
+        assert!(matches!(err, GoopError::Paused));
+        assert!(part.exists(), "pause keeps the .part for --continue");
+        assert!(ytdl.exists(), "pause keeps the fragment state");
     }
 }

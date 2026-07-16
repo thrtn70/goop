@@ -3,26 +3,31 @@
 //! This is the final fallback in [`crate::backend::dispatch`]: when neither
 //! yt-dlp nor gallery-dl recognises a URL, Goop streams the file itself so
 //! "anything with a link" still works. It runs in-process (no child
-//! process), reusing the Extract job lane — so it is cancel-only, like the
-//! other in-process workers, and emits the same [`ProgressEvent`]s the queue
-//! sidebar already renders.
+//! process), reusing the Extract job lane, and emits the same
+//! [`ProgressEvent`]s the queue sidebar already renders.
 //!
 //! Resume foundation: the download streams into a sibling `.part` file and
 //! is atomically renamed into place on success, so a partial download never
-//! shadows a good file. A retry resumes via an HTTP `Range` request,
+//! shadows a good file. A re-run resumes via an HTTP `Range` request,
 //! validated with `If-Range` against the `ETag`/`Last-Modified` recorded in
 //! a small `.meta` sidecar, so a changed remote file restarts cleanly
-//! instead of corrupting the partial. Interactive pause/resume and
-//! automatic retry/backoff are intentionally out of scope here (roadmap
-//! item #4).
+//! instead of corrupting the partial.
+//!
+//! Stop semantics: **pause** stops the stream and KEEPS the `.part` +
+//! `.meta` — the resumed run walks the validated Range path above.
+//! **Cancel** deletes both: the user is done with this URL, and hidden
+//! sidecar litter must not outlive the job. Stream/transport failures keep
+//! the partial and surface as [`GoopError::Network`] so the retry layer
+//! (`crate::retry`) can back off and resume from the same offset.
 //!
 //! Integrity barrier: HTTPS to the origin plus the atomic-rename of a fully
 //! written `.part` — the same posture as the sidecar updater.
 
 use crate::backend::{BackendOutcome, ResultKindTag};
+use crate::retry::transient_status;
 use crate::ytdlp::{DirectFileInfo, ExtractRequest};
 use futures_util::StreamExt;
-use goop_core::{EventSink, GoopError, JobId, ProgressEvent};
+use goop_core::{EventSink, GoopError, Interrupt, JobId, JobSignals, ProgressEvent};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
     HeaderMap, HeaderName, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
@@ -34,14 +39,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tokio_util::sync::CancellationToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Per-read (per-chunk) idle timeout: the clock resets after each successfully
 /// delivered frame, so it aborts a fully stalled connection without capping
 /// the total time a large but healthy download may take. A server that
-/// trickles bytes slower than this interval will not trip it — `cancel` is the
-/// only bound on total transfer time (the cancel-only model is intentional).
+/// trickles bytes slower than this interval will not trip it — a user stop
+/// (cancel/pause) is the only bound on total transfer time, by design. A
+/// tripped timeout surfaces as a transient `Network` error, so the retry
+/// layer resumes the stalled transfer from its partial.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Throttle progress emits so a fast download doesn't flood the IPC channel.
@@ -115,7 +121,7 @@ pub async fn download(
     sink: Arc<dyn EventSink>,
     job_id: JobId,
     req: &ExtractRequest,
-    cancel: CancellationToken,
+    signals: JobSignals,
 ) -> Result<BackendOutcome, GoopError> {
     require_http_scheme(&req.url)?;
     let start = Instant::now();
@@ -128,6 +134,12 @@ pub async fn download(
     let hash = url_hash(&req.url);
     let part_path = output_dir.join(format!(".{hash}.goopdl.part"));
     let meta_path = output_dir.join(format!(".{hash}.goopdl.meta"));
+
+    // Entry guard: bounds the stop latency during the request/header
+    // phase, where the select loop below isn't polling yet.
+    if let Some(int) = signals.check() {
+        return Err(finish_interrupt(int, &part_path, &meta_path).await);
+    }
 
     let mut existing_len = tokio::fs::metadata(&part_path)
         .await
@@ -160,7 +172,7 @@ pub async fn download(
     let resp = request
         .send()
         .await
-        .map_err(|e| GoopError::Queue(format!("direct download: request: {e}")))?;
+        .map_err(|e| classify_reqwest("request", &e))?;
 
     let status = resp.status();
     // Append ONLY when the server resumed from exactly our offset (verified via
@@ -180,13 +192,9 @@ pub async fn download(
             .get(&req.url)
             .send()
             .await
-            .map_err(|e| GoopError::Queue(format!("direct download: restart: {e}")))?;
+            .map_err(|e| classify_reqwest("restart", &e))?;
         if !fresh.status().is_success() {
-            return Err(GoopError::Queue(format!(
-                "direct download: HTTP {} for {}",
-                fresh.status(),
-                req.url
-            )));
+            return Err(status_error(fresh.status(), &req.url));
         }
         (fresh, false, 0)
     } else if status.is_success() {
@@ -194,10 +202,7 @@ pub async fn download(
         // file (e.g. the If-Range validator changed). Overwrite from the start.
         (resp, false, 0)
     } else {
-        return Err(GoopError::Queue(format!(
-            "direct download: HTTP {status} for {}",
-            req.url
-        )));
+        return Err(status_error(status, &req.url));
     };
 
     // Read everything we need from the headers before `bytes_stream` consumes
@@ -223,10 +228,12 @@ pub async fn download(
     loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
+            int = signals.interrupted() => {
                 let _ = file.flush().await;
-                // Keep the .part + .meta so a retry resumes from here.
-                return Err(GoopError::Cancelled);
+                // Close the handle before finish_interrupt may delete the
+                // file — an open handle blocks removal on Windows.
+                drop(file);
+                return Err(finish_interrupt(int, &part_path, &meta_path).await);
             }
             chunk = stream.next() => match chunk {
                 Some(Ok(bytes)) => {
@@ -239,8 +246,9 @@ pub async fn download(
                 }
                 Some(Err(e)) => {
                     let _ = file.flush().await;
-                    // Keep the partial for a later resume.
-                    return Err(GoopError::Queue(format!("direct download: stream: {e}")));
+                    // Keep the partial: a mid-transfer drop is transient by
+                    // nature, and the retry layer resumes from this offset.
+                    return Err(GoopError::Network(format!("direct download: stream: {e}")));
                 }
                 None => break,
             },
@@ -274,6 +282,55 @@ pub async fn download(
         result_kind: ResultKindTag::File,
         file_count: 1,
     })
+}
+
+/// Cancel: the user is done with this URL — remove the partial and its
+/// validator so no hidden litter outlives the job. Pause: keep both; the
+/// next run resumes through the validated Range path.
+async fn finish_interrupt(int: Interrupt, part_path: &Path, meta_path: &Path) -> GoopError {
+    if matches!(int, Interrupt::Cancel) {
+        let _ = tokio::fs::remove_file(part_path).await;
+        let _ = tokio::fs::remove_file(meta_path).await;
+    }
+    int.into()
+}
+
+/// Best-effort synchronous removal of the URL's `.part` + `.meta`
+/// sidecars, for callers outside a running download (cancelling a paused
+/// job from the IPC layer).
+pub(crate) fn remove_partials(output_dir: &Path, url: &str) {
+    let hash = url_hash(url);
+    let _ = std::fs::remove_file(output_dir.join(format!(".{hash}.goopdl.part")));
+    let _ = std::fs::remove_file(output_dir.join(format!(".{hash}.goopdl.meta")));
+}
+
+/// Classify a reqwest transport failure at construction time, where the
+/// error kind is still structured. Timeouts and connection failures are
+/// transient; TLS trust failures are not — a bad certificate doesn't heal
+/// on retry — and everything else (builder errors, redirect loops) stays
+/// a plain queue error.
+fn classify_reqwest(context: &str, e: &reqwest::Error) -> GoopError {
+    let msg = format!("direct download: {context}: {e}");
+    let tls_failure = format!("{e:?}")
+        .to_ascii_lowercase()
+        .contains("certificate");
+    if (e.is_timeout() || e.is_connect()) && !tls_failure {
+        GoopError::Network(msg)
+    } else {
+        GoopError::Queue(msg)
+    }
+}
+
+/// HTTP failure classified by status: retryable statuses (408/429/5xx —
+/// see `retry::transient_status`) become `Network`, the rest stay `Queue`.
+/// Message text is identical either way.
+fn status_error(status: StatusCode, url: &str) -> GoopError {
+    let msg = format!("direct download: HTTP {status} for {url}");
+    if transient_status(status) {
+        GoopError::Network(msg)
+    } else {
+        GoopError::Queue(msg)
+    }
 }
 
 async fn open_part(part_path: &Path, append: bool) -> Result<tokio::fs::File, GoopError> {
@@ -476,7 +533,7 @@ fn split_stem_ext(filename: &str) -> (String, String) {
     }
 }
 
-fn url_hash(url: &str) -> String {
+pub(crate) fn url_hash(url: &str) -> String {
     let mut h = sha2::Sha256::new();
     h.update(url.as_bytes());
     let full = hex_lower(h.finalize().as_slice());
@@ -682,7 +739,7 @@ mod tests {
             s.clone(),
             JobId::new(),
             &req(&format!("{}/song.mp3", server.uri()), dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -717,7 +774,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&format!("{}/d", server.uri()), dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -753,7 +810,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&url, dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -787,7 +844,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&url, dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -827,7 +884,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&url, dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -869,7 +926,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&url, dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -885,7 +942,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req("ftp://example.com/file.bin", dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .expect_err("ftp must be rejected");
@@ -928,7 +985,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&url, dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
@@ -936,30 +993,320 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_cancel_keeps_partial() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/c.bin"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
-            .mount(&server)
-            .await;
+    async fn download_cancel_removes_partial_and_meta() {
+        // Cancel means "done with this URL": any partial from an earlier
+        // pause or failure is deleted rather than left as hidden litter.
         let dir = TempDir::new().unwrap();
-        let cancel = CancellationToken::new();
-        cancel.cancel(); // pre-cancelled: the biased select short-circuits
-        let err = download(
-            sink(),
-            JobId::new(),
-            &req(&format!("{}/c.bin", server.uri()), dir.path()),
-            cancel,
+        let url = "https://example.com/c.bin".to_string();
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"hello").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
         )
-        .await
-        .expect_err("cancelled download must error");
+        .unwrap();
+
+        let signals = JobSignals::new();
+        signals.cancel.cancel(); // pre-cancelled: the entry guard fires
+        let err = download(sink(), JobId::new(), &req(&url, dir.path()), signals)
+            .await
+            .expect_err("cancelled download must error");
         assert!(matches!(err, GoopError::Cancelled));
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("goopdl"))
+            .collect();
+        assert!(leftovers.is_empty(), "cancel must delete .part and .meta");
+    }
+
+    #[tokio::test]
+    async fn download_pause_keeps_partial_and_meta_and_returns_paused() {
+        let dir = TempDir::new().unwrap();
+        let url = "https://example.com/p.bin".to_string();
+        let hash = url_hash(&url);
+        let part = dir.path().join(format!(".{hash}.goopdl.part"));
+        let meta = dir.path().join(format!(".{hash}.goopdl.meta"));
+        std::fs::write(&part, b"hello").unwrap();
+        std::fs::write(&meta, "\"etag-1\"").unwrap();
+
+        let signals = JobSignals::new();
+        signals.pause.cancel();
+        let err = download(sink(), JobId::new(), &req(&url, dir.path()), signals)
+            .await
+            .expect_err("paused download must yield");
+        assert!(matches!(err, GoopError::Paused));
+        assert!(part.exists(), "pause keeps the .part for resume");
+        assert!(meta.exists(), "pause keeps the validator");
+    }
+
+    #[tokio::test]
+    async fn pre_fired_cancel_wins_over_pause() {
+        let dir = TempDir::new().unwrap();
+        let url = "https://example.com/b.bin".to_string();
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"x").unwrap();
+
+        let signals = JobSignals::new();
+        signals.pause.cancel();
+        signals.cancel.cancel();
+        let err = download(sink(), JobId::new(), &req(&url, dir.path()), signals)
+            .await
+            .expect_err("must stop");
+        assert!(matches!(err, GoopError::Cancelled), "cancel outranks pause");
         let kept = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".goopdl.part"));
-        assert!(kept, "the .part must be kept for a later resume");
+            .any(|e| e.file_name().to_string_lossy().contains("goopdl"));
+        assert!(!kept, "cancel-wins also means partials are deleted");
+    }
+
+    #[tokio::test]
+    async fn paused_partial_resumes_via_range_on_second_call() {
+        // End-to-end pause -> resume at the file level: the state a pause
+        // leaves behind (validated .part) feeds the existing Range path on
+        // the next run, with zero resume-specific code.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .and(header("range", "bytes=5-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 5-9/10")
+                    .insert_header("etag", "\"etag-1\"")
+                    .set_body_bytes(b"world".to_vec()),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/file.bin", server.uri());
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"hello").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
+        )
+        .unwrap();
+
+        // First call: pause already requested (the paused state itself).
+        let paused = JobSignals::new();
+        paused.pause.cancel();
+        let err = download(sink(), JobId::new(), &req(&url, dir.path()), paused)
+            .await
+            .expect_err("paused");
+        assert!(matches!(err, GoopError::Paused));
+
+        // Second call (the resume): fresh signals, resumes from offset 5.
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&url, dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.bytes, 10);
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"helloworld");
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_classified_transient_network() {
+        // Bind a port, then drop the listener so connecting is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let dir = TempDir::new().unwrap();
+        let err = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("http://127.0.0.1:{port}/x.bin"), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect_err("must fail to connect");
+        assert!(
+            matches!(err, GoopError::Network(_)),
+            "connection refused must be retryable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_5xx_is_network_and_4xx_is_queue() {
+        for (code, want_network) in [(503u16, true), (404u16, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(code))
+                .mount(&server)
+                .await;
+            let dir = TempDir::new().unwrap();
+            let err = download(
+                sink(),
+                JobId::new(),
+                &req(&format!("{}/f.bin", server.uri()), dir.path()),
+                JobSignals::new(),
+            )
+            .await
+            .expect_err("must fail");
+            match (want_network, &err) {
+                (true, GoopError::Network(_)) | (false, GoopError::Queue(_)) => {}
+                _ => panic!("HTTP {code}: wrong classification: {err:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn remove_partials_deletes_both_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let url = "https://example.com/z.bin";
+        let hash = url_hash(url);
+        let part = dir.path().join(format!(".{hash}.goopdl.part"));
+        let meta = dir.path().join(format!(".{hash}.goopdl.meta"));
+        std::fs::write(&part, b"x").unwrap();
+        std::fs::write(&meta, "v").unwrap();
+        remove_partials(dir.path(), url);
+        assert!(!part.exists());
+        assert!(!meta.exists());
+    }
+
+    // ---- dispatch-level auto-retry (direct fast path) ---------------------
+
+    fn tiny_policy() -> crate::retry::RetryPolicy {
+        crate::retry::RetryPolicy {
+            max_retries: 4,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_503_then_success_resumes_from_offset() {
+        let server = MockServer::start().await;
+        // First ranged attempt: 503 (consumed once, higher priority)...
+        Mock::given(method("GET"))
+            .and(path("/big.bin"))
+            .and(header("range", "bytes=5-"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // ...second ranged attempt succeeds. No bare-GET mock is mounted, so
+        // a restart-from-zero would 404 and fail the test: every attempt
+        // must resume from the partial.
+        Mock::given(method("GET"))
+            .and(path("/big.bin"))
+            .and(header("range", "bytes=5-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 5-9/10")
+                    .insert_header("etag", "\"etag-1\"")
+                    .set_body_bytes(b"world".to_vec()),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let url = format!("{}/big.bin", server.uri());
+        let hash = url_hash(&url);
+        std::fs::write(dir.path().join(format!(".{hash}.goopdl.part")), b"hello").unwrap();
+        std::fs::write(
+            dir.path().join(format!(".{hash}.goopdl.meta")),
+            "\"etag-1\"",
+        )
+        .unwrap();
+
+        let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let outcome = crate::backend::dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req(&url, dir.path()),
+            JobSignals::new(),
+            &tiny_policy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.bytes, 10);
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"helloworld");
+        let stages: Vec<String> = rec
+            .progress
+            .lock()
+            .iter()
+            .map(|p| p.stage.clone())
+            .collect();
+        let retries = stages
+            .iter()
+            .filter(|st| st.starts_with("retrying"))
+            .count();
+        assert_eq!(retries, 1, "exactly one retry announcement, got {stages:?}");
+    }
+
+    #[tokio::test]
+    async fn permanent_404_fails_without_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gone.bin"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1) // verified on server drop: exactly one request
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let err = crate::backend::dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req(&format!("{}/gone.bin", server.uri()), dir.path()),
+            JobSignals::new(),
+            &tiny_policy(),
+        )
+        .await
+        .expect_err("404 is permanent");
+        assert!(matches!(err, GoopError::Queue(_)));
+        assert!(
+            rec.progress
+                .lock()
+                .iter()
+                .all(|p| !p.stage.starts_with("retrying")),
+            "no retry events for a permanent failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_cap_exhaustion_surfaces_last_error_after_five_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flaky.bin"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(5) // 1 attempt + 4 retries, verified on drop
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let err = crate::backend::dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req(&format!("{}/flaky.bin", server.uri()), dir.path()),
+            JobSignals::new(),
+            &tiny_policy(),
+        )
+        .await
+        .expect_err("budget exhausted");
+        assert!(
+            matches!(&err, GoopError::Network(m) if m.contains("503")),
+            "last error surfaces: {err:?}"
+        );
+        let retry_events = rec
+            .progress
+            .lock()
+            .iter()
+            .filter(|p| p.stage.starts_with("retrying"))
+            .count();
+        assert_eq!(retry_events, 4);
     }
 
     #[tokio::test]
@@ -977,7 +1324,7 @@ mod tests {
             sink(),
             JobId::new(),
             &req(&format!("{}/stream", server.uri()), dir.path()),
-            CancellationToken::new(),
+            JobSignals::new(),
         )
         .await
         .unwrap();
