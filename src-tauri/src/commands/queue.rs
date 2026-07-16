@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use goop_core::{IpcError, Job, JobId, JobState};
+use goop_core::{IpcError, Job, JobId, JobKind, JobState};
 use goop_queue::SchedulerError;
 use tauri::State;
 
@@ -9,6 +9,8 @@ fn map_scheduler_err(e: SchedulerError) -> IpcError {
         // its PID. The frontend retries briefly when it sees this.
         SchedulerError::JobNotRunning => IpcError::Queue("job_not_running".into()),
         SchedulerError::JobNotPaused => IpcError::Queue("job_not_paused".into()),
+        SchedulerError::JobNotPausable => IpcError::Queue("job_not_pausable".into()),
+        SchedulerError::JobNotRetryable => IpcError::Queue("job_not_retryable".into()),
         SchedulerError::ProcessControl(inner) => IpcError::Unknown(inner.to_string()),
         SchedulerError::Store(inner) => inner.into(),
     }
@@ -19,26 +21,67 @@ pub fn queue_list(state: State<'_, AppState>) -> Result<Vec<Job>, IpcError> {
     state.store.list().map_err(Into::into)
 }
 
+/// Cancel a job in any non-terminal state: running jobs get their stop
+/// token fired, queued and paused jobs are finalized directly. Cancelling
+/// a paused download also removes its partial files — pause is the
+/// keep-partial verb, cancel means done — which happens best-effort off
+/// the IPC thread since the paused job has no live worker to clean up.
 #[tauri::command]
 pub fn queue_cancel(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
-    state.scheduler.cancel(job_id);
+    let paused_extract_req = paused_extract_request(&state, job_id);
+    state.scheduler.cancel(job_id).map_err(map_scheduler_err)?;
+    if let Some(req) = paused_extract_req {
+        tauri::async_runtime::spawn_blocking(move || {
+            goop_extractor::cleanup_partials_for(&req);
+        });
+    }
     Ok(())
 }
 
-/// Suspend the running child process for `job_id` (Phase G — v0.2.0).
-/// Maps to SIGSTOP on Unix, NtSuspendProcess on Windows. Only ffmpeg
-/// conversions and Ghostscript PDF compress jobs register PIDs; image
-/// conversions and yt-dlp downloads return a `job_not_running` queue error.
+/// The parsed `ExtractRequest` of `job_id` IF it is a paused extract job,
+/// read before the cancel flips its state. `None` for everything else —
+/// running downloads clean up in their own cancel branch.
+fn paused_extract_request(
+    state: &State<'_, AppState>,
+    job_id: JobId,
+) -> Option<goop_extractor::ytdlp::ExtractRequest> {
+    let job = state.store.get_by_id(job_id).ok().flatten()?;
+    if job.kind != JobKind::Extract || job.state != JobState::Paused {
+        return None;
+    }
+    serde_json::from_value(job.payload).ok()
+}
+
+/// Pause the job identified by `job_id`. Jobs with a registered child
+/// PID (ffmpeg conversions, Ghostscript PDF compress, and other external
+/// PDF tools) are suspended in place — SIGSTOP on Unix, NtSuspendProcess
+/// on Windows. Download jobs stop gracefully instead: the worker keeps
+/// its partial files on disk and the row flips to `paused` via a queue
+/// event once the worker yields, shortly after this command returns Ok.
+/// Running jobs with neither mechanism return `job_not_pausable`; jobs
+/// that aren't running return `job_not_running`.
 #[tauri::command]
 pub fn queue_pause(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
     state.scheduler.pause(job_id).map_err(map_scheduler_err)
 }
 
-/// Resume a previously-paused child process. Maps to SIGCONT on Unix,
-/// NtResumeProcess on Windows.
+/// Resume a paused job. PID-suspended children continue in place
+/// (SIGCONT / NtResumeProcess). Paused download jobs are re-queued at the
+/// front instead; the partial files on disk make the re-run a resume.
+/// Works across app restarts for download jobs.
 #[tauri::command]
 pub fn queue_resume(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
     state.scheduler.resume(job_id).map_err(map_scheduler_err)
+}
+
+/// Re-queue a failed job on the same row: state flips back to `queued`,
+/// `attempts` is incremented, and the result/timestamps are cleared. Any
+/// kind in an error state qualifies (including jobs interrupted by an app
+/// crash); for download jobs, partial files on disk make the re-run a
+/// resume. Jobs not in an error state return `job_not_retryable`.
+#[tauri::command]
+pub fn queue_retry(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
+    state.scheduler.retry(job_id).map_err(map_scheduler_err)
 }
 
 #[tauri::command]
@@ -46,10 +89,23 @@ pub fn queue_cancel_many(
     job_ids: Vec<JobId>,
     state: State<'_, AppState>,
 ) -> Result<usize, IpcError> {
+    let mut cancelled = 0usize;
     for id in &job_ids {
-        state.scheduler.cancel(*id);
+        let paused_extract_req = paused_extract_request(&state, *id);
+        match state.scheduler.cancel(*id) {
+            Ok(()) => {
+                cancelled += 1;
+                if let Some(req) = paused_extract_req {
+                    tauri::async_runtime::spawn_blocking(move || {
+                        goop_extractor::cleanup_partials_for(&req);
+                    });
+                }
+            }
+            // Best-effort batch: keep going, report how many took.
+            Err(e) => tracing::warn!(job_id = ?id, error = %e, "cancel failed in batch"),
+        }
     }
-    Ok(job_ids.len())
+    Ok(cancelled)
 }
 
 /// Reassign queue priorities so the supplied IDs are scheduled in the given
