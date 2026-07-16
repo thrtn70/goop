@@ -6,13 +6,13 @@
 //! backends produce the same `BackendOutcome` shape so the caller can
 //! convert to a `JobResult` without caring which extractor ran.
 
-use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId};
+use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId, JobSignals};
 use goop_sidecar::BinaryResolver;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 use crate::classify::{classify_extractor, ExtractorChoice};
 use crate::gallery_dl::GalleryDl;
+use crate::retry::{with_retry, RetryPolicy, DEFAULT_RETRY_POLICY};
 use crate::ytdlp::{ExtractRequest, YtDlp};
 
 /// Uniform result the IPC layer turns into a `JobResult`. `result_kind`
@@ -38,26 +38,70 @@ pub enum ResultKindTag {
 
 /// Dispatch an extract request: classify the URL, run the chosen
 /// extractor, and fall back to the OTHER one on a "no matching
-/// extractor" error. Errors from any other failure mode (network,
-/// auth, rate limit, etc.) propagate without retry.
+/// extractor" error. Transient network failures are retried with
+/// backoff (resuming from partial files); every other failure mode
+/// (auth, rate limit on the subprocess paths, unsupported input)
+/// propagates on the first attempt.
 pub async fn dispatch(
     resolver: &BinaryResolver,
     sink: Arc<dyn EventSink>,
     job_id: JobId,
     req: &ExtractRequest,
-    cancel: CancellationToken,
+    signals: JobSignals,
+) -> Result<BackendOutcome, GoopError> {
+    dispatch_with_policy(resolver, sink, job_id, req, signals, &DEFAULT_RETRY_POLICY).await
+}
+
+/// Test seam: `dispatch` with an injectable retry policy so tests can
+/// drive the backoff with millisecond delays against a mock server.
+pub(crate) async fn dispatch_with_policy(
+    resolver: &BinaryResolver,
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
+    policy: &RetryPolicy,
+) -> Result<BackendOutcome, GoopError> {
+    with_retry(policy, &signals, &sink, job_id, || {
+        dispatch_once(resolver, sink.clone(), job_id, req, signals.clone())
+    })
+    .await
+}
+
+/// One full attempt of the classify → primary → fallback → direct
+/// pipeline. The retry wrapper re-runs this whole function, so an
+/// attempt that failed transiently mid-fallback re-classifies cleanly.
+/// The inner cookie-fallback and cross-extractor retries can't compound
+/// with the transient retries: their trigger strings (cookie-DB errors,
+/// "Unsupported URL") are disjoint from the transient set.
+async fn dispatch_once(
+    resolver: &BinaryResolver,
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
 ) -> Result<BackendOutcome, GoopError> {
     // Fast path: the probe already determined this is a plain file neither
     // extractor handles, so skip the two doomed extractor spawns.
     if req.direct {
-        return crate::direct::download(sink, job_id, req, cancel).await;
+        return crate::direct::download(sink, job_id, req, signals).await;
     }
     let primary = classify_extractor(&req.url);
-    let result = run_one(resolver, sink.clone(), job_id, req, cancel.clone(), primary).await;
+    let result = run_one(
+        resolver,
+        sink.clone(),
+        job_id,
+        req,
+        signals.clone(),
+        primary,
+    )
+    .await;
     match result {
         Ok(outcome) => Ok(outcome),
         Err(err) => {
-            if cancel.is_cancelled() || !is_no_matching_extractor_err(&err) {
+            // A fired signal (cancel OR pause) suppresses the fallback:
+            // the user asked this job to stop, not to try harder.
+            if signals.check().is_some() || !is_no_matching_extractor_err(&err) {
                 return Err(err);
             }
             let fallback = match primary {
@@ -69,18 +113,18 @@ pub async fn dispatch(
                 sink.clone(),
                 job_id,
                 req,
-                cancel.clone(),
+                signals.clone(),
                 fallback,
             )
             .await
             {
                 Ok(outcome) => Ok(outcome),
                 Err(err2) => {
-                    if cancel.is_cancelled() || !is_no_matching_extractor_err(&err2) {
+                    if signals.check().is_some() || !is_no_matching_extractor_err(&err2) {
                         return Err(err2);
                     }
                     // Neither extractor recognised the URL: stream it directly.
-                    crate::direct::download(sink, job_id, req, cancel).await
+                    crate::direct::download(sink, job_id, req, signals).await
                 }
             }
         }
@@ -92,13 +136,13 @@ async fn run_one(
     sink: Arc<dyn EventSink>,
     job_id: JobId,
     req: &ExtractRequest,
-    cancel: CancellationToken,
+    signals: JobSignals,
     backend: ExtractorChoice,
 ) -> Result<BackendOutcome, GoopError> {
     match backend {
         ExtractorChoice::YtDlp => {
             let yt = YtDlp::new(resolver, sink);
-            let res = yt.download(job_id, req, cancel).await?;
+            let res = yt.download(job_id, req, signals).await?;
             Ok(BackendOutcome {
                 output_path: res.output_path,
                 bytes: res.bytes,
@@ -109,7 +153,7 @@ async fn run_one(
         }
         ExtractorChoice::GalleryDl => {
             let gd = GalleryDl::new(resolver, sink);
-            let res = gd.download(job_id, req, cancel).await?;
+            let res = gd.download(job_id, req, signals).await?;
             Ok(BackendOutcome {
                 output_path: res.output_path,
                 bytes: res.bytes,
@@ -119,6 +163,20 @@ async fn run_one(
             })
         }
     }
+}
+
+/// Best-effort removal of every partial-download artifact a run may have
+/// left behind for `req`: the direct downloader's hidden `.part`/`.meta`
+/// sidecars, recent yt-dlp/gallery-dl `.part`/`.ytdl` files, and the
+/// gallery-dl start marker. Used when a paused download is cancelled —
+/// pause keeps partials by contract, and the worker that would normally
+/// clean up on cancel already returned.
+pub fn cleanup_partials_for(req: &ExtractRequest) {
+    let expanded = goop_core::path::expand(&req.output_dir);
+    let output_dir = std::fs::canonicalize(&expanded).unwrap_or(expanded);
+    crate::direct::remove_partials(&output_dir, &req.url);
+    crate::ytdlp::cleanup_partials(&output_dir, None);
+    crate::gallery_dl::cleanup_run_artifacts(&output_dir, &req.url);
 }
 
 fn is_no_matching_extractor_err(err: &GoopError) -> bool {
@@ -150,5 +208,11 @@ mod tests {
         assert!(!is_no_matching_extractor_err(&err));
         let err = GoopError::Cancelled;
         assert!(!is_no_matching_extractor_err(&err));
+        // The control-flow and transient variants must never trigger the
+        // cross-extractor fallback.
+        assert!(!is_no_matching_extractor_err(&GoopError::Paused));
+        assert!(!is_no_matching_extractor_err(&GoopError::Network(
+            "Unsupported URL in a network message must not count".into()
+        )));
     }
 }

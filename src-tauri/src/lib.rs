@@ -91,9 +91,12 @@ pub fn run() {
             let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
             let _interrupted = store.reconcile().ok();
-            // Phase G: silently re-queue any jobs left in `paused` state from
-            // a previous run. The child process is gone so we restart from
-            // scratch; the user already knows the app restarted.
+            // Re-queue jobs left in `paused` state from a previous run —
+            // except downloads. A paused download's partial files survive on
+            // disk, so its Paused row survives the restart too and resumes
+            // where it left off when the user asks. Every other kind was a
+            // suspended child process that died with the app, so those
+            // restart from scratch.
             match store.recover_paused() {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(count = n, "re-queued paused jobs after restart"),
@@ -109,17 +112,20 @@ pub fn run() {
 
             let r_for_extract = resolver.clone();
             let sink_for_extract = sink.clone();
-            let extract_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+            let extract_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_extract.clone();
                 let s = sink_for_extract.clone();
                 Box::pin(async move {
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     // Route via the dispatcher: it picks yt-dlp or
-                    // gallery-dl based on the URL's classifier output
-                    // and falls back to the OTHER extractor on a
-                    // no-matching-extractor error.
-                    let outcome = goop_extractor::dispatch(&r, s, id, &req, cancel).await?;
+                    // gallery-dl based on the URL's classifier output and
+                    // falls back to the OTHER extractor on a
+                    // no-matching-extractor error, retrying transient
+                    // network failures with backoff. Downloads honor both
+                    // signals: cancel deletes partials, pause keeps them
+                    // for resume.
+                    let outcome = goop_extractor::dispatch(&r, s, id, &req, signals).await?;
                     Ok(JobResult {
                         output_path: Some(outcome.output_path),
                         bytes: Some(outcome.bytes),
@@ -143,13 +149,16 @@ pub fn run() {
             let encoders_for_convert = encoders.clone();
             let hw_enabled_for_convert = hw_enabled.clone();
             let pids_for_convert = pid_registry.clone();
-            let convert_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+            let convert_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_convert.clone();
                 let s = sink_for_convert.clone();
                 let enc = encoders_for_convert.clone();
                 let hw = hw_enabled_for_convert.load(Ordering::Relaxed);
                 let pids = pids_for_convert.clone();
                 Box::pin(async move {
+                    // Conversions pause via the PID registry (SIGSTOP on the
+                    // ffmpeg child), so only the cancel token threads down.
+                    let cancel = signals.cancel;
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     let res = if req.target.is_image() {
@@ -183,13 +192,16 @@ pub fn run() {
             let pids_for_pdf = pid_registry.clone();
             let tessdata_user_for_pdf = tessdata_user_dir.clone();
             let tessdata_bundled_for_pdf = tessdata_bundled_dir.clone();
-            let pdf_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+            let pdf_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_pdf.clone();
                 let gs_dir = gs_dir_for_pdf.clone();
                 let pids = pids_for_pdf.clone();
                 let tessdata_user = tessdata_user_for_pdf.clone();
                 let tessdata_bundled = tessdata_bundled_for_pdf.clone();
                 Box::pin(async move {
+                    // External-tool PDF ops pause via the PID registry, so
+                    // only the cancel token threads down.
+                    let cancel = signals.cancel;
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
                     let started = std::time::Instant::now();
@@ -601,7 +613,7 @@ pub fn run() {
             // clear "not yet implemented" error so the queue surface signals
             // progress instead of silently succeeding or panicking — they're
             // wired up in Phases 5–7.
-            let image_worker: WorkerFn = Arc::new(move |_id, payload, _cancel| {
+            let image_worker: WorkerFn = Arc::new(move |_id, payload, _signals| {
                 Box::pin(async move {
                     let op: ImageOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad image payload: {e}")))?;
@@ -751,7 +763,7 @@ pub fn run() {
             // via goop-metadata) and emit N/total progress so an album-sized
             // batch shows as a single queue row instead of dozens.
             let sink_for_meta = sink.clone();
-            let metadata_worker: WorkerFn = Arc::new(move |id, payload, cancel| {
+            let metadata_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let s = sink_for_meta.clone();
                 Box::pin(async move {
                     let MetadataOperation::Write { items, backup } =
@@ -763,7 +775,7 @@ pub fn run() {
                     let started = std::time::Instant::now();
                     let total = items.len();
                     for (i, item) in items.iter().enumerate() {
-                        if cancel.is_cancelled() {
+                        if signals.cancel.is_cancelled() {
                             return Err(GoopError::Cancelled);
                         }
                         s.emit_progress(ProgressEvent {
@@ -879,6 +891,7 @@ pub fn run() {
             commands::queue::queue_cancel_many,
             commands::queue::queue_pause,
             commands::queue::queue_resume,
+            commands::queue::queue_retry,
             commands::queue::queue_reorder,
             commands::queue::queue_move_to_top,
             commands::queue::queue_clear_completed,

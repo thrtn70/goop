@@ -185,16 +185,108 @@ impl QueueStore {
         Ok(n)
     }
 
-    /// Reset any rows left in `paused` state from a previous run back to
-    /// `queued` and clear `started_at`. The child process is dead so the
-    /// job re-runs from scratch on next pull. Called once at startup before
-    /// workers begin pulling. Returns the number of rows reset.
+    /// Reset rows left in `paused` state from a previous run back to
+    /// `queued` — EXCEPT extract jobs. An extract pause is a graceful stop
+    /// with resumable partial files on disk, so Paused legitimately
+    /// survives a restart and the user resumes it on their own terms.
+    /// Every other kind was a suspended child process that died with the
+    /// app, so those re-run from scratch on next pull. Called once at
+    /// startup before workers begin pulling. Returns the number of rows
+    /// reset.
     pub fn recover_paused(&self) -> Result<usize, GoopError> {
         let c = self.conn.lock();
         let n = c
             .execute(
-                "UPDATE jobs SET state = ?1, started_at = NULL WHERE state = 'paused'",
+                "UPDATE jobs SET state = ?1, started_at = NULL
+                 WHERE state = 'paused' AND kind != 'extract'",
                 params![state_to_str(&JobState::Queued)],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Flip a paused job back to `queued`, clear `started_at`, and bump it
+    /// ahead of everything currently queued so it restarts promptly — the
+    /// user explicitly asked for it back. A single atomic UPDATE: returns
+    /// 0 when the job isn't paused (already resumed, completed, unknown),
+    /// letting the caller distinguish without a read-modify-write race.
+    ///
+    /// Dedicated method rather than `update_state` because that method's
+    /// COALESCE semantics can never NULL-out `started_at`.
+    pub fn requeue_paused(&self, id: JobId) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?2, started_at = NULL,
+                    priority = (SELECT COALESCE(MAX(priority), 0) + 10
+                                FROM jobs WHERE state = 'queued')
+                 WHERE id = ?1 AND state = 'paused'",
+                params![id.0.to_string(), state_to_str(&JobState::Queued)],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Atomically claim a queued job for execution: `queued` → `running`
+    /// with `started_at` set, in one state-guarded UPDATE. Returns 0 when
+    /// the row is no longer `queued` — a cancel (or anything else) that
+    /// landed between the scheduler's poll and this claim finalized the
+    /// row, and the job must not run. This is the claim-side counterpart
+    /// of `cancel_inactive`'s guard.
+    pub fn claim_queued(&self, id: JobId, now_ms: i64) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?2, started_at = ?3
+                 WHERE id = ?1 AND state = 'queued'",
+                params![id.0.to_string(), state_to_str(&JobState::Running), now_ms],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Finalize a job that has no live worker to report for it: queued
+    /// and paused rows flip straight to `cancelled` with `finished_at`
+    /// set, so they land in History like any other cancel. Running rows
+    /// are the worker's responsibility (the scheduler fires their cancel
+    /// token instead) and terminal rows are left alone — the state check
+    /// lives inside the single atomic UPDATE so there is no window for a
+    /// worker pickup to slip between a read and a write. Returns rows
+    /// affected.
+    pub fn cancel_inactive(&self, id: JobId) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?2, finished_at = ?3
+                 WHERE id = ?1 AND state IN ('queued', 'paused')",
+                params![
+                    id.0.to_string(),
+                    state_to_str(&JobState::Cancelled),
+                    now_ms()
+                ],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// Manual retry: flip an errored job back to `queued` on the SAME row.
+    /// Clears `result`/`started_at`/`finished_at`, increments `attempts`
+    /// (attempts counts user-initiated retries), un-hides the row from the
+    /// queue tab, and bumps it to the front — it already waited its turn
+    /// once. The `LIKE 'error:%'` predicate matches every persisted error
+    /// including boot-reconcile's `error:interrupted`, which makes a job
+    /// that died with the app recoverable in one click. Returns 0 when the
+    /// job isn't in an error state.
+    pub fn retry_errored(&self, id: JobId) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = ?2, result = NULL, started_at = NULL,
+                    finished_at = NULL, attempts = attempts + 1, hidden_from_queue = 0,
+                    priority = (SELECT COALESCE(MAX(priority), 0) + 10
+                                FROM jobs WHERE state = 'queued')
+                 WHERE id = ?1 AND state LIKE 'error:%'",
+                params![id.0.to_string(), state_to_str(&JobState::Queued)],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         Ok(n)
@@ -603,6 +695,207 @@ mod tests {
         s.insert(&job).unwrap();
         let n = s.recover_paused().unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn recover_paused_keeps_extract_rows_paused() {
+        let (s, _tmp) = temp_store();
+        let extract = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let convert = Job::new(JobKind::Convert, serde_json::Value::Null);
+        for j in [&extract, &convert] {
+            s.insert(j).unwrap();
+            s.update_state(j.id, &JobState::Running, None, 1234)
+                .unwrap();
+            s.update_state(j.id, &JobState::Paused, None, 5678).unwrap();
+        }
+
+        let n = s.recover_paused().unwrap();
+        assert_eq!(n, 1, "only the convert row should be recovered");
+
+        let e = s.get_by_id(extract.id).unwrap().expect("row");
+        assert_eq!(e.state, JobState::Paused, "extract stays paused");
+        assert!(e.started_at.is_some(), "extract row untouched");
+
+        let c = s.get_by_id(convert.id).unwrap().expect("row");
+        assert_eq!(c.state, JobState::Queued);
+        assert!(c.started_at.is_none());
+    }
+
+    #[test]
+    fn requeue_paused_sets_queued_clears_started_at_and_outprioritizes_queue() {
+        let (s, _tmp) = temp_store();
+        let mut waiting_a = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut waiting_b = Job::new(JobKind::Extract, serde_json::Value::Null);
+        waiting_a.priority = 20;
+        waiting_b.priority = 10;
+        s.insert(&waiting_a).unwrap();
+        s.insert(&waiting_b).unwrap();
+
+        let paused = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&paused).unwrap();
+        s.update_state(paused.id, &JobState::Running, None, 1234)
+            .unwrap();
+        s.update_state(paused.id, &JobState::Paused, None, 5678)
+            .unwrap();
+
+        let n = s.requeue_paused(paused.id).unwrap();
+        assert_eq!(n, 1);
+
+        let after = s.get_by_id(paused.id).unwrap().expect("row");
+        assert_eq!(after.state, JobState::Queued);
+        assert!(after.started_at.is_none(), "started_at must be cleared");
+        assert!(
+            after.priority > waiting_a.priority,
+            "resumed job must outprioritize the existing queue"
+        );
+        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        assert_eq!(next.id, paused.id);
+    }
+
+    #[test]
+    fn requeue_paused_returns_zero_when_not_paused() {
+        let (s, _tmp) = temp_store();
+        let queued = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut running = Job::new(JobKind::Extract, serde_json::Value::Null);
+        running.state = JobState::Running;
+        s.insert(&queued).unwrap();
+        s.insert(&running).unwrap();
+        assert_eq!(s.requeue_paused(queued.id).unwrap(), 0);
+        assert_eq!(s.requeue_paused(running.id).unwrap(), 0);
+        assert_eq!(s.requeue_paused(JobId::new()).unwrap(), 0);
+    }
+
+    #[test]
+    fn retry_errored_resets_row_clears_result_and_finished_at_and_increments_attempts() {
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::json!({"url":"https://x"}));
+        s.insert(&job).unwrap();
+        s.update_state(job.id, &JobState::Running, None, 1000)
+            .unwrap();
+        // Seed with the boot-reconcile shape specifically: retry must also
+        // recover jobs that died with the app ("error:interrupted").
+        s.update_state(
+            job.id,
+            &JobState::Error {
+                message: "interrupted".into(),
+            },
+            None,
+            2000,
+        )
+        .unwrap();
+
+        let n = s.retry_errored(job.id).unwrap();
+        assert_eq!(n, 1);
+
+        let after = s.get_by_id(job.id).unwrap().expect("row");
+        assert_eq!(after.state, JobState::Queued);
+        assert_eq!(after.attempts, 1);
+        assert!(after.result.is_none());
+        assert!(after.started_at.is_none());
+        assert!(after.finished_at.is_none());
+        // A previously cleared-from-queue row must reappear in the queue tab.
+        assert!(s.list().unwrap().iter().any(|j| j.id == job.id));
+    }
+
+    #[test]
+    fn claim_queued_transitions_to_running_and_sets_started_at() {
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        assert_eq!(s.claim_queued(job.id, 4242).unwrap(), 1);
+        let after = s.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(after.state, JobState::Running);
+        assert_eq!(after.started_at, Some(4242));
+    }
+
+    #[test]
+    fn claim_queued_misses_rows_that_left_the_queued_state() {
+        // The cancel-vs-claim race: a job cancelled between the scheduler's
+        // poll and its claim must not be resurrected to running.
+        let (s, _tmp) = temp_store();
+        let job = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&job).unwrap();
+        assert_eq!(s.cancel_inactive(job.id).unwrap(), 1);
+        assert_eq!(s.claim_queued(job.id, 4242).unwrap(), 0);
+        let after = s.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(after.state, JobState::Cancelled, "cancel must stick");
+        assert!(after.finished_at.is_some());
+    }
+
+    #[test]
+    fn cancel_inactive_finalizes_queued_and_paused_rows() {
+        let (s, _tmp) = temp_store();
+        let queued = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let paused = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&queued).unwrap();
+        s.insert(&paused).unwrap();
+        s.update_state(paused.id, &JobState::Paused, None, 1000)
+            .unwrap();
+
+        assert_eq!(s.cancel_inactive(queued.id).unwrap(), 1);
+        assert_eq!(s.cancel_inactive(paused.id).unwrap(), 1);
+        for id in [queued.id, paused.id] {
+            let j = s.get_by_id(id).unwrap().unwrap();
+            assert_eq!(j.state, JobState::Cancelled);
+            assert!(j.finished_at.is_some(), "cancelled rows belong in History");
+        }
+    }
+
+    #[test]
+    fn cancel_inactive_ignores_running_and_terminal_rows() {
+        let (s, _tmp) = temp_store();
+        let mut running = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut done = Job::new(JobKind::Extract, serde_json::Value::Null);
+        running.state = JobState::Running;
+        done.state = JobState::Done;
+        s.insert(&running).unwrap();
+        s.insert(&done).unwrap();
+
+        assert_eq!(s.cancel_inactive(running.id).unwrap(), 0);
+        assert_eq!(s.cancel_inactive(done.id).unwrap(), 0);
+        assert_eq!(
+            s.get_by_id(running.id).unwrap().unwrap().state,
+            JobState::Running
+        );
+        assert_eq!(s.get_by_id(done.id).unwrap().unwrap().state, JobState::Done);
+    }
+
+    #[test]
+    fn retry_errored_returns_zero_for_non_error_rows() {
+        let (s, _tmp) = temp_store();
+        let queued = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut done = Job::new(JobKind::Extract, serde_json::Value::Null);
+        let mut cancelled = Job::new(JobKind::Extract, serde_json::Value::Null);
+        done.state = JobState::Done;
+        cancelled.state = JobState::Cancelled;
+        for j in [&queued, &done, &cancelled] {
+            s.insert(j).unwrap();
+            assert_eq!(s.retry_errored(j.id).unwrap(), 0, "state {:?}", j.state);
+        }
+    }
+
+    #[test]
+    fn retry_errored_bumps_priority_above_existing_queued_and_unhides() {
+        let (s, _tmp) = temp_store();
+        let mut waiting = Job::new(JobKind::Extract, serde_json::Value::Null);
+        waiting.priority = 50;
+        s.insert(&waiting).unwrap();
+
+        let mut failed = Job::new(JobKind::Extract, serde_json::Value::Null);
+        failed.state = JobState::Error {
+            message: "boom".into(),
+        };
+        s.insert(&failed).unwrap();
+        // Simulate the user having cleared completed jobs from the queue tab.
+        s.clear_completed().unwrap();
+
+        assert_eq!(s.retry_errored(failed.id).unwrap(), 1);
+        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        assert_eq!(next.id, failed.id, "retried job goes to the front");
+        assert!(
+            s.list().unwrap().iter().any(|j| j.id == failed.id),
+            "retried job must be un-hidden from the queue tab"
+        );
     }
 
     #[test]

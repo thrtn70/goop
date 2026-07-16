@@ -20,6 +20,18 @@ pub enum GoopError {
     Config(String),
     #[error("cancelled")]
     Cancelled,
+    /// Control-flow sibling of `Cancelled`: the job's pause signal fired
+    /// and the worker stopped gracefully, keeping its partial files. The
+    /// scheduler maps this to `JobState::Paused`; it must never be
+    /// persisted as a job failure or cross the IPC boundary as one.
+    #[error("paused")]
+    Paused,
+    /// Transient network failure eligible for automatic retry. Constructed
+    /// where transport structure is still visible (reqwest error kinds,
+    /// HTTP status codes) — classifying stringified errors after the fact
+    /// is fragile. The message is the full human-readable description.
+    #[error("network error: {0}")]
+    Network(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("serde: {0}")]
@@ -78,7 +90,16 @@ impl From<GoopError> for IpcError {
             GoopError::Queue(x) => Self::Queue(x),
             GoopError::Config(x) => Self::Config(x),
             GoopError::Cancelled => Self::Cancelled,
-            other => Self::Unknown(other.to_string()),
+            // Defensive: Paused is scheduler control flow and should be
+            // consumed before any IPC boundary. If it ever leaks, surface
+            // it as a queue-domain message rather than "unknown".
+            GoopError::Paused => Self::Queue("paused".into()),
+            // Deliberately exhaustive from here — no wildcard, so adding
+            // a GoopError variant forces an explicit decision about its
+            // IPC shape instead of silently landing in Unknown.
+            e @ GoopError::Network(_) => Self::Unknown(e.to_string()),
+            e @ GoopError::Io(_) => Self::Unknown(e.to_string()),
+            e @ GoopError::Serde(_) => Self::Unknown(e.to_string()),
         }
     }
 }
@@ -239,6 +260,75 @@ pub fn is_no_matching_extractor(stderr: &str) -> bool {
 pub fn is_cookie_db_error(stderr: &str) -> bool {
     (stderr.contains("Could not copy") && stderr.contains("cookie database"))
         || (stderr.contains("could not find") && stderr.contains("cookies database"))
+}
+
+/// True when raw yt-dlp / gallery-dl stderr indicates a transient network
+/// failure worth an automatic retry (connection drop, timeout, 5xx).
+///
+/// The deny list is checked FIRST and wins: yt-dlp runs its own internal
+/// retries, so a line like "HTTP Error 404 ... giving up after 10 retries"
+/// carries both a permanent marker and a transient-looking one — it must
+/// not retry. 429 is deliberately on the deny list for the subprocess
+/// paths: by the time it escapes the extractor's internal retries it is a
+/// real rate limit, and hammering the site again seconds later only
+/// extends the ban. Unmatched stderr is NOT transient — a false-positive
+/// retry on a permanent error wastes half a minute; a false negative
+/// costs one click of the Retry button.
+pub fn is_transient_network_stderr(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    const PERMANENT: &[&str] = &[
+        // yt-dlp / urllib style
+        "http error 400",
+        "http error 401",
+        "http error 403",
+        "http error 404",
+        "http error 410",
+        "http error 429",
+        // gallery-dl / requests style
+        "httperror: 400",
+        "httperror: 401",
+        "httperror: 403",
+        "httperror: 404",
+        "httperror: 410",
+        "httperror: 429",
+        "too many requests",
+        "unsupported url",
+        "no suitable extractor",
+        "video unavailable",
+        "private video",
+        "sign in to confirm",
+        // TLS trust failures don't heal on retry
+        "certificate",
+    ];
+    if PERMANENT.iter().any(|p| s.contains(p)) {
+        return false;
+    }
+    const TRANSIENT: &[&str] = &[
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "httperror: 500",
+        "httperror: 502",
+        "httperror: 503",
+        "httperror: 504",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        // "The read operation timed out", "Connection timed out"
+        "timed out",
+        // EAI_AGAIN — the resolver itself says temporary
+        "temporary failure in name resolution",
+        // requests/urllib3 (gallery-dl)
+        "remote end closed connection",
+        "connection broken",
+        "incompleteread",
+        "max retries exceeded",
+        // yt-dlp internal-retry exhaustion (permanent causes are caught
+        // by the deny list above)
+        "giving up after",
+    ];
+    TRANSIENT.iter().any(|p| s.contains(p))
 }
 
 #[cfg(test)]
@@ -440,5 +530,66 @@ mod tests {
         assert!(!is_cookie_db_error(
             "could not find login cookies in chrome"
         ));
+    }
+
+    #[test]
+    fn paused_maps_to_queue_ipc_error() {
+        let ie: IpcError = GoopError::Paused.into();
+        assert!(matches!(ie, IpcError::Queue(ref m) if m == "paused"));
+    }
+
+    #[test]
+    fn network_error_user_message_includes_description() {
+        let ge = GoopError::Network("direct download: stream: connection reset".into());
+        assert!(ge.user_message().contains("connection reset"));
+    }
+
+    #[test]
+    fn transient_stderr_matches_ytdlp_network_failures() {
+        for s in [
+            "ERROR: unable to download video data: HTTP Error 503: Service Unavailable",
+            "ERROR: Unable to connect: <urlopen error [Errno 111] Connection refused>",
+            "ERROR: The read operation timed out",
+            "ERROR: [download] Got error: [Errno 54] Connection reset by peer",
+            "ERROR: giving up after 10 retries",
+            "ERROR: <urlopen error [Errno -3] Temporary failure in name resolution>",
+        ] {
+            assert!(is_transient_network_stderr(s), "should be transient: {s}");
+        }
+    }
+
+    #[test]
+    fn transient_stderr_matches_gallery_dl_requests_failures() {
+        for s in [
+            "ConnectionError: HTTPSConnectionPool(host='x.com', port=443): Max retries exceeded with url",
+            "ChunkedEncodingError: Connection broken: IncompleteRead(512 bytes read)",
+            "ReadTimeout: HTTPSConnectionPool(host='x.com', port=443): Read timed out. (read timeout=30)",
+            "RemoteDisconnected: Remote end closed connection without response",
+            "HTTPError: 502 Bad Gateway",
+        ] {
+            assert!(is_transient_network_stderr(s), "should be transient: {s}");
+        }
+    }
+
+    #[test]
+    fn transient_stderr_deny_list_wins() {
+        for s in [
+            // Permanent cause + transient-looking retry-exhaustion marker:
+            // deny list must win.
+            "ERROR: HTTP Error 404: Not Found. Giving up after 10 fragment retries",
+            "ERROR: HTTP Error 429: Too Many Requests",
+            "HTTPError: 429 Too Many Requests",
+            "ERROR: Unsupported URL: https://example.com",
+            "ERROR: Sign in to confirm your age",
+            "ERROR: certificate verify failed: unable to get local issuer certificate",
+            "ERROR: [generic] Video unavailable",
+            "",
+            "ERROR: random unmapped failure",
+        ] {
+            assert!(
+                !is_transient_network_stderr(s),
+                "should NOT be transient: {s}"
+            );
+        }
     }
 }

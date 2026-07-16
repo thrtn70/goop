@@ -1,11 +1,13 @@
-use goop_core::{is_cookie_db_error, EventSink, GoopError, JobId, ProgressEvent, SidecarEvent};
+use goop_core::{
+    is_cookie_db_error, EventSink, GoopError, Interrupt, JobId, JobSignals, ProgressEvent,
+    SidecarEvent,
+};
 use goop_sidecar::BinaryResolver;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio_util::sync::CancellationToken;
 
 use crate::ytdlp::{ExtractRequest, UrlProbe};
 
@@ -137,7 +139,7 @@ impl<'a> GalleryDl<'a> {
         &self,
         job_id: JobId,
         req: &ExtractRequest,
-        cancel: CancellationToken,
+        signals: JobSignals,
     ) -> Result<GalleryDlResult, GoopError> {
         let bin = self.resolver.resolve("gallery-dl")?;
         let output_dir = canonical_output_dir(&req.output_dir)?;
@@ -148,7 +150,7 @@ impl<'a> GalleryDl<'a> {
                 req,
                 &bin.path,
                 &output_dir,
-                cancel.clone(),
+                signals.clone(),
                 /* with_cookies: */ true,
             )
             .await;
@@ -157,7 +159,7 @@ impl<'a> GalleryDl<'a> {
             Err(GoopError::SubprocessFailed { ref stderr, .. })
                 if is_cookie_db_error(stderr)
                     && req.cookies_from_browser.is_some()
-                    && !cancel.is_cancelled() =>
+                    && signals.check().is_none() =>
             {
                 let browser = req.cookies_from_browser.as_deref().unwrap_or("the browser");
                 self.sink.emit_sidecar(SidecarEvent::Warning {
@@ -172,7 +174,7 @@ impl<'a> GalleryDl<'a> {
                     req,
                     &bin.path,
                     &output_dir,
-                    cancel,
+                    signals,
                     /* with_cookies: */ false,
                 )
                 .await
@@ -191,7 +193,7 @@ impl<'a> GalleryDl<'a> {
         req: &ExtractRequest,
         bin_path: &std::path::Path,
         output_dir: &std::path::Path,
-        cancel: CancellationToken,
+        signals: JobSignals,
         with_cookies: bool,
     ) -> Result<GalleryDlResult, GoopError> {
         let mut cmd = Command::new(bin_path);
@@ -202,9 +204,11 @@ impl<'a> GalleryDl<'a> {
             .arg("--no-mtime")
             .arg("-o")
             .arg("output.metadata=null")
-            // Quiet INFO logs but keep the file-completion lines we
-            // need for progress counting (those land on stdout via -v
-            // would be too noisy; --no-skip preserves redownload rules).
+            // Quiet INFO logs but keep the file-completion lines we need
+            // for progress counting. gallery-dl's default skip-existing
+            // behaviour is deliberately left in effect: it is what makes a
+            // paused or retried album re-run cheap (finished files are
+            // skipped, the in-flight `.part` is resumed).
             .arg("--quiet");
         if with_cookies {
             if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
@@ -216,6 +220,13 @@ impl<'a> GalleryDl<'a> {
             .stderr(Stdio::piped());
 
         let started = std::time::Instant::now();
+        // The scan cutoff survives across pause/resume and retry re-runs
+        // via an on-disk marker, so the post-exit tally counts the whole
+        // album from the FIRST attempt's start — not just files touched by
+        // this run. Without it, a resume of an already-complete album
+        // would tally zero files and fail as "no extractable content".
+        let marker_path = start_marker_path(output_dir, &req.url);
+        let scan_cutoff = read_or_init_start_marker(&marker_path);
         let mut child: Child = cmd.spawn()?;
         // invariant: stdout was requested with Stdio::piped above.
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -240,11 +251,14 @@ impl<'a> GalleryDl<'a> {
 
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
+                // biased: a fired stop signal must win over further
+                // subprocess output, deterministically — same discipline
+                // as the direct downloader's loop.
+                biased;
+                int = signals.interrupted() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    cleanup_partials(output_dir);
-                    return Err(GoopError::Cancelled);
+                    return Err(finish_interrupt(int, output_dir, &marker_path));
                 }
                 line = out_reader.next_line() => {
                     match line? {
@@ -323,16 +337,19 @@ impl<'a> GalleryDl<'a> {
         // race the in-loop is_file() check had where a freshly-renamed
         // file might not show up as a regular file by the time the
         // event-loop reads gallery-dl's stdout line for it.
-        let (file_count, bytes) = scan_outputs(output_dir, started);
+        let (file_count, bytes) = scan_outputs(output_dir, scan_cutoff);
         if file_count == 0 {
             // gallery-dl exited 0 but the output dir has no new files —
             // likely the URL probed cleanly but had no extractable
-            // content (private album, empty user profile, etc.).
+            // content (private album, empty user profile, etc.). The
+            // marker is kept so a manual retry still tallies from the
+            // original start.
             return Err(GoopError::SubprocessFailed {
                 binary: "gallery-dl".into(),
                 stderr: "URL valid but no extractable content".into(),
             });
         }
+        let _ = std::fs::remove_file(&marker_path);
         Ok(GalleryDlResult {
             output_path: output_dir.to_string_lossy().into_owned(),
             bytes,
@@ -343,18 +360,13 @@ impl<'a> GalleryDl<'a> {
 }
 
 /// Walk `output_dir` recursively for regular files modified at or after
-/// `started`. Returns `(count, total_bytes)`. Used as the authoritative
+/// `cutoff`. Returns `(count, total_bytes)`. Used as the authoritative
 /// post-exit tally — robust against the in-loop `is_file()` race that
-/// could mis-count files freshly renamed during the download.
-fn scan_outputs(output_dir: &std::path::Path, started: std::time::Instant) -> (u32, u64) {
-    // Convert the monotonic Instant to wall-clock for `metadata.modified()`
-    // comparison. We accept a small clock-skew tolerance because the only
-    // failure mode is over-counting older files (harmless — gallery-dl
-    // wouldn't have re-emitted a path it didn't write) or under-counting
-    // by a few microseconds at the boundary (negligible).
-    let started_wall = std::time::SystemTime::now()
-        .checked_sub(started.elapsed())
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+/// could mis-count files freshly renamed during the download. The cutoff
+/// is the run's persisted start marker so pause/resume and retry re-runs
+/// tally every file the album produced since the first attempt.
+fn scan_outputs(output_dir: &std::path::Path, cutoff: std::time::SystemTime) -> (u32, u64) {
+    let started_wall = cutoff;
     let mut count = 0u32;
     let mut bytes = 0u64;
     let mut stack: Vec<PathBuf> = vec![output_dir.to_path_buf()];
@@ -372,13 +384,18 @@ fn scan_outputs(output_dir: &std::path::Path, started: std::time::Instant) -> (u
             if !meta.is_file() {
                 continue;
             }
-            // Skip gallery-dl's `.part` partials — they're not user-facing
-            // outputs and would inflate the count if a download crashed
-            // mid-write.
+            // Skip gallery-dl's `.part` partials and hidden bookkeeping
+            // files (the run's start marker, the direct downloader's
+            // sidecars) — none are user-facing outputs and both would
+            // inflate the tally.
             if path
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e == "part")
+                || path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
             {
                 continue;
             }
@@ -463,6 +480,73 @@ fn canonical_output_dir(raw: &str) -> Result<PathBuf, GoopError> {
 /// Best-effort cleanup of gallery-dl's `.part` files on cancel. Mirrors
 /// the cleanup_partials helper in `ytdlp.rs`. Limited to files modified
 /// in the last hour so we don't sweep stale partials from earlier runs.
+/// Cancel: the user is done — remove recent `.part` partials and the
+/// run's start marker. Pause: keep both; a re-run skips finished files
+/// (gallery-dl's default), resumes the in-flight `.part`, and tallies
+/// the album from the marker's original start time.
+///
+/// Caveat: resume relies on gallery-dl DEFAULTS (part files on, skip
+/// enabled); a user-level gallery-dl config that disables either turns
+/// resume into a re-download. Accepted for now — Goop doesn't pass
+/// `--config-ignore`.
+fn finish_interrupt(
+    int: Interrupt,
+    output_dir: &std::path::Path,
+    marker_path: &std::path::Path,
+) -> GoopError {
+    match int {
+        Interrupt::Cancel => {
+            cleanup_partials(output_dir);
+            let _ = std::fs::remove_file(marker_path);
+            GoopError::Cancelled
+        }
+        Interrupt::Pause => GoopError::Paused,
+    }
+}
+
+/// The per-URL start marker: unix-millis of the first attempt's start,
+/// keyed by URL hash so concurrent albums in one folder don't collide.
+fn start_marker_path(output_dir: &std::path::Path, url: &str) -> PathBuf {
+    output_dir.join(format!(".{}.goopdl.t0", crate::direct::url_hash(url)))
+}
+
+/// How long a start marker stays trusted. A marker older than this is a
+/// leftover from an abandoned run (the queue never sits on a paused or
+/// failed job that long without the partials going stale too) — re-init
+/// rather than tally a week of unrelated files into the album.
+const START_MARKER_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Read the persisted run-start time, or initialise it to now. Garbage
+/// content, future timestamps, and stale markers all re-initialise.
+fn read_or_init_start_marker(marker_path: &std::path::Path) -> std::time::SystemTime {
+    let now = std::time::SystemTime::now();
+    if let Ok(content) = std::fs::read_to_string(marker_path) {
+        if let Ok(ms) = content.trim().parse::<u64>() {
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+            let fresh = now
+                .duration_since(t)
+                .map(|age| age <= START_MARKER_MAX_AGE)
+                .unwrap_or(false);
+            if fresh {
+                return t;
+            }
+        }
+    }
+    let ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let _ = std::fs::write(marker_path, ms.to_string());
+    now
+}
+
+/// Remove the URL's partials AND start marker — the full cancel-of-paused
+/// cleanup, callable from outside a running download.
+pub(crate) fn cleanup_run_artifacts(output_dir: &std::path::Path, url: &str) {
+    cleanup_partials(output_dir);
+    let _ = std::fs::remove_file(start_marker_path(output_dir, url));
+}
+
 fn cleanup_partials(output_dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(output_dir) else {
         return;
@@ -549,5 +633,98 @@ mod tests {
         assert_eq!(count, 0);
         assert!(thumb.is_none());
         assert!(uploader.is_none());
+    }
+
+    #[test]
+    fn finish_interrupt_pause_keeps_part_and_marker_cancel_removes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = "https://example.com/album";
+        let part = dir.path().join("photo.jpg.part");
+        let marker = start_marker_path(dir.path(), url);
+        std::fs::write(&part, b"x").unwrap();
+        std::fs::write(&marker, "1000").unwrap();
+
+        let err = finish_interrupt(Interrupt::Pause, dir.path(), &marker);
+        assert!(matches!(err, GoopError::Paused));
+        assert!(part.exists(), "pause keeps the in-flight .part");
+        assert!(marker.exists(), "pause keeps the tally marker");
+
+        let err = finish_interrupt(Interrupt::Cancel, dir.path(), &marker);
+        assert!(matches!(err, GoopError::Cancelled));
+        assert!(!part.exists(), "cancel removes the .part");
+        assert!(!marker.exists(), "cancel removes the marker");
+    }
+
+    #[test]
+    fn start_marker_init_read_and_staleness() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".abc.goopdl.t0");
+        let now = std::time::SystemTime::now();
+
+        // Missing: initialised to ~now and persisted.
+        let t = read_or_init_start_marker(&marker);
+        assert!(marker.exists());
+        assert!(now.duration_since(t).unwrap_or_default().as_secs() < 5);
+
+        // Valid recent value: returned as-is.
+        let hour_ago = now - std::time::Duration::from_secs(3600);
+        let ms = hour_ago
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        std::fs::write(&marker, ms.to_string()).unwrap();
+        let t = read_or_init_start_marker(&marker);
+        let drift = t
+            .duration_since(hour_ago)
+            .or_else(|_| hour_ago.duration_since(t))
+            .unwrap();
+        assert!(drift.as_millis() < 5, "persisted value round-trips");
+
+        // Garbage content: re-initialised.
+        std::fs::write(&marker, "not a number").unwrap();
+        let t = read_or_init_start_marker(&marker);
+        assert!(now.duration_since(t).unwrap_or_default().as_secs() < 5);
+
+        // Stale (8 days old): re-initialised.
+        let stale = now - std::time::Duration::from_secs(8 * 24 * 3600);
+        let ms = stale
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        std::fs::write(&marker, ms.to_string()).unwrap();
+        let t = read_or_init_start_marker(&marker);
+        assert!(
+            now.duration_since(t).unwrap_or_default().as_secs() < 5,
+            "stale marker must not be trusted"
+        );
+    }
+
+    #[test]
+    fn scan_outputs_counts_from_cutoff_and_skips_bookkeeping_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulates a resumed run: the cutoff is an hour in the past (the
+        // first attempt's start), files on disk were written since then.
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::write(dir.path().join("one.jpg"), b"aaaa").unwrap();
+        std::fs::write(dir.path().join("two.jpg"), b"bb").unwrap();
+        std::fs::write(dir.path().join("three.jpg.part"), b"cc").unwrap();
+        std::fs::write(dir.path().join(".xyz.goopdl.t0"), b"123").unwrap();
+
+        let (count, bytes) = scan_outputs(dir.path(), cutoff);
+        assert_eq!(count, 2, "partials and hidden bookkeeping are skipped");
+        assert_eq!(bytes, 6);
+    }
+
+    #[test]
+    fn cleanup_run_artifacts_removes_partials_and_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = "https://example.com/album";
+        let part = dir.path().join("photo.jpg.part");
+        let marker = start_marker_path(dir.path(), url);
+        std::fs::write(&part, b"x").unwrap();
+        std::fs::write(&marker, "1000").unwrap();
+        cleanup_run_artifacts(dir.path(), url);
+        assert!(!part.exists());
+        assert!(!marker.exists());
     }
 }
