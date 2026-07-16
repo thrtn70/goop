@@ -10,8 +10,15 @@ parking_lot = "0.12"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# CancellationToken only (JobSignals). Deliberately NOT a full tokio
+# dependency — signals.rs polls the token futures by hand so this crate
+# stays runtime-free.
+tokio-util.workspace = true
 uuid.workspace = true
 ts-rs = { workspace = true, features = ["uuid-impl", "serde-json-impl"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [features]
 test-util = []

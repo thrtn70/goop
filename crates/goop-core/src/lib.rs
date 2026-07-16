@@ -9,6 +9,7 @@ pub mod path;
 pub mod pdf;
 pub mod preset;
 pub mod process_registry;
+pub mod signals;
 pub mod update;
 
 pub use convert::{
@@ -16,7 +17,8 @@ pub use convert::{
     ProbeResult, QualityPreset, ResolutionCap, SourceKind, TargetFormat,
 };
 pub use error::{
-    friendly_message, is_cookie_db_error, is_no_matching_extractor, GoopError, IpcError,
+    friendly_message, is_cookie_db_error, is_no_matching_extractor, is_transient_network_stderr,
+    GoopError, IpcError,
 };
 pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
@@ -33,4 +35,5 @@ pub use pdf::{
 };
 pub use preset::Preset;
 pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};
+pub use signals::{Interrupt, JobSignals};
 pub use update::UpdateInfo;
