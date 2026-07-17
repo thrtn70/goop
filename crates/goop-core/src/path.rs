@@ -52,7 +52,11 @@ pub fn data_dir() -> PathBuf {
 // otherwise debug builds use `goop-dev` and release builds use `goop`, so a
 // `tauri dev` build and the packaged app never share a queue.db.
 fn resolve_data_dir(base: PathBuf, is_debug: bool, env_override: Option<String>) -> PathBuf {
-    if let Some(dir) = env_override.filter(|s| !s.trim().is_empty()) {
+    if let Some(dir) = env_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return PathBuf::from(dir);
     }
     base.join(if is_debug { "goop-dev" } else { "goop" })
@@ -106,5 +110,21 @@ mod tests {
     fn resolve_data_dir_ignores_empty_env_override() {
         let p = resolve_data_dir(PathBuf::from("/data"), false, Some(String::new()));
         assert_eq!(p, PathBuf::from("/data/goop"));
+    }
+
+    #[test]
+    fn resolve_data_dir_trims_whitespace_from_env_override() {
+        let p = resolve_data_dir(
+            PathBuf::from("/data"),
+            false,
+            Some("  /custom/dir  ".into()),
+        );
+        assert_eq!(p, PathBuf::from("/custom/dir"));
+    }
+
+    #[test]
+    fn resolve_data_dir_ignores_whitespace_only_env_override() {
+        let p = resolve_data_dir(PathBuf::from("/data"), true, Some("   ".into()));
+        assert_eq!(p, PathBuf::from("/data/goop-dev"));
     }
 }

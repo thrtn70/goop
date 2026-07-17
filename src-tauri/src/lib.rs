@@ -108,16 +108,18 @@ pub fn run() {
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
             let data_dir = gpath::data_dir();
-            let store = QueueStore::open(&data_dir.join("queue.db"))
-                .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
 
-            // Single-instance ownership. Only the process holding the exclusive
-            // lock on <data_dir>/queue.lock may reconcile and run workers.
-            // Otherwise a second instance would flip this one's `running` rows
-            // to error:interrupted while its in-process workers keep writing
-            // .part files (zombie workers), and two fleets could race the same
-            // partial file. The guard is held for the process lifetime via
-            // AppState.
+            // Single-instance ownership FIRST — before opening the store.
+            // Only the process holding the exclusive lock on
+            // <data_dir>/queue.lock may open/migrate the DB, reconcile, and
+            // run workers. Otherwise a second instance would flip this one's
+            // `running` rows to error:interrupted while its in-process workers
+            // keep writing .part files (zombie workers), and two fleets could
+            // race the same partial file. Acquiring before QueueStore::open
+            // also means a losing instance exits via the friendly dialog
+            // below instead of colliding on concurrent schema-migration DDL
+            // and dying with a raw "queue open" error. Held for the process
+            // lifetime via AppState.
             let instance_guard = match goop_core::InstanceGuard::try_acquire(&data_dir) {
                 Ok(Some(guard)) => guard,
                 Ok(None) => {
@@ -135,9 +137,15 @@ pub fn run() {
                         .message("Goop couldn't start: its application data folder is unavailable (check the folder's permissions). No downloads were changed.")
                         .kind(MessageDialogKind::Error)
                         .blocking_show();
-                    std::process::exit(0);
+                    // Nonzero: a genuine startup failure, distinct from the
+                    // expected exit(0) "another instance owns it" case above,
+                    // so supervisors and exit-code checks can tell them apart.
+                    std::process::exit(1);
                 }
             };
+
+            let store = QueueStore::open(&data_dir.join("queue.db"))
+                .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
 
             let _interrupted = store.reconcile().ok();
             // Re-queue jobs left in `paused` state from a previous run —
