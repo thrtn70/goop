@@ -51,7 +51,9 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
-                let _ = w.set_focus();
+                if let Err(e) = w.set_focus() {
+                    tracing::warn!(error = %e, "failed to focus existing window on second launch");
+                }
             }
         }));
     }
@@ -129,6 +131,10 @@ pub fn run() {
                 Err(e) => {
                     tracing::error!(error = %e, dir = %data_dir.display(),
                         "could not acquire the queue lock; exiting to avoid corrupting a running instance");
+                    app.dialog()
+                        .message("Goop couldn't start: its application data folder is unavailable (check the folder's permissions). No downloads were changed.")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
                     std::process::exit(0);
                 }
             };
