@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/ipc/commands";
 import { jobIdKey, useAppStore } from "@/store/appStore";
-import type { HistoryCounts, Job, JobId, JobState, Settings } from "@/types";
+import type { HistoryCounts, Job, JobId, JobState, Settings, SidecarEvent } from "@/types";
 
 vi.mock("@/ipc/commands", () => ({
   api: {
@@ -205,11 +205,14 @@ describe("app store queue and settings operations", () => {
 
   it("ignores warning sidecar events with unknown codes", () => {
     const before = useAppStore.getState().toasts.length;
+    // WarningCode makes this unrepresentable, but the event arrives over IPC as
+    // unvalidated JSON, so a Rust side that gained a variant without regenerated
+    // bindings could still deliver one. Cast past the type to cover that.
     useAppStore.getState().handleSidecarEvent({
       kind: "warning",
       code: "unknown_future_code",
       message: "noise",
-    });
+    } as unknown as SidecarEvent);
     expect(useAppStore.getState().toasts.length).toBe(before);
   });
 });

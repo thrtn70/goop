@@ -64,6 +64,7 @@ export * from './UpdateInfo';
 export * from './UpdateProgress';
 export * from './UpdateStatus';
 export * from './UrlProbe';
+export * from './WarningCode';
 export * from './WatermarkPosition';
 export * from './WatermarkSpec';
 export * from './serde_json/JsonValue';
