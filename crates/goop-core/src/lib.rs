@@ -3,6 +3,7 @@ pub mod error;
 pub mod events;
 pub mod history;
 pub mod image;
+pub mod instance;
 pub mod job;
 pub mod metadata;
 pub mod path;
@@ -25,6 +26,7 @@ pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use image::{
     CropRect, IconPlatform, ImageOperation, ResizeMode, WatermarkPosition, WatermarkSpec,
 };
+pub use instance::InstanceGuard;
 pub use job::{Job, JobId, JobKind, JobResult, JobState, ResultKind};
 pub use metadata::{
     AudioTags, CoverArt, CoverArtOp, MetadataDomain, MetadataOperation, MetadataView,
