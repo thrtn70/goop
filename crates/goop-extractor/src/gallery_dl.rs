@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::ytdlp::{ExtractRequest, UrlProbe};
+use crate::ytdlp::{ExtractRequest, UrlProbe, STDERR_DRAIN_GRACE};
 
 /// Browsers gallery-dl is willing to read cookies from. Same allowlist
 /// as `ytdlp::SUPPORTED_BROWSERS` — the two extractors share the
@@ -249,7 +249,15 @@ impl<'a> GalleryDl<'a> {
         // out of the tail window.
         let mut cookie_error_line: Option<String> = None;
 
-        loop {
+        // Drain BOTH streams to EOF rather than stopping at stdout's. See
+        // `ytdlp::download_once` for the full rationale: the loop is
+        // biased toward stdout, so a child that closed stdout early would
+        // otherwise end it with stderr never read, and every decision the
+        // caller makes is a substring test over that stderr. The
+        // `if !*_done` guards keep an EOF'd reader from spinning the loop.
+        let mut out_done = false;
+        let mut err_done = false;
+        while !(out_done && err_done) {
             tokio::select! {
                 // biased: a fired stop signal must win over further
                 // subprocess output, deterministically — same discipline
@@ -260,7 +268,7 @@ impl<'a> GalleryDl<'a> {
                     let _ = child.wait().await;
                     return Err(finish_interrupt(int, output_dir, &marker_path));
                 }
-                line = out_reader.next_line() => {
+                line = out_reader.next_line(), if !out_done => {
                     match line? {
                         Some(l) => {
                             // gallery-dl with --quiet still prints completed
@@ -288,30 +296,52 @@ impl<'a> GalleryDl<'a> {
                                 });
                             }
                         }
-                        None => break,
+                        None => out_done = true,
                     }
                 }
-                line = err_reader.next_line() => {
-                    if let Ok(Some(l)) = line {
-                        if cookie_error_line.is_none() && is_cookie_db_error(&l) {
-                            cookie_error_line = Some(l.clone());
-                        }
-                        stderr_tail.push_str(&l);
-                        stderr_tail.push('\n');
-                        if stderr_tail.len() > 8192 {
-                            // Walk forward to the next char boundary so a
-                            // truncation in the middle of a multi-byte UTF-8
-                            // sequence (CJK / emoji in extractor errors)
-                            // doesn't panic at the slice.
-                            let mut drop_to = stderr_tail.len() - 4096;
-                            while drop_to < stderr_tail.len()
-                                && !stderr_tail.is_char_boundary(drop_to)
-                            {
-                                drop_to += 1;
+                line = err_reader.next_line(), if !err_done => {
+                    match line {
+                        Ok(Some(l)) => {
+                            if cookie_error_line.is_none() && is_cookie_db_error(&l) {
+                                cookie_error_line = Some(l.clone());
                             }
-                            stderr_tail = stderr_tail[drop_to..].to_string();
+                            stderr_tail.push_str(&l);
+                            stderr_tail.push('\n');
+                            if stderr_tail.len() > 8192 {
+                                // Walk forward to the next char boundary so a
+                                // truncation in the middle of a multi-byte UTF-8
+                                // sequence (CJK / emoji in extractor errors)
+                                // doesn't panic at the slice.
+                                let mut drop_to = stderr_tail.len() - 4096;
+                                while drop_to < stderr_tail.len()
+                                    && !stderr_tail.is_char_boundary(drop_to)
+                                {
+                                    drop_to += 1;
+                                }
+                                stderr_tail = stderr_tail[drop_to..].to_string();
+                            }
                         }
+                        Ok(None) => err_done = true,
+                        // One undecodable line. tokio consumes the bad
+                        // bytes before validating them, so the reader has
+                        // already moved on — skip it and keep the rest of
+                        // the message rather than dropping everything after
+                        // the first bad byte. See `ytdlp::download_once`.
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
+                        // A real IO error won't clear on the next poll.
+                        Err(_) => err_done = true,
                     }
+                }
+                // Bounds the drain against a grandchild holding stderr open
+                // past the child's exit. Inactivity window, reset by any
+                // stderr line. See `ytdlp::download_once`.
+                _ = tokio::time::sleep(STDERR_DRAIN_GRACE), if out_done && !err_done => {
+                    tracing::warn!(
+                        "gallery-dl stderr still open after stdout EOF; \
+                         proceeding with the {} bytes collected so far",
+                        stderr_tail.len()
+                    );
+                    err_done = true;
                 }
             }
         }
