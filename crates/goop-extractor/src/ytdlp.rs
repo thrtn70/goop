@@ -229,7 +229,11 @@ impl<'a> YtDlp<'a> {
         })
     }
 
-    pub async fn download(
+    /// `pub(crate)` on purpose: callers must come through
+    /// `backend::dispatch`, which installs the `WarnOnceSink` this fn's
+    /// warning relies on to stay one-per-dispatch. A direct call would
+    /// silently bypass it.
+    pub(crate) async fn download(
         &self,
         job_id: JobId,
         req: &ExtractRequest,
@@ -264,10 +268,16 @@ impl<'a> YtDlp<'a> {
             .await;
 
         // Cookie-DB read failure + cookies were actually requested → retry
-        // without the flag and surface a one-shot warning. Public videos
-        // and most yt-dlp-supported sites work without cookies, so the
-        // fallback turns "extract fails" into "extract works, with a
-        // heads-up". A fired cancel or pause short-circuits the retry.
+        // without the flag and warn. Public videos and most
+        // yt-dlp-supported sites work without cookies, so the fallback
+        // turns "extract fails" into "extract works, with a heads-up". A
+        // fired cancel or pause short-circuits the retry.
+        //
+        // This warns once per call, which is NOT once per dispatch:
+        // dispatch may run gallery-dl after us and the retry layer may
+        // re-run us, and each would hit the same locked cookie DB.
+        // Collapsing those repeats is `WarnOnceSink`'s job, installed by
+        // `backend::dispatch_with_policy` — don't add a guard here.
         match first {
             Err(GoopError::SubprocessFailed { ref stderr, .. })
                 if is_cookie_db_error(stderr)

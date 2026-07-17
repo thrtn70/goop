@@ -20,7 +20,7 @@ pub use error::{
     friendly_message, is_cookie_db_error, is_no_matching_extractor, is_transient_network_stderr,
     GoopError, IpcError,
 };
-pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent};
+pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent, WarnOnceSink};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use image::{
     CropRect, IconPlatform, ImageOperation, ResizeMode, WatermarkPosition, WatermarkSpec,

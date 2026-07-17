@@ -6,7 +6,7 @@
 //! backends produce the same `BackendOutcome` shape so the caller can
 //! convert to a `JobResult` without caring which extractor ran.
 
-use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId, JobSignals};
+use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId, JobSignals, WarnOnceSink};
 use goop_sidecar::BinaryResolver;
 use std::sync::Arc;
 
@@ -62,6 +62,19 @@ pub(crate) async fn dispatch_with_policy(
     signals: JobSignals,
     policy: &RetryPolicy,
 ) -> Result<BackendOutcome, GoopError> {
+    // Warnings are raised by whichever extractor hits the condition, but
+    // this is the only layer that knows how many extractors ran and how
+    // often the pipeline replayed: `with_retry` re-runs `dispatch_once`,
+    // which may try both extractors. Two extractors hitting the same
+    // locked cookie DB across five attempts is ONE fact, so collapse
+    // repeats of a code to the first for the span of this dispatch.
+    // Progress (including `with_retry`'s own backoff events) is untouched.
+    //
+    // Scoped to the dispatch, not the app: a resumed or manually retried
+    // job comes back through here with a fresh wrapper and warns again,
+    // which is intended — the user acted. Shadowing `sink` keeps the
+    // unwrapped one from being used below by accident.
+    let sink = WarnOnceSink::wrap(sink);
     with_retry(policy, &signals, &sink, job_id, || {
         dispatch_once(resolver, sink.clone(), job_id, req, signals.clone())
     })
@@ -217,9 +230,15 @@ mod tests {
     }
 }
 
-/// Dispatch tests driven by fake sidecars — shell scripts that reproduce
-/// the stderr real yt-dlp / gallery-dl emit. Cheap to point at pathological
-/// process behaviour that the real binaries only produce under a race.
+/// End-to-end dispatch tests driven by fake sidecars — shell scripts that
+/// reproduce the stderr real yt-dlp / gallery-dl emit. They exist to pin
+/// down how many cookie warnings ONE dispatch produces, which is a
+/// property of how this module composes the extractors with the retry
+/// wrapper and so is invisible to either extractor's own unit tests.
+///
+/// They assert on the warnings a plain `RecordingSink` receives, never on
+/// `WarnOnceSink` itself, so they'd hold for any other implementation of
+/// the same guarantee.
 ///
 /// Unix-only: the fakes are `/bin/sh` scripts. The logic under test is
 /// platform-independent, so the coverage gap on Windows is acceptable.
@@ -227,6 +246,7 @@ mod tests {
 mod fake_sidecar_tests {
     use super::*;
     use goop_core::events::RecordingSink;
+    use goop_core::SidecarEvent;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -266,7 +286,9 @@ echo "$dir/photo.jpg" 2>/dev/null || true
 exit 0
 "#;
 
-    /// Millisecond backoff, so these tests spend no real time waiting.
+    /// Millisecond backoff, so the retry tests spend no real time waiting.
+    /// Shallower than `DEFAULT_RETRY_POLICY` (which allows 4 retries): 2
+    /// retries is enough to prove the replay without three extra spawns.
     const FAST_RETRIES: RetryPolicy = RetryPolicy {
         max_retries: 2,
         base_delay: Duration::from_millis(1),
@@ -281,6 +303,17 @@ exit 0
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    fn warning_codes(sink: &RecordingSink) -> Vec<String> {
+        sink.sidecar
+            .lock()
+            .iter()
+            .filter_map(|e| match e {
+                SidecarEvent::Warning { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn request(url: &str, output_dir: &std::path::Path) -> ExtractRequest {
         ExtractRequest {
             url: url.into(),
@@ -293,23 +326,183 @@ exit 0
         }
     }
 
-    /// The output loop is `biased`, so it polls stdout before stderr; it
-    /// used to `break` on stdout EOF, which meant a child whose stdout was
-    /// already closed had its stderr read zero times and dropped whole.
+    /// Regression: yt-dlp cookie-fails and declines the URL, dispatch
+    /// falls back to gallery-dl, which cookie-fails too and then
+    /// succeeds. The job works, so the user gets ONE heads-up — not one
+    /// per extractor that happened to touch the same locked cookie DB.
+    #[tokio::test]
+    async fn cookie_warning_fires_once_when_the_fallback_extractor_also_cookie_fails() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "{COOKIE_FAIL_WITH_COOKIES}\
+                 echo 'ERROR: Unsupported URL: https://example.com/x' >&2\n\
+                 exit 1\n"
+            ),
+        );
+        // Cookie-fails, then downloads one file into `--directory`.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            &format!("{COOKIE_FAIL_WITH_COOKIES}{GALLERY_DL_WRITES_ONE_FILE}"),
+        );
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let req = request("https://example.com/x", out.path());
+
+        let res = dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            &FAST_RETRIES,
+        )
+        .await;
+
+        assert!(res.is_ok(), "gallery-dl should carry the job: {res:?}");
+        assert_eq!(
+            warning_codes(&rec),
+            vec!["cookie_fallback"],
+            "both extractors cookie-failed; the user should hear it once"
+        );
+    }
+
+    /// Regression: a transient failure sends `with_retry` around again,
+    /// replaying the whole pipeline — including the cookie failure that
+    /// opens every attempt. The warning still belongs to the job, not to
+    /// the attempt.
+    #[tokio::test]
+    async fn cookie_warning_fires_once_across_transient_retries() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Cookie-fails, then hits a transient error the retry layer takes
+        // as worth another attempt.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "{COOKIE_FAIL_WITH_COOKIES}\
+                 echo 'ERROR: unable to download video data: Connection reset by peer' >&2\n\
+                 exit 1\n"
+            ),
+        );
+        // Never reached: a transient error is not a no-match, so dispatch
+        // retries rather than falling back. Present so the resolver can't
+        // silently pick up a real gallery-dl from $PATH.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let req = request("https://example.com/x", out.path());
+
+        let res = dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            &FAST_RETRIES,
+        )
+        .await;
+
+        assert!(res.is_err(), "the transient error exhausts the budget");
+        let retries = rec
+            .progress
+            .lock()
+            .iter()
+            .filter(|p| p.stage.starts_with("retrying"))
+            .count();
+        assert_eq!(
+            retries, 2,
+            "policy allows 2 retries after the first attempt"
+        );
+        assert_eq!(
+            warning_codes(&rec),
+            vec!["cookie_fallback"],
+            "3 attempts each cookie-failed; the user should hear it once"
+        );
+    }
+
+    /// The dedupe is scoped to one dispatch, not to the process: a job the
+    /// user resumed or hit Retry on re-enters `dispatch` (see
+    /// `goop_queue::scheduler::resume`, which re-queues paused downloads)
+    /// and is entitled to say the cookie DB is still locked. Pinned
+    /// because hoisting the wrapper up to the app-level sink would silence
+    /// every warning after the first for a whole app run — and every other
+    /// test here would still pass.
+    #[tokio::test]
+    async fn each_dispatch_warns_afresh_so_a_resumed_job_is_told_again() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "{COOKIE_FAIL_WITH_COOKIES}\
+                 echo 'ERROR: Unsupported URL: https://example.com/x' >&2\n\
+                 exit 1\n"
+            ),
+        );
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            &format!("{COOKIE_FAIL_WITH_COOKIES}{GALLERY_DL_WRITES_ONE_FILE}"),
+        );
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        // One sink across both dispatches — the app-level sink outlives any
+        // single job, which is exactly why the wrapper must not.
+        let rec = Arc::new(RecordingSink::new());
+        let req = request("https://example.com/x", out.path());
+
+        for _ in 0..2 {
+            let res = dispatch_with_policy(
+                &resolver,
+                rec.clone(),
+                JobId::new(),
+                &req,
+                JobSignals::new(),
+                &FAST_RETRIES,
+            )
+            .await;
+            assert!(res.is_ok(), "{res:?}");
+        }
+
+        assert_eq!(
+            warning_codes(&rec),
+            vec!["cookie_fallback", "cookie_fallback"],
+            "a second dispatch is a second user-initiated run: warn again"
+        );
+    }
+
+    /// Regression for a stderr drain race, surfaced because these fakes
+    /// exit far faster than real yt-dlp / gallery-dl (Python, slow to tear
+    /// down). The extractors' output loop is `biased`, so it polls stdout
+    /// before stderr; a child whose stdout was already at EOF made it
+    /// `break` before stderr had been read even once, losing the message
+    /// whole.
     ///
     /// Everything the wrappers decide is a substring test over that
-    /// stderr, so losing it silently disables ALL of: the cookie fallback,
-    /// the cross-extractor fallback, the transient retry, and
-    /// `friendly_message`. Real yt-dlp / gallery-dl are Python and linger
-    /// through teardown, so the window rarely opens in production — these
-    /// fakes exit immediately, which is why it showed up here first.
-    ///
-    /// `exec 1>&-` closes stdout before a byte of stderr exists, forcing
-    /// the losing interleaving on every run.
+    /// stderr, so dropping it silently disables ALL of: the cookie
+    /// fallback, the cross-extractor fallback, the transient retry, and
+    /// `friendly_message`. The children here close stdout up front and
+    /// write stderr late, which forces the losing interleaving on every
+    /// run rather than the ~4% the plain fakes hit.
     #[tokio::test]
     async fn stderr_is_read_even_when_the_child_closes_stdout_first() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
+        // `exec 1>&-` closes stdout before a byte of stderr exists, so the
+        // stdout reader reports EOF on its very first poll.
         write_fake(
             bins.path(),
             "yt-dlp",
@@ -341,21 +534,22 @@ exit 0
         )
         .await;
 
-        // Only reachable if yt-dlp's "Unsupported URL" survived to drive
-        // the fallback, and gallery-dl's cookie error survived to drive
-        // its no-cookie retry.
+        // Reaching gallery-dl at all proves yt-dlp's "Unsupported URL"
+        // survived; the warning proves its cookie error did too.
         assert!(
             res.is_ok(),
             "stderr was dropped, so nothing fell back: {res:?}"
         );
+        assert_eq!(warning_codes(&rec), vec!["cookie_fallback"]);
     }
 
     /// Extractor stderr is not guaranteed UTF-8 — a mojibake title or a
     /// legacy Windows codepage puts undecodable bytes in the middle of an
     /// otherwise readable message. One bad line must not cost us the rest
-    /// of it: tokio consumes the bad bytes before it validates them, so
-    /// the reader has already moved on and skipping keeps the remainder.
-    /// Here the marker the dispatcher needs sits AFTER the bad line.
+    /// of it: every routing decision is a substring test over the whole
+    /// stderr, so truncating at the first bad byte silently disables the
+    /// fallbacks. Here the marker the dispatcher needs sits AFTER the bad
+    /// line.
     #[tokio::test]
     async fn one_undecodable_stderr_line_does_not_swallow_the_rest() {
         let bins = TempDir::new().unwrap();
