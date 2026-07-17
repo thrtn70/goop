@@ -152,6 +152,40 @@ pub struct DebridCtx {
     /// item handle (`"torrent:42"` / `"web:abc"`). The host writes it
     /// into the job's stored payload as `debrid_item`.
     pub persist_item: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The handle resolved earlier in THIS scheduler pickup. `dispatch`
+    /// builds one `DebridCtx` per pickup and the retry loop reuses it
+    /// across attempts, but the borrowed `req` still carries the
+    /// pre-create value on every attempt. Without this cell, a transient
+    /// failure that strikes right after a successful create (e.g. a blip
+    /// mid-CDN-download) would send the retry back through the create
+    /// branch and mint a SECOND TorBox item for the same link. `run`
+    /// consults it before `req.debrid_item`; `remember` fills it.
+    pub session_item: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl DebridCtx {
+    /// A fresh session (no handle resolved yet this pickup). Host code
+    /// builds it with this; the field is populated by `remember`.
+    pub fn session() -> Arc<std::sync::Mutex<Option<String>>> {
+        Arc::new(std::sync::Mutex::new(None))
+    }
+
+    /// Record a just-created handle both durably (job payload, survives
+    /// restart) and in-memory (this pickup's retries skip the create).
+    fn remember(&self, formatted: &str) {
+        (self.persist_item)(formatted);
+        *self.session_item.lock().unwrap_or_else(|e| e.into_inner()) = Some(formatted.to_string());
+    }
+
+    /// The handle to reuse this attempt: an in-pickup create wins, then
+    /// the payload value from an earlier pickup / restart.
+    fn resolved_item(&self, req: &ExtractRequest) -> Option<String> {
+        self.session_item
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .or_else(|| req.debrid_item.clone())
+    }
 }
 
 /// Persisted handle for a TorBox item. `Queued` means TorBox accepted the
@@ -246,10 +280,11 @@ pub async fn run(
 
     // One create per link, ever, per handle state: a fresh job creates and
     // persists the handle; a queued handle is only re-created once TorBox's
-    // own queue releases it. The persisted handle — not the retry loop —
-    // owns the create, so poll cycles can never hammer the rate-limited
-    // create endpoints.
-    let (kind, id) = match req.debrid_item.as_deref().and_then(parse_item) {
+    // own queue releases it. The RESOLVED handle — the in-pickup cell first,
+    // then the persisted payload — owns the create, never the retry loop, so
+    // poll cycles and post-create transient retries can't hammer the
+    // rate-limited create endpoints (see `DebridCtx::session_item`).
+    let (kind, id) = match ctx.resolved_item(req).as_deref().and_then(parse_item) {
         Some(ItemHandle::Active(kind, id)) => (kind, id),
         Some(ItemHandle::Queued(kind, qid)) => {
             if client.queued_still_pending(kind, &qid).await? {
@@ -263,7 +298,7 @@ pub async fn run(
             // item. Re-submitting the same link returns that item's id
             // (and cannot re-queue — a slot was just consumed by it).
             let handle = create_item(&client, &req.url).await?;
-            (ctx.persist_item)(&format_item(&handle));
+            ctx.remember(&format_item(&handle));
             match handle {
                 ItemHandle::Active(kind, id) => (kind, id),
                 ItemHandle::Queued(..) => {
@@ -277,7 +312,7 @@ pub async fn run(
         }
         None => {
             let handle = create_item(&client, &req.url).await?;
-            (ctx.persist_item)(&format_item(&handle));
+            ctx.remember(&format_item(&handle));
             match handle {
                 ItemHandle::Active(kind, id) => (kind, id),
                 ItemHandle::Queued(..) => {
@@ -918,6 +953,7 @@ mod tests {
         let ctx = DebridCtx {
             api_base: base,
             api_key: "k".into(),
+            session_item: DebridCtx::session(),
             persist_item: Arc::new(move |item| p.lock().unwrap().push(item.to_string())),
         };
         (ctx, persisted)
@@ -1327,6 +1363,92 @@ mod tests {
             "got {err:?}"
         );
         assert_eq!(persisted.lock().unwrap().as_slice(), ["torrent:42"]);
+    }
+
+    #[tokio::test]
+    async fn transient_failure_after_create_does_not_recreate_on_retry() {
+        // Regression: a transient error striking right after a successful
+        // create must NOT re-fire createtorrent when the retry loop re-runs
+        // `run` with the same `DebridCtx` — otherwise it mints a duplicate
+        // TorBox item and leaks an account slot. Two `run` calls sharing one
+        // ctx model exactly what `with_retry` does across attempts.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/torrents/createtorrent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(
+                serde_json::json!({ "torrent_id": 100, "queued_id": null }),
+            )))
+            .expect(1) // exactly one create across BOTH attempts
+            .mount(&server)
+            .await;
+        // Attempt 1: mylist flakes once (503 → transient Network error).
+        Mock::given(method("GET"))
+            .and(path("/torrents/mylist"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // Attempt 2: mylist ready with one file.
+        Mock::given(method("GET"))
+            .and(path("/torrents/mylist"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(ok_body(serde_json::json!({
+                    "id": 100,
+                    "name": "f",
+                    "download_state": "cached",
+                    "download_present": true,
+                    "download_finished": true,
+                    "files": [ { "id": 0, "short_name": "f.bin", "size": 4 } ],
+                }))),
+            )
+            .with_priority(5)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/torrents/requestdl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(
+                serde_json::Value::String(format!("{}/cdn/0", server.uri())),
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cdn/0"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"data".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = TempDir::new().unwrap();
+        let (ctx, persisted) = ctx_with_recorder(server.uri());
+        let req = test_req("magnet:?xt=x", dir.path(), None);
+
+        let err = run(
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, GoopError::Network(_)),
+            "attempt 1 should transiently fail, got {err:?}"
+        );
+
+        let outcome = run(
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.file_count, 1);
+        // Create persisted exactly once; the mock's `.expect(1)` enforces the
+        // create-call count when the server drops at end of test.
+        assert_eq!(persisted.lock().unwrap().as_slice(), ["torrent:100"]);
     }
 
     #[tokio::test]

@@ -137,6 +137,7 @@ pub fn run() {
                         goop_extractor::debrid::DebridCtx {
                             api_base: goop_extractor::debrid::TORBOX_API_BASE.to_string(),
                             api_key,
+                            session_item: goop_extractor::debrid::DebridCtx::session(),
                             persist_item: Arc::new(move |item: &str| {
                                 let mut r = req_for_persist.clone();
                                 r.debrid_item = Some(item.to_string());

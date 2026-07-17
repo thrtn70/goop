@@ -68,15 +68,37 @@ fn spawn_debrid_remote_cancel(state: &State<'_, AppState>, job_id: JobId, item: 
     };
     let store = state.store.clone();
     tauri::async_runtime::spawn(async move {
-        // Give a running worker a moment to observe its cancel token and
-        // finalize the row before the state check.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let finalized = store
-            .get_by_id(job_id)
-            .ok()
-            .flatten()
-            .is_some_and(|j| j.state == JobState::Cancelled);
+        // Wait for the worker to observe its cancel token and finalize the
+        // row before deleting the remote item. A running debrid job can be
+        // mid-HTTP-call to TorBox (up to the client's 30s timeout) before it
+        // sees the token, so poll rather than checking once after a fixed
+        // sleep — a single short sleep would give up and skip the remote
+        // delete for exactly the slow-response case that leaks a slot. Bail
+        // early if the row settles to any OTHER terminal state (a racing
+        // resume, or it finished first): only a Cancelled row gets the drop.
+        let mut finalized = false;
+        for _ in 0..140 {
+            match store.get_by_id(job_id).ok().flatten().map(|j| j.state) {
+                Some(JobState::Cancelled) => {
+                    finalized = true;
+                    break;
+                }
+                // Settled to some OTHER terminal state, or the row is gone:
+                // the cancel didn't win, so don't touch the remote item.
+                Some(JobState::Done) | Some(JobState::Error { .. }) | None => return,
+                // Still in flight — keep waiting for it to observe the token.
+                // Spelled out (not `_`) so a new JobState variant forces a
+                // decision here at compile time instead of silently polling.
+                Some(JobState::Queued) | Some(JobState::Running) | Some(JobState::Paused) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await
+                }
+            }
+        }
         if !finalized {
+            tracing::warn!(
+                ?job_id,
+                "debrid cancel: row never finalized; skipping remote delete"
+            );
             return;
         }
         if let Err(e) = goop_extractor::debrid::remote_cancel(
