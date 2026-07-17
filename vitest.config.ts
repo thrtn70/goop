@@ -9,5 +9,9 @@ export default defineConfig({
     environment: "jsdom",
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
+    // Anchor discovery to this checkout's sources: the default glob also
+    // crawls nested checkouts (git worktrees, vendored copies) and runs
+    // stale duplicates of every suite.
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
 });
