@@ -132,10 +132,20 @@ impl<'a> GalleryDl<'a> {
     ///
     /// On a cookie-DB read failure (Chrome v127+ DPAPI lock, missing
     /// browser, etc.) when `req.cookies_from_browser` was set, retries
-    /// once without `--cookies-from-browser` and emits a one-shot
+    /// once without `--cookies-from-browser` and emits a
     /// `SidecarEvent::Warning` so the UI can toast the user. Cancellation
     /// short-circuits the retry.
-    pub async fn download(
+    ///
+    /// This warns once per call, which is NOT once per dispatch — we may
+    /// run as dispatch's fallback after yt-dlp already warned about the
+    /// same locked cookie DB, or be re-run by the retry layer. Collapsing
+    /// those repeats is `WarnOnceSink`'s job, installed by
+    /// `backend::dispatch_with_policy` — don't add a guard here.
+    ///
+    /// `pub(crate)` on purpose: callers must come through
+    /// `backend::dispatch`, which installs that `WarnOnceSink`. A direct
+    /// call would silently bypass it.
+    pub(crate) async fn download(
         &self,
         job_id: JobId,
         req: &ExtractRequest,

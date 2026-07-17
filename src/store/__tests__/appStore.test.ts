@@ -178,7 +178,7 @@ describe("app store queue and settings operations", () => {
     expect(sent).not.toHaveProperty("output_dir_extract");
   });
 
-  it("enqueues a one-shot info toast for cookie_fallback sidecar warnings", () => {
+  it("enqueues an info toast for a cookie_fallback sidecar warning", () => {
     const before = useAppStore.getState().toasts.length;
     useAppStore.getState().handleSidecarEvent({
       kind: "warning",
@@ -193,7 +193,24 @@ describe("app store queue and settings operations", () => {
     expect(t.detail).toContain("chrome");
   });
 
-  it("ignores yt_dlp_updated sidecar events (handled by version subscriber)", () => {
+  // Deduping cookie_fallback is the extractor's job (WarnOnceSink), scoped
+  // to one dispatch attempt. A second event means a second attempt — a
+  // resume or a manual retry — and the user should see it. Pins the
+  // pass-through so a store-level dedupe can't be added without this
+  // failing loudly.
+  it("enqueues one toast per cookie_fallback event (dedupe is the backend's job)", () => {
+    const before = useAppStore.getState().toasts.length;
+    for (let i = 0; i < 2; i++) {
+      useAppStore.getState().handleSidecarEvent({
+        kind: "warning",
+        code: "cookie_fallback",
+        message: "Couldn't read chrome cookies — proceeded without.",
+      });
+    }
+    expect(useAppStore.getState().toasts.length).toBe(before + 2);
+  });
+
+  it("ignores yt_dlp_updated sidecar events (no branch handles them)", () => {
     const before = useAppStore.getState().toasts.length;
     useAppStore.getState().handleSidecarEvent({
       kind: "yt_dlp_updated",

@@ -135,8 +135,7 @@ type AppStoreState = {
   /**
    * Routes a `SidecarEvent` to the right side effect. Handles
    * `kind === "warning"` (cookie auto-fallback, future broadcast warnings)
-   * by enqueuing a one-shot info toast; other variants are no-ops here
-   * (yt_dlp_updated is consumed by the version-info subscriber instead).
+   * by enqueuing an info toast; every other variant is a no-op here.
    */
   handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
@@ -360,18 +359,25 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   handleSidecarEvent(e) {
     if (e.kind === "warning" && e.code === "cookie_fallback") {
-      // The cookie auto-fallback fires once per job at the wrapper layer
-      // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
-      // lock, missing browser, etc.). Surface as a non-blocking info toast
-      // so the user knows what happened without a hard error.
+      // Raised when the browser cookie DB couldn't be read (Chrome v127+
+      // DPAPI lock, missing browser, etc.) and the extract proceeded
+      // anonymously. Surface as a non-blocking info toast so the user
+      // knows what happened without a hard error.
+      //
+      // Deliberately no dedupe here: the extractor collapses this to one
+      // event per dispatch attempt (WarnOnceSink), however many extractors
+      // and retries hit the same locked DB. A resumed or manually retried
+      // job is a fresh dispatch and warns again ON PURPOSE — deduping here
+      // would swallow that.
       get().enqueueToast({
         variant: "info",
         title: "Cookies skipped for this download",
         detail: e.message,
       });
     }
-    // yt_dlp_updated and other warning codes are consumed by their own
-    // dedicated subscribers (e.g. version-info refresh in useAppVersion).
+    // Other codes are dropped. Note yt_dlp_updated lands here too and has
+    // no branch, so an auto-update leaves the cached version stale until a
+    // reload — pre-existing, tracked separately.
   },
   incrementUnseen() {
     set((s) => ({ unseenCompletions: s.unseenCompletions + 1 }));
