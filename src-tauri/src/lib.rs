@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
 pub fn run() {
@@ -88,8 +89,34 @@ pub fn run() {
                 .filter(|p| p.exists());
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
-            let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
+            let data_dir = gpath::data_dir();
+            let store = QueueStore::open(&data_dir.join("queue.db"))
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
+
+            // Single-instance ownership. Only the process holding the exclusive
+            // lock on <data_dir>/queue.lock may reconcile and run workers.
+            // Otherwise a second instance would flip this one's `running` rows
+            // to error:interrupted while its in-process workers keep writing
+            // .part files (zombie workers), and two fleets could race the same
+            // partial file. The guard is held for the process lifetime via
+            // AppState.
+            let instance_guard = match goop_core::InstanceGuard::try_acquire(&data_dir) {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    tracing::warn!(dir = %data_dir.display(), "another Goop instance owns the queue; exiting");
+                    app.dialog()
+                        .message("Goop is already running. Switch to the open window to manage your downloads.")
+                        .kind(MessageDialogKind::Info)
+                        .blocking_show();
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, dir = %data_dir.display(),
+                        "could not acquire the queue lock; exiting to avoid corrupting a running instance");
+                    std::process::exit(0);
+                }
+            };
+
             let _interrupted = store.reconcile().ok();
             // Re-queue jobs left in `paused` state from a previous run —
             // except downloads. A paused download's partial files survive on
@@ -870,6 +897,7 @@ pub fn run() {
             app.manage(AppState {
                 resolver,
                 store,
+                instance_guard,
                 scheduler,
                 settings: parking_lot::RwLock::new(settings),
                 settings_path,

@@ -11,6 +11,11 @@ use std::sync::Arc;
 pub struct AppState {
     pub resolver: Arc<BinaryResolver>,
     pub store: QueueStore,
+    /// Exclusive lock proving this process owns the shared queue. Held for the
+    /// whole process lifetime; dropping it (on exit) releases the lock so a
+    /// later instance can take over. Never read directly — presence is the point.
+    #[allow(dead_code)]
+    pub instance_guard: goop_core::InstanceGuard,
     pub scheduler: Arc<Scheduler>,
     pub settings: RwLock<Settings>,
     pub settings_path: PathBuf,
