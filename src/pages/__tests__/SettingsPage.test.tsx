@@ -34,12 +34,17 @@ const apiMocks = vi.hoisted(() => ({
     openReleasesPage: vi.fn(),
     openAboutLink: vi.fn(),
   },
+  // Mirror the real sidecar IPC surface: loadVersions fans out over all of
+  // these, so a missing stub surfaces as "not a function" rather than a
+  // meaningful assertion failure if a test ever exercises it for real.
   sidecar: {
     updateYtDlp: vi.fn(),
     updateGalleryDl: vi.fn(),
     ytDlpVersion: vi.fn(),
     ffmpegVersion: vi.fn(),
     galleryDlVersion: vi.fn(),
+    ghostscriptVersion: vi.fn(),
+    mutoolVersion: vi.fn(),
   },
   preset: { list: vi.fn(), save: vi.fn(), delete: vi.fn() },
   thumbnail: { get: vi.fn() },
@@ -83,8 +88,15 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
+// The sidecar-update tests swap in a stubbed loadVersions; keep the real one
+// so each test starts from the store's actual implementation.
+const realLoadVersions = useAppStore.getState().loadVersions;
+
 beforeEach(() => {
   apiMocks.settings.set.mockReset();
+  apiMocks.sidecar.updateYtDlp.mockReset();
+  apiMocks.sidecar.updateGalleryDl.mockReset();
+  useAppStore.setState({ loadVersions: realLoadVersions });
   // Mirror the Rust backend's apply_patch: regular Option<T> fields use
   // `if let Some(v)` and so a `null` on the wire means "no change", not
   // "set to null". Spreading the patch verbatim would overwrite theme,
@@ -114,6 +126,92 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("SettingsPage sidecar updates refresh the version cache", () => {
+  it("force-refreshes cached versions after yt-dlp actually updates", async () => {
+    const loadVersions = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ loadVersions });
+    apiMocks.sidecar.updateYtDlp.mockResolvedValue({
+      attempted: true,
+      previous_version: "2024.10.07",
+      new_version: "2024.11.18",
+      message: "Updated yt-dlp to 2024.11.18",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update yt-dlp" }));
+
+    // `true` matters: the cache is warmed at boot, so an unforced call would
+    // hand back the pre-update version and leave About stale.
+    await waitFor(() => expect(loadVersions).toHaveBeenCalledWith(true));
+  });
+
+  it("force-refreshes cached versions after gallery-dl actually updates", async () => {
+    const loadVersions = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ loadVersions });
+    apiMocks.sidecar.updateGalleryDl.mockResolvedValue({
+      attempted: true,
+      previous_version: "1.32.0",
+      new_version: "1.32.4",
+      message: "Updated gallery-dl to 1.32.4",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update gallery-dl" }));
+
+    await waitFor(() => expect(loadVersions).toHaveBeenCalledWith(true));
+  });
+
+  it("keeps the success message when the version refresh fails", async () => {
+    const loadVersions = vi.fn().mockRejectedValue(new Error("spawn failed"));
+    useAppStore.setState({ loadVersions });
+    apiMocks.sidecar.updateYtDlp.mockResolvedValue({
+      attempted: true,
+      previous_version: "2024.10.07",
+      new_version: "2024.11.18",
+      message: "Updated yt-dlp to 2024.11.18",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update yt-dlp" }));
+
+    // The update itself succeeded; a failed re-read must not overwrite that
+    // with an error, and must not surface as an unhandled rejection.
+    await waitFor(() => expect(loadVersions).toHaveBeenCalledWith(true));
+    expect(screen.getByText("Updated yt-dlp to 2024.11.18")).toBeTruthy();
+  });
+
+  it("skips the refresh when the update was a no-op", async () => {
+    const loadVersions = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ loadVersions });
+    apiMocks.sidecar.updateYtDlp.mockResolvedValue({
+      attempted: true,
+      previous_version: "2024.11.18",
+      new_version: "2024.11.18",
+      message: "yt-dlp is up to date.",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update yt-dlp" }));
+
+    await screen.findByText("yt-dlp is up to date.");
+    expect(loadVersions).not.toHaveBeenCalled();
+  });
+
+  it("skips the refresh when the update failed", async () => {
+    const loadVersions = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ loadVersions });
+    apiMocks.sidecar.updateYtDlp.mockRejectedValue(new Error("network down"));
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update yt-dlp" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/network down/)).toBeTruthy(),
+    );
+    expect(loadVersions).not.toHaveBeenCalled();
+  });
 });
 
 describe("SettingsPage Output folder Browse picker", () => {

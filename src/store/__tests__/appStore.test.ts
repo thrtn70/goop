@@ -21,9 +21,19 @@ vi.mock("@/ipc/commands", () => ({
     settings: { set: vi.fn(), get: vi.fn() },
     preset: { list: vi.fn(), save: vi.fn(), delete: vi.fn() },
     update: { check: vi.fn(), download: vi.fn() },
-    sidecar: { ytDlpVersion: vi.fn(), ffmpegVersion: vi.fn() },
+    sidecar: {
+      ytDlpVersion: vi.fn(),
+      ffmpegVersion: vi.fn(),
+      galleryDlVersion: vi.fn(),
+      ghostscriptVersion: vi.fn(),
+      mutoolVersion: vi.fn(),
+    },
     thumbnail: { get: vi.fn() },
   },
+}));
+
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn().mockResolvedValue("0.2.1"),
 }));
 
 const counts: HistoryCounts = { all: 0, extract: 0, convert: 0, pdf: 0 };
@@ -71,12 +81,21 @@ describe("app store queue and settings operations", () => {
     (clearMocks as () => void)();
     vi.mocked(api.history.list).mockResolvedValue([]);
     vi.mocked(api.history.counts).mockResolvedValue(counts);
+    // loadVersions fans out over every sidecar at once. Each call is
+    // individually .catch()-guarded, but a bare vi.fn() returns undefined and
+    // .catch() on that throws synchronously, rejecting the whole batch.
+    vi.mocked(api.sidecar.ytDlpVersion).mockResolvedValue("2024.10.07");
+    vi.mocked(api.sidecar.galleryDlVersion).mockResolvedValue("1.32.4");
+    vi.mocked(api.sidecar.ffmpegVersion).mockResolvedValue("n7.1");
+    vi.mocked(api.sidecar.ghostscriptVersion).mockResolvedValue("10.04.0");
+    vi.mocked(api.sidecar.mutoolVersion).mockResolvedValue("1.27.0");
     useAppStore.setState({
       settings: null,
       jobs: [],
       progressById: {},
       toasts: [],
       thumbnailsById: {},
+      versions: null,
       ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
       history: {
         search: "",
@@ -193,13 +212,65 @@ describe("app store queue and settings operations", () => {
     expect(t.detail).toContain("chrome");
   });
 
-  it("ignores yt_dlp_updated sidecar events (handled by version subscriber)", () => {
-    const before = useAppStore.getState().toasts.length;
+  it("force-refreshes the cached versions when yt-dlp reports an update", async () => {
+    // A warm cache is the norm here: boot pre-loads versions so Settings →
+    // About renders instantly. That makes `force` load-bearing — a plain
+    // loadVersions() would return this stale value and never re-spawn.
+    useAppStore.setState({
+      versions: {
+        goop: "0.2.1",
+        ytDlp: "2024.10.07",
+        galleryDl: null,
+        ffmpeg: null,
+        ghostscript: null,
+        mutool: null,
+        os: "darwin",
+      },
+    });
+    vi.mocked(api.sidecar.ytDlpVersion).mockResolvedValue("2024.11.18");
+
     useAppStore.getState().handleSidecarEvent({
       kind: "yt_dlp_updated",
       from_version: "2024.10.07",
       to_version: "2024.11.18",
     });
+
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().versions?.ytDlp).toBe("2024.11.18"),
+    );
+  });
+
+  it("collapses overlapping version loads into a single fan-out", async () => {
+    // A successful update fires a refresh from both the Settings button and
+    // the yt_dlp_updated event. Each fan-out overwrites `versions` wholesale,
+    // so racing them lets the slower batch's transient failure blank a
+    // sidecar the faster one read fine.
+    const [a, b] = await Promise.all([
+      useAppStore.getState().loadVersions(true),
+      useAppStore.getState().loadVersions(true),
+    ]);
+
+    expect(api.sidecar.ytDlpVersion).toHaveBeenCalledTimes(1);
+    expect(a).toBe(b);
+  });
+
+  it("starts a fresh fan-out once the previous load settled", async () => {
+    await useAppStore.getState().loadVersions(true);
+    await useAppStore.getState().loadVersions(true);
+    expect(api.sidecar.ytDlpVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not toast for yt_dlp_updated (Settings shows the result inline)", async () => {
+    const before = useAppStore.getState().toasts.length;
+    vi.mocked(api.sidecar.ytDlpVersion).mockResolvedValue("2024.11.18");
+
+    useAppStore.getState().handleSidecarEvent({
+      kind: "yt_dlp_updated",
+      from_version: "2024.10.07",
+      to_version: "2024.11.18",
+    });
+
+    await vi.waitFor(() => expect(api.sidecar.ytDlpVersion).toHaveBeenCalled());
     expect(useAppStore.getState().toasts.length).toBe(before);
   });
 

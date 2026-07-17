@@ -1,9 +1,10 @@
+use crate::events::TauriSink;
 use crate::state::AppState;
-use goop_core::IpcError;
+use goop_core::{EventSink, IpcError, SidecarEvent};
 use goop_sidecar::tessdata::{self, LanguagePack};
 use goop_sidecar::updater::{UpdateChecker, UpdateStatus};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -128,10 +129,40 @@ pub async fn sidecar_status(state: State<'_, AppState>) -> Result<SidecarStatus,
     })
 }
 
+/// Map a finished yt-dlp update onto the event that tells the frontend its
+/// cached version strings went stale. `None` when the binary didn't actually
+/// change, so an already-current sidecar doesn't cost a pointless re-spawn of
+/// every version command.
+///
+/// Either version being unreadable is deliberately not reported: the event's
+/// fields aren't optional, so there'd be no honest value to put in them, and a
+/// placeholder would let an unconfirmed version display as if it were checked.
+/// The Settings button that triggered the update refreshes on its own
+/// regardless, so nothing is lost by staying quiet.
+fn yt_dlp_updated_event(status: &UpdateStatus) -> Option<SidecarEvent> {
+    match (&status.previous_version, &status.new_version) {
+        (Some(from), Some(to)) if from != to => Some(SidecarEvent::YtDlpUpdated {
+            from_version: from.clone(),
+            to_version: to.clone(),
+        }),
+        _ => None,
+    }
+}
+
 #[tauri::command]
-pub async fn sidecar_update_yt_dlp(state: State<'_, AppState>) -> Result<UpdateStatus, IpcError> {
+pub async fn sidecar_update_yt_dlp(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<UpdateStatus, IpcError> {
     let checker = UpdateChecker::for_yt_dlp(&state.resolver);
-    checker.update_in_place().await.map_err(Into::into)
+    let status = checker.update_in_place().await?;
+    // yt-dlp rewrites its own binary in place, so every cached version string
+    // for it is now wrong. Announce it so any view showing the version can
+    // re-read rather than waiting for an app restart.
+    if let Some(event) = yt_dlp_updated_event(&status) {
+        TauriSink(app).emit_sidecar(event);
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -265,4 +296,58 @@ pub async fn sidecar_tessdata_remove(
     code: String,
 ) -> Result<(), IpcError> {
     tessdata::remove_language(&code, &state.tessdata_user_dir).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(previous: Option<&str>, new: Option<&str>) -> UpdateStatus {
+        UpdateStatus {
+            attempted: true,
+            previous_version: previous.map(String::from),
+            new_version: new.map(String::from),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn announces_an_update_that_changed_the_binary() {
+        let event = yt_dlp_updated_event(&status(Some("2024.10.07"), Some("2024.11.18")));
+        match event {
+            Some(SidecarEvent::YtDlpUpdated {
+                from_version,
+                to_version,
+            }) => {
+                assert_eq!(from_version, "2024.10.07");
+                assert_eq!(to_version, "2024.11.18");
+            }
+            other => panic!("expected a YtDlpUpdated event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stays_quiet_when_yt_dlp_was_already_current() {
+        assert!(
+            yt_dlp_updated_event(&status(Some("2024.11.18"), Some("2024.11.18"))).is_none(),
+            "an unchanged version must not trigger a frontend re-spawn"
+        );
+    }
+
+    #[test]
+    fn stays_quiet_when_the_update_failed() {
+        assert!(yt_dlp_updated_event(&status(Some("2024.10.07"), None)).is_none());
+    }
+
+    #[test]
+    fn stays_quiet_when_the_pre_update_version_could_not_be_read() {
+        // No honest `from_version` to report, so the event stays silent and
+        // the Settings caller's own refresh covers this case instead.
+        assert!(yt_dlp_updated_event(&status(None, Some("2024.11.18"))).is_none());
+    }
+
+    #[test]
+    fn stays_quiet_when_neither_version_could_be_read() {
+        assert!(yt_dlp_updated_event(&status(None, None)).is_none());
+    }
 }

@@ -133,10 +133,10 @@ type AppStoreState = {
   enqueueToast: (t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & { ttlMs?: number | null }) => string;
   dismissToast: (id: string) => void;
   /**
-   * Routes a `SidecarEvent` to the right side effect. Handles
-   * `kind === "warning"` (cookie auto-fallback, future broadcast warnings)
-   * by enqueuing a one-shot info toast; other variants are no-ops here
-   * (yt_dlp_updated is consumed by the version-info subscriber instead).
+   * Routes a `SidecarEvent` to the right side effect. `yt_dlp_updated`
+   * force-refreshes the version cache so Settings → About stops showing the
+   * pre-update version; `warning` (cookie auto-fallback) enqueues a one-shot
+   * info toast. Unknown warning codes are ignored.
    */
   handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
@@ -171,6 +171,7 @@ type AppStoreState = {
    * Fetch Goop + sidecar versions and cache them. Idempotent — subsequent
    * calls return the existing cached value without re-spawning binaries.
    * Pass `force: true` to bypass the cache (e.g. after a sidecar update).
+   * Overlapping calls share one fan-out rather than racing to overwrite.
    */
   loadVersions: (force?: boolean) => Promise<AppVersionInfo>;
   /** Toggle the QueueSidebar's collapsed state. Session-only; does not persist. */
@@ -284,6 +285,17 @@ function currentFilter(h: HistoryState): HistoryFilter {
   };
 }
 
+/**
+ * The in-flight version fan-out, shared by every overlapping `loadVersions`
+ * caller. A successful sidecar update fires two refreshes within milliseconds
+ * — one from the Settings button, one from the `yt_dlp_updated` event — and
+ * each fan-out spawns six binaries then overwrites `versions` wholesale. Left
+ * to race, the batch that finishes last wins outright, so a transient spawn
+ * failure in it could blank an unrelated sidecar's version that the other
+ * batch had read fine. Coalescing collapses them into one read.
+ */
+let versionsInFlight: Promise<AppVersionInfo> | null = null;
+
 export const useAppStore = create<AppStoreState>((set, get) => ({
   settings: null,
   jobs: [],
@@ -359,6 +371,18 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
   handleSidecarEvent(e) {
+    if (e.kind === "yt_dlp_updated") {
+      // yt-dlp replaced its own binary, so the cached version string is now
+      // wrong. `force` is load-bearing: the cache is warmed during boot, so
+      // an unforced load would hand back the pre-update value. No toast —
+      // Settings reports the update result inline next to the button.
+      void get()
+        .loadVersions(true)
+        .catch(() => {
+          /* About keeps the stale value until the next successful load */
+        });
+      return;
+    }
     if (e.kind === "warning" && e.code === "cookie_fallback") {
       // The cookie auto-fallback fires once per job at the wrapper layer
       // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
@@ -370,8 +394,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         detail: e.message,
       });
     }
-    // yt_dlp_updated and other warning codes are consumed by their own
-    // dedicated subscribers (e.g. version-info refresh in useAppVersion).
+    // Unrecognised warning codes are ignored on purpose so the Rust side can
+    // add new ones without breaking an older frontend.
   },
   incrementUnseen() {
     set((s) => ({ unseenCompletions: s.unseenCompletions + 1 }));
@@ -573,25 +597,34 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       const cached = get().versions;
       if (cached) return cached;
     }
-    const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] = await Promise.all([
-      getVersion().catch(() => "-"),
-      api.sidecar.ytDlpVersion().catch(() => null),
-      api.sidecar.galleryDlVersion().catch(() => null),
-      api.sidecar.ffmpegVersion().catch(() => null),
-      api.sidecar.ghostscriptVersion().catch(() => null),
-      api.sidecar.mutoolVersion().catch(() => null),
-    ]);
-    const info: AppVersionInfo = {
-      goop,
-      ytDlp,
-      galleryDl,
-      ffmpeg,
-      ghostscript,
-      mutool,
-      os: detectOs(),
-    };
-    set({ versions: info });
-    return info;
+    if (versionsInFlight) return versionsInFlight;
+    const load = (async () => {
+      const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] = await Promise.all([
+        getVersion().catch(() => "-"),
+        api.sidecar.ytDlpVersion().catch(() => null),
+        api.sidecar.galleryDlVersion().catch(() => null),
+        api.sidecar.ffmpegVersion().catch(() => null),
+        api.sidecar.ghostscriptVersion().catch(() => null),
+        api.sidecar.mutoolVersion().catch(() => null),
+      ]);
+      const info: AppVersionInfo = {
+        goop,
+        ytDlp,
+        galleryDl,
+        ffmpeg,
+        ghostscript,
+        mutool,
+        os: detectOs(),
+      };
+      set({ versions: info });
+      return info;
+    })();
+    versionsInFlight = load;
+    try {
+      return await load;
+    } finally {
+      versionsInFlight = null;
+    }
   },
   async loadThumbnail(jobId) {
     const key = jobIdKey(jobId);
