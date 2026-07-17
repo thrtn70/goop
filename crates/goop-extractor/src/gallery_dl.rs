@@ -122,6 +122,7 @@ impl<'a> GalleryDl<'a> {
             // skips the format picker.
             formats: Vec::new(),
             direct: None,
+            debrid: None,
         })
     }
 

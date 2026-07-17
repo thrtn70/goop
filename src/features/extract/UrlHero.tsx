@@ -66,7 +66,24 @@ export default function UrlHero({ url }: { url?: string }) {
         // Set for plain-file links the extractors don't handle: skip the
         // doomed extractor spawns and stream the file directly.
         direct: probe.direct != null,
+        // Set for magnet/hoster links that route through TorBox. The
+        // remaining fields are owned by the backend debrid resolver and
+        // cleared at the IPC boundary regardless.
+        debrid: probe.debrid != null,
+        debrid_item: null,
+        resume_key: null,
+        filename_hint: null,
       });
+      // Enqueue emits no queue event until the scheduler claims the job,
+      // so refresh explicitly — otherwise a job queued behind a full
+      // concurrency limit is invisible in the sidebar until something
+      // else transitions. Best-effort: the next queue event self-heals.
+      useAppStore
+        .getState()
+        .refreshJobs()
+        .catch(() => {
+          /* transient IPC failure — the next queue event refreshes */
+        });
     } catch (e) {
       setError(formatError(e));
     }

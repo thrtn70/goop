@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { DirectFileInfo, FormatOption, UrlProbe } from "@/types";
+import type { DebridProbeInfo, DirectFileInfo, FormatOption, UrlProbe } from "@/types";
 
 export interface StartOptions {
   format: FormatOption | null;
@@ -11,6 +11,9 @@ type Props = { probe: UrlProbe; onStart: (opts: StartOptions) => void };
 export default function ProbeCard({ probe, onStart }: Props) {
   if (probe.direct) {
     return <DirectCard info={probe.direct} onStart={onStart} />;
+  }
+  if (probe.debrid) {
+    return <DebridCard title={probe.title} info={probe.debrid} onStart={onStart} />;
   }
   return <MediaCard probe={probe} onStart={onStart} />;
 }
@@ -92,6 +95,52 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
           <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
           {!info.resumable && (
             <p className="mt-1 text-xs text-fg-muted">This server may not support resuming.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 flex">
+        <button
+          type="button"
+          className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+          onClick={() => onStart({ format: null, audioOnly: false })}
+        >
+          Download
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DebridCard({
+  title,
+  info,
+  onStart,
+}: {
+  title: string;
+  info: DebridProbeInfo;
+  onStart: (opts: StartOptions) => void;
+}) {
+  const meta = [info.magnet ? "Magnet" : null, "via TorBox"]
+    .filter((s): s is string => s != null)
+    .join(" · ");
+
+  return (
+    <div className="rounded-lg bg-surface-1 p-4">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" focusable="false">
+            <path d="M13 3 4 14h6l-1 7 9-11h-6l1-7z" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate font-display text-lg font-semibold text-fg">{title}</h3>
+          <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
+          {info.magnet && (
+            <p className="mt-1 text-xs text-fg-muted">
+              TorBox fetches the torrent, then Goop downloads it — uncached torrents can take a
+              while to become ready.
+            </p>
           )}
         </div>
       </div>

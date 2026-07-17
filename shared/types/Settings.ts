@@ -44,4 +44,11 @@ extract_naming_scheme: ExtractNamingScheme,
  * always win — this only seeds the initial value when a row
  * first mounts.
  */
-default_metadata_policy: MetadataPolicy, };
+default_metadata_policy: MetadataPolicy, 
+/**
+ * TorBox API key for the debrid backend. `None` = debrid routing
+ * disabled: magnet links fail with a pointer to Settings and the
+ * hoster fallback is skipped. Stored plaintext by owner decision —
+ * personal tool, own machine.
+ */
+torbox_api_key: string | null, };

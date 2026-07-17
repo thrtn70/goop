@@ -79,6 +79,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",
+    torbox_api_key: null,
     ...overrides,
   };
 }
@@ -92,10 +93,10 @@ beforeEach(() => {
   // warnings on re-render.
   //
   // Caveat for future tests: the tri-state fields (cookies_from_browser,
-  // output_dir_extract) deliberately use `null` to mean "clear" on the
-  // wire. Tests that exercise the Clear-button flow on those fields will
-  // need a different mock that preserves explicit-null for those keys.
-  // Today's tests only patch regular Option<T> fields.
+  // output_dir_extract, torbox_api_key) deliberately use `null` to mean
+  // "clear" on the wire. Tests that exercise the clear flow on those
+  // fields will need a different mock that preserves explicit-null for
+  // those keys. Today's tests only patch regular Option<T> fields.
   apiMocks.settings.set.mockImplementation(async (patch: Partial<Settings>) => {
     const current = useAppStore.getState().settings ?? makeSettings();
     const applied = Object.fromEntries(

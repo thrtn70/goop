@@ -29,6 +29,10 @@ impl QueueStore {
         // we check `pragma_table_info` first; that keeps re-opens of an
         // already-migrated DB silent.
         ensure_hidden_from_queue_column(&conn)?;
+        // Migration 0003 (debrid): add `not_before` so a job waiting on an
+        // external service can park in `queued` with a wake-up deadline
+        // instead of pinning a concurrency permit while it polls.
+        ensure_not_before_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -149,23 +153,59 @@ impl QueueStore {
         Ok(updated)
     }
 
-    pub fn next_queued(&self, kind: &JobKind) -> Result<Option<Job>, GoopError> {
+    /// `now_ms` gates rows a yielded worker parked with a future
+    /// `not_before` deadline (debrid waiting-on-TorBox polls) — they stay
+    /// invisible to the claim loop until the deadline passes.
+    pub fn next_queued(&self, kind: &JobKind, now_ms: i64) -> Result<Option<Job>, GoopError> {
         let c = self.conn.lock();
         let mut stmt = c
             .prepare(
                 "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
                  FROM jobs WHERE state = 'queued' AND kind = ?1
+                   AND (not_before IS NULL OR not_before <= ?2)
                  ORDER BY priority DESC, created_at ASC LIMIT 1",
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         let mut rows = stmt
-            .query_map(params![kind_to_str(kind)], row_to_job)
+            .query_map(params![kind_to_str(kind), now_ms], row_to_job)
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         match rows.next() {
             Some(Ok(j)) => Ok(Some(j)),
             Some(Err(e)) => Err(GoopError::Queue(e.to_string())),
             None => Ok(None),
         }
+    }
+
+    /// Rewrite a job's stored payload. Used by the debrid path to persist
+    /// the TorBox item handle after the first create call, so poll cycles
+    /// and app restarts don't re-submit the link.
+    pub fn update_payload(&self, id: JobId, payload: &serde_json::Value) -> Result<(), GoopError> {
+        let c = self.conn.lock();
+        c.execute(
+            "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+            params![
+                id.0.to_string(),
+                serde_json::to_string(payload).map_err(|e| GoopError::Queue(e.to_string()))?,
+            ],
+        )
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Yield a running job back to the queue with a wake-up deadline: the
+    /// worker found its external dependency (TorBox fetch) not ready and
+    /// released its concurrency permit instead of blocking on it. Guarded
+    /// on `running` so a cancel that already finalized the row wins.
+    pub fn requeue_with_delay(&self, id: JobId, not_before_ms: i64) -> Result<usize, GoopError> {
+        let c = self.conn.lock();
+        let n = c
+            .execute(
+                "UPDATE jobs SET state = 'queued', started_at = NULL, not_before = ?2
+                 WHERE id = ?1 AND state = 'running'",
+                params![id.0.to_string(), not_before_ms],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(n)
     }
 
     /// On boot, flip any `running` jobs to `error{reason:"interrupted"}`.
@@ -235,9 +275,11 @@ impl QueueStore {
     /// of `cancel_inactive`'s guard.
     pub fn claim_queued(&self, id: JobId, now_ms: i64) -> Result<usize, GoopError> {
         let c = self.conn.lock();
+        // not_before is cleared on claim so a stale yield deadline can't
+        // delay later cycles (e.g. a pause→resume requeue of the same row).
         let n = c
             .execute(
-                "UPDATE jobs SET state = ?2, started_at = ?3
+                "UPDATE jobs SET state = ?2, started_at = ?3, not_before = NULL
                  WHERE id = ?1 AND state = 'queued'",
                 params![id.0.to_string(), state_to_str(&JobState::Running), now_ms],
             )
@@ -572,6 +614,20 @@ fn ensure_hidden_from_queue_column(conn: &Connection) -> Result<(), GoopError> {
     Ok(())
 }
 
+fn ensure_not_before_column(conn: &Connection) -> Result<(), GoopError> {
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'not_before'")
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    let exists = stmt
+        .exists([])
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    if !exists {
+        conn.execute("ALTER TABLE jobs ADD COLUMN not_before INTEGER", [])
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,8 +659,85 @@ mod tests {
         b.priority = 5;
         s.insert(&a).unwrap();
         s.insert(&b).unwrap();
-        let n = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        let n = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(n.id, b.id);
+    }
+
+    #[test]
+    fn update_payload_rewrites_payload_in_place() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::json!({"url":"magnet:?xt=x"}));
+        s.insert(&j).unwrap();
+        s.update_payload(
+            j.id,
+            &serde_json::json!({"url":"magnet:?xt=x","debrid_item":"torrent:7"}),
+        )
+        .unwrap();
+        let row = s.get_by_id(j.id).unwrap().unwrap();
+        assert_eq!(row.payload["debrid_item"], "torrent:7");
+        assert_eq!(row.payload["url"], "magnet:?xt=x");
+    }
+
+    #[test]
+    fn next_queued_skips_rows_delayed_by_not_before() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        s.claim_queued(j.id, 1_000).unwrap();
+        assert_eq!(s.requeue_with_delay(j.id, 6_000).unwrap(), 1);
+
+        assert!(
+            s.next_queued(&JobKind::Extract, 5_999).unwrap().is_none(),
+            "a delayed row must not be claimable before its deadline"
+        );
+        let picked = s.next_queued(&JobKind::Extract, 6_000).unwrap().unwrap();
+        assert_eq!(picked.id, j.id);
+    }
+
+    #[test]
+    fn requeue_with_delay_only_flips_running_rows_and_clears_started_at() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+
+        // Still queued — nothing to requeue.
+        assert_eq!(s.requeue_with_delay(j.id, 5_000).unwrap(), 0);
+
+        s.claim_queued(j.id, 1_000).unwrap();
+        assert_eq!(s.requeue_with_delay(j.id, 5_000).unwrap(), 1);
+        let row = s
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == j.id)
+            .unwrap();
+        assert!(matches!(row.state, JobState::Queued), "got {:?}", row.state);
+        assert!(row.started_at.is_none(), "yield must clear started_at");
+
+        // A cancelled row must not be revivable via requeue.
+        s.cancel_inactive(j.id).unwrap();
+        assert_eq!(s.requeue_with_delay(j.id, 9_000).unwrap(), 0);
+    }
+
+    #[test]
+    fn claim_clears_not_before_so_later_cycles_start_fresh() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        s.claim_queued(j.id, 1_000).unwrap();
+        s.requeue_with_delay(j.id, 6_000).unwrap();
+        assert_eq!(s.claim_queued(j.id, 6_500).unwrap(), 1);
+
+        // Re-queue through a path that sets no delay (pause→resume style):
+        // the old deadline must not linger and block the pickup.
+        s.update_state(j.id, &JobState::Queued, None, 7_000)
+            .unwrap();
+        let picked = s.next_queued(&JobKind::Extract, 0).unwrap();
+        assert_eq!(
+            picked.map(|p| p.id),
+            Some(j.id),
+            "stale not_before must not survive a claim"
+        );
     }
 
     #[test]
@@ -620,7 +753,7 @@ mod tests {
         // Move c to top, then a, then b.
         let n = s.reorder_queued(&[c.id, a.id, b.id]).unwrap();
         assert_eq!(n, 3);
-        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        let next = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(next.id, c.id);
     }
 
@@ -748,7 +881,7 @@ mod tests {
             after.priority > waiting_a.priority,
             "resumed job must outprioritize the existing queue"
         );
-        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        let next = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(next.id, paused.id);
     }
 
@@ -890,7 +1023,7 @@ mod tests {
         s.clear_completed().unwrap();
 
         assert_eq!(s.retry_errored(failed.id).unwrap(), 1);
-        let next = s.next_queued(&JobKind::Extract).unwrap().unwrap();
+        let next = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(next.id, failed.id, "retried job goes to the front");
         assert!(
             s.list().unwrap().iter().any(|j| j.id == failed.id),

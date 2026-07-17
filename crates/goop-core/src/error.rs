@@ -32,6 +32,13 @@ pub enum GoopError {
     /// is fragile. The message is the full human-readable description.
     #[error("network error: {0}")]
     Network(String),
+    /// Control-flow sibling of `Paused`: the worker's external dependency
+    /// (a debrid service fetching the content) isn't ready yet. The
+    /// scheduler re-queues the job with a `not_before` deadline and
+    /// releases its concurrency permit instead of blocking on the wait.
+    /// Must never be persisted as a job failure.
+    #[error("waiting on external service: retry in {retry_after_ms}ms")]
+    WaitingExternal { retry_after_ms: u64 },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("serde: {0}")]
@@ -94,6 +101,9 @@ impl From<GoopError> for IpcError {
             // consumed before any IPC boundary. If it ever leaks, surface
             // it as a queue-domain message rather than "unknown".
             GoopError::Paused => Self::Queue("paused".into()),
+            // Same story: WaitingExternal is consumed by the scheduler's
+            // yield path and must never reach IPC as a failure.
+            GoopError::WaitingExternal { .. } => Self::Queue("waiting on external service".into()),
             // Deliberately exhaustive from here — no wildcard, so adding
             // a GoopError variant forces an explicit decision about its
             // IPC shape instead of silently landing in Unknown.

@@ -1,13 +1,24 @@
 use crate::state::AppState;
 use goop_core::{is_no_matching_extractor, GoopError, IpcError, Job, JobId, JobKind};
 use goop_extractor::classify::{classify_extractor, ExtractorChoice};
+use goop_extractor::debrid;
 use goop_extractor::gallery_dl::GalleryDl;
-use goop_extractor::ytdlp::{DirectFileInfo, ExtractRequest, UrlProbe, YtDlp};
+use goop_extractor::ytdlp::{DebridProbeInfo, DirectFileInfo, ExtractRequest, UrlProbe, YtDlp};
 use std::path::PathBuf;
 use tauri::State;
 
 #[tauri::command]
 pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<UrlProbe, IpcError> {
+    // Magnet links can't be probed by either extractor and only a debrid
+    // service can turn them into HTTP — route straight to the TorBox card.
+    if debrid::is_magnet(&url) {
+        if state.settings.read().torbox_api_key.is_none() {
+            return Err(IpcError::Queue(
+                "Magnet links download through TorBox — add your TorBox API key in Settings".into(),
+            ));
+        }
+        return Ok(debrid_url_probe(url, true));
+    }
     let cookies = state.settings.read().cookies_from_browser.clone();
     let primary = classify_extractor(&url);
     let result = probe_with(primary, &state, &url, cookies.as_deref()).await;
@@ -24,8 +35,16 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
             match probe_with(fallback, &state, &url, cookies.as_deref()).await {
                 Ok(probe) => Ok(probe),
                 Err(err2) if is_unsupported(&err2) => {
-                    // Neither extractor recognised the URL — try a plain HTTP
-                    // probe so the UI can still offer a direct download.
+                    // Neither extractor recognised the URL. If TorBox
+                    // supports this host, its debrid card beats a "direct
+                    // download" of what is usually an HTML landing page.
+                    if let Some(matcher) = state.torbox_hosters().await {
+                        if matcher.matches(&url) {
+                            return Ok(debrid_url_probe(url, false));
+                        }
+                    }
+                    // Otherwise try a plain HTTP probe so the UI can
+                    // still offer a direct download.
                     let info = goop_extractor::direct::probe(&url).await?;
                     Ok(direct_url_probe(url, info))
                 }
@@ -33,6 +52,28 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
             }
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Build a `UrlProbe` for a debrid-routed link. Magnet display names ride
+/// in the `dn=` query param; hoster links fall back to the URL itself.
+fn debrid_url_probe(url: String, magnet: bool) -> UrlProbe {
+    let title = debrid::magnet_display_name(&url).unwrap_or_else(|| {
+        if magnet {
+            "Magnet link".to_string()
+        } else {
+            url.clone()
+        }
+    });
+    UrlProbe {
+        url,
+        title,
+        uploader: None,
+        duration_secs: None,
+        thumbnail_url: None,
+        formats: Vec::new(),
+        direct: None,
+        debrid: Some(DebridProbeInfo { magnet }),
     }
 }
 
@@ -48,6 +89,7 @@ fn direct_url_probe(url: String, info: DirectFileInfo) -> UrlProbe {
         thumbnail_url: None,
         formats: Vec::new(),
         direct: Some(info),
+        debrid: None,
     }
 }
 
@@ -83,6 +125,11 @@ pub async fn extract_from_url(
         req.cookies_from_browser = s.cookies_from_browser.clone();
         req.output_template = Some(s.extract_naming_scheme.to_yt_dlp_template().to_string());
     }
+    // Internal fields the debrid resolver owns — never trust them from
+    // the UI (a tampered payload could smuggle a path via filename_hint).
+    req.debrid_item = None;
+    req.resume_key = None;
+    req.filename_hint = None;
     req.output_dir = canonical_dir(&req.output_dir)?;
     let payload = serde_json::to_value(&req).map_err(|e| IpcError::Queue(e.to_string()))?;
     let job = Job::new(JobKind::Extract, payload);

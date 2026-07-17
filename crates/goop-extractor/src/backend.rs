@@ -11,6 +11,7 @@ use goop_sidecar::BinaryResolver;
 use std::sync::Arc;
 
 use crate::classify::{classify_extractor, ExtractorChoice};
+use crate::debrid::{self, DebridCtx, TorBoxClient};
 use crate::gallery_dl::GalleryDl;
 use crate::retry::{with_retry, RetryPolicy, DEFAULT_RETRY_POLICY};
 use crate::ytdlp::{ExtractRequest, YtDlp};
@@ -48,8 +49,18 @@ pub async fn dispatch(
     job_id: JobId,
     req: &ExtractRequest,
     signals: JobSignals,
+    debrid: Option<DebridCtx>,
 ) -> Result<BackendOutcome, GoopError> {
-    dispatch_with_policy(resolver, sink, job_id, req, signals, &DEFAULT_RETRY_POLICY).await
+    dispatch_with_policy(
+        resolver,
+        sink,
+        job_id,
+        req,
+        signals,
+        &DEFAULT_RETRY_POLICY,
+        debrid,
+    )
+    .await
 }
 
 /// Test seam: `dispatch` with an injectable retry policy so tests can
@@ -61,9 +72,17 @@ pub(crate) async fn dispatch_with_policy(
     req: &ExtractRequest,
     signals: JobSignals,
     policy: &RetryPolicy,
+    debrid: Option<DebridCtx>,
 ) -> Result<BackendOutcome, GoopError> {
     with_retry(policy, &signals, &sink, job_id, || {
-        dispatch_once(resolver, sink.clone(), job_id, req, signals.clone())
+        dispatch_once(
+            resolver,
+            sink.clone(),
+            job_id,
+            req,
+            signals.clone(),
+            debrid.clone(),
+        )
     })
     .await
 }
@@ -80,7 +99,19 @@ async fn dispatch_once(
     job_id: JobId,
     req: &ExtractRequest,
     signals: JobSignals,
+    debrid: Option<DebridCtx>,
 ) -> Result<BackendOutcome, GoopError> {
+    // Debrid path: magnet links always (only a debrid service can turn
+    // them into HTTP), plus hoster links the probe already matched.
+    if req.debrid || debrid::is_magnet(&req.url) {
+        let Some(ctx) = debrid.as_ref() else {
+            return Err(GoopError::Queue(
+                "This link needs the TorBox debrid service — add your TorBox API key in Settings"
+                    .into(),
+            ));
+        };
+        return debrid::run(sink, job_id, req, signals, ctx).await;
+    }
     // Fast path: the probe already determined this is a plain file neither
     // extractor handles, so skip the two doomed extractor spawns.
     if req.direct {
@@ -124,10 +155,47 @@ async fn dispatch_once(
                         return Err(err2);
                     }
                     // Neither extractor recognised the URL: stream it directly.
-                    crate::direct::download(sink, job_id, req, signals).await
+                    match crate::direct::download(sink.clone(), job_id, req, signals.clone()).await
+                    {
+                        Ok(outcome) => Ok(outcome),
+                        Err(err3) => {
+                            debrid_last_resort(sink, job_id, req, signals, debrid, err3).await
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// Last-resort fallback for un-hinted hoster links: the whole
+/// extractor → direct chain failed, so ask TorBox whether it supports
+/// this host and route through it if so. Control-flow errors and an
+/// absent key pass the original failure through untouched.
+async fn debrid_last_resort(
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
+    debrid: Option<DebridCtx>,
+    err: GoopError,
+) -> Result<BackendOutcome, GoopError> {
+    if matches!(
+        err,
+        GoopError::Cancelled | GoopError::Paused | GoopError::WaitingExternal { .. }
+    ) || signals.check().is_some()
+    {
+        return Err(err);
+    }
+    let Some(ctx) = debrid else {
+        return Err(err);
+    };
+    let client = TorBoxClient::new(&ctx.api_base, &ctx.api_key);
+    match client.hosters().await {
+        Ok(matcher) if matcher.matches(&req.url) => {
+            debrid::run(sink, job_id, req, signals, &ctx).await
+        }
+        _ => Err(err),
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod classify;
+pub mod debrid;
 pub mod direct;
 pub mod gallery_dl;
 mod retry;

@@ -536,3 +536,36 @@ describe("QueueRow auto-retry stage rendering", () => {
     expect(bar.getAttribute("aria-valuenow")).toBe("37");
   });
 });
+
+describe("QueueRow debrid waiting stage", () => {
+  it("shows the waiting-on-TorBox stage on a queued row", () => {
+    const job = makeJob({
+      kind: "extract",
+      state: "queued",
+      payload: { url: "magnet:?xt=urn:btih:abc" },
+    });
+    useAppStore.setState({
+      progressById: {
+        [job.id as string]: {
+          percent: 0,
+          eta_secs: 10,
+          speed_hr: null,
+          encoder: null,
+          stage: "waiting on TorBox (downloading)",
+        },
+      },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText("waiting on TorBox (downloading)")).toBeTruthy();
+  });
+
+  it("keeps plain queued rows free of stage text", () => {
+    const job = makeJob({
+      kind: "extract",
+      state: "queued",
+      payload: { url: "https://youtube.com/watch?v=abc" },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.queryByText(/waiting on TorBox/)).toBeNull();
+  });
+});

@@ -24,4 +24,32 @@ output_template: string | null,
  * `false`; the dispatch-level no-match fallback still covers the
  * un-hinted case, so this is purely an optimisation.
  */
-direct: boolean, };
+direct: boolean, 
+/**
+ * Hint, set by the probe step, that this URL routes through the
+ * debrid service (magnet links always do; hoster links when the
+ * probe matched TorBox's supported-hoster list). `magnet:` URLs
+ * route to debrid regardless, so this is probe metadata the same
+ * way `direct` is.
+ */
+debrid: boolean, 
+/**
+ * Persisted TorBox item handle (`"torrent:42"` / `"web:abc"`),
+ * written back into the job payload after the first create call so
+ * the waiting-poll cycles and app restarts don't re-submit the
+ * link. Internal — set by the debrid resolver, never by the UI.
+ */
+debrid_item: string | null, 
+/**
+ * Stable key for the direct downloader's `.part`/`.meta` sidecar
+ * names, overriding the URL. The debrid path downloads from
+ * short-lived CDN URLs; keying partials on the original link keeps
+ * resume working when the CDN URL rotates. Internal.
+ */
+resume_key: string | null, 
+/**
+ * Preferred output filename, overriding header/URL derivation.
+ * The debrid path knows the real name from TorBox while the CDN
+ * URL may be opaque. Internal.
+ */
+filename_hint: string | null, };

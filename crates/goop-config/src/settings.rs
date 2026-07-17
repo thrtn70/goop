@@ -92,6 +92,12 @@ pub struct Settings {
     /// first mounts.
     #[serde(default)]
     pub default_metadata_policy: MetadataPolicy,
+    /// TorBox API key for the debrid backend. `None` = debrid routing
+    /// disabled: magnet links fail with a pointer to Settings and the
+    /// hoster fallback is skipped. Stored plaintext by owner decision —
+    /// personal tool, own machine.
+    #[serde(default)]
+    pub torbox_api_key: Option<String>,
 }
 
 /// yt-dlp's full list of supported browsers for `--cookies-from-browser`.
@@ -139,6 +145,7 @@ impl Default for Settings {
             output_dir_extract: None,
             extract_naming_scheme: ExtractNamingScheme::default(),
             default_metadata_policy: MetadataPolicy::default(),
+            torbox_api_key: None,
         }
     }
 }
@@ -196,6 +203,12 @@ pub struct SettingsPatch {
     pub output_dir_extract: Option<Option<String>>,
     pub extract_naming_scheme: Option<ExtractNamingScheme>,
     pub default_metadata_policy: Option<MetadataPolicy>,
+    /// Tri-state on the wire (see `double_option` helper):
+    /// - field absent → `None` (no change)
+    /// - `null`       → `Some(None)` (clear)
+    /// - `"tb-…"`     → `Some(Some(key))` (set)
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub torbox_api_key: Option<Option<String>>,
 }
 
 pub fn load(path: &Path) -> Result<Settings, GoopError> {
@@ -272,6 +285,11 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.default_metadata_policy {
         next.default_metadata_policy = v;
+    }
+    if let Some(v) = patch.torbox_api_key {
+        // Trim pasted whitespace; a blank value clears rather than storing
+        // a key that can never authenticate.
+        next.torbox_api_key = v.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
     }
     next
 }
@@ -354,6 +372,51 @@ mod tests {
         .unwrap();
         let loaded = load(&p).unwrap();
         assert!(!loaded.has_seen_onboarding);
+    }
+
+    #[test]
+    fn torbox_api_key_defaults_to_none_and_survives_legacy_load() {
+        assert!(Settings::default().torbox_api_key.is_none());
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        assert!(load(&p).unwrap().torbox_api_key.is_none());
+    }
+
+    #[test]
+    fn apply_patch_sets_trims_and_clears_torbox_api_key() {
+        let base = Settings::default();
+        let patch: SettingsPatch =
+            serde_json::from_str(r#"{"torbox_api_key": "  tb-key-123  "}"#).unwrap();
+        let set = apply_patch(&base, patch);
+        assert_eq!(
+            set.torbox_api_key.as_deref(),
+            Some("tb-key-123"),
+            "value must be set and whitespace-trimmed"
+        );
+
+        let noop: SettingsPatch = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(
+            apply_patch(&set, noop).torbox_api_key.as_deref(),
+            Some("tb-key-123"),
+            "field-absent must be a no-op"
+        );
+
+        let clear: SettingsPatch = serde_json::from_str(r#"{"torbox_api_key": null}"#).unwrap();
+        assert!(
+            apply_patch(&set, clear).torbox_api_key.is_none(),
+            "null on the wire must clear the key"
+        );
+
+        let blank: SettingsPatch = serde_json::from_str(r#"{"torbox_api_key": "   "}"#).unwrap();
+        assert!(
+            apply_patch(&set, blank).torbox_api_key.is_none(),
+            "whitespace-only value must clear rather than store an unusable key"
+        );
     }
 
     #[test]
