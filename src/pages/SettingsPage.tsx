@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { formatError } from "@/ipc/error";
 import { api } from "@/ipc/commands";
-import type { ExtractNamingScheme, Theme } from "@/types";
+import type { ExtractNamingScheme, Theme, UpdateStatus } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import SettingsSection from "@/components/SettingsSection";
 import OcrLanguagesSection from "@/components/OcrLanguagesSection";
@@ -38,6 +38,7 @@ export default function SettingsPage() {
   const updateInfo = useAppStore((s) => s.updateInfo);
   const checkForUpdate = useAppStore((s) => s.checkForUpdate);
   const enqueueToast = useAppStore((s) => s.enqueueToast);
+  const loadVersions = useAppStore((s) => s.loadVersions);
   const version = useAppVersion();
   const [err, setErr] = useState<string | null>(null);
   const [checkingForUpdate, setCheckingForUpdate] = useState(false);
@@ -111,12 +112,42 @@ export default function SettingsPage() {
     }
   }
 
+  /**
+   * True when an update actually swapped the binary, meaning every cached
+   * version string for it is now stale. An up-to-date sidecar reports the
+   * same version on both sides and needs no re-spawn.
+   *
+   * Deliberately looser than the backend's `yt_dlp_updated_event` filter,
+   * which stays silent when the pre-update version was unreadable because it
+   * has no honest `from_version` to report. A null-to-known transition is
+   * still a change worth showing, and this is the only path that catches it.
+   */
+  function didChangeVersion(status: UpdateStatus): boolean {
+    return status.new_version !== null && status.new_version !== status.previous_version;
+  }
+
+  /**
+   * Re-read the sidecar versions into the store so About drops the
+   * pre-update value. `force` is required: the cache is warmed during boot,
+   * so an unforced load would return the version we just replaced. Runs
+   * fire-and-forget — the update itself is already done, and re-spawning
+   * every sidecar shouldn't hold the button in its "Updating..." state.
+   */
+  async function refreshVersions(): Promise<void> {
+    try {
+      await loadVersions(true);
+    } catch {
+      /* the update itself succeeded; About refreshes on the next load */
+    }
+  }
+
   async function handleYtDlpUpdate() {
     setYtDlpUpdating(true);
     setYtDlpUpdateMsg(null);
     try {
       const status = await api.sidecar.updateYtDlp();
       setYtDlpUpdateMsg(status.message || "yt-dlp is up to date.");
+      if (didChangeVersion(status)) void refreshVersions();
     } catch (e) {
       setYtDlpUpdateMsg(formatError(e));
     } finally {
@@ -130,6 +161,7 @@ export default function SettingsPage() {
     try {
       const status = await api.sidecar.updateGalleryDl();
       setGalleryDlUpdateMsg(status.message || "gallery-dl is up to date.");
+      if (didChangeVersion(status)) void refreshVersions();
     } catch (e) {
       setGalleryDlUpdateMsg(formatError(e));
     } finally {
