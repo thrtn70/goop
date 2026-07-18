@@ -59,6 +59,17 @@ pub enum ExtractorChoice {
     GalleryDl,
 }
 
+impl ExtractorChoice {
+    /// The extractor to fall back to. Lives on the type so the download
+    /// and probe paths can't disagree about what "the other one" means.
+    pub fn other(self) -> Self {
+        match self {
+            Self::YtDlp => Self::GalleryDl,
+            Self::GalleryDl => Self::YtDlp,
+        }
+    }
+}
+
 /// Domains routed to gallery-dl by default. Substring match against the
 /// lowercase URL — order doesn't matter; first match wins. Keep entries
 /// minimal and grow this list as users surface real URLs that yt-dlp's
@@ -103,6 +114,15 @@ const GALLERY_DL_DOMAINS: &[&str] = &[
     // via the dispatcher's fallback.
     "twitter.com",
     "x.com",
+    // MediaWiki — these serve 403 to yt-dlp's user-agent, so without an
+    // entry here the first spawn is always wasted. Deliberately NOT the
+    // bare "wikimedia.org": that would also capture upload.wikimedia.org,
+    // the raw file host gallery-dl resolves TO, which belongs on the
+    // direct-download path. gallery-dl's extractor covers the wider
+    // MediaWiki family (wiktionary, fandom, ...); those reach it through
+    // the dispatcher's block-fallback rather than bloating this list.
+    "commons.wikimedia.org",
+    "wikipedia.org",
 ];
 
 pub fn classify_extractor(url: &str) -> ExtractorChoice {
@@ -205,6 +225,51 @@ mod tests {
                 "expected YtDlp for {url}"
             );
         }
+    }
+
+    #[test]
+    fn other_is_an_involution() {
+        // The fallback must be the OTHER extractor, and flipping twice must
+        // return to the start — otherwise a mistyped arm could send the
+        // fallback straight back to the extractor that just failed.
+        for choice in [ExtractorChoice::YtDlp, ExtractorChoice::GalleryDl] {
+            assert_ne!(choice.other(), choice);
+            assert_eq!(choice.other().other(), choice);
+        }
+    }
+
+    #[test]
+    fn extractor_choice_routes_wikimedia_pages_to_gallery_dl() {
+        // Verified against the bundled gallery-dl: Category:Kittens
+        // enumerates 1034 files, the Cat article 58. yt-dlp gets 403 from
+        // both. The dispatcher's block-fallback would rescue these anyway;
+        // classifying them here just saves the doomed first spawn.
+        for url in [
+            "https://commons.wikimedia.org/wiki/Category:Kittens",
+            "https://commons.wikimedia.org/wiki/File:Example.jpg",
+            "https://en.wikipedia.org/wiki/Cat",
+            "https://de.wikipedia.org/wiki/Katze",
+        ] {
+            assert_eq!(
+                classify_extractor(url),
+                ExtractorChoice::GalleryDl,
+                "expected GalleryDl for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn extractor_choice_leaves_raw_wikimedia_uploads_alone() {
+        // upload.wikimedia.org is the raw file host gallery-dl RESOLVES to,
+        // not a page it extracts. It must stay on the default path so the
+        // dispatcher's direct downloader streams the file, rather than
+        // burning a gallery-dl spawn that can only shrug at it.
+        assert_eq!(
+            classify_extractor(
+                "https://upload.wikimedia.org/wikipedia/commons/e/e8/Black_cat_on_blue.jpg"
+            ),
+            ExtractorChoice::YtDlp
+        );
     }
 
     #[test]

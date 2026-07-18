@@ -200,13 +200,32 @@ const PATTERNS: &[(&str, &str)] = &[
         "No suitable extractor found",
         "Neither extractor recognized this URL. Make sure the link points directly to a media page (post, album, or file).",
     ),
+    // 401/403, in BOTH dialects: yt-dlp writes "HTTP Error 403" (urllib,
+    // space) and gallery-dl "HTTPError: 403" (requests, colon). The pairs
+    // must stay in lockstep — keying only gallery-dl's dialect leaves the
+    // yt-dlp case falling through to raw Python stderr, which is exactly
+    // the output the commons.wikimedia.org report opened with. Both sit
+    // BELOW the specific auth-wall patterns above so an age-gate or
+    // private-video 403 still reports its actual cause.
     (
         "HTTPError: 401",
         "The site requires authentication. Enable \"Cookies from browser\" in Settings if you have a logged-in account.",
     ),
     (
+        "HTTP Error 401",
+        "The site requires authentication. Enable \"Cookies from browser\" in Settings if you have a logged-in account.",
+    ),
+    // A 403 only reaches the user after the other extractor has had its
+    // turn too (see `warrants_other_extractor`), so a stale session is one
+    // candidate rather than the diagnosis — name the other one instead of
+    // sending a never-logged-in user off to re-log-in for nothing.
+    (
         "HTTPError: 403",
-        "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser, then try again.",
+        "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser and try again — or the site may be blocking automated downloads.",
+    ),
+    (
+        "HTTP Error 403",
+        "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser and try again — or the site may be blocking automated downloads.",
     ),
     (
         "HTTPError: 404",
@@ -260,6 +279,119 @@ pub fn is_no_matching_extractor(stderr: &str) -> bool {
 pub fn is_cookie_db_error(stderr: &str) -> bool {
     (stderr.contains("Could not copy") && stderr.contains("cookie database"))
         || (stderr.contains("could not find") && stderr.contains("cookies database"))
+}
+
+/// True when the raw stderr indicates the site refused the chosen
+/// extractor (401/403) in a way the OTHER extractor might not hit.
+///
+/// A block is a statement about the request, not about the content: sites
+/// routinely serve 403 to yt-dlp's user-agent while gallery-dl fetches the
+/// same page fine (`commons.wikimedia.org` is the motivating case). So a
+/// block earns a second attempt where a 404 would not.
+///
+/// The deny list is checked FIRST and wins, mirroring
+/// `is_transient_network_stderr`. A 401/403 carrying one of those markers
+/// is a real auth wall or a removed item — the other extractor hits the
+/// same wall, so the second spawn buys nothing and its weaker verdict
+/// ("No suitable extractor") would only mask the accurate message.
+///
+/// Only 401 and 403 qualify. 404/410 mean gone; 429 means a second spawn
+/// seconds later just extends the ban; 5xx belongs to
+/// `is_transient_network_stderr`. Unmatched stderr is NOT a block — the
+/// cost of a false positive is a wasted spawn, of a false negative one
+/// click of the Retry button.
+pub fn is_access_blocked_stderr(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    const NOT_A_BLOCK: &[&str] = &[
+        "private video",
+        "sign in to confirm",
+        "members-only",
+        "login required",
+        "account is suspended",
+        "is geo restricted",
+        "video unavailable",
+        "could not authenticate you",
+        // Cookie-DB read failures own their retry-without-cookies path in
+        // the extractor wrapper (see `is_cookie_db_error`); treating them
+        // as a block here would pre-empt it with a doomed cross-extractor
+        // spawn that fails for the very same reason.
+        "cookie database",
+        "cookies database",
+        "could not find login cookies",
+    ];
+    if NOT_A_BLOCK.iter().any(|p| s.contains(p)) {
+        return false;
+    }
+    const BLOCKED: &[&str] = &[
+        // yt-dlp / urllib style
+        "http error 401",
+        "http error 403",
+        // gallery-dl / requests style
+        "httperror: 401",
+        "httperror: 403",
+    ];
+    BLOCKED.iter().any(|p| s.contains(p))
+}
+
+/// True when the primary extractor's failure earns a second attempt with
+/// the OTHER extractor: either it didn't recognise the URL, or the site
+/// blocked it. Every other failure — and all control flow — propagates on
+/// the first attempt.
+pub fn warrants_other_extractor(err: &GoopError) -> bool {
+    match err {
+        GoopError::SubprocessFailed { stderr, .. } => {
+            is_no_matching_extractor(stderr) || is_access_blocked_stderr(stderr)
+        }
+        _ => false,
+    }
+}
+
+/// What to do once BOTH extractors have failed.
+#[derive(Debug)]
+pub enum BothFailed {
+    /// Neither extractor recognised the URL. That *pair* of verdicts is
+    /// the signal it may be a plain file worth streaming directly.
+    TryDirect,
+    /// Show the user this error.
+    Surface(GoopError),
+}
+
+/// Decide what the user sees when both extractors failed, and whether the
+/// URL still deserves a direct-download attempt.
+///
+/// The rule: **a no-matching-extractor verdict never wins over a real
+/// one.** "Unsupported URL" is the least informative thing either tool can
+/// say, so a fallback that shrugs must not overwrite a primary that came
+/// back with something concrete — otherwise a site that 403s yt-dlp and is
+/// unknown to gallery-dl reports as "Neither extractor recognized this
+/// URL", which is false.
+///
+/// Only two shrugs earn the direct downloader. A block is not evidence the
+/// URL is a plain file, so it must not reach `direct` — which would
+/// happily stream the site's 403 error page as if it were media.
+pub fn both_failed(primary: GoopError, fallback: GoopError) -> BothFailed {
+    match (shrugged(&primary), shrugged(&fallback)) {
+        (true, true) => BothFailed::TryDirect,
+        (_, true) => BothFailed::Surface(primary),
+        _ => BothFailed::Surface(fallback),
+    }
+}
+
+/// True when the extractor's only verdict was "I don't handle this URL".
+///
+/// `stderr` is an accumulated tail of a whole run rather than a single
+/// line, so nothing structurally prevents a shrug marker and a block
+/// marker sharing one blob. A block wins that tie: it is the more specific
+/// claim, and mis-reading one as a shrug is the costlier direction — two
+/// shrugs send the URL to the direct downloader, which would stream the
+/// site's 403 error page as if it were media.
+fn shrugged(err: &GoopError) -> bool {
+    match err {
+        GoopError::SubprocessFailed { stderr, .. } => {
+            is_no_matching_extractor(stderr) && !is_access_blocked_stderr(stderr)
+        }
+        _ => false,
+    }
 }
 
 /// True when raw yt-dlp / gallery-dl stderr indicates a transient network
@@ -569,6 +701,260 @@ mod tests {
         ] {
             assert!(is_transient_network_stderr(s), "should be transient: {s}");
         }
+    }
+
+    /// Real yt-dlp stderr captured from
+    /// `https://commons.wikimedia.org/wiki/Category:Kittens` — the site
+    /// serves 403 to yt-dlp's user-agent while gallery-dl fetches the same
+    /// page fine. Kept verbatim so the matcher is tested against the
+    /// dialect yt-dlp actually emits, not a paraphrase of it.
+    const COMMONS_403: &str = "ERROR: [generic] Unable to download webpage: \
+         HTTP Error 403: Forbidden (caused by <HTTPError 403: Forbidden>)";
+
+    fn err(binary: &str, stderr: &str) -> GoopError {
+        GoopError::SubprocessFailed {
+            binary: binary.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// Which extractor's error `both_failed` chose to show.
+    fn surfaced(v: BothFailed) -> String {
+        match v {
+            BothFailed::Surface(GoopError::SubprocessFailed { binary, .. }) => binary,
+            other => panic!("expected Surface(SubprocessFailed), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn friendly_403_names_the_automated_block_not_just_cookies() {
+        // By the time a 403 is surfaced, the other extractor has already had
+        // its turn (see `warrants_other_extractor`), so the block is likely
+        // aimed at automated access rather than at a stale session. Offering
+        // ONLY the cookie remedy sends a user who was never logged in — the
+        // commons.wikimedia.org case — off to re-log-in for nothing.
+        //
+        // Both dialects must be covered. yt-dlp writes "HTTP Error 403"
+        // (space) and gallery-dl "HTTPError: 403"; testing only the latter
+        // would leave the very stderr that motivated this fallback
+        // (COMMONS_403) falling through to raw Python output.
+        for stderr in [COMMONS_403, "[site][album] HTTPError: 403 Forbidden"] {
+            let m = friendly_message(stderr)
+                .unwrap_or_else(|| panic!("403 must map to friendly text: {stderr}"));
+            let lc = m.to_lowercase();
+            assert!(lc.contains("cookies"), "keep the cookie remedy: {m}");
+            assert!(
+                lc.contains("automated"),
+                "must also name the automated-access block: {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn friendly_401_covers_both_dialects() {
+        for stderr in [
+            "ERROR: Unable to download webpage: HTTP Error 401: Unauthorized",
+            "[site][album] HTTPError: 401 Unauthorized",
+        ] {
+            let m = friendly_message(stderr)
+                .unwrap_or_else(|| panic!("401 must map to friendly text: {stderr}"));
+            assert!(
+                m.to_lowercase().contains("authentication") || m.to_lowercase().contains("log in"),
+                "401 should point at authentication: {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_403_age_gate_still_reports_the_age_gate() {
+        // Ordering guard: the specific auth-wall patterns sit above the
+        // generic 401/403 entries, so a stderr carrying both must report the
+        // actionable cause, not "the site blocked the request".
+        let m = friendly_message("ERROR: Sign in to confirm your age. HTTP Error 403: Forbidden")
+            .unwrap();
+        assert!(m.contains("age verification"), "specific must win: {m}");
+    }
+
+    #[test]
+    fn access_blocked_matches_both_extractor_dialects() {
+        for s in [
+            COMMONS_403,
+            "ERROR: Unable to download webpage: HTTP Error 401: Unauthorized",
+            "[site][album] HTTPError: 403 Forbidden",
+            "[site][album] HTTPError: 401 Unauthorized",
+        ] {
+            assert!(is_access_blocked_stderr(s), "should be a block: {s}");
+        }
+    }
+
+    #[test]
+    fn access_blocked_deny_list_wins_over_the_status_code() {
+        // Each of these is a real auth wall or a removed item: the other
+        // extractor hits the same wall, so a second spawn buys nothing.
+        for s in [
+            "ERROR: Private video. Sign in if you've been granted access. HTTP Error 403",
+            "ERROR: Sign in to confirm your age. HTTP Error 403: Forbidden",
+            "ERROR: Join this channel to get access to members-only content (HTTP Error 403)",
+            "ERROR: Login required. HTTP Error 401: Unauthorized",
+            "ERROR: This account is suspended: HTTP Error 403",
+            "ERROR: The uploader has not made this video available: is geo restricted (403)",
+            "ERROR: [generic] Video unavailable. HTTP Error 403",
+            "ERROR: Could not authenticate you. HTTPError: 401",
+            // Cookie-DB failures own their retry-without-cookies path in the
+            // extractor wrapper; hijacking them here would pre-empt it.
+            "ERROR: Could not copy Chrome cookie database. HTTP Error 403",
+            "ERROR: could not find opera cookies database in path. HTTP Error 403",
+            "ERROR: could not find login cookies in chrome. HTTP Error 403",
+        ] {
+            assert!(!is_access_blocked_stderr(s), "should NOT be a block: {s}");
+        }
+    }
+
+    #[test]
+    fn access_blocked_ignores_statuses_a_second_spawn_cannot_help() {
+        for s in [
+            // Gone is gone, for either extractor.
+            "ERROR: HTTP Error 404: Not Found",
+            "HTTPError: 410 Gone",
+            // A second spawn seconds later only extends a rate-limit ban.
+            "ERROR: HTTP Error 429: Too Many Requests",
+            "HTTPError: 429 Too Many Requests",
+            // 5xx is is_transient_network_stderr's job, not ours.
+            "ERROR: HTTP Error 503: Service Unavailable",
+            "ERROR: Unsupported URL: https://example.com",
+            "",
+            "ERROR: random unmapped failure",
+        ] {
+            assert!(!is_access_blocked_stderr(s), "should NOT be a block: {s}");
+        }
+    }
+
+    /// `dispatch_once`'s contract: the cross-extractor fallback cannot
+    /// compound with `with_retry`'s transient retries, because their
+    /// trigger sets are disjoint. Asserted rather than left as a comment —
+    /// an overlap would silently multiply spawns (5 attempts x 2 extractors).
+    #[test]
+    fn access_blocked_is_disjoint_from_the_transient_and_unsupported_sets() {
+        for s in [
+            COMMONS_403,
+            "ERROR: Unable to download webpage: HTTP Error 401: Unauthorized",
+            "[site][album] HTTPError: 403 Forbidden",
+            "[site][album] HTTPError: 401 Unauthorized",
+        ] {
+            assert!(is_access_blocked_stderr(s));
+            assert!(
+                !is_transient_network_stderr(s),
+                "a block must never also be transient, or the fallback \
+                 compounds with the retry budget: {s}"
+            );
+            assert!(
+                !is_no_matching_extractor(s),
+                "a block must never also read as no-matching-extractor: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn warrants_other_extractor_covers_both_unsupported_and_blocked() {
+        assert!(warrants_other_extractor(&err(
+            "yt-dlp",
+            "ERROR: Unsupported URL: https://example.com"
+        )));
+        assert!(warrants_other_extractor(&err("yt-dlp", COMMONS_403)));
+    }
+
+    #[test]
+    fn warrants_other_extractor_refuses_everything_else() {
+        // A permanent failure must not cost a second doomed spawn...
+        assert!(!warrants_other_extractor(&err(
+            "gallery-dl",
+            "HTTPError: 404 Not Found"
+        )));
+        // ...and control flow must never "try harder": the user stopped it.
+        assert!(!warrants_other_extractor(&GoopError::Cancelled));
+        assert!(!warrants_other_extractor(&GoopError::Paused));
+        // The direct downloader's typed errors are not an extractor verdict.
+        assert!(!warrants_other_extractor(&GoopError::Network(
+            "Unsupported URL inside a network message must not count".into()
+        )));
+    }
+
+    #[test]
+    fn a_blocked_blob_is_never_read_as_a_shrug() {
+        // `stderr` is an accumulated tail of a whole run, not a single line,
+        // so nothing structurally stops a shrug marker and a block marker
+        // sharing one blob. If that happened, treating it as a shrug would
+        // let two of them reach `TryDirect` — streaming the site's 403 page
+        // as if it were media. Resolve the ambiguity toward the block: it is
+        // the more specific claim, and being wrong costs only a message.
+        let blob = "ERROR: Unsupported URL: https://x\nERROR: HTTP Error 403: Forbidden";
+        let v = both_failed(err("yt-dlp", blob), err("gallery-dl", blob));
+        assert!(
+            !matches!(v, BothFailed::TryDirect),
+            "a blob carrying a 403 must never reach the direct downloader"
+        );
+    }
+
+    #[test]
+    fn both_unsupported_earns_a_direct_download_attempt() {
+        let v = both_failed(
+            err(
+                "yt-dlp",
+                "ERROR: Unsupported URL: https://example.com/f.bin",
+            ),
+            err("gallery-dl", "No suitable extractor found for 'https://x'"),
+        );
+        assert!(
+            matches!(v, BothFailed::TryDirect),
+            "two 'unrecognised' verdicts are the plain-file signal"
+        );
+    }
+
+    #[test]
+    fn block_then_unsupported_surfaces_the_block() {
+        // Regression for the bug this rule exists to prevent: a 403 whose
+        // fallback doesn't know the site must NOT be reported to the user
+        // as "Neither extractor recognized this URL" — that is false, and
+        // strictly less useful than the 403 we actually got.
+        let v = both_failed(
+            err("yt-dlp", COMMONS_403),
+            err("gallery-dl", "No suitable extractor found for 'https://x'"),
+        );
+        assert_eq!(surfaced(v), "yt-dlp");
+    }
+
+    #[test]
+    fn block_then_unsupported_never_falls_through_to_direct() {
+        // A 403 on a web page is not evidence the URL is a plain file, so
+        // it must not reach the direct downloader (which would stream the
+        // site's 403 error page as if it were media).
+        let v = both_failed(
+            err("yt-dlp", COMMONS_403),
+            err("gallery-dl", "ERROR: Unsupported URL: https://x"),
+        );
+        assert!(!matches!(v, BothFailed::TryDirect));
+    }
+
+    #[test]
+    fn unsupported_then_real_error_surfaces_the_fallbacks_verdict() {
+        // Unchanged behaviour: the fallback actually engaged with the URL,
+        // so its error describes it better than the primary's shrug.
+        let v = both_failed(
+            err("yt-dlp", "ERROR: Unsupported URL: https://example.com"),
+            err("gallery-dl", "HTTPError: 401 Unauthorized"),
+        );
+        assert_eq!(surfaced(v), "gallery-dl");
+    }
+
+    #[test]
+    fn two_real_errors_surface_the_fallbacks_verdict() {
+        // Both engaged; neither shrugged. Keep today's behaviour (the last
+        // error wins) rather than inventing a preference between them.
+        let v = both_failed(
+            err("yt-dlp", COMMONS_403),
+            err("gallery-dl", "HTTPError: 401 Unauthorized"),
+        );
+        assert_eq!(surfaced(v), "gallery-dl");
     }
 
     #[test]

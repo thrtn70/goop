@@ -1,12 +1,20 @@
 //! Routing layer that picks between yt-dlp and gallery-dl based on the
-//! URL's classifier output, then falls back to the OTHER extractor if
-//! the chosen one returns a "no matching extractor" error.
+//! URL's classifier output, then falls back to the OTHER extractor if the
+//! chosen one either doesn't recognise the URL or is blocked by the site.
+//!
+//! The fallback rule itself lives in `goop_core::error`
+//! (`warrants_other_extractor` / `both_failed`) rather than here, because
+//! the probe path in `src-tauri/src/commands/extract.rs` has to make the
+//! identical decision. Two hand-copied versions of it drifted once
+//! already.
 //!
 //! `dispatch` is the only thing the IPC layer needs to call. Both
 //! backends produce the same `BackendOutcome` shape so the caller can
 //! convert to a `JobResult` without caring which extractor ran.
 
-use goop_core::{is_no_matching_extractor, EventSink, GoopError, JobId, JobSignals};
+use goop_core::{
+    both_failed, warrants_other_extractor, BothFailed, EventSink, GoopError, JobId, JobSignals,
+};
 use goop_sidecar::BinaryResolver;
 use std::sync::Arc;
 
@@ -37,11 +45,13 @@ pub enum ResultKindTag {
 }
 
 /// Dispatch an extract request: classify the URL, run the chosen
-/// extractor, and fall back to the OTHER one on a "no matching
-/// extractor" error. Transient network failures are retried with
+/// extractor, and fall back to the OTHER one when the first either
+/// doesn't recognise the URL or is refused by the site (401/403) — a
+/// block describes the request, not the content, so the other extractor
+/// may still be let through. Transient network failures are retried with
 /// backoff (resuming from partial files); every other failure mode
-/// (auth, rate limit on the subprocess paths, unsupported input)
-/// propagates on the first attempt.
+/// (a real auth wall, rate limits on the subprocess paths, unsupported
+/// input) propagates on the first attempt.
 pub async fn dispatch(
     resolver: &BinaryResolver,
     sink: Arc<dyn EventSink>,
@@ -73,7 +83,9 @@ pub(crate) async fn dispatch_with_policy(
 /// attempt that failed transiently mid-fallback re-classifies cleanly.
 /// The inner cookie-fallback and cross-extractor retries can't compound
 /// with the transient retries: their trigger strings (cookie-DB errors,
-/// "Unsupported URL") are disjoint from the transient set.
+/// "Unsupported URL", 401/403) are disjoint from the transient set —
+/// asserted by `access_blocked_is_disjoint_from_the_transient_and_unsupported_sets`
+/// in `goop_core::error`.
 async fn dispatch_once(
     resolver: &BinaryResolver,
     sink: Arc<dyn EventSink>,
@@ -87,7 +99,7 @@ async fn dispatch_once(
         return crate::direct::download(sink, job_id, req, signals).await;
     }
     let primary = classify_extractor(&req.url);
-    let result = run_one(
+    let err = match run_one(
         resolver,
         sink.clone(),
         job_id,
@@ -95,39 +107,36 @@ async fn dispatch_once(
         signals.clone(),
         primary,
     )
-    .await;
-    match result {
-        Ok(outcome) => Ok(outcome),
-        Err(err) => {
-            // A fired signal (cancel OR pause) suppresses the fallback:
-            // the user asked this job to stop, not to try harder.
-            if signals.check().is_some() || !is_no_matching_extractor_err(&err) {
-                return Err(err);
-            }
-            let fallback = match primary {
-                ExtractorChoice::YtDlp => ExtractorChoice::GalleryDl,
-                ExtractorChoice::GalleryDl => ExtractorChoice::YtDlp,
-            };
-            match run_one(
-                resolver,
-                sink.clone(),
-                job_id,
-                req,
-                signals.clone(),
-                fallback,
-            )
-            .await
-            {
-                Ok(outcome) => Ok(outcome),
-                Err(err2) => {
-                    if signals.check().is_some() || !is_no_matching_extractor_err(&err2) {
-                        return Err(err2);
-                    }
-                    // Neither extractor recognised the URL: stream it directly.
-                    crate::direct::download(sink, job_id, req, signals).await
-                }
-            }
-        }
+    .await
+    {
+        Ok(outcome) => return Ok(outcome),
+        Err(err) => err,
+    };
+    // A fired signal (cancel OR pause) suppresses the fallback: the user
+    // asked this job to stop, not to try harder.
+    if signals.check().is_some() || !warrants_other_extractor(&err) {
+        return Err(err);
+    }
+    let err2 = match run_one(
+        resolver,
+        sink.clone(),
+        job_id,
+        req,
+        signals.clone(),
+        primary.other(),
+    )
+    .await
+    {
+        Ok(outcome) => return Ok(outcome),
+        Err(err2) => err2,
+    };
+    if signals.check().is_some() {
+        return Err(err2);
+    }
+    match both_failed(err, err2) {
+        // Neither extractor recognised the URL: stream it directly.
+        BothFailed::TryDirect => crate::direct::download(sink, job_id, req, signals).await,
+        BothFailed::Surface(e) => Err(e),
     }
 }
 
@@ -177,42 +186,4 @@ pub fn cleanup_partials_for(req: &ExtractRequest) {
     crate::direct::remove_partials(&output_dir, &req.url);
     crate::ytdlp::cleanup_partials(&output_dir, None);
     crate::gallery_dl::cleanup_run_artifacts(&output_dir, &req.url);
-}
-
-fn is_no_matching_extractor_err(err: &GoopError) -> bool {
-    match err {
-        GoopError::SubprocessFailed { stderr, .. } => is_no_matching_extractor(stderr),
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_matching_extractor_err_matches_subprocess_failure() {
-        let err = GoopError::SubprocessFailed {
-            binary: "yt-dlp".into(),
-            stderr: "ERROR: Unsupported URL: https://example.com".into(),
-        };
-        assert!(is_no_matching_extractor_err(&err));
-    }
-
-    #[test]
-    fn no_matching_extractor_err_ignores_other_errors() {
-        let err = GoopError::SubprocessFailed {
-            binary: "yt-dlp".into(),
-            stderr: "HTTPError: 404 Not Found".into(),
-        };
-        assert!(!is_no_matching_extractor_err(&err));
-        let err = GoopError::Cancelled;
-        assert!(!is_no_matching_extractor_err(&err));
-        // The control-flow and transient variants must never trigger the
-        // cross-extractor fallback.
-        assert!(!is_no_matching_extractor_err(&GoopError::Paused));
-        assert!(!is_no_matching_extractor_err(&GoopError::Network(
-            "Unsupported URL in a network message must not count".into()
-        )));
-    }
 }

@@ -1,5 +1,7 @@
 use crate::state::AppState;
-use goop_core::{is_no_matching_extractor, GoopError, IpcError, Job, JobId, JobKind};
+use goop_core::{
+    both_failed, warrants_other_extractor, BothFailed, GoopError, IpcError, Job, JobId, JobKind,
+};
 use goop_extractor::classify::{classify_extractor, ExtractorChoice};
 use goop_extractor::gallery_dl::GalleryDl;
 use goop_extractor::ytdlp::{DirectFileInfo, ExtractRequest, UrlProbe, YtDlp};
@@ -10,29 +12,31 @@ use tauri::State;
 pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<UrlProbe, IpcError> {
     let cookies = state.settings.read().cookies_from_browser.clone();
     let primary = classify_extractor(&url);
-    let result = probe_with(primary, &state, &url, cookies.as_deref()).await;
-    match result {
-        Ok(probe) => Ok(probe),
-        Err(err) if is_unsupported(&err) => {
-            // Fall back to the OTHER extractor on a no-matching-extractor
-            // error so the user gets a probe even when the primary
-            // misclassified or the URL straddles both.
-            let fallback = match primary {
-                ExtractorChoice::YtDlp => ExtractorChoice::GalleryDl,
-                ExtractorChoice::GalleryDl => ExtractorChoice::YtDlp,
-            };
-            match probe_with(fallback, &state, &url, cookies.as_deref()).await {
-                Ok(probe) => Ok(probe),
-                Err(err2) if is_unsupported(&err2) => {
-                    // Neither extractor recognised the URL — try a plain HTTP
-                    // probe so the UI can still offer a direct download.
-                    let info = goop_extractor::direct::probe(&url).await?;
-                    Ok(direct_url_probe(url, info))
-                }
-                Err(err2) => Err(err2.into()),
-            }
+    let err = match probe_with(primary, &state, &url, cookies.as_deref()).await {
+        Ok(probe) => return Ok(probe),
+        Err(err) => err,
+    };
+    // Fall back to the OTHER extractor when the primary either didn't
+    // recognise the URL (misclassified, or it straddles both) or was
+    // blocked by the site — a 403 describes the request, not the content,
+    // so the other extractor may well be let through.
+    if !warrants_other_extractor(&err) {
+        return Err(err.into());
+    }
+    let err2 = match probe_with(primary.other(), &state, &url, cookies.as_deref()).await {
+        Ok(probe) => return Ok(probe),
+        Err(err2) => err2,
+    };
+    // Same rule as the download path in `goop_extractor::backend`, so the
+    // probe can't promise a direct download the worker won't attempt.
+    match both_failed(err, err2) {
+        BothFailed::TryDirect => {
+            // Neither extractor recognised the URL — try a plain HTTP probe
+            // so the UI can still offer a direct download.
+            let info = goop_extractor::direct::probe(&url).await?;
+            Ok(direct_url_probe(url, info))
         }
-        Err(err) => Err(err.into()),
+        BothFailed::Surface(e) => Err(e.into()),
     }
 }
 
@@ -60,13 +64,6 @@ async fn probe_with(
     match backend {
         ExtractorChoice::YtDlp => YtDlp::probe(&state.resolver, url, cookies).await,
         ExtractorChoice::GalleryDl => GalleryDl::probe(&state.resolver, url, cookies).await,
-    }
-}
-
-fn is_unsupported(err: &GoopError) -> bool {
-    match err {
-        GoopError::SubprocessFailed { stderr, .. } => is_no_matching_extractor(stderr),
-        _ => false,
     }
 }
 
