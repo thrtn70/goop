@@ -1,5 +1,7 @@
 use crate::job::{JobId, JobResult, JobState};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -38,7 +40,7 @@ pub struct QueueEvent {
 /// exhaustiveness check fails the frontend typecheck until one exists.
 /// Regenerate the TS bindings (`scripts/generate-bindings.sh`) after any change
 /// here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
 pub enum WarningCode {
@@ -67,6 +69,66 @@ pub trait EventSink: Send + Sync + 'static {
     fn emit_progress(&self, event: ProgressEvent);
     fn emit_queue(&self, event: QueueEvent);
     fn emit_sidecar(&self, event: SidecarEvent);
+}
+
+/// `EventSink` decorator that collapses repeated `SidecarEvent::Warning`s
+/// carrying the same `code` down to the first one. Progress, queue, and
+/// non-`Warning` sidecar events pass through untouched.
+///
+/// A warning is emitted by whichever leaf detects the condition, but one
+/// run can put several leaves through the same condition: a dispatcher
+/// may try a second backend after the first declines, and a retry wrapper
+/// may replay the whole pipeline. Each leaf emitting once therefore still
+/// yields a pile of identical toasts. Wrapping the sink for the span of a
+/// run collapses them without any leaf needing to know how many times it
+/// might run, or which sibling ran before it.
+///
+/// `code` is the whole identity — two warnings sharing a code are taken
+/// to be the same fact, and the first one's `message` is what survives.
+/// So a code must name a coarse category ("cookie_fallback"), never carry
+/// per-instance detail that callers would expect to see every time.
+///
+/// Deliberately scoped to the wrapper rather than global: the seen-set
+/// dies with it, so the caller chooses the span. `goop-extractor` wraps
+/// one dispatch attempt, which means a resumed or manually retried job
+/// warns afresh — the user acted, so a fresh heads-up is warranted.
+pub struct WarnOnceSink {
+    inner: Arc<dyn EventSink>,
+    seen: parking_lot::Mutex<HashSet<WarningCode>>,
+}
+
+impl WarnOnceSink {
+    /// Wrap `inner` so each distinct warning code reaches it at most once.
+    pub fn wrap(inner: Arc<dyn EventSink>) -> Arc<dyn EventSink> {
+        Arc::new(Self {
+            inner,
+            seen: parking_lot::Mutex::new(HashSet::new()),
+        })
+    }
+}
+
+impl EventSink for WarnOnceSink {
+    fn emit_progress(&self, event: ProgressEvent) {
+        self.inner.emit_progress(event);
+    }
+
+    fn emit_queue(&self, event: QueueEvent) {
+        self.inner.emit_queue(event);
+    }
+
+    fn emit_sidecar(&self, event: SidecarEvent) {
+        if let SidecarEvent::Warning { code, .. } = &event {
+            // `insert` returns false when the code was already present.
+            // The lock is released before forwarding: `inner` is arbitrary
+            // user code (the Tauri emit path), and holding a lock across
+            // it invites a deadlock for no benefit.
+            let first_time = self.seen.lock().insert(*code);
+            if !first_time {
+                return;
+            }
+        }
+        self.inner.emit_sidecar(event);
+    }
 }
 
 /// Test/no-op sink that records all emitted events in a Vec.
@@ -111,7 +173,42 @@ impl EventSink for RecordingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::JobId;
+    use crate::job::{JobId, JobState};
+
+    fn warning(code: WarningCode) -> SidecarEvent {
+        // Derive the message from the code's snake_case wire form so the
+        // dedup key (the typed code) and the human message stay in step.
+        let name = serde_json::to_value(code)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        SidecarEvent::Warning {
+            code,
+            message: format!("{name} happened"),
+        }
+    }
+
+    fn progress(stage: &str) -> ProgressEvent {
+        ProgressEvent {
+            job_id: JobId::new(),
+            percent: 0.0,
+            eta_secs: None,
+            speed_hr: None,
+            stage: stage.into(),
+            encoder: None,
+        }
+    }
+
+    fn codes(sink: &RecordingSink) -> Vec<WarningCode> {
+        sink.sidecar
+            .lock()
+            .iter()
+            .filter_map(|e| match e {
+                SidecarEvent::Warning { code, .. } => Some(*code),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn recording_sink_captures_events() {
@@ -147,6 +244,21 @@ mod tests {
     }
 
     #[test]
+    fn warn_once_forwards_the_first_warning_of_each_code() {
+        let rec = Arc::new(RecordingSink::new());
+        let sink = WarnOnceSink::wrap(rec.clone());
+
+        sink.emit_sidecar(warning(WarningCode::CookieFallback));
+
+        assert_eq!(codes(&rec), vec![WarningCode::CookieFallback]);
+        // The message must survive the wrapper untouched.
+        assert!(
+            matches!(&rec.sidecar.lock()[0], SidecarEvent::Warning { message, .. }
+                if message == "cookie_fallback happened")
+        );
+    }
+
+    #[test]
     fn warning_code_round_trips_through_json() {
         let code: WarningCode =
             serde_json::from_value(serde_json::json!("cookie_fallback")).expect("code parses");
@@ -159,5 +271,76 @@ mod tests {
     fn warning_code_rejects_unknown_values() {
         let parsed: Result<WarningCode, _> = serde_json::from_value(serde_json::json!("nope"));
         assert!(parsed.is_err(), "unknown codes must not deserialize");
+    }
+
+    #[test]
+    fn warn_once_suppresses_repeats_of_the_same_code() {
+        let rec = Arc::new(RecordingSink::new());
+        let sink = WarnOnceSink::wrap(rec.clone());
+
+        for _ in 0..3 {
+            sink.emit_sidecar(warning(WarningCode::CookieFallback));
+        }
+
+        assert_eq!(codes(&rec), vec![WarningCode::CookieFallback]);
+    }
+
+    /// `code` is the whole identity: two warnings sharing a code collapse to
+    /// the first, message and all. With a single `WarningCode` variant today
+    /// this is the meaningful form of the "distinct codes stay distinct"
+    /// property (a two-variant test returns when a second variant lands).
+    #[test]
+    fn warn_once_dedupes_on_code_not_message() {
+        let rec = Arc::new(RecordingSink::new());
+        let sink = WarnOnceSink::wrap(rec.clone());
+
+        sink.emit_sidecar(SidecarEvent::Warning {
+            code: WarningCode::CookieFallback,
+            message: "first".into(),
+        });
+        sink.emit_sidecar(SidecarEvent::Warning {
+            code: WarningCode::CookieFallback,
+            message: "second".into(),
+        });
+
+        assert_eq!(rec.sidecar.lock().len(), 1);
+        assert!(matches!(&rec.sidecar.lock()[0],
+            SidecarEvent::Warning { message, .. } if message == "first"));
+    }
+
+    #[test]
+    fn warn_once_never_dedupes_non_warning_sidecar_variants() {
+        let rec = Arc::new(RecordingSink::new());
+        let sink = WarnOnceSink::wrap(rec.clone());
+
+        for _ in 0..2 {
+            sink.emit_sidecar(SidecarEvent::YtDlpUpdated {
+                from_version: "2024.10.07".into(),
+                to_version: "2024.11.18".into(),
+            });
+        }
+
+        assert_eq!(rec.sidecar.lock().len(), 2);
+    }
+
+    #[test]
+    fn warn_once_passes_progress_and_queue_straight_through() {
+        let rec = Arc::new(RecordingSink::new());
+        let sink = WarnOnceSink::wrap(rec.clone());
+
+        // Identical repeats must all land: `with_retry` reports every
+        // backoff through `stage`, and a deduped progress stream would
+        // freeze the queue row's retry countdown.
+        for _ in 0..3 {
+            sink.emit_progress(progress("retrying (attempt 2/5)"));
+            sink.emit_queue(QueueEvent {
+                job_id: JobId::new(),
+                state: JobState::Running,
+                result: None,
+            });
+        }
+
+        assert_eq!(rec.progress.lock().len(), 3);
+        assert_eq!(rec.queue.lock().len(), 3);
     }
 }

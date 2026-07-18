@@ -135,8 +135,7 @@ type AppStoreState = {
   /**
    * Routes a `SidecarEvent` to the right side effect. Handles
    * `kind === "warning"` (cookie auto-fallback, future broadcast warnings)
-   * by enqueuing a one-shot info toast; other variants are no-ops here
-   * (yt_dlp_updated is consumed by the version-info subscriber instead).
+   * by enqueuing an info toast; every other variant is a no-op here.
    */
   handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
@@ -370,6 +369,12 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
         // lock, missing browser, etc.). Surface as a non-blocking info toast
         // so the user knows what happened without a hard error.
+        //
+        // Deliberately no dedupe here: the extractor collapses this to one
+        // event per dispatch (WarnOnceSink), however many extractors and
+        // retries hit the same locked DB. A resumed or manually retried job
+        // is a fresh dispatch and warns again ON PURPOSE — deduping here
+        // would swallow that.
         get().enqueueToast({
           variant: "info",
           title: "Cookies skipped for this download",

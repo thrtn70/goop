@@ -44,6 +44,13 @@ fn validated_browser(name: Option<&str>) -> Option<&'static str> {
     SUPPORTED_BROWSERS.iter().copied().find(|b| *b == n)
 }
 
+/// How long the output loop keeps draining stderr after stdout has hit
+/// EOF, with no new stderr arriving. Only a bound on a pathological case
+/// (see the drain loop in `download_once`); a healthy child EOFs both
+/// streams at once and never arms it. Shared with `gallery_dl`, which
+/// drives its subprocess the same way.
+pub(crate) const STDERR_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ExtractRequest {
@@ -222,7 +229,11 @@ impl<'a> YtDlp<'a> {
         })
     }
 
-    pub async fn download(
+    /// `pub(crate)` on purpose: callers must come through
+    /// `backend::dispatch`, which installs the `WarnOnceSink` this fn's
+    /// warning relies on to stay one-per-dispatch. A direct call would
+    /// silently bypass it.
+    pub(crate) async fn download(
         &self,
         job_id: JobId,
         req: &ExtractRequest,
@@ -257,10 +268,16 @@ impl<'a> YtDlp<'a> {
             .await;
 
         // Cookie-DB read failure + cookies were actually requested → retry
-        // without the flag and surface a one-shot warning. Public videos
-        // and most yt-dlp-supported sites work without cookies, so the
-        // fallback turns "extract fails" into "extract works, with a
-        // heads-up". A fired cancel or pause short-circuits the retry.
+        // without the flag and warn. Public videos and most
+        // yt-dlp-supported sites work without cookies, so the fallback
+        // turns "extract fails" into "extract works, with a heads-up". A
+        // fired cancel or pause short-circuits the retry.
+        //
+        // This warns once per call, which is NOT once per dispatch:
+        // dispatch may run gallery-dl after us and the retry layer may
+        // re-run us, and each would hit the same locked cookie DB.
+        // Collapsing those repeats is `WarnOnceSink`'s job, installed by
+        // `backend::dispatch_with_policy` — don't add a guard here.
         match first {
             Err(GoopError::SubprocessFailed { ref stderr, .. })
                 if is_cookie_db_error(stderr)
@@ -354,7 +371,21 @@ impl<'a> YtDlp<'a> {
         let mut cookie_error_line: Option<String> = None;
         let mut last_progress_line: Option<String> = None;
 
-        loop {
+        // Drain BOTH streams to EOF rather than stopping at stdout's. The
+        // loop is biased, so it polls stdout first; a child that closed
+        // stdout early (or exited before the first poll) would otherwise
+        // end the loop with stderr never read even once. Everything the
+        // caller decides — the cookie fallback below, the cross-extractor
+        // fallback, the transient retry, `friendly_message` — is a
+        // substring test over that stderr, so losing it fails silently and
+        // looks like a clean "unknown error".
+        //
+        // The `if !*_done` guards are load-bearing: a reader already at
+        // EOF returns `Ready(None)` immediately, forever, so an unguarded
+        // arm would spin the loop hot instead of waiting on its sibling.
+        let mut out_done = false;
+        let mut err_done = false;
+        while !(out_done && err_done) {
             tokio::select! {
                 // biased: a fired stop signal must win over further
                 // subprocess output, deterministically — same discipline
@@ -365,7 +396,7 @@ impl<'a> YtDlp<'a> {
                     let _ = child.wait().await;
                     return Err(finish_interrupt(int, output_dir, last_progress_line.as_deref()));
                 }
-                line = out_reader.next_line() => {
+                line = out_reader.next_line(), if !out_done => {
                     match line? {
                         Some(l) => {
                             if let Some(ev) = parse_progress(job_id, &l) {
@@ -375,30 +406,60 @@ impl<'a> YtDlp<'a> {
                                 output_path = Some(l);
                             }
                         }
-                        None => break,
+                        None => out_done = true,
                     }
                 }
-                line = err_reader.next_line() => {
-                    if let Ok(Some(l)) = line {
-                        if cookie_error_line.is_none() && is_cookie_db_error(&l) {
-                            cookie_error_line = Some(l.clone());
-                        }
-                        stderr_tail.push_str(&l);
-                        stderr_tail.push('\n');
-                        if stderr_tail.len() > 8192 {
-                            // Walk forward to the next char boundary so a
-                            // truncation in the middle of a multi-byte UTF-8
-                            // sequence (CJK / emoji in extractor errors)
-                            // doesn't panic at the slice.
-                            let mut drop_to = stderr_tail.len() - 4096;
-                            while drop_to < stderr_tail.len()
-                                && !stderr_tail.is_char_boundary(drop_to)
-                            {
-                                drop_to += 1;
+                line = err_reader.next_line(), if !err_done => {
+                    match line {
+                        Ok(Some(l)) => {
+                            if cookie_error_line.is_none() && is_cookie_db_error(&l) {
+                                cookie_error_line = Some(l.clone());
                             }
-                            stderr_tail = stderr_tail[drop_to..].to_string();
+                            stderr_tail.push_str(&l);
+                            stderr_tail.push('\n');
+                            if stderr_tail.len() > 8192 {
+                                // Walk forward to the next char boundary so a
+                                // truncation in the middle of a multi-byte UTF-8
+                                // sequence (CJK / emoji in extractor errors)
+                                // doesn't panic at the slice.
+                                let mut drop_to = stderr_tail.len() - 4096;
+                                while drop_to < stderr_tail.len()
+                                    && !stderr_tail.is_char_boundary(drop_to)
+                                {
+                                    drop_to += 1;
+                                }
+                                stderr_tail = stderr_tail[drop_to..].to_string();
+                            }
                         }
+                        Ok(None) => err_done = true,
+                        // One line we couldn't decode — mojibake in a
+                        // title, a legacy Windows codepage. tokio consumes
+                        // the bad bytes before it validates them, so the
+                        // reader has already moved on and the next poll
+                        // returns the FOLLOWING line. Skip it and keep
+                        // reading: bailing here would drop everything
+                        // after the first bad byte, and the caller's
+                        // decisions are substring tests over the whole
+                        // message.
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
+                        // A real IO error won't clear on the next poll.
+                        Err(_) => err_done = true,
                     }
+                }
+                // Bounds the drain. A grandchild that inherited stderr but
+                // not stdout holds this pipe open after the child exits,
+                // which would otherwise pin the job open for the
+                // grandchild's whole lifetime. An INACTIVITY window, not a
+                // deadline: `select!` rebuilds the sleep each iteration, so
+                // any stderr line resets it. Normal runs never arm it —
+                // both streams EOF together when the child exits.
+                _ = tokio::time::sleep(STDERR_DRAIN_GRACE), if out_done && !err_done => {
+                    tracing::warn!(
+                        "yt-dlp stderr still open after stdout EOF; \
+                         proceeding with the {} bytes collected so far",
+                        stderr_tail.len()
+                    );
+                    err_done = true;
                 }
             }
         }

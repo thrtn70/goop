@@ -21,7 +21,7 @@ pub use error::{
     is_no_matching_extractor, is_transient_network_stderr, warrants_other_extractor, BothFailed,
     GoopError, IpcError,
 };
-pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent, WarningCode};
+pub use events::{EventSink, ProgressEvent, QueueEvent, SidecarEvent, WarnOnceSink, WarningCode};
 pub use history::{HistoryCounts, HistoryFilter, HistorySort, HistoryViewMode};
 pub use image::{
     CropRect, IconPlatform, ImageOperation, ResizeMode, WatermarkPosition, WatermarkSpec,
