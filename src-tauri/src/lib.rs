@@ -32,13 +32,32 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter("goop=info,warn")
         .init();
-    let result = tauri::Builder::default()
+    // Single-instance guard (release builds only): a second launch focuses the
+    // existing window instead of booting a second backend against the shared
+    // queue. Not registered in debug builds so `tauri dev` can run alongside
+    // the packaged app (they use separate data dirs); two dev instances are
+    // still caught by the queue lock in setup(). Must be the first plugin.
+    #[cfg_attr(debug_assertions, allow(unused_mut))]
+    let mut builder = tauri::Builder::default();
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                if let Err(e) = w.set_focus() {
+                    tracing::warn!(error = %e, "failed to focus existing window on second launch");
+                }
+            }
+        }));
+    }
+    let result = builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -88,8 +107,46 @@ pub fn run() {
                 .filter(|p| p.exists());
             let settings_path = gpath::config_file();
             let settings = cfg::load(&settings_path).unwrap_or_default();
-            let store = QueueStore::open(&gpath::data_dir().join("queue.db"))
+            let data_dir = gpath::data_dir();
+
+            // Single-instance ownership FIRST — before opening the store.
+            // Only the process holding the exclusive lock on
+            // <data_dir>/queue.lock may open/migrate the DB, reconcile, and
+            // run workers. Otherwise a second instance would flip this one's
+            // `running` rows to error:interrupted while its in-process workers
+            // keep writing .part files (zombie workers), and two fleets could
+            // race the same partial file. Acquiring before QueueStore::open
+            // also means a losing instance exits via the friendly dialog
+            // below instead of colliding on concurrent schema-migration DDL
+            // and dying with a raw "queue open" error. Held for the process
+            // lifetime via AppState.
+            let instance_guard = match goop_core::InstanceGuard::try_acquire(&data_dir) {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    tracing::warn!(dir = %data_dir.display(), "another Goop instance owns the queue; exiting");
+                    app.dialog()
+                        .message("Goop is already running. Switch to the open window to manage your downloads.")
+                        .kind(MessageDialogKind::Info)
+                        .blocking_show();
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, dir = %data_dir.display(),
+                        "could not acquire the queue lock; exiting to avoid corrupting a running instance");
+                    app.dialog()
+                        .message("Goop couldn't start: its application data folder is unavailable (check the folder's permissions). No downloads were changed.")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    // Nonzero: a genuine startup failure, distinct from the
+                    // expected exit(0) "another instance owns it" case above,
+                    // so supervisors and exit-code checks can tell them apart.
+                    std::process::exit(1);
+                }
+            };
+
+            let store = QueueStore::open(&data_dir.join("queue.db"))
                 .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
+
             let _interrupted = store.reconcile().ok();
             // Re-queue jobs left in `paused` state from a previous run —
             // except downloads. A paused download's partial files survive on
@@ -870,6 +927,7 @@ pub fn run() {
             app.manage(AppState {
                 resolver,
                 store,
+                instance_guard,
                 scheduler,
                 settings: parking_lot::RwLock::new(settings),
                 settings_path,

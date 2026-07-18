@@ -40,9 +40,26 @@ pub fn presets_file() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir()
-        .map(|d| d.join("goop"))
-        .unwrap_or_else(|| PathBuf::from("."))
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    resolve_data_dir(
+        base,
+        cfg!(debug_assertions),
+        std::env::var("GOOP_DATA_DIR").ok(),
+    )
+}
+
+// Resolve the app-data directory. An explicit `GOOP_DATA_DIR` override wins;
+// otherwise debug builds use `goop-dev` and release builds use `goop`, so a
+// `tauri dev` build and the packaged app never share a queue.db.
+fn resolve_data_dir(base: PathBuf, is_debug: bool, env_override: Option<String>) -> PathBuf {
+    if let Some(dir) = env_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+    base.join(if is_debug { "goop-dev" } else { "goop" })
 }
 
 #[cfg(test)]
@@ -69,5 +86,45 @@ mod tests {
     #[test]
     fn default_output_is_absolute() {
         assert!(default_output_dir().is_absolute());
+    }
+
+    #[test]
+    fn resolve_data_dir_release_uses_goop() {
+        let p = resolve_data_dir(PathBuf::from("/data"), false, None);
+        assert_eq!(p, PathBuf::from("/data/goop"));
+    }
+
+    #[test]
+    fn resolve_data_dir_debug_uses_goop_dev() {
+        let p = resolve_data_dir(PathBuf::from("/data"), true, None);
+        assert_eq!(p, PathBuf::from("/data/goop-dev"));
+    }
+
+    #[test]
+    fn resolve_data_dir_env_override_wins_over_debug() {
+        let p = resolve_data_dir(PathBuf::from("/data"), true, Some("/custom/dir".into()));
+        assert_eq!(p, PathBuf::from("/custom/dir"));
+    }
+
+    #[test]
+    fn resolve_data_dir_ignores_empty_env_override() {
+        let p = resolve_data_dir(PathBuf::from("/data"), false, Some(String::new()));
+        assert_eq!(p, PathBuf::from("/data/goop"));
+    }
+
+    #[test]
+    fn resolve_data_dir_trims_whitespace_from_env_override() {
+        let p = resolve_data_dir(
+            PathBuf::from("/data"),
+            false,
+            Some("  /custom/dir  ".into()),
+        );
+        assert_eq!(p, PathBuf::from("/custom/dir"));
+    }
+
+    #[test]
+    fn resolve_data_dir_ignores_whitespace_only_env_override() {
+        let p = resolve_data_dir(PathBuf::from("/data"), true, Some("   ".into()));
+        assert_eq!(p, PathBuf::from("/data/goop-dev"));
     }
 }
