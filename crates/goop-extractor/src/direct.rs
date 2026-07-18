@@ -130,8 +130,10 @@ pub async fn download(
 
     // Part/meta names are derived from the URL so a retry finds the same
     // partial regardless of the eventual filename, and two different URLs
-    // that resolve to the same filename don't share a partial.
-    let hash = url_hash(&req.url);
+    // that resolve to the same filename don't share a partial. The debrid
+    // path overrides via `resume_key`: its CDN URLs rotate but the
+    // original link (plus file id) is stable, so resume keeps working.
+    let hash = url_hash(req.resume_key.as_deref().unwrap_or(&req.url));
     let part_path = output_dir.join(format!(".{hash}.goopdl.part"));
     let meta_path = output_dir.join(format!(".{hash}.goopdl.meta"));
 
@@ -206,8 +208,12 @@ pub async fn download(
     };
 
     // Read everything we need from the headers before `bytes_stream` consumes
-    // the response.
-    let filename = filename_from_headers(resp.headers(), &req.url);
+    // the response. A debrid-supplied hint wins over derivation — TorBox
+    // knows the real name while its CDN URL may be opaque.
+    let filename = req
+        .filename_hint
+        .clone()
+        .unwrap_or_else(|| filename_from_headers(resp.headers(), &req.url));
     let total = if append {
         content_range_total(resp.headers())
             .or_else(|| header_u64(resp.headers(), CONTENT_LENGTH).map(|cl| resume_from + cl))
@@ -584,6 +590,10 @@ mod tests {
             cookies_from_browser: None,
             output_template: None,
             direct: true,
+            debrid: false,
+            debrid_item: None,
+            resume_key: None,
+            filename_hint: None,
         }
     }
 
@@ -1230,6 +1240,7 @@ mod tests {
             &req(&url, dir.path()),
             JobSignals::new(),
             &tiny_policy(),
+            None,
         )
         .await
         .unwrap();
@@ -1267,6 +1278,7 @@ mod tests {
             &req(&format!("{}/gone.bin", server.uri()), dir.path()),
             JobSignals::new(),
             &tiny_policy(),
+            None,
         )
         .await
         .expect_err("404 is permanent");
@@ -1299,6 +1311,7 @@ mod tests {
             &req(&format!("{}/flaky.bin", server.uri()), dir.path()),
             JobSignals::new(),
             &tiny_policy(),
+            None,
         )
         .await
         .expect_err("budget exhausted");

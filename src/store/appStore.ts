@@ -127,6 +127,14 @@ type AppStoreState = {
   versions: AppVersionInfo | null;
   ui: UiState;
   loadAll: () => Promise<void>;
+  /**
+   * Re-list jobs from the backend. Call after an enqueue IPC returns:
+   * inserting a job emits no queue event (the first event fires when the
+   * scheduler claims it), so under a saturated queue the new row would
+   * otherwise stay invisible — and uncancellable — until something else
+   * transitions.
+   */
+  refreshJobs: () => Promise<void>;
   applyProgress: (e: AppProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
   cancel: (id: JobId) => Promise<void>;
@@ -228,7 +236,10 @@ function newToastId(): string {
 // equivalently), which the backend's double_option deserializer reads as
 // "no change". Including them as `null` would mean "clear" on every patch
 // and silently wipe the user's setting whenever an unrelated field saves.
-type NoopPatch = Omit<SettingsPatch, "cookies_from_browser" | "output_dir_extract">;
+type NoopPatch = Omit<
+  SettingsPatch,
+  "cookies_from_browser" | "output_dir_extract" | "torbox_api_key"
+>;
 
 function emptyPatch(): NoopPatch {
   return {
@@ -315,6 +326,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   async loadAll() {
     const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
     set({ settings, jobs });
+  },
+  async refreshJobs() {
+    const jobs = await api.queue.list();
+    set({ jobs });
   },
   applyProgress(e) {
     const key = jobIdKey(e.job_id);

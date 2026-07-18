@@ -79,6 +79,30 @@ pub struct ExtractRequest {
     /// un-hinted case, so this is purely an optimisation.
     #[serde(default)]
     pub direct: bool,
+    /// Hint, set by the probe step, that this URL routes through the
+    /// debrid service (magnet links always do; hoster links when the
+    /// probe matched TorBox's supported-hoster list). `magnet:` URLs
+    /// route to debrid regardless, so this is probe metadata the same
+    /// way `direct` is.
+    #[serde(default)]
+    pub debrid: bool,
+    /// Persisted TorBox item handle (`"torrent:42"` / `"web:abc"`),
+    /// written back into the job payload after the first create call so
+    /// the waiting-poll cycles and app restarts don't re-submit the
+    /// link. Internal — set by the debrid resolver, never by the UI.
+    #[serde(default)]
+    pub debrid_item: Option<String>,
+    /// Stable key for the direct downloader's `.part`/`.meta` sidecar
+    /// names, overriding the URL. The debrid path downloads from
+    /// short-lived CDN URLs; keying partials on the original link keeps
+    /// resume working when the CDN URL rotates. Internal.
+    #[serde(default)]
+    pub resume_key: Option<String>,
+    /// Preferred output filename, overriding header/URL derivation.
+    /// The debrid path knows the real name from TorBox while the CDN
+    /// URL may be opaque. Internal.
+    #[serde(default)]
+    pub filename_hint: Option<String>,
 }
 
 /// Metadata for a plain file the extractors don't handle, surfaced by the
@@ -118,6 +142,21 @@ pub struct UrlProbe {
     /// for normal yt-dlp / gallery-dl results.
     #[serde(default)]
     pub direct: Option<DirectFileInfo>,
+    /// Set when the URL routes through the debrid service: always for
+    /// `magnet:` links, and for hoster links the probe matched against
+    /// TorBox's supported-hoster list. The UI renders a "via TorBox"
+    /// card. `None` everywhere else.
+    #[serde(default)]
+    pub debrid: Option<DebridProbeInfo>,
+}
+
+/// Probe metadata for a debrid-routed link. Sibling of `DirectFileInfo`
+/// for the "via TorBox" card.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub struct DebridProbeInfo {
+    /// `true` for magnet links, `false` for hoster links.
+    pub magnet: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -212,6 +251,7 @@ impl<'a> YtDlp<'a> {
                     thumbnail_url: None,
                     formats: Vec::new(),
                     direct: Some(info),
+                    debrid: None,
                 });
             }
         }
@@ -226,6 +266,7 @@ impl<'a> YtDlp<'a> {
                 .map(|fs| fs.iter().filter_map(parse_format).collect())
                 .unwrap_or_default(),
             direct: None,
+            debrid: None,
         })
     }
 
@@ -756,6 +797,10 @@ mod tests {
             cookies_from_browser: None,
             output_template: None,
             direct: false,
+            debrid: false,
+            debrid_item: None,
+            resume_key: None,
+            filename_hint: None,
         };
         assert!(req_no_cookies.cookies_from_browser.is_none());
     }

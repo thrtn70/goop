@@ -425,6 +425,11 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         </div>
       )}
+      {/* Debrid jobs park in `queued` between TorBox readiness polls; the
+       *  waiting stage is the only signal the row has, so surface it. */}
+      {name === "queued" && progress?.stage.startsWith("waiting on TorBox") && (
+        <div className="mt-1 text-xs text-fg-muted">{progress.stage}</div>
+      )}
       {(name === "running" || name === "paused") && (
         <>
           <div className={clsx("mt-1 flex items-center gap-2", name === "paused" && "opacity-50")}>

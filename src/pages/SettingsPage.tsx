@@ -50,6 +50,7 @@ export default function SettingsPage() {
   const themeFieldId = useId();
   const namingSchemeFieldId = useId();
   const cookiesFieldId = useId();
+  const torboxKeyFieldId = useId();
   const extractConcurrencyFieldId = useId();
   const convertConcurrencyFieldId = useId();
 
@@ -406,6 +407,26 @@ export default function SettingsPage() {
             </select>
           </Field>
         </div>
+        <Field
+          label="TorBox API key"
+          hint="Unlocks magnet links and premium hoster links via your TorBox account: paste a link, TorBox fetches it, Goop downloads the result. Get the key from torbox.app → Settings → API. Leave empty to turn debrid routing off."
+          htmlFor={torboxKeyFieldId}
+        >
+          <input
+            id={torboxKeyFieldId}
+            key={`tbk-${settings.torbox_api_key ?? ""}`}
+            type="password"
+            autoComplete="off"
+            placeholder="TorBox API key"
+            defaultValue={settings.torbox_api_key ?? ""}
+            onBlur={(e) => {
+              const v = e.target.value.trim();
+              if (v === (settings.torbox_api_key ?? "")) return;
+              void patch({ torbox_api_key: v === "" ? null : v });
+            }}
+            className="w-full rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+          />
+        </Field>
       </SettingsSection>
 
       <SettingsSection title="Updates" description="Keep Goop and its sidecars current.">

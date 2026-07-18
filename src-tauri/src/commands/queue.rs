@@ -29,11 +29,88 @@ pub fn queue_list(state: State<'_, AppState>) -> Result<Vec<Job>, IpcError> {
 #[tauri::command]
 pub fn queue_cancel(job_id: JobId, state: State<'_, AppState>) -> Result<(), IpcError> {
     let paused_extract_req = paused_extract_request(&state, job_id);
+    let debrid_item = debrid_item_of(&state, job_id);
     state.scheduler.cancel(job_id).map_err(map_scheduler_err)?;
     if let Some(req) = paused_extract_req {
         spawn_paused_partial_cleanup(&state, job_id, req);
     }
+    if let Some(item) = debrid_item {
+        spawn_debrid_remote_cancel(&state, job_id, item);
+    }
     Ok(())
+}
+
+/// The persisted TorBox item handle of `job_id` IF it is a non-terminal
+/// debrid extract job, read before the cancel flips its state.
+fn debrid_item_of(state: &State<'_, AppState>, job_id: JobId) -> Option<String> {
+    let job = state.store.get_by_id(job_id).ok().flatten()?;
+    if job.kind != JobKind::Extract
+        || matches!(
+            job.state,
+            JobState::Done | JobState::Cancelled | JobState::Error { .. }
+        )
+    {
+        return None;
+    }
+    serde_json::from_value::<goop_extractor::ytdlp::ExtractRequest>(job.payload)
+        .ok()?
+        .debrid_item
+}
+
+/// Tell TorBox to drop the item a cancelled debrid job created, so the
+/// remote fetch doesn't keep burning the account's active-download slots.
+/// Best-effort and gated the same way as the partial cleanup: only a row
+/// that actually finalized as Cancelled gets the remote delete (a racing
+/// resume must not have its TorBox item ripped away).
+fn spawn_debrid_remote_cancel(state: &State<'_, AppState>, job_id: JobId, item: String) {
+    let Some(key) = state.settings.read().torbox_api_key.clone() else {
+        return;
+    };
+    let store = state.store.clone();
+    tauri::async_runtime::spawn(async move {
+        // Wait for the worker to observe its cancel token and finalize the
+        // row before deleting the remote item. A running debrid job can be
+        // mid-HTTP-call to TorBox (up to the client's 30s timeout) before it
+        // sees the token, so poll rather than checking once after a fixed
+        // sleep — a single short sleep would give up and skip the remote
+        // delete for exactly the slow-response case that leaks a slot. Bail
+        // early if the row settles to any OTHER terminal state (a racing
+        // resume, or it finished first): only a Cancelled row gets the drop.
+        let mut finalized = false;
+        for _ in 0..140 {
+            match store.get_by_id(job_id).ok().flatten().map(|j| j.state) {
+                Some(JobState::Cancelled) => {
+                    finalized = true;
+                    break;
+                }
+                // Settled to some OTHER terminal state, or the row is gone:
+                // the cancel didn't win, so don't touch the remote item.
+                Some(JobState::Done) | Some(JobState::Error { .. }) | None => return,
+                // Still in flight — keep waiting for it to observe the token.
+                // Spelled out (not `_`) so a new JobState variant forces a
+                // decision here at compile time instead of silently polling.
+                Some(JobState::Queued) | Some(JobState::Running) | Some(JobState::Paused) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await
+                }
+            }
+        }
+        if !finalized {
+            tracing::warn!(
+                ?job_id,
+                "debrid cancel: row never finalized; skipping remote delete"
+            );
+            return;
+        }
+        if let Err(e) = goop_extractor::debrid::remote_cancel(
+            goop_extractor::debrid::TORBOX_API_BASE,
+            &key,
+            &item,
+        )
+        .await
+        {
+            tracing::warn!(?job_id, error = %e, "TorBox remote cancel failed (best-effort)");
+        }
+    });
 }
 
 /// Run `cleanup_partials_for` off-thread — but only after re-checking

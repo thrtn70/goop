@@ -174,6 +174,7 @@ describe("UpdateBanner", () => {
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",
+    torbox_api_key: null,
   };
 
   it("renders nothing when no update is available", () => {

@@ -193,7 +193,7 @@ impl Scheduler {
                 break;
             };
             // Poll store for next job. In v0.1, simple sleep-loop; v0.2 adds a notify channel.
-            let job = match self.store.next_queued(&kind) {
+            let job = match self.store.next_queued(&kind, now_ms()) {
                 Ok(Some(j)) => j,
                 _ => {
                     drop(permit);
@@ -236,6 +236,64 @@ impl Scheduler {
             let w = worker.clone();
             tokio::spawn(async move {
                 let res = (w)(job.id, job.payload.clone(), sig.clone()).await;
+                // External-wait yield is handled BEFORE the signals entry
+                // is removed, unlike every terminal branch below. The
+                // terminal branches persist via `update_state`, which
+                // writes unconditionally by id, so a cancel falling
+                // through to `cancel_inactive` during their window is a
+                // harmless no-op. `requeue_with_delay` is guarded on
+                // `running` while `cancel_inactive` is guarded on
+                // `queued`/`paused` — mutually exclusive at every instant
+                // — so a cancel landing in an empty-signals window here
+                // would be silently lost. Keeping the entry alive through
+                // the requeue, then re-checking the token after removal,
+                // closes that: a racing cancel either fires the live
+                // token (caught by the re-check) or arrives after removal
+                // and finds the row already `queued` (cancel_inactive
+                // works).
+                if let Err(GoopError::WaitingExternal { retry_after_ms }) = &res {
+                    if !sig.cancel.is_cancelled() {
+                        let deadline = now_ms().saturating_add(*retry_after_ms as i64);
+                        let requeued = match store.requeue_with_delay(job.id, deadline) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                tracing::warn!(?job.id, error = %e, "failed to requeue waiting job");
+                                0
+                            }
+                        };
+                        signals.remove(&job.id);
+                        if requeued > 0 {
+                            if sig.cancel.is_cancelled() {
+                                // A cancel raced the requeue and fired the
+                                // (now-removed) token; honor it here — the
+                                // row is `queued`, update_state is
+                                // unconditional by id.
+                                if let Err(e) =
+                                    store.update_state(job.id, &JobState::Cancelled, None, now_ms())
+                                {
+                                    tracing::warn!(?job.id, error = %e, "failed to finalize cancel after yield");
+                                }
+                                sink.emit_queue(QueueEvent {
+                                    job_id: job.id,
+                                    state: JobState::Cancelled,
+                                    result: None,
+                                });
+                            } else {
+                                // The Queued event doubles as the UI
+                                // refresh signal for the waiting row.
+                                sink.emit_queue(QueueEvent {
+                                    job_id: job.id,
+                                    state: JobState::Queued,
+                                    result: None,
+                                });
+                            }
+                        }
+                        drop(permit);
+                        return;
+                    }
+                    // Cancel token already fired: fall through to the
+                    // match below, which maps this to Cancelled.
+                }
                 // Remove FIRST: shrinks the pause-vs-completion window
                 // (a pause landing now falls through to the store check and
                 // reports honestly), and cancel's inactive-row branch
@@ -253,6 +311,9 @@ impl Scheduler {
                     // Paused is NOT terminal: no finished_at, row stays in
                     // the queue, resume re-dispatches it.
                     Err(GoopError::Paused) => (JobState::Paused, None),
+                    // Only reachable with the cancel token fired (the
+                    // yield path above returns otherwise): cancel wins.
+                    Err(GoopError::WaitingExternal { .. }) => (JobState::Cancelled, None),
                     Err(e) => (
                         // user_message() applies friendly_message at this
                         // boundary so History rows show "age verification"
@@ -570,6 +631,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn waiting_external_yields_permit_and_eventually_completes() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_in_worker = calls.clone();
+        let worker: WorkerFn = Arc::new(move |_id, _payload, _signals| {
+            let calls = calls_in_worker.clone();
+            Box::pin(async move {
+                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(GoopError::WaitingExternal { retry_after_ms: 50 })
+                } else {
+                    Ok(done_result())
+                }
+            })
+        });
+        let (s, sink, store, _tmp) = make_scheduler_with(worker, noop_worker());
+        s.clone().run_forever();
+
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        store.insert(&j).unwrap();
+
+        assert!(
+            wait_until(|| state_of(&store, j.id) == JobState::Done, 5000).await,
+            "job must complete after the external wait clears; got {:?}",
+            state_of(&store, j.id)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "two yields + one success");
+
+        let events = sink.queue.lock().clone();
+        let requeues = events
+            .iter()
+            .filter(|e| e.job_id == j.id && matches!(e.state, JobState::Queued))
+            .count();
+        assert_eq!(
+            requeues, 2,
+            "each yield must announce the row going back to queued"
+        );
+        let job = store.get_by_id(j.id).unwrap().unwrap();
+        assert_eq!(job.attempts, 0, "yields are not retries");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.state, JobState::Error { .. })),
+            "a yield must never surface as a job failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_external_wait_finalizes_cancelled() {
+        // Worker always yields with a long deadline; the cancel lands
+        // while the row is parked in `queued` with a future not_before.
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_in_worker = calls.clone();
+        let worker: WorkerFn = Arc::new(move |_id, _payload, _signals| {
+            let calls = calls_in_worker.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(GoopError::WaitingExternal {
+                    retry_after_ms: 30_000,
+                })
+            })
+        });
+        let (s, _sink, store, _tmp) = make_scheduler_with(worker, noop_worker());
+        s.clone().run_forever();
+
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        store.insert(&j).unwrap();
+
+        assert!(
+            wait_until(
+                || calls.load(Ordering::SeqCst) >= 1 && state_of(&store, j.id) == JobState::Queued,
+                5000
+            )
+            .await,
+            "row must park back in queued after the first yield"
+        );
+        s.cancel(j.id).unwrap();
+        assert!(
+            wait_until(|| state_of(&store, j.id) == JobState::Cancelled, 2000).await,
+            "cancel of a parked waiting row must finalize it; got {:?}",
+            state_of(&store, j.id)
+        );
+    }
+
+    #[tokio::test]
     async fn scheduler_runs_jobs_and_cancels_on_demand() {
         let d = tempdir().unwrap();
         let store = QueueStore::open(&d.path().join("q.db")).unwrap();
@@ -808,7 +952,10 @@ mod tests {
         let after = store.get_by_id(job.id).unwrap().unwrap();
         assert_eq!(after.state, JobState::Queued);
         assert!(after.started_at.is_none());
-        let next = store.next_queued(&JobKind::Extract).unwrap().unwrap();
+        let next = store
+            .next_queued(&JobKind::Extract, now_ms())
+            .unwrap()
+            .unwrap();
         assert_eq!(next.id, job.id, "resumed job is the next pick");
         let states: Vec<_> = sink.queue.lock().iter().map(|e| e.state.clone()).collect();
         assert_eq!(states, vec![JobState::Queued]);
@@ -877,7 +1024,10 @@ mod tests {
         sched.cancel(job.id).expect("cancel queued");
         assert_eq!(state_of(&store, job.id), JobState::Cancelled);
         assert!(
-            store.next_queued(&JobKind::Extract).unwrap().is_none(),
+            store
+                .next_queued(&JobKind::Extract, now_ms())
+                .unwrap()
+                .is_none(),
             "cancelled job must not be pickable"
         );
     }

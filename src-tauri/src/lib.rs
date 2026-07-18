@@ -167,14 +167,50 @@ pub fn run() {
             // this; the scheduler looks them up to send SIGSTOP/SIGCONT.
             let pid_registry: Arc<dyn PidRegistry> = Arc::new(SchedulerPidRegistry::new());
 
+            // Shared live settings handle: the extract worker reads the
+            // TorBox key per dispatch (so a key added in Settings applies
+            // to already-queued jobs) and AppState exposes the same lock
+            // to the IPC layer.
+            let settings_shared = Arc::new(parking_lot::RwLock::new(settings.clone()));
+
             let r_for_extract = resolver.clone();
             let sink_for_extract = sink.clone();
+            let settings_for_extract = settings_shared.clone();
+            let store_for_extract = store.clone();
             let extract_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_extract.clone();
                 let s = sink_for_extract.clone();
+                let settings = settings_for_extract.clone();
+                let store = store_for_extract.clone();
                 Box::pin(async move {
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
+                    // Debrid context rides along only when a key is set.
+                    // The persist callback writes the TorBox item handle
+                    // back into the stored payload so waiting-poll cycles
+                    // and app restarts don't re-submit the link.
+                    let debrid = settings.read().torbox_api_key.clone().map(|api_key| {
+                        let req_for_persist = req.clone();
+                        goop_extractor::debrid::DebridCtx {
+                            api_base: goop_extractor::debrid::TORBOX_API_BASE.to_string(),
+                            api_key,
+                            session_item: goop_extractor::debrid::DebridCtx::session(),
+                            persist_item: Arc::new(move |item: &str| {
+                                let mut r = req_for_persist.clone();
+                                r.debrid_item = Some(item.to_string());
+                                match serde_json::to_value(&r) {
+                                    Ok(v) => {
+                                        if let Err(e) = store.update_payload(id, &v) {
+                                            tracing::warn!(?id, error = %e, "failed to persist debrid item handle");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(?id, error = %e, "failed to serialize debrid payload")
+                                    }
+                                }
+                            }),
+                        }
+                    });
                     // Route via the dispatcher: it picks yt-dlp or
                     // gallery-dl based on the URL's classifier output and
                     // falls back to the OTHER extractor on a
@@ -182,7 +218,7 @@ pub fn run() {
                     // network failures with backoff. Downloads honor both
                     // signals: cancel deletes partials, pause keeps them
                     // for resume.
-                    let outcome = goop_extractor::dispatch(&r, s, id, &req, signals).await?;
+                    let outcome = goop_extractor::dispatch(&r, s, id, &req, signals, debrid).await?;
                     Ok(JobResult {
                         output_path: Some(outcome.output_path),
                         bytes: Some(outcome.bytes),
@@ -929,13 +965,14 @@ pub fn run() {
                 store,
                 instance_guard,
                 scheduler,
-                settings: parking_lot::RwLock::new(settings),
+                settings: settings_shared,
                 settings_path,
                 thumbs,
                 encoders,
                 hw_enabled,
                 tessdata_user_dir,
                 tessdata_bundled_dir,
+                torbox_hosters: tokio::sync::OnceCell::new(),
             });
             Ok(())
         })

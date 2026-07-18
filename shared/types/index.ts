@@ -6,6 +6,7 @@ export * from './ConvertResult';
 export * from './CoverArt';
 export * from './CoverArtOp';
 export * from './CropRect';
+export * from './DebridProbeInfo';
 export * from './DirectFileInfo';
 export * from './ExtractNamingScheme';
 export * from './ExtractRequest';

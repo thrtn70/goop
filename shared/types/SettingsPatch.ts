@@ -24,4 +24,11 @@ has_seen_onboarding: boolean | null, notifications_enabled: boolean | null,
  * - `null`       → `Some(None)` (clear the override)
  * - `"/path"`    → `Some(Some(path))` (set)
  */
-output_dir_extract: string | null | null, extract_naming_scheme: ExtractNamingScheme | null, default_metadata_policy: MetadataPolicy | null, };
+output_dir_extract: string | null | null, extract_naming_scheme: ExtractNamingScheme | null, default_metadata_policy: MetadataPolicy | null, 
+/**
+ * Tri-state on the wire (see `double_option` helper):
+ * - field absent → `None` (no change)
+ * - `null`       → `Some(None)` (clear)
+ * - `"tb-…"`     → `Some(Some(key))` (set)
+ */
+torbox_api_key: string | null | null, };

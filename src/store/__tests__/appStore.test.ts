@@ -71,6 +71,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",
+    torbox_api_key: null,
     ...overrides,
   };
 }
@@ -361,5 +362,19 @@ describe("applyProgress retry-stage percent hold", () => {
     const entry = useAppStore.getState().progressById[jobIdKey(id)];
     expect(entry.percent).toBe(43.1);
     expect(entry.stage).toBe("downloading");
+  });
+});
+
+describe("refreshJobs", () => {
+  it("re-lists jobs so a freshly enqueued row shows without a queue event", async () => {
+    const id = "00000000-0000-7000-8000-00000000abcd" as JobId;
+    useAppStore.setState({ jobs: [] });
+    vi.mocked(api.queue.list).mockResolvedValue([makeJob(id, "queued")]);
+
+    await useAppStore.getState().refreshJobs();
+
+    const jobs = useAppStore.getState().jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].state).toBe("queued");
   });
 });
