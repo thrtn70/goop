@@ -16,3 +16,28 @@
 # explicitly for clarity).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# macOS: point pkg-config at the prebuilt static HEIC decode stack that
+# scripts/build-static-heif-deps.sh drops in .heif-deps, so `cargo build`
+# works without per-shell exports.
+#
+# `relative = true` resolves against the parent of the config file that
+# defines it. Note this file is tracked, so a linked worktree checks out its
+# OWN copy, which cargo finds first — the path there resolves to that
+# worktree's .heif-deps, NOT this one. A worktree therefore still needs a
+# .heif-deps of its own; a symlink to the primary checkout's is enough. Do
+# not assume it is inherited.
+#
+# These do NOT override an already-set environment variable (no `force`), so
+# CI's macOS legs — which export both to $GITHUB_ENV before building — still
+# win, and a developer can override either for a one-off build. On Windows
+# libheif-sys cfg-gates pkg-config out entirely in favour of vcpkg, so both
+# values are inert there.
+#
+# Caveat worth knowing: pkg-config also searches its own built-in paths, so a
+# machine with Homebrew's libheif installed will link that (dynamically, at
+# whatever version brew has) if .heif-deps is missing or stale — silently,
+# with no error. Only CI's static-link check catches that drift.
+[env]
+SYSTEM_DEPS_LIBHEIF_LINK = "static"
+PKG_CONFIG_PATH = { value = ".heif-deps/lib/pkgconfig", relative = true }
