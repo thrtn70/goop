@@ -26,6 +26,28 @@ pub struct QueueEvent {
     pub result: Option<JobResult>,
 }
 
+/// Machine-readable discriminant for `SidecarEvent::Warning`.
+///
+/// This is not a display string — the frontend routes on it. `handleSidecarEvent`
+/// in `src/store/appStore.ts` switches on the code to pick a side effect, and a
+/// code it doesn't recognize is dropped rather than shown as a generic warning.
+/// Keeping this an enum rather than a `String` is what makes a rename or typo a
+/// compile error on both sides instead of a silent no-op.
+///
+/// Adding a variant requires a matching branch in `handleSidecarEvent`; its
+/// exhaustiveness check fails the frontend typecheck until one exists.
+/// Regenerate the TS bindings (`scripts/generate-bindings.sh`) after any change
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum WarningCode {
+    /// The browser cookie DB couldn't be read (Chrome v127+ DPAPI lock, missing
+    /// browser, etc.) and the extractor retried without cookies. Emitted at most
+    /// once per job: each extractor's fallback is a single non-looping retry.
+    CookieFallback,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -35,7 +57,7 @@ pub enum SidecarEvent {
         to_version: String,
     },
     Warning {
-        code: String,
+        code: WarningCode,
         message: String,
     },
 }
@@ -103,5 +125,39 @@ mod tests {
             encoder: None,
         });
         assert_eq!(sink.progress.lock().len(), 1);
+    }
+
+    /// Locks the wire format the frontend matches on. `WarningCode` replaced a
+    /// bare `String` here; this asserts that swap kept the emitted JSON
+    /// byte-identical, so the typing change carries no wire break.
+    #[test]
+    fn warning_serializes_code_as_snake_case_string() {
+        let json = serde_json::to_value(SidecarEvent::Warning {
+            code: WarningCode::CookieFallback,
+            message: "Couldn't read chrome cookies — proceeded without.".into(),
+        })
+        .expect("SidecarEvent serializes");
+
+        assert_eq!(json["kind"], "warning");
+        assert_eq!(json["code"], "cookie_fallback");
+        assert_eq!(
+            json["message"],
+            "Couldn't read chrome cookies — proceeded without."
+        );
+    }
+
+    #[test]
+    fn warning_code_round_trips_through_json() {
+        let code: WarningCode =
+            serde_json::from_value(serde_json::json!("cookie_fallback")).expect("code parses");
+        assert_eq!(code, WarningCode::CookieFallback);
+    }
+
+    /// The frontend routes on `code`, so an unrecognized code must not
+    /// silently deserialize into a known one.
+    #[test]
+    fn warning_code_rejects_unknown_values() {
+        let parsed: Result<WarningCode, _> = serde_json::from_value(serde_json::json!("nope"));
+        assert!(parsed.is_err(), "unknown codes must not deserialize");
     }
 }

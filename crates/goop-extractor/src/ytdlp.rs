@@ -1,6 +1,6 @@
 use goop_core::{
     is_cookie_db_error, EventSink, GoopError, Interrupt, JobId, JobSignals, ProgressEvent,
-    SidecarEvent,
+    SidecarEvent, WarningCode,
 };
 use goop_sidecar::BinaryResolver;
 use regex::Regex;
@@ -269,7 +269,7 @@ impl<'a> YtDlp<'a> {
             {
                 let browser = req.cookies_from_browser.as_deref().unwrap_or("the browser");
                 self.sink.emit_sidecar(SidecarEvent::Warning {
-                    code: "cookie_fallback".into(),
+                    code: WarningCode::CookieFallback,
                     message: format!(
                         "Couldn't read {browser} cookies — proceeded without. \
                          Close {browser} fully and retry to use logged-in cookies."

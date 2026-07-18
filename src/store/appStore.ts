@@ -359,19 +359,32 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
   handleSidecarEvent(e) {
-    if (e.kind === "warning" && e.code === "cookie_fallback") {
-      // The cookie auto-fallback fires once per job at the wrapper layer
-      // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
-      // lock, missing browser, etc.). Surface as a non-blocking info toast
-      // so the user knows what happened without a hard error.
-      get().enqueueToast({
-        variant: "info",
-        title: "Cookies skipped for this download",
-        detail: e.message,
-      });
+    if (e.kind !== "warning") {
+      // yt_dlp_updated is consumed by its own dedicated subscriber
+      // (version-info refresh in useAppVersion).
+      return;
     }
-    // yt_dlp_updated and other warning codes are consumed by their own
-    // dedicated subscribers (e.g. version-info refresh in useAppVersion).
+    switch (e.code) {
+      case "cookie_fallback":
+        // The cookie auto-fallback fires once per job at the wrapper layer
+        // when the browser cookie DB couldn't be read (Chrome v127+ DPAPI
+        // lock, missing browser, etc.). Surface as a non-blocking info toast
+        // so the user knows what happened without a hard error.
+        get().enqueueToast({
+          variant: "info",
+          title: "Cookies skipped for this download",
+          detail: e.message,
+        });
+        break;
+      default: {
+        // Adding a WarningCode variant without a case above fails typecheck
+        // here rather than shipping a warning that silently goes nowhere.
+        // Still a runtime no-op: the event arrives as unvalidated JSON, so an
+        // unrecognized code can physically show up and must not throw.
+        const unhandled: never = e.code;
+        void unhandled;
+      }
+    }
   },
   incrementUnseen() {
     set((s) => ({ unseenCompletions: s.unseenCompletions + 1 }));
