@@ -136,13 +136,6 @@ jobs:
             "$FFMPEG" -hide_banner -encoders | grep -qw "$enc" \
               || { echo "::error::ffmpeg is missing the '$enc' subtitle encoder"; exit 1; }
           done
-      # The capability check above proves the features exist; these run the
-      # conversion pipeline against them. This job already has the sidecars
-      # fetched, so it's the only place the `#[ignore]`d tests can act as a
-      # standing gate rather than a manual one.
-      - name: Subtitle conversions (real ffmpeg)
-        shell: bash
-        run: cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
       # v0.2.8: per-OS static HEIC stack + link guards. These graduated
       # from the Phase 0 spike (.github/workflows/heic-spike.yml,
       # deleted after the gate passed) so every PR re-proves the
@@ -209,3 +202,14 @@ jobs:
           cargo test -p goop-converter heic
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      # The capability check earlier proves the ffmpeg features exist; this
+      # runs the conversion pipeline against them, and is the only place the
+      # `#[ignore]`d tests act as a standing gate rather than a manual one.
+      #
+      # Must come after the per-OS HEIC setup above: linking goop-converter
+      # needs the static libheif those steps install. Placed earlier it fails
+      # on Windows with `cannot open input file 'heif.lib'` — and passes on
+      # macOS only because Homebrew's libheif masks the missing static one.
+      - name: Subtitle conversions (real ffmpeg)
+        shell: bash
+        run: cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
