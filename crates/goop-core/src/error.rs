@@ -18,6 +18,12 @@ pub enum GoopError {
     Queue(String),
     #[error("config error: {0}")]
     Config(String),
+    /// The request itself is impossible to satisfy — e.g. a subtitle
+    /// attached to an output format that can't carry one. Distinct from
+    /// `SubprocessFailed`: the tool was never run, so there is no stderr
+    /// to interpret, and no retry will help.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("cancelled")]
     Cancelled,
     /// Control-flow sibling of `Cancelled`: the job's pause signal fired
@@ -78,6 +84,7 @@ pub enum IpcError {
     SubprocessFailed(String),
     Queue(String),
     Config(String),
+    InvalidRequest(String),
     Cancelled,
     Unknown(String),
 }
@@ -96,6 +103,7 @@ impl From<GoopError> for IpcError {
             }
             GoopError::Queue(x) => Self::Queue(x),
             GoopError::Config(x) => Self::Config(x),
+            GoopError::InvalidRequest(x) => Self::InvalidRequest(x),
             GoopError::Cancelled => Self::Cancelled,
             // Defensive: Paused is scheduler control flow and should be
             // consumed before any IPC boundary. If it ever leaks, surface

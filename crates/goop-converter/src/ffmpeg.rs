@@ -108,28 +108,14 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             }
         };
         let probe = FfmpegBackend::probe(self.resolver, &input).await?;
-        let mut plan = if let Some(mode) = req.compress_mode {
-            crate::compat::decide_compression(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                mode,
-                probe.duration_ms,
-            )
-        } else {
-            decide(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                req.quality_preset,
-                req.resolution_cap,
-                req.gif_options.as_ref(),
-            )
-        };
+        let (mut plan, subtitle_input) = build_plan(req, &probe)?;
 
         let output_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
 
-        let hw_encoder = self.maybe_apply_hw(&mut plan, req.quality_preset);
+        // Same effective quality the plan was built with, so the GPU
+        // encoder's quality args can't drift from the software ones.
+        let quality = effective_quality(req.quality_preset, req.subtitle.as_ref().map(|s| s.mode));
+        let hw_encoder = self.maybe_apply_hw(&mut plan, quality);
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
 
@@ -139,6 +125,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 &input,
                 &output_path,
                 &plan,
+                subtitle_input.as_deref(),
                 &probe,
                 job_id,
                 current_encoder,
@@ -159,7 +146,11 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                     "hardware encode failed; retrying with software"
                 );
                 let _ = std::fs::remove_file(&output_path);
-                let plan_sw = self.rebuild_software_plan(req, &probe);
+                // Rebuild through the same function so the software retry
+                // carries identical subtitle args — deriving it separately
+                // is how a soft-muxed track would silently vanish on
+                // fallback.
+                let (plan_sw, subtitle_sw) = build_plan(req, &probe)?;
                 current_encoder = None;
                 let _ = stderr; // capture so the error type matches; debug-logged above
                 let _ = binary;
@@ -168,6 +159,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                     &input,
                     &output_path,
                     &plan_sw,
+                    subtitle_sw.as_deref(),
                     &probe,
                     job_id,
                     current_encoder,
@@ -205,30 +197,6 @@ impl<'a> FfmpegBackend<'a> {
         maybe_apply_hw_h264(plan, encoders, quality)
     }
 
-    fn rebuild_software_plan(&self, req: &ConvertRequest, probe: &ProbeResult) -> Plan {
-        // Re-derive the plan without HW substitution. The original `decide`
-        // result is the software baseline; we don't cache it because compat
-        // is cheap and this path only runs after a HW failure.
-        if let Some(mode) = req.compress_mode {
-            crate::compat::decide_compression(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                mode,
-                probe.duration_ms,
-            )
-        } else {
-            decide(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                req.quality_preset,
-                req.resolution_cap,
-                req.gif_options.as_ref(),
-            )
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn run_ffmpeg(
         &self,
@@ -236,6 +204,7 @@ impl<'a> FfmpegBackend<'a> {
         input: &Path,
         output_path: &Path,
         plan: &Plan,
+        subtitle_input: Option<&Path>,
         probe: &ProbeResult,
         job_id: JobId,
         encoder: Option<&'static str>,
@@ -252,11 +221,20 @@ impl<'a> FfmpegBackend<'a> {
                 cmd.arg(a);
             }
             cmd.arg("-i").arg(input);
+            // A soft-embedded subtitle is a second input. It must follow the
+            // main `-i` and precede every output option, which is exactly
+            // where the plan's post-input args begin.
+            if let Some(sub) = subtitle_input {
+                cmd.arg("-i").arg(sub);
+            }
             for a in &plan.args[idx + 1..] {
                 cmd.arg(a);
             }
         } else {
             cmd.arg("-i").arg(input);
+            if let Some(sub) = subtitle_input {
+                cmd.arg("-i").arg(sub);
+            }
             for a in &plan.args {
                 cmd.arg(a);
             }
@@ -349,6 +327,73 @@ impl<'a> FfmpegBackend<'a> {
 /// Backward-compat alias.
 pub type Ffmpeg<'a> = FfmpegBackend<'a>;
 
+/// Which quality preset the plan should actually be built with.
+///
+/// Burn-in has to draw onto decoded frames, so a plan that stream-copies
+/// would drop the subtitles without a word. `None` and `Original` both
+/// mean "remux when you can", so they are upgraded to `Balanced`; an
+/// explicitly chosen preset already re-encodes and is left alone.
+fn effective_quality(
+    requested: Option<goop_core::QualityPreset>,
+    mode: Option<goop_core::SubtitleMode>,
+) -> Option<goop_core::QualityPreset> {
+    use goop_core::{QualityPreset, SubtitleMode};
+    match (mode, requested) {
+        (Some(SubtitleMode::BurnIn), None | Some(QualityPreset::Original)) => {
+            Some(QualityPreset::Balanced)
+        }
+        _ => requested,
+    }
+}
+
+/// Build the ffmpeg plan for `req`, plus the path (if any) that must be
+/// opened as a second input.
+///
+/// Both the first attempt and the hardware→software retry go through here,
+/// so the retry can't drift from the original invocation.
+fn build_plan(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+) -> Result<(Plan, Option<PathBuf>), GoopError> {
+    let mode = req.subtitle.as_ref().map(|s| s.mode);
+
+    let mut plan = if let Some(compress) = req.compress_mode {
+        crate::compat::decide_compression(
+            req.target,
+            probe.video_codec.as_deref(),
+            probe.audio_codec.as_deref(),
+            compress,
+            probe.duration_ms,
+        )
+    } else {
+        decide(
+            req.target,
+            probe.video_codec.as_deref(),
+            probe.audio_codec.as_deref(),
+            effective_quality(req.quality_preset, mode),
+            req.resolution_cap,
+            req.gif_options.as_ref(),
+        )
+    };
+
+    let Some(sub) = req.subtitle.as_ref() else {
+        return Ok((plan, None));
+    };
+
+    // Expand but deliberately do NOT canonicalize: on Windows that returns
+    // a `\\?\`-prefixed path, which the filter-graph parser can't consume.
+    let sub_path = goop_core::path::expand(&sub.source_path);
+    if !sub_path.is_file() {
+        return Err(GoopError::InvalidRequest(format!(
+            "subtitle file does not exist: {}",
+            sub.source_path
+        )));
+    }
+
+    let extra_input = crate::subtitle::apply_to_plan(&mut plan, req.target, sub.mode, &sub_path)?;
+    Ok((plan, extra_input))
+}
+
 fn resolve_output_path(
     input_path: &str,
     requested: &str,
@@ -383,7 +428,141 @@ pub fn target_extension(target: TargetFormat, acodec: Option<&str>) -> &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goop_core::{QualityPreset, SubtitleMode, SubtitleOptions};
     use std::fs;
+
+    fn req_with(target: TargetFormat, subtitle: Option<SubtitleOptions>) -> ConvertRequest {
+        ConvertRequest {
+            input_path: "/in.mp4".into(),
+            output_path: "/out".into(),
+            target,
+            quality_preset: None,
+            resolution_cap: None,
+            gif_options: None,
+            compress_mode: None,
+            batch_id: None,
+            metadata_policy: None,
+            subtitle,
+        }
+    }
+
+    fn probe_h264_aac() -> ProbeResult {
+        ProbeResult {
+            duration_ms: 1000,
+            width: Some(1920),
+            height: Some(1080),
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            file_size: 1000,
+            container: Some("mov,mp4".into()),
+            has_video: true,
+            has_audio: true,
+            source_kind: goop_core::SourceKind::Video,
+            color_space: None,
+            image_format: None,
+            has_subtitles: false,
+            subtitle_codec: None,
+        }
+    }
+
+    #[test]
+    fn burn_in_upgrades_a_remuxing_quality_to_an_encoding_one() {
+        // `None` / `Original` would remux, which silently drops burn-in.
+        for q in [None, Some(QualityPreset::Original)] {
+            assert_eq!(
+                effective_quality(q, Some(SubtitleMode::BurnIn)),
+                Some(QualityPreset::Balanced),
+                "{q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn burn_in_respects_an_explicitly_chosen_quality() {
+        for q in [QualityPreset::Fast, QualityPreset::Small] {
+            assert_eq!(
+                effective_quality(Some(q), Some(SubtitleMode::BurnIn)),
+                Some(q)
+            );
+        }
+    }
+
+    #[test]
+    fn soft_embed_and_no_subtitle_leave_quality_untouched() {
+        assert_eq!(effective_quality(None, Some(SubtitleMode::Soft)), None);
+        assert_eq!(effective_quality(None, None), None);
+        assert_eq!(
+            effective_quality(Some(QualityPreset::Original), None),
+            Some(QualityPreset::Original)
+        );
+    }
+
+    #[test]
+    fn build_plan_without_a_subtitle_asks_for_no_second_input() {
+        let (plan, extra) =
+            build_plan(&req_with(TargetFormat::Mp4, None), &probe_h264_aac()).unwrap();
+        assert_eq!(extra, None);
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn build_plan_soft_embed_returns_the_subtitle_as_a_second_input() {
+        let sub = tempfile_srt("build-plan-soft");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        );
+        let (plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra, Some(sub.clone()));
+        assert!(plan.args.windows(2).any(|w| w == ["-c:s", "mov_text"]));
+        fs::remove_file(&sub).ok();
+    }
+
+    #[test]
+    fn build_plan_burn_in_forces_an_encode_and_adds_the_filter() {
+        let sub = tempfile_srt("build-plan-burn");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::BurnIn,
+            }),
+        );
+        // Source is h264/aac, which would otherwise remux.
+        let (plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra, None);
+        assert!(plan.reencoded, "burn-in must never stream-copy");
+        assert!(plan
+            .video_filters
+            .iter()
+            .any(|f| f.starts_with("subtitles=")));
+        fs::remove_file(&sub).ok();
+    }
+
+    #[test]
+    fn build_plan_rejects_a_missing_subtitle_file() {
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: "/definitely/not/here.srt".into(),
+                mode: SubtitleMode::Soft,
+            }),
+        );
+        let err = build_plan(&req, &probe_h264_aac()).unwrap_err();
+        assert!(
+            matches!(err, GoopError::InvalidRequest(ref m) if m.contains("not/here.srt")),
+            "got {err:?}"
+        );
+    }
+
+    fn tempfile_srt(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("goop-{tag}-{}.srt", std::process::id()));
+        fs::write(&p, "1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
+        p
+    }
 
     #[test]
     fn resolve_treats_dir_as_dir() {

@@ -3,4 +3,4 @@
 /**
  * Serializable error surface for Tauri IPC.
  */
-export type IpcError = { "code": "sidecar_missing", "message": string } | { "code": "subprocess_failed", "message": string } | { "code": "queue", "message": string } | { "code": "config", "message": string } | { "code": "cancelled" } | { "code": "unknown", "message": string };
+export type IpcError = { "code": "sidecar_missing", "message": string } | { "code": "subprocess_failed", "message": string } | { "code": "queue", "message": string } | { "code": "config", "message": string } | { "code": "invalid_request", "message": string } | { "code": "cancelled" } | { "code": "unknown", "message": string };

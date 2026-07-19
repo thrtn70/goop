@@ -15,7 +15,8 @@ pub mod update;
 
 pub use convert::{
     CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, MetadataPolicy,
-    ProbeResult, QualityPreset, ResolutionCap, SourceKind, TargetFormat,
+    ProbeResult, QualityPreset, ResolutionCap, SourceKind, SubtitleMode, SubtitleOptions,
+    TargetFormat,
 };
 pub use error::{
     both_failed, friendly_message, is_access_blocked_stderr, is_cookie_db_error,
