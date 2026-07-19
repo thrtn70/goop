@@ -47,9 +47,17 @@ fn bundled_resolver(link_dir: &Path) -> BinaryResolver {
         .unwrap_or_else(|_| PathBuf::from("src-tauri/bin"));
     let triple = current_triple();
     for name in ["ffmpeg", "ffprobe"] {
-        let src = bin.join(format!("{name}-{triple}"));
+        // `BinaryResolver` appends `.exe` on Windows, so the link has to
+        // carry it too or the lookup misses and silently falls back to
+        // whatever is on `PATH`.
+        let (src_name, dst_name) = if cfg!(windows) {
+            (format!("{name}-{triple}.exe"), format!("{name}.exe"))
+        } else {
+            (format!("{name}-{triple}"), name.to_string())
+        };
+        let src = bin.join(src_name);
         if src.is_file() {
-            let _ = symlink(&src, &link_dir.join(name));
+            let _ = symlink(&src, &link_dir.join(dst_name));
         }
     }
     BinaryResolver::new(link_dir.to_path_buf())
@@ -65,22 +73,31 @@ fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::copy(src, dst).map(|_| ())
 }
 
-fn current_triple() -> String {
+fn current_triple() -> &'static str {
     // Only the two shipping targets need to resolve here; anything else
     // falls through to the `PATH` lookup inside `BinaryResolver`.
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin".to_string()
+        "aarch64-apple-darwin"
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        "x86_64-pc-windows-msvc.exe".to_string()
+        "x86_64-pc-windows-msvc"
     } else {
-        "unknown".to_string()
+        "unknown"
     }
 }
 
 fn ffmpeg_path(r: &BinaryResolver) -> PathBuf {
-    r.resolve("ffmpeg")
-        .expect("ffmpeg must be resolvable for this ignored test")
-        .path
+    let resolved = r
+        .resolve("ffmpeg")
+        .expect("ffmpeg must be resolvable for this ignored test");
+    // Without this the suite can pass green against a `PATH` ffmpeg that
+    // has nothing to do with what ships — which is exactly how the missing
+    // libass in Homebrew's build went unnoticed until it was looked for.
+    assert!(
+        !resolved.source_is_path,
+        "expected the bundled sidecar, got {} from PATH — run scripts/fetch-sidecars.sh",
+        resolved.path.display()
+    );
+    resolved.path
 }
 
 /// True when the resolved ffmpeg was built with libass. Burn-in needs it,
