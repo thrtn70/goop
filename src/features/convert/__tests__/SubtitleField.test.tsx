@@ -4,11 +4,19 @@ import userEvent from "@testing-library/user-event";
 import SubtitleField, { subtitleSupport } from "../SubtitleField";
 import type { SubtitleOptions } from "@/types";
 
-const { mockOpen } = vi.hoisted(() => ({ mockOpen: vi.fn() }));
+const { mockOpen, mockEnqueueToast } = vi.hoisted(() => ({
+  mockOpen: vi.fn(),
+  mockEnqueueToast: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => mockOpen(...args),
   save: vi.fn(),
+}));
+
+vi.mock("@/store/appStore", () => ({
+  useAppStore: (selector: (s: unknown) => unknown) =>
+    selector({ enqueueToast: mockEnqueueToast }),
 }));
 
 const ALL = { soft: true, burn: true };
@@ -66,6 +74,19 @@ describe("SubtitleField", () => {
     await userEvent.click(screen.getByRole("button", { name: /add file/i }));
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a picker failure instead of failing silently", async () => {
+    mockOpen.mockRejectedValue(new Error("dialog unavailable"));
+    const onChange = vi.fn();
+    render(<SubtitleField subtitle={null} onChange={onChange} support={ALL} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(mockEnqueueToast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: "error" }),
+    );
   });
 
   it("shows the filename and lets the mode change", async () => {

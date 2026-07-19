@@ -344,6 +344,38 @@ describe("ConvertPage", () => {
     });
   });
 
+  it("reconciles a subtitle that apply-to-all left on an incompatible target", async () => {
+    // The bug this guards: "apply to all" overwrites `target` on the other
+    // rows without going through the row's own coercion, so a subtitle
+    // picked for MP4 could ride along to a format that can't carry it and
+    // be rejected by the backend.
+    mockOpen.mockResolvedValue(["/tmp/a.mp4", "/tmp/b.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("a.mp4")).toBeDefined());
+
+    // Attach a subtitle to the SECOND row, then set the first row to GIF
+    // and push that target onto every row.
+    mockOpen.mockResolvedValue("/tmp/movie.srt");
+    const addButtons = screen.getAllByRole("button", { name: /add file/i });
+    await userEvent.click(addButtons[1]);
+    await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
+
+    await userEvent.click(screen.getAllByRole("button", { name: "GIF" })[0]);
+    await userEvent.click(screen.getByRole("button", { name: /apply to all/i }));
+    await userEvent.click(screen.getByRole("button", { name: /convert 2 files/i }));
+
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(2));
+    const payloads = mockFromFile.mock.calls.map(([req]) => req);
+    // Guard against a vacuous pass: apply-to-all must really have pushed
+    // GIF onto both rows, which is what creates the bad pairing.
+    expect(payloads.every((p) => p.target === "gif")).toBe(true);
+    expect(payloads.every((p) => p.subtitle === null)).toBe(true);
+  });
+
   it("offers only subtitle targets for a bare subtitle file", async () => {
     mockProbe.mockResolvedValue(srtProbe);
     renderPage();

@@ -394,6 +394,17 @@ fn build_plan(
     }
 
     let preserve_existing = crate::subtitle::can_preserve_existing(&probe.subtitle_codecs);
+    if sub.mode == goop_core::SubtitleMode::Soft && probe.has_subtitles && !preserve_existing {
+        // Bitmap subtitles (Blu-ray PGS, DVD) can't become text, so the
+        // source's own tracks are left behind rather than aborting the
+        // conversion. Losing them is invisible in the output, so say so
+        // somewhere at least.
+        tracing::warn!(
+            codecs = ?probe.subtitle_codecs,
+            "source subtitle tracks can't be converted to the target's text codec; \
+             they will not be carried over"
+        );
+    }
     let extra_input = crate::subtitle::apply_to_plan(
         &mut plan,
         req.target,

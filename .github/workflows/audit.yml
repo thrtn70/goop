@@ -136,6 +136,13 @@ jobs:
             "$FFMPEG" -hide_banner -encoders | grep -qw "$enc" \
               || { echo "::error::ffmpeg is missing the '$enc' subtitle encoder"; exit 1; }
           done
+      # The capability check above proves the features exist; these run the
+      # conversion pipeline against them. This job already has the sidecars
+      # fetched, so it's the only place the `#[ignore]`d tests can act as a
+      # standing gate rather than a manual one.
+      - name: Subtitle conversions (real ffmpeg)
+        shell: bash
+        run: cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
       # v0.2.8: per-OS static HEIC stack + link guards. These graduated
       # from the Phase 0 spike (.github/workflows/heic-spike.yml,
       # deleted after the gate passed) so every PR re-proves the
