@@ -40,7 +40,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         color_space: Some("sRGB".to_string()),
         image_format,
         has_subtitles: false,
-        subtitle_codec: None,
+        subtitle_codecs: vec![],
     })
 }
 

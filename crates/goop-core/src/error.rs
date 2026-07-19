@@ -253,6 +253,13 @@ const PATTERNS: &[(&str, &str)] = &[
         "HTTPError: 429",
         "The site rate-limited the request. Wait a few minutes before trying again.",
     ),
+    // Burn-in needs an ffmpeg built with libass. The bundled sidecars have
+    // it, but the dev-mode PATH fallback (Homebrew's ffmpeg) does not, and
+    // "No such filter" gives no clue which feature just became unavailable.
+    (
+        "No such filter: 'subtitles'",
+        "This copy of ffmpeg can't burn in subtitles (it was built without libass). Add the subtitles as a track instead, or reinstall Goop to restore the bundled ffmpeg.",
+    ),
     (
         "[Errno 2] No such file or directory",
         "Couldn't write to the output folder. Check that the folder exists and Goop has permission to write there.",
@@ -557,6 +564,18 @@ mod tests {
     fn user_message_passes_through_non_subprocess_variants() {
         let ge = GoopError::Cancelled;
         assert_eq!(ge.user_message(), "cancelled");
+    }
+
+    #[test]
+    fn friendly_message_explains_a_missing_libass_build() {
+        let stderr = "[AVFilterGraph @ 0x74d0c18580] No such filter: 'subtitles'\n\
+                      Error opening output files: Filter not found";
+        let m = friendly_message(stderr).expect("missing libass must map to friendly text");
+        assert!(m.contains("burn in subtitles"), "{m}");
+        assert!(
+            m.contains("track"),
+            "should point at the working alternative: {m}"
+        );
     }
 
     #[test]

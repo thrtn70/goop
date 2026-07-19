@@ -8,6 +8,9 @@ export type ProbeResult = { duration_ms: bigint, width: number | null, height: n
  */
 has_subtitles: boolean, 
 /**
- * Codec of the first subtitle stream (`subrip`, `webvtt`, …).
+ * Codecs of every subtitle stream, in stream order (`subrip`,
+ * `webvtt`, `hdmv_pgs_subtitle`, …). The full list matters because
+ * text and bitmap subtitles can't be transcoded into each other, so
+ * preserving existing tracks is only safe when they are all text.
  */
-subtitle_codec: string | null, };
+subtitle_codecs: Array<string>, };

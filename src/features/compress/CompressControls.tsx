@@ -45,7 +45,10 @@ function availabilityFor(probe: ProbeResult): Availability {
 }
 
 function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf" {
-  return probe.source_kind;
+  // A subtitle file has no size worth compressing and the Compress tab
+  // offers it no useful controls, but nothing stops one being dropped
+  // here. Fall back to the video labels rather than widening the union.
+  return probe.source_kind === "subtitle" ? "video" : probe.source_kind;
 }
 
 interface CompressControlsProps {

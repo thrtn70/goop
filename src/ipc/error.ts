@@ -27,6 +27,10 @@ export function parseIpcError(err: unknown): IpcError | null {
     case "subprocess_failed":
     case "queue":
     case "config":
+    // The backend's own message already names what's wrong with the
+    // request (e.g. which format can't carry a subtitle track), so it is
+    // worth keeping rather than collapsing into "unknown".
+    case "invalid_request":
       return { code, message: message ?? code };
     case "cancelled":
       return { code };

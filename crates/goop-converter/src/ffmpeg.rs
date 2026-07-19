@@ -150,10 +150,13 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 // carries identical subtitle args — deriving it separately
                 // is how a soft-muxed track would silently vanish on
                 // fallback.
-                let (plan_sw, subtitle_sw) = build_plan(req, &probe)?;
+                let Ok((plan_sw, subtitle_sw)) = build_plan(req, &probe) else {
+                    // Only reachable if the subtitle file vanished between
+                    // the two attempts. Report the encode failure that got
+                    // us here rather than that red herring.
+                    return Err(GoopError::SubprocessFailed { binary, stderr });
+                };
                 current_encoder = None;
-                let _ = stderr; // capture so the error type matches; debug-logged above
-                let _ = binary;
                 self.run_ffmpeg(
                     &bin.path,
                     &input,
@@ -390,7 +393,14 @@ fn build_plan(
         )));
     }
 
-    let extra_input = crate::subtitle::apply_to_plan(&mut plan, req.target, sub.mode, &sub_path)?;
+    let preserve_existing = crate::subtitle::can_preserve_existing(&probe.subtitle_codecs);
+    let extra_input = crate::subtitle::apply_to_plan(
+        &mut plan,
+        req.target,
+        sub.mode,
+        &sub_path,
+        preserve_existing,
+    )?;
     Ok((plan, extra_input))
 }
 
@@ -461,7 +471,7 @@ mod tests {
             color_space: None,
             image_format: None,
             has_subtitles: false,
-            subtitle_codec: None,
+            subtitle_codecs: vec![],
         }
     }
 

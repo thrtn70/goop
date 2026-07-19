@@ -57,3 +57,7 @@ ico = "0.4"
 # input to output. Pure-Rust; no system deps. PNG, JPEG, RIFF only —
 # matches the v0.2.5 supported preserve matrix.
 img-parts = "0.3"
+
+[dev-dependencies]
+# Scratch dirs for the `#[ignore]`d real-ffmpeg subtitle tests.
+tempfile = "3"

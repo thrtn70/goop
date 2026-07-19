@@ -3,7 +3,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
-import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
+import { subtitleForTarget } from "./FileRow";
+import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat } from "@/types";
 
 export interface FileEntry {
   path: string;
@@ -11,6 +12,7 @@ export interface FileEntry {
   sourceDir: string;
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
+  subtitle: SubtitleOptions | null;
 }
 
 interface ConvertActionBarProps {
@@ -79,6 +81,10 @@ export default function ConvertActionBar({
           compress_mode: null,
           batch_id: null,
           metadata_policy: f.metadataPolicy,
+          // Reconcile here, not just in the row: a preset or "apply to all"
+          // can change `target` without the row's coercion ever running,
+          // which would otherwise send a pairing the backend rejects.
+          subtitle: subtitleForTarget(f.subtitle, f.target),
         });
       } else {
         // Tag every enqueue in this batch with a shared id so toast
@@ -96,6 +102,7 @@ export default function ConvertActionBar({
               compress_mode: null,
               batch_id: batchId,
               metadata_policy: f.metadataPolicy,
+              subtitle: subtitleForTarget(f.subtitle, f.target),
             }),
           ),
         );
@@ -180,6 +187,8 @@ function extFor(target: TargetFormat): string {
     ogg: "ogg",
     aac: "aac",
     extract_audio_keep_codec: "audio",
+    srt: "srt",
+    vtt: "vtt",
     png: "png",
     jpeg: "jpg",
     webp: "webp",

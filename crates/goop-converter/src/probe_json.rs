@@ -51,13 +51,15 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         .iter()
         .find(|s| s.codec_type.as_deref() == Some("audio"));
 
-    let subtitle = streams
+    let subtitle_codecs: Vec<String> = streams
         .iter()
-        .find(|s| s.codec_type.as_deref() == Some("subtitle"));
+        .filter(|s| s.codec_type.as_deref() == Some("subtitle"))
+        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .collect();
 
     let has_video = video.is_some();
     let has_audio = audio.is_some();
-    let has_subtitles = subtitle.is_some();
+    let has_subtitles = !subtitle_codecs.is_empty();
     // A container's kind is decided by its richest stream: a video with
     // embedded subs is still a video. Only a file whose *only* content is
     // a subtitle stream (a bare .srt / .vtt) is a Subtitle source.
@@ -85,7 +87,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         color_space: None,
         image_format: None,
         has_subtitles,
-        subtitle_codec: subtitle.and_then(|s| s.codec_name.clone()),
+        subtitle_codecs,
     })
 }
 
@@ -144,7 +146,7 @@ mod tests {
         // Video fallback, leaving the target picker fully disabled.
         assert_eq!(r.source_kind, goop_core::SourceKind::Subtitle);
         assert!(r.has_subtitles);
-        assert_eq!(r.subtitle_codec.as_deref(), Some("subrip"));
+        assert_eq!(r.subtitle_codecs, vec!["subrip"]);
         assert!(!r.has_video);
         assert!(!r.has_audio);
         assert_eq!(r.duration_ms, 0);
@@ -154,7 +156,7 @@ mod tests {
     fn parses_bare_vtt_as_subtitle_source() {
         let r = parse_probe_json(VTT_JSON).unwrap();
         assert_eq!(r.source_kind, goop_core::SourceKind::Subtitle);
-        assert_eq!(r.subtitle_codec.as_deref(), Some("webvtt"));
+        assert_eq!(r.subtitle_codecs, vec!["webvtt"]);
     }
 
     #[test]
@@ -164,14 +166,14 @@ mod tests {
         assert!(r.has_video);
         assert!(r.has_audio);
         assert!(r.has_subtitles);
-        assert_eq!(r.subtitle_codec.as_deref(), Some("subrip"));
+        assert_eq!(r.subtitle_codecs, vec!["subrip"]);
     }
 
     #[test]
     fn sources_without_subtitles_report_none() {
         let r = parse_probe_json(MP4_JSON).unwrap();
         assert!(!r.has_subtitles);
-        assert!(r.subtitle_codec.is_none());
+        assert!(r.subtitle_codecs.is_empty());
     }
 
     #[test]

@@ -51,6 +51,8 @@ const mp4Probe: ProbeResult = {
   source_kind: "video",
   color_space: null,
   image_format: null,
+  has_subtitles: false,
+  subtitle_codecs: [],
 };
 
 const audioOnlyProbe: ProbeResult = {
@@ -66,6 +68,8 @@ const audioOnlyProbe: ProbeResult = {
   source_kind: "audio",
   color_space: null,
   image_format: null,
+  has_subtitles: false,
+  subtitle_codecs: [],
 };
 
 const imageProbe: ProbeResult = {
@@ -81,6 +85,25 @@ const imageProbe: ProbeResult = {
   source_kind: "image",
   color_space: "sRGB",
   image_format: "PNG",
+  has_subtitles: false,
+  subtitle_codecs: [],
+};
+
+const srtProbe: ProbeResult = {
+  duration_ms: BigInt(0),
+  width: null,
+  height: null,
+  video_codec: null,
+  audio_codec: null,
+  file_size: BigInt(1_200),
+  container: "srt",
+  has_video: false,
+  has_audio: false,
+  source_kind: "subtitle",
+  color_space: null,
+  image_format: null,
+  has_subtitles: true,
+  subtitle_codecs: ["subrip"],
 };
 
 function renderPage() {
@@ -204,6 +227,135 @@ describe("ConvertPage", () => {
         }),
       );
     });
+  });
+
+  it("offers subtitles for video sources and hides them for audio-only", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    const { unmount } = renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    expect(screen.getByText(/subtitles:/i)).toBeDefined();
+    unmount();
+    cleanup();
+
+    mockProbe.mockResolvedValue(audioOnlyProbe);
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    expect(screen.queryByText(/subtitles:/i)).toBeNull();
+  });
+
+  it("sends the picked subtitle with the convert request", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+
+    // The browse dialog and the subtitle picker share the same mock, so
+    // swap its answer before opening the subtitle one.
+    mockOpen.mockResolvedValue("/tmp/movie.srt");
+    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
+
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+
+    await waitFor(() => {
+      expect(mockFromFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtitle: { source_path: "/tmp/movie.srt", mode: "soft" },
+        }),
+      );
+    });
+  });
+
+  it("drops the subtitle when switching to a target that can't carry one", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+
+    mockOpen.mockResolvedValue("/tmp/movie.srt");
+    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
+
+    // GIF has no video track to mux into and no burn-in support.
+    await userEvent.click(screen.getByRole("button", { name: "GIF" }));
+    expect(screen.queryByText("movie.srt")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => {
+      expect(mockFromFile).toHaveBeenCalledWith(
+        expect.objectContaining({ target: "gif", subtitle: null }),
+      );
+    });
+  });
+
+  it("switches a soft track to burn-in for a container without subtitle tracks", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+
+    mockOpen.mockResolvedValue("/tmp/movie.srt");
+    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
+
+    await userEvent.click(screen.getByRole("button", { name: "AVI" }));
+
+    // The file is kept, but the only supported mode is now selected.
+    expect(screen.getByText("movie.srt")).toBeDefined();
+    expect(screen.getByRole("button", { name: /burn in/i }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /soft track/i })).toHaveProperty("disabled", true);
+  });
+
+  it("keeps a subtitle through a detour via an incompatible target", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+
+    mockOpen.mockResolvedValue("/tmp/movie.srt");
+    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
+
+    // Tap GIF by mistake, then back to MP4: re-picking the file would be
+    // an annoying tax on a misclick.
+    await userEvent.click(screen.getByRole("button", { name: "GIF" }));
+    await userEvent.click(screen.getByRole("button", { name: "MP4" }));
+
+    expect(screen.getByText("movie.srt")).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => {
+      expect(mockFromFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: "mp4",
+          subtitle: { source_path: "/tmp/movie.srt", mode: "soft" },
+        }),
+      );
+    });
+  });
+
+  it("offers only subtitle targets for a bare subtitle file", async () => {
+    mockProbe.mockResolvedValue(srtProbe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+
+    expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "MP3" })).toBeNull();
+    // A .srt source defaults to the other format, since srt->srt is a no-op.
+    expect(screen.getByRole("button", { name: /WebVTT/ }).className).toContain("bg-accent");
+    expect(screen.getByRole("button", { name: "SRT" })).toBeDefined();
   });
 
   it("removes file row when remove is clicked", async () => {

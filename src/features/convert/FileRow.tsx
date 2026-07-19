@@ -1,20 +1,42 @@
 import { useEffect, useState } from "react";
-import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
+import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
 import { useAppStore } from "@/store/appStore";
 import TargetPicker, { smartDefault } from "./TargetPicker";
 import GifOptionsPanel from "./GifOptionsPanel";
+import SubtitleField, { subtitleSupport } from "./SubtitleField";
 
 interface RowOptionsState {
   target: TargetFormat;
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
+  subtitle: SubtitleOptions | null;
 }
 
 export interface FileRowOptions {
   target: TargetFormat;
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
+  subtitle: SubtitleOptions | null;
+}
+
+/** Reconcile a picked subtitle with a target format.
+ *
+ * Returns null when the target can't carry subtitles at all, and switches
+ * mode when only the other one is available (AVI has no subtitle track but
+ * can still be burned into). Exported so the send path can apply the same
+ * rule — a target set from outside this row, by a preset or "apply to all",
+ * never passes through here. */
+export function subtitleForTarget(
+  subtitle: SubtitleOptions | null,
+  target: TargetFormat,
+): SubtitleOptions | null {
+  if (!subtitle) return null;
+  const support = subtitleSupport(target);
+  if (!support.soft && !support.burn) return null;
+  if (subtitle.mode === "soft" && !support.soft) return { ...subtitle, mode: "burn_in" };
+  if (subtitle.mode === "burn_in" && !support.burn) return { ...subtitle, mode: "soft" };
+  return subtitle;
 }
 
 interface FileRowProps {
@@ -65,6 +87,7 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
         target,
         gifOptions: target === "gif" ? defaultGifOptions() : null,
         metadataPolicy: defaultPolicy,
+        subtitle: null,
       };
       setOpts(seeded);
       onOptionsChange(path, seeded);
@@ -112,13 +135,14 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
   }
 
   const p = state.probe;
-  const { target, gifOptions, metadataPolicy } = opts;
+  const { target, gifOptions, metadataPolicy, subtitle } = opts;
 
   const update = (partial: Partial<RowOptionsState>) => {
     const next: RowOptionsState = {
       target: partial.target ?? target,
       gifOptions: partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
       metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
+      subtitle: partial.subtitle !== undefined ? partial.subtitle : subtitle,
     };
     setOpts(next);
     onOptionsChange(path, next);
@@ -126,6 +150,8 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
 
   const showGifOpts = target === "gif" && p.source_kind === "video";
   const showMetadataPolicy = p.source_kind === "image";
+  const subSupport = subtitleSupport(target);
+  const showSubtitle = p.source_kind === "video" && (subSupport.soft || subSupport.burn);
 
   const meta: string[] = [];
   if (Number(p.duration_ms) > 0) meta.push(formatDuration(Number(p.duration_ms)));
@@ -156,10 +182,21 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
             update({
               target: t,
               gifOptions: t === "gif" ? (gifOptions ?? defaultGifOptions()) : null,
+              // Keep the picked file when the new target can't use it (the
+              // control just hides) so flipping through formats doesn't
+              // make the user re-pick it. The send path drops it.
+              subtitle: subtitleForTarget(subtitle, t) ?? subtitle,
             })
           }
         />
       </div>
+      {showSubtitle && (
+        <SubtitleField
+          subtitle={subtitle}
+          onChange={(s) => update({ subtitle: s })}
+          support={subSupport}
+        />
+      )}
       {showGifOpts && gifOptions && (
         <GifOptionsPanel
           gifOptions={gifOptions}

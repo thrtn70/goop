@@ -75,7 +75,47 @@ pub(crate) fn plan_extract(target: TargetFormat) -> Plan {
     }
 }
 
+/// Subtitle codecs that carry text, and can therefore be transcoded into
+/// any of the codecs in [`soft_codec`].
+///
+/// Bitmap subtitles (`hdmv_pgs_subtitle` from Blu-ray, `dvd_subtitle` from
+/// DVD) are deliberately absent: ffmpeg can only convert text-to-text or
+/// bitmap-to-bitmap, so asking it to turn one into `mov_text` aborts the
+/// whole conversion.
+const TEXT_SUBTITLE_CODECS: &[&str] = &[
+    "subrip",
+    "srt",
+    "ass",
+    "ssa",
+    "mov_text",
+    "webvtt",
+    "text",
+    "subviewer",
+    "subviewer1",
+    "mpl2",
+    "microdvd",
+    "sami",
+    "realtext",
+    "stl",
+];
+
+/// Whether every existing subtitle stream can be carried into `target`.
+///
+/// Unknown codecs count as "not text": preserving them risks aborting the
+/// conversion, while skipping them only costs a track the user didn't ask
+/// about. The user's own attached subtitle is added either way.
+pub(crate) fn can_preserve_existing(subtitle_codecs: &[String]) -> bool {
+    !subtitle_codecs.is_empty()
+        && subtitle_codecs
+            .iter()
+            .all(|c| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+}
+
 /// Attach `sub_path` to `plan` according to `mode`.
+///
+/// `preserve_existing` maps the source's own subtitle streams through
+/// alongside the new one; see [`can_preserve_existing`] for when that is
+/// safe. It is ignored for burn-in, which adds no stream maps at all.
 ///
 /// Returns the path ffmpeg must open as a **second input** (`-i`), which is
 /// `Some` for soft-embed and `None` for burn-in — burn-in reads the file
@@ -85,6 +125,7 @@ pub(crate) fn apply_to_plan(
     target: TargetFormat,
     mode: SubtitleMode,
     sub_path: &Path,
+    preserve_existing: bool,
 ) -> Result<Option<PathBuf>, GoopError> {
     if !supports(target, mode) {
         let what = match mode {
@@ -109,6 +150,13 @@ pub(crate) fn apply_to_plan(
                 "0:v:0?".to_string(),
                 "-map".to_string(),
                 "0:a:0?".to_string(),
+            ]);
+            // Because the maps above are exhaustive, subtitle streams the
+            // source already had are dropped unless they are named too.
+            if preserve_existing {
+                plan.args.extend(["-map".to_string(), "0:s?".to_string()]);
+            }
+            plan.args.extend([
                 "-map".to_string(),
                 "1:0".to_string(),
                 "-c:s".to_string(),
@@ -142,15 +190,34 @@ pub(crate) fn apply_to_plan(
 ///
 /// The value is unescaped twice on the way in — once by the filtergraph
 /// parser and once by the AVOption parser — so every metacharacter needs
-/// two rounds of escaping. Backslashes are normalized to forward slashes
-/// first (Win32 accepts them), which leaves the drive-letter colon as the
-/// only Windows-specific case: `C:\x\y.srt` becomes `C\\:/x/y.srt`.
+/// two rounds of escaping.
 ///
 /// Args are passed to ffmpeg via `Command::arg`, never a shell, so no
 /// third (shell) round applies.
 pub(crate) fn escape_subtitles_path(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    let layer1 = normalized.replace('\'', r"\'").replace(':', r"\:");
+    escape_for_filter(path, cfg!(windows))
+}
+
+/// `windows_paths` decides whether a backslash means "directory separator"
+/// (Windows, where it is rewritten to `/` because Win32 accepts either, so
+/// only the drive-letter colon needs escaping: `C:\x\y.srt` becomes
+/// `C\\:/x/y.srt`) or an ordinary filename character (everywhere else,
+/// where rewriting it would point ffmpeg at a different file).
+///
+/// Split out from `escape_subtitles_path` so the Windows behaviour stays
+/// under test on every host.
+fn escape_for_filter(path: &str, windows_paths: bool) -> String {
+    let normalized = if windows_paths {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
+    // Backslash first in each layer, so the escapes added after it aren't
+    // escaped a second time.
+    let layer1 = normalized
+        .replace('\\', r"\\")
+        .replace('\'', r"\'")
+        .replace(':', r"\:");
     let mut layer2 = layer1.replace('\\', r"\\").replace('\'', r"\'");
     for ch in ['[', ']', ',', ';'] {
         layer2 = layer2.replace(ch, &format!("\\{ch}"));
@@ -182,9 +249,22 @@ mod tests {
 
     #[test]
     fn escapes_windows_drive_colon_and_backslashes() {
+        // Pinned with an explicit flag rather than `escape_subtitles_path`
+        // so the Windows behaviour is covered when CI runs on macOS.
         assert_eq!(
-            escape_subtitles_path(r"C:\Users\thor\my subs.srt"),
+            escape_for_filter(r"C:\Users\thor\my subs.srt", true),
             r"C\\:/Users/thor/my subs.srt"
+        );
+    }
+
+    #[test]
+    fn keeps_a_literal_backslash_off_windows() {
+        // A backslash is a legal filename character on macOS/Linux, so
+        // rewriting it to `/` would point ffmpeg at a different file.
+        // It still needs escaping for both parser layers.
+        assert_eq!(
+            escape_for_filter(r"/tmp/a\b.srt", false),
+            r"/tmp/a\\\\b.srt"
         );
     }
 
@@ -262,6 +342,7 @@ mod tests {
             TargetFormat::Mp4,
             SubtitleMode::Soft,
             Path::new("/tmp/s.srt"),
+            false,
         )
         .unwrap();
 
@@ -291,6 +372,7 @@ mod tests {
                 target,
                 SubtitleMode::Soft,
                 Path::new("/tmp/s.srt"),
+                false,
             )
             .unwrap();
             let idx = plan.args.iter().position(|a| a == "-c:s").unwrap();
@@ -308,6 +390,7 @@ mod tests {
                 target,
                 SubtitleMode::Soft,
                 Path::new("/tmp/s.srt"),
+                false,
             )
             .unwrap_err();
             assert!(
@@ -327,6 +410,7 @@ mod tests {
             TargetFormat::Mp4,
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
+            false,
         )
         .unwrap();
 
@@ -354,6 +438,7 @@ mod tests {
             TargetFormat::Mp4,
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
+            false,
         )
         .unwrap();
 
@@ -383,6 +468,7 @@ mod tests {
             TargetFormat::Mp4,
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, GoopError::InvalidRequest(_)));
@@ -397,10 +483,91 @@ mod tests {
                 target,
                 SubtitleMode::BurnIn,
                 Path::new("/tmp/s.srt"),
+                false,
             )
             .unwrap_err();
             assert!(matches!(err, GoopError::InvalidRequest(_)), "{target:?}");
         }
+    }
+
+    // --- Preserving the source's own subtitle tracks --------------------
+
+    #[test]
+    fn text_subtitle_streams_are_safe_to_preserve() {
+        assert!(can_preserve_existing(&["subrip".to_string()]));
+        assert!(can_preserve_existing(&[
+            "subrip".to_string(),
+            "ass".to_string()
+        ]));
+    }
+
+    #[test]
+    fn bitmap_and_unknown_subtitle_streams_are_not_preserved() {
+        // Transcoding a bitmap subtitle into mov_text/srt/webvtt aborts the
+        // whole conversion, so these must be left behind instead.
+        assert!(!can_preserve_existing(&["hdmv_pgs_subtitle".to_string()]));
+        assert!(!can_preserve_existing(&["dvd_subtitle".to_string()]));
+        // Mixed: one bitmap track is enough to make the whole map unsafe.
+        assert!(!can_preserve_existing(&[
+            "subrip".to_string(),
+            "hdmv_pgs_subtitle".to_string()
+        ]));
+        // Unknown codecs fail closed.
+        assert!(!can_preserve_existing(&["something_new".to_string()]));
+        assert!(!can_preserve_existing(&[]));
+    }
+
+    #[test]
+    fn soft_embed_carries_existing_text_tracks_through() {
+        // Regression: the explicit maps are exhaustive, so without an
+        // explicit `0:s?` the source's own subtitle tracks are dropped the
+        // moment the user attaches an external one.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        apply_to_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            SubtitleMode::Soft,
+            Path::new("/tmp/s.srt"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.args,
+            vec![
+                "-c", "copy", "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-map", "1:0",
+                "-c:s", "srt",
+            ]
+        );
+    }
+
+    #[test]
+    fn soft_embed_omits_existing_tracks_when_they_cannot_be_transcoded() {
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        apply_to_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            SubtitleMode::Soft,
+            Path::new("/tmp/s.srt"),
+            false,
+        )
+        .unwrap();
+
+        assert!(!plan.args.iter().any(|a| a == "0:s?"));
     }
 
     // --- Extraction ----------------------------------------------------

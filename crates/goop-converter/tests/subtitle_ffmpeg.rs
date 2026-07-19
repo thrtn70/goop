@@ -1,0 +1,334 @@
+//! Real-ffmpeg checks for subtitle support.
+//!
+//! Every other test in this crate asserts on the `Plan` arg vector, which
+//! cannot catch an arg list that is well-formed but rejected by ffmpeg.
+//! These drive `FfmpegBackend::convert` end to end instead.
+//!
+//! `#[ignore]` so `cargo test --workspace` stays green without a bundled
+//! ffmpeg. Run them explicitly:
+//!
+//! ```text
+//! cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
+//! ```
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+
+use goop_converter::backend::ConversionBackend;
+use goop_converter::FfmpegBackend;
+use goop_core::{
+    ConvertRequest, EventSink, JobId, ProgressEvent, QueueEvent, SidecarEvent, SubtitleMode,
+    SubtitleOptions, TargetFormat,
+};
+use goop_sidecar::BinaryResolver;
+use tokio_util::sync::CancellationToken;
+
+struct SilentSink;
+
+impl EventSink for SilentSink {
+    fn emit_progress(&self, _: ProgressEvent) {}
+    fn emit_queue(&self, _: QueueEvent) {}
+    fn emit_sidecar(&self, _: SidecarEvent) {}
+}
+
+/// A resolver pointed at a directory holding plainly-named copies of this
+/// checkout's sidecars.
+///
+/// `src-tauri/bin` stores them as `<name>-<target-triple>`, the layout
+/// Tauri's bundler consumes, whereas `BinaryResolver` looks for a bare
+/// `<name>` (which is what the packaged app ends up with). Symlinking into
+/// a temp dir bridges the two so these tests exercise the ffmpeg that
+/// actually ships rather than whatever is on `PATH`.
+fn bundled_resolver(link_dir: &Path) -> BinaryResolver {
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src-tauri/bin")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("src-tauri/bin"));
+    let triple = current_triple();
+    for name in ["ffmpeg", "ffprobe"] {
+        let src = bin.join(format!("{name}-{triple}"));
+        if src.is_file() {
+            let _ = symlink(&src, &link_dir.join(name));
+        }
+    }
+    BinaryResolver::new(link_dir.to_path_buf())
+}
+
+#[cfg(unix)]
+fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(windows)]
+fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::copy(src, dst).map(|_| ())
+}
+
+fn current_triple() -> String {
+    // Only the two shipping targets need to resolve here; anything else
+    // falls through to the `PATH` lookup inside `BinaryResolver`.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin".to_string()
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc.exe".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn ffmpeg_path(r: &BinaryResolver) -> PathBuf {
+    r.resolve("ffmpeg")
+        .expect("ffmpeg must be resolvable for this ignored test")
+        .path
+}
+
+/// True when the resolved ffmpeg was built with libass. Burn-in needs it,
+/// and Homebrew's ffmpeg — the usual `PATH` fallback in a dev checkout —
+/// is built without it.
+fn has_subtitles_filter(ffmpeg: &Path) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-filters"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.split_whitespace().nth(1) == Some("subtitles"))
+        })
+        .unwrap_or(false)
+}
+
+fn write_srt(path: &Path, text: &str) {
+    std::fs::write(path, format!("1\n00:00:00,200 --> 00:00:01,500\n{text}\n")).unwrap();
+}
+
+/// A 2-second colour clip with a silent audio track.
+fn make_source(ffmpeg: &Path, out: &Path) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=160x120:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:d=2",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the test source clip");
+}
+
+/// Codec names of `out`'s subtitle streams, in order.
+fn subtitle_codecs(r: &BinaryResolver, out: &Path) -> Vec<String> {
+    let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
+    let probe = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "s",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(out)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+fn request(
+    input: &Path,
+    output: &Path,
+    target: TargetFormat,
+    sub: Option<SubtitleOptions>,
+) -> ConvertRequest {
+    ConvertRequest {
+        input_path: input.to_string_lossy().into_owned(),
+        output_path: output.to_string_lossy().into_owned(),
+        target,
+        quality_preset: None,
+        resolution_cap: None,
+        gif_options: None,
+        compress_mode: None,
+        batch_id: None,
+        metadata_policy: None,
+        subtitle: sub,
+    }
+}
+
+async fn convert(r: &BinaryResolver, req: &ConvertRequest) -> Result<(), goop_core::GoopError> {
+    FfmpegBackend::new(r, Arc::new(SilentSink))
+        .convert(JobId::new(), req, CancellationToken::new())
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_embed_produces_a_playable_subtitle_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let subs = tmp.path().join("subs.srt");
+    let out = tmp.path().join("out.mp4");
+    make_source(&ffmpeg, &src);
+    write_srt(&subs, "Hello from goop");
+
+    convert(
+        &r,
+        &request(
+            &src,
+            &out,
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: subs.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        ),
+    )
+    .await
+    .expect("soft embed should succeed");
+
+    // `-c copy` followed by `-c:s mov_text` must transcode only the
+    // subtitle and leave the a/v streams copied.
+    assert_eq!(subtitle_codecs(&r, &out), vec!["mov_text"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_embed_keeps_the_sources_own_subtitle_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let original = tmp.path().join("original.srt");
+    let with_subs = tmp.path().join("with_subs.mkv");
+    let extra = tmp.path().join("extra.srt");
+    let out = tmp.path().join("out.mkv");
+    make_source(&ffmpeg, &src);
+    write_srt(&original, "ORIGINAL");
+    write_srt(&extra, "EXTRA");
+
+    // Build a source that already carries a subtitle track.
+    let status = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&src)
+        .arg("-i")
+        .arg(&original)
+        .args(["-c", "copy", "-c:s", "srt"])
+        .arg(&with_subs)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    convert(
+        &r,
+        &request(
+            &with_subs,
+            &out,
+            TargetFormat::Mkv,
+            Some(SubtitleOptions {
+                source_path: extra.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        ),
+    )
+    .await
+    .expect("soft embed onto a subtitled source should succeed");
+
+    // Attaching a subtitle must not silently discard the one already there.
+    assert_eq!(subtitle_codecs(&r, &out), vec!["subrip", "subrip"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn burn_in_renders_through_the_libass_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    // Exercise the escaping alongside the filter: spaces and a comma are
+    // both filtergraph-hostile.
+    let subs = tmp.path().join("my subs, take 2.srt");
+    let out = tmp.path().join("out.mp4");
+    if !has_subtitles_filter(&ffmpeg) {
+        eprintln!(
+            "skipping: {} was built without libass (no `subtitles` filter). \
+             The bundled sidecar has it; a PATH ffmpeg often does not.",
+            ffmpeg.display()
+        );
+        return;
+    }
+    make_source(&ffmpeg, &src);
+    write_srt(&subs, "Burned in");
+
+    convert(
+        &r,
+        &request(
+            &src,
+            &out,
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: subs.to_string_lossy().into_owned(),
+                mode: SubtitleMode::BurnIn,
+            }),
+        ),
+    )
+    .await
+    .expect("burn-in should succeed (needs an ffmpeg built with libass)");
+
+    // Burned-in subtitles live in the pixels, not in a stream.
+    assert!(subtitle_codecs(&r, &out).is_empty());
+    assert!(std::fs::metadata(&out).unwrap().len() > 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn srt_converts_to_vtt_and_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let srt = tmp.path().join("in.srt");
+    let vtt = tmp.path().join("out.vtt");
+    let back = tmp.path().join("back.srt");
+    write_srt(&srt, "Round trip");
+
+    convert(&r, &request(&srt, &vtt, TargetFormat::Vtt, None))
+        .await
+        .expect("srt -> vtt");
+    let vtt_text = std::fs::read_to_string(&vtt).unwrap();
+    assert!(vtt_text.starts_with("WEBVTT"), "got: {vtt_text}");
+    assert!(vtt_text.contains("Round trip"));
+
+    convert(&r, &request(&vtt, &back, TargetFormat::Srt, None))
+        .await
+        .expect("vtt -> srt");
+    let srt_text = std::fs::read_to_string(&back).unwrap();
+    assert!(srt_text.contains("Round trip"));
+    assert!(
+        srt_text.contains("00:00:00,200 --> 00:00:01,500"),
+        "got: {srt_text}"
+    );
+}

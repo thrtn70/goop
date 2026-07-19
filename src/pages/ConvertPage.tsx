@@ -49,6 +49,7 @@ export default function ConvertPage() {
                 sourceDir: dirname(path),
                 gifOptions: null,
                 metadataPolicy: "preserve",
+                subtitle: null,
               },
             ],
       );
@@ -77,6 +78,7 @@ export default function ConvertPage() {
             sourceDir: dirname(p),
             gifOptions: null,
             metadataPolicy: "preserve" as MetadataPolicy,
+            subtitle: null,
           }));
         return [...prev, ...fresh];
       });
@@ -92,6 +94,7 @@ export default function ConvertPage() {
               target: opts.target,
               gifOptions: opts.gifOptions,
               metadataPolicy: opts.metadataPolicy,
+              subtitle: opts.subtitle,
             }
           : f,
       ),
@@ -119,6 +122,9 @@ export default function ConvertPage() {
         i === 0
           ? f
           : {
+              // `subtitle` is deliberately not copied: it points at one
+              // specific file's subtitle track, which is almost never the
+              // right one for the rest of the batch.
               ...f,
               target: head.target,
               gifOptions: head.gifOptions,

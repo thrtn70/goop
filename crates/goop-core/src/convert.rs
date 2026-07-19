@@ -281,9 +281,12 @@ pub struct ProbeResult {
     /// either a bare `.srt` / `.vtt` or a container with embedded subs.
     #[serde(default)]
     pub has_subtitles: bool,
-    /// Codec of the first subtitle stream (`subrip`, `webvtt`, …).
+    /// Codecs of every subtitle stream, in stream order (`subrip`,
+    /// `webvtt`, `hdmv_pgs_subtitle`, …). The full list matters because
+    /// text and bitmap subtitles can't be transcoded into each other, so
+    /// preserving existing tracks is only safe when they are all text.
     #[serde(default)]
-    pub subtitle_codec: Option<String>,
+    pub subtitle_codecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
