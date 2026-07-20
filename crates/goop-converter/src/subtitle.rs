@@ -99,6 +99,90 @@ const TEXT_SUBTITLE_CODECS: &[&str] = &[
     "stl",
 ];
 
+/// The `-sub_charenc` value ffmpeg needs in order to read `bytes` as text,
+/// or `None` when it already reads them correctly.
+///
+/// ffmpeg assumes UTF-8 for text subtitles and *discards* every cue it
+/// cannot decode, exiting 0 regardless — so a legacy-codepage file loses
+/// exactly the lines that motivated its encoding, and reports success. It
+/// only fails outright when no cue at all decodes. Guessing here is what
+/// closes that hole.
+///
+/// `None` for valid UTF-8 keeps the overwhelmingly common path byte-for-byte
+/// identical to not having this function at all.
+pub(crate) fn detect_charenc(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.is_empty() || std::str::from_utf8(bytes).is_ok() {
+        return None;
+    }
+    // ffmpeg detects UTF-16 from the BOM and converts it itself; its docs
+    // say explicitly not to name an encoding in that case.
+    //
+    // The UTF-32 BOMs are listed too, not because ffmpeg handles them, but
+    // because the detector has no UTF-32 candidate: left to guess it would
+    // return a confident 8-bit codepage for text that is nothing of the
+    // sort. Declining to guess fails visibly; guessing wrong does not.
+    // Note UTF-32LE (`FF FE 00 00`) starts with the UTF-16LE BOM, so it is
+    // already covered by the case above — listed here for the reader.
+    const BOMS: [&[u8]; 4] = [
+        &[0xFF, 0xFE],             // UTF-16LE (and UTF-32LE's prefix)
+        &[0xFE, 0xFF],             // UTF-16BE
+        &[0x00, 0x00, 0xFE, 0xFF], // UTF-32BE
+        &[0xFF, 0xFE, 0x00, 0x00], // UTF-32LE
+    ];
+    if BOMS.iter().any(|bom| bytes.starts_with(bom)) {
+        return None;
+    }
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    let guess = detector.guess(None, true);
+    // Bytes that failed the UTF-8 check above cannot be UTF-8, so a UTF-8
+    // guess means the detector had nothing to go on. Passing it would be a
+    // no-op that only makes the command harder to read.
+    (guess != encoding_rs::UTF_8).then(|| guess.name())
+}
+
+/// Anything larger than this is not a subtitle file, whatever its extension
+/// claims. The largest real `.srt` is a few hundred kilobytes — a full
+/// feature film's dialogue is well under one megabyte — so this is orders of
+/// magnitude of headroom, and its job is only to stop a mis-picked video
+/// file from being read into memory in full.
+const MAX_SUBTITLE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// [`detect_charenc`] for a file on disk.
+///
+/// Reads the whole file rather than a prefix: subtitle files are kilobytes,
+/// and a detector fed only the first block would miss a lone accented line
+/// near the end — which is precisely the silent-loss case.
+///
+/// An unreadable or implausibly large file yields `None`, skipping detection
+/// rather than guessing from a binary blob; the conversion then proceeds on
+/// ffmpeg's own defaults instead of having a bogus encoding forced onto it.
+pub(crate) fn detect_charenc_of_file(path: &Path) -> Option<String> {
+    let too_big = std::fs::metadata(path)
+        .map(|m| m.len() > MAX_SUBTITLE_BYTES)
+        .unwrap_or(true);
+    if too_big {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    detect_charenc(&bytes).map(str::to_string)
+}
+
+/// Whether `label` is safe to interpolate into a filtergraph unescaped.
+///
+/// Every encoding label in use is alphanumerics, hyphens and underscores
+/// (`Shift_JIS` supplies the underscore), none of which mean anything to the
+/// filtergraph parser. That is a property of the detector's current label
+/// set, though, not a guarantee — so it is checked rather than trusted, and
+/// a future label carrying a `:` or `,` drops detection instead of quietly
+/// producing a malformed filter.
+fn is_safe_filter_label(label: &str) -> bool {
+    !label.is_empty()
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Whether every existing subtitle stream can be carried into `target`.
 ///
 /// Unknown codecs count as "not text": preserving them risks aborting the
@@ -117,6 +201,11 @@ pub(crate) fn can_preserve_existing(subtitle_codecs: &[String]) -> bool {
 /// alongside the new one; see [`can_preserve_existing`] for when that is
 /// safe. It is ignored for burn-in, which adds no stream maps at all.
 ///
+/// `charenc` is the source's character encoding, from [`detect_charenc`].
+/// Burn-in consumes it here, on the filter, because the file is read through
+/// the filtergraph where `-sub_charenc` never reaches it; soft-embed leaves
+/// it for the caller to pass as an input option instead.
+///
 /// Returns the path ffmpeg must open as a **second input** (`-i`), which is
 /// `Some` for soft-embed and `None` for burn-in — burn-in reads the file
 /// through the filter graph instead.
@@ -126,6 +215,7 @@ pub(crate) fn apply_to_plan(
     mode: SubtitleMode,
     sub_path: &Path,
     preserve_existing: bool,
+    charenc: Option<&str>,
 ) -> Result<Option<PathBuf>, GoopError> {
     if !supports(target, mode) {
         let what = match mode {
@@ -177,8 +267,13 @@ pub(crate) fn apply_to_plan(
             // Appended last so it runs *after* any resolution cap: drawing
             // at the final size keeps the text crisp instead of scaling
             // already-rendered glyphs.
+            //
+            let charenc = charenc
+                .filter(|enc| is_safe_filter_label(enc))
+                .map(|enc| format!(":charenc={enc}"))
+                .unwrap_or_default();
             plan.video_filters.push(format!(
-                "subtitles=filename={}",
+                "subtitles=filename={}{charenc}",
                 escape_subtitles_path(&sub_path.to_string_lossy())
             ));
             Ok(None)
@@ -229,6 +324,143 @@ fn escape_for_filter(path: &str, windows_paths: bool) -> String {
 mod tests {
     use super::*;
     use goop_core::{QualityPreset, ResolutionCap};
+
+    // --- Character encoding detection ---------------------------------
+    //
+    // ffmpeg assumes UTF-8 for text subtitles and *discards* every cue it
+    // can't decode, exiting 0 all the same. A 20-cue cp1252 file with one
+    // accented cue therefore yields 19 cues and a success report. Only a
+    // file where every cue fails decoding errors out. So detection has to
+    // happen for us, not for ffmpeg.
+
+    #[test]
+    fn valid_utf8_needs_no_charenc() {
+        // Plain ASCII, accented UTF-8, and CJK are all already what ffmpeg
+        // expects; naming an encoding could only make things worse.
+        assert_eq!(
+            detect_charenc(b"1\n00:00:01,000 --> 00:00:02,000\nhi\n"),
+            None
+        );
+        assert_eq!(detect_charenc("Café déjà vu".as_bytes()), None);
+        assert_eq!(detect_charenc("你好世界 こんにちは".as_bytes()), None);
+    }
+
+    #[test]
+    fn utf8_bom_needs_no_charenc() {
+        // A BOM is valid UTF-8 and ffmpeg consumes it without leaking a
+        // glyph into the first cue; verified against the bundled binary.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("Café".as_bytes());
+        assert_eq!(detect_charenc(&bytes), None);
+    }
+
+    #[test]
+    fn windows_1252_is_detected() {
+        // 0xE9 0xE0 0xE7 = e-acute, a-grave, c-cedilla in cp1252, and are
+        // not valid UTF-8 in this arrangement.
+        let bytes = b"Caf\xE9 \xE0 c\xF4t\xE9 de l'h\xF4tel. Elodie a d\xE9j\xE0 mang\xE9.";
+        assert_eq!(detect_charenc(bytes), Some("windows-1252"));
+    }
+
+    #[test]
+    fn cp1251_cyrillic_is_detected() {
+        // "Привет, мир! Это проверка кодировки." in cp1251.
+        let bytes = b"\xCF\xF0\xE8\xE2\xE5\xF2, \xEC\xE8\xF0! \xDD\xF2\xEE \
+                      \xEF\xF0\xEE\xE2\xE5\xF0\xEA\xE0 \xEA\xEE\xE4\xE8\xF0\xEE\xE2\xEA\xE8.";
+        assert_eq!(detect_charenc(bytes), Some("windows-1251"));
+    }
+
+    #[test]
+    fn utf16_is_left_for_ffmpeg_to_autodetect() {
+        // ffmpeg detects UTF-16 from the BOM and converts it itself; its
+        // docs say explicitly not to pass an encoding for it.
+        let le = [0xFF, 0xFE, b'h', 0x00, b'i', 0x00];
+        let be = [0xFE, 0xFF, 0x00, b'h', 0x00, b'i'];
+        assert_eq!(detect_charenc(&le), None);
+        assert_eq!(detect_charenc(&be), None);
+    }
+
+    #[test]
+    fn empty_input_needs_no_charenc() {
+        assert_eq!(detect_charenc(b""), None);
+    }
+
+    #[test]
+    fn utf32_is_not_guessed_at() {
+        // The detector has no UTF-32 candidate, so an unguarded guess would
+        // confidently return an 8-bit codepage for text that is nothing of
+        // the sort — and force it on.
+        let be = [0x00, 0x00, 0xFE, 0xFF, 0x00, 0x00, 0x00, b'h'];
+        let le = [0xFF, 0xFE, 0x00, 0x00, b'h', 0x00, 0x00, 0x00];
+        assert_eq!(detect_charenc(&be), None);
+        assert_eq!(detect_charenc(&le), None);
+    }
+
+    #[test]
+    fn an_oversized_file_is_not_sniffed() {
+        // Guards the case where a video file reaches detection: reading it
+        // whole to guess a charset would be both pointless and expensive.
+        let path = std::env::temp_dir().join(format!("goop-charenc-big-{}", std::process::id()));
+        std::fs::write(&path, vec![0xE9u8; (MAX_SUBTITLE_BYTES + 1) as usize]).unwrap();
+        assert_eq!(detect_charenc_of_file(&path), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn only_filtergraph_safe_labels_reach_the_filter() {
+        assert!(is_safe_filter_label("windows-1252"));
+        assert!(is_safe_filter_label("Shift_JIS"));
+        // A label carrying a filtergraph metacharacter must be dropped
+        // rather than interpolated into a malformed filter.
+        for bad in ["utf:8", "a,b", "x'y", "", "a\\b", "a[b]"] {
+            assert!(!is_safe_filter_label(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn burn_in_carries_the_detected_charenc_into_the_filter() {
+        // Burn-in reads the file through the filtergraph, so -sub_charenc
+        // never reaches it; the option has to ride on the filter instead.
+        let mut plan = burnable_plan();
+        apply_to_plan(
+            &mut plan,
+            TargetFormat::Mp4,
+            SubtitleMode::BurnIn,
+            Path::new("/tmp/sub.srt"),
+            false,
+            Some("windows-1252"),
+        )
+        .unwrap();
+        let filter = plan
+            .video_filters
+            .iter()
+            .find(|f| f.starts_with("subtitles="))
+            .expect("burn-in must add a subtitles filter");
+        assert!(
+            filter.contains("charenc=windows-1252"),
+            "filter lacks the charenc: {filter}"
+        );
+    }
+
+    #[test]
+    fn burn_in_omits_charenc_for_utf8() {
+        let mut plan = burnable_plan();
+        apply_to_plan(
+            &mut plan,
+            TargetFormat::Mp4,
+            SubtitleMode::BurnIn,
+            Path::new("/tmp/sub.srt"),
+            false,
+            None,
+        )
+        .unwrap();
+        let filter = plan
+            .video_filters
+            .iter()
+            .find(|f| f.starts_with("subtitles="))
+            .unwrap();
+        assert!(!filter.contains("charenc"), "unexpected charenc: {filter}");
+    }
 
     fn burnable_plan() -> Plan {
         crate::compat::decide(
@@ -343,6 +575,7 @@ mod tests {
             SubtitleMode::Soft,
             Path::new("/tmp/s.srt"),
             false,
+            None,
         )
         .unwrap();
 
@@ -373,6 +606,7 @@ mod tests {
                 SubtitleMode::Soft,
                 Path::new("/tmp/s.srt"),
                 false,
+                None,
             )
             .unwrap();
             let idx = plan.args.iter().position(|a| a == "-c:s").unwrap();
@@ -391,6 +625,7 @@ mod tests {
                 SubtitleMode::Soft,
                 Path::new("/tmp/s.srt"),
                 false,
+                None,
             )
             .unwrap_err();
             assert!(
@@ -411,6 +646,7 @@ mod tests {
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
             false,
+            None,
         )
         .unwrap();
 
@@ -439,6 +675,7 @@ mod tests {
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
             false,
+            None,
         )
         .unwrap();
 
@@ -469,6 +706,7 @@ mod tests {
             SubtitleMode::BurnIn,
             Path::new("/tmp/s.srt"),
             false,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, GoopError::InvalidRequest(_)));
@@ -484,6 +722,7 @@ mod tests {
                 SubtitleMode::BurnIn,
                 Path::new("/tmp/s.srt"),
                 false,
+                None,
             )
             .unwrap_err();
             assert!(matches!(err, GoopError::InvalidRequest(_)), "{target:?}");
@@ -536,6 +775,7 @@ mod tests {
             SubtitleMode::Soft,
             Path::new("/tmp/s.srt"),
             true,
+            None,
         )
         .unwrap();
 
@@ -564,6 +804,7 @@ mod tests {
             SubtitleMode::Soft,
             Path::new("/tmp/s.srt"),
             false,
+            None,
         )
         .unwrap();
 

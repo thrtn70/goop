@@ -13,6 +13,13 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
+# Subtitle charset detection. chardetng is Firefox's detector and
+# encoding_rs supplies the label names; both are pure Rust, so the
+# static-link story for the release builds is unaffected. ffmpeg's
+# -sub_charenc accepts encoding_rs label names verbatim (verified
+# against windows-1252/1251 and ISO-8859-2).
+chardetng = "0.1"
+encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff", "avif", "hdr", "ico"] }
 # JPEG-XL via jpegxl-rs's `vendored` feature: jpegxl-src builds libjxl
 # 0.11 from vendored source via cmake at build time, statically linking

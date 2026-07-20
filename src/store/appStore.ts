@@ -36,7 +36,10 @@ type AppProgressEvent = ProgressEvent & {
   encoder?: string | null;
 };
 
-export type ToastVariant = "success" | "error" | "cancelled" | "info";
+// `warning` is for a job that produced a usable file with something
+// quietly missing from it — louder than `info`, but not a failure.
+export type ToastVariant =
+  "success" | "error" | "cancelled" | "info" | "warning";
 
 export interface Toast {
   id: string;
@@ -138,13 +141,18 @@ type AppStoreState = {
   applyProgress: (e: AppProgressEvent) => void;
   applyQueue: (e: QueueEvent) => void;
   cancel: (id: JobId) => Promise<void>;
-  enqueueToast: (t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & { ttlMs?: number | null }) => string;
+  enqueueToast: (
+    t: Omit<Toast, "id" | "createdAt" | "dismissAt"> & {
+      ttlMs?: number | null;
+    },
+  ) => string;
   dismissToast: (id: string) => void;
   /**
    * Routes a `SidecarEvent` to the right side effect. `yt_dlp_updated`
    * force-refreshes the version cache so Settings → About stops showing the
-   * pre-update version; `warning` (cookie auto-fallback) enqueues a one-shot
-   * info toast. Unknown warning codes are ignored.
+   * pre-update version; `warning` enqueues a one-shot toast per code —
+   * cookie auto-fallback as info, dropped subtitle cues as a warning.
+   * Unknown warning codes are ignored.
    */
   handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
@@ -324,7 +332,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   pendingFocusUrlInput: 0,
   pendingFilePicker: 0,
   async loadAll() {
-    const [settings, jobs] = await Promise.all([api.settings.get(), api.queue.list()]);
+    const [settings, jobs] = await Promise.all([
+      api.settings.get(),
+      api.queue.list(),
+    ]);
     set({ settings, jobs });
   },
   async refreshJobs() {
@@ -358,7 +369,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       const idx = s.jobs.findIndex((j) => jobIdKey(j.id) === targetKey);
       if (idx < 0) return {};
       const next = [...s.jobs];
-      next[idx] = { ...next[idx], state: e.state, result: e.result ?? next[idx].result };
+      next[idx] = {
+        ...next[idx],
+        state: e.state,
+        result: e.result ?? next[idx].result,
+      };
       return { jobs: next };
     });
   },
@@ -417,6 +432,18 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
           detail: e.message,
         });
         break;
+      case "subtitle_cues_dropped":
+        // ffmpeg discards subtitle cues it can't decode and still exits 0,
+        // so the job otherwise completes looking entirely healthy while
+        // lines are missing from the output. Warn rather than error: the
+        // conversion did produce a usable file, just an incomplete subtitle
+        // track, and re-running won't help without a different source file.
+        get().enqueueToast({
+          variant: "warning",
+          title: "Some subtitle lines were skipped",
+          detail: e.message,
+        });
+        break;
       default: {
         // Adding a WarningCode variant without a case above fails typecheck
         // here rather than shipping a warning that silently goes nowhere.
@@ -434,7 +461,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     set({ unseenCompletions: 0 });
   },
   async patchSettings(partial) {
-    const patch: SettingsPatch = { ...emptyPatch(), ...partial } as SettingsPatch;
+    const patch: SettingsPatch = {
+      ...emptyPatch(),
+      ...partial,
+    } as SettingsPatch;
     const next = await api.settings.set(patch);
     set({ settings: next });
   },
@@ -517,7 +547,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         ...s.history,
         sort,
         descending:
-          descending ?? (s.history.sort === sort ? !s.history.descending : true),
+          descending ??
+          (s.history.sort === sort ? !s.history.descending : true),
       },
     }));
     void get().loadHistory();
@@ -578,7 +609,9 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
     await get().forgetJobs(trashedIds);
     if (failed > 0) {
-      throw new Error(`Could not move ${failed} item${failed === 1 ? "" : "s"} to Trash.`);
+      throw new Error(
+        `Could not move ${failed} item${failed === 1 ? "" : "s"} to Trash.`,
+      );
     }
   },
   toggleQueueCollapsed() {
@@ -629,14 +662,15 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
     if (versionsInFlight) return versionsInFlight;
     const load = (async () => {
-      const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] = await Promise.all([
-        getVersion().catch(() => "-"),
-        api.sidecar.ytDlpVersion().catch(() => null),
-        api.sidecar.galleryDlVersion().catch(() => null),
-        api.sidecar.ffmpegVersion().catch(() => null),
-        api.sidecar.ghostscriptVersion().catch(() => null),
-        api.sidecar.mutoolVersion().catch(() => null),
-      ]);
+      const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] =
+        await Promise.all([
+          getVersion().catch(() => "-"),
+          api.sidecar.ytDlpVersion().catch(() => null),
+          api.sidecar.galleryDlVersion().catch(() => null),
+          api.sidecar.ffmpegVersion().catch(() => null),
+          api.sidecar.ghostscriptVersion().catch(() => null),
+          api.sidecar.mutoolVersion().catch(() => null),
+        ]);
       const info: AppVersionInfo = {
         goop,
         ytDlp,
@@ -778,7 +812,9 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
       },
       onSidecar: (e) => useAppStore.getState().handleSidecarEvent(e),
       onUpdateProgress: (e) =>
-        useAppStore.getState().applyUpdateProgress(Number(e.downloaded), Number(e.total)),
+        useAppStore
+          .getState()
+          .applyUpdateProgress(Number(e.downloaded), Number(e.total)),
     });
     return unlisten;
   } catch {

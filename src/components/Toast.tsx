@@ -15,6 +15,7 @@ const VARIANT_STYLES: Record<ToastData["variant"], string> = {
   error: "bg-error-subtle border-error/40",
   cancelled: "bg-surface-2 border-border",
   info: "bg-surface-2 border-accent/40",
+  warning: "bg-warning-subtle border-warning/40",
 };
 
 const VARIANT_ICONS: Record<ToastData["variant"], LucideIcon> = {
@@ -22,6 +23,7 @@ const VARIANT_ICONS: Record<ToastData["variant"], LucideIcon> = {
   error: AlertTriangle,
   cancelled: X,
   info: Info,
+  warning: AlertTriangle,
 };
 
 const VARIANT_ICON_COLORS: Record<ToastData["variant"], string> = {
@@ -29,6 +31,7 @@ const VARIANT_ICON_COLORS: Record<ToastData["variant"], string> = {
   error: "text-error",
   cancelled: "text-fg-muted",
   info: "text-accent",
+  warning: "text-warning",
 };
 
 function truncateForAria(text: string): string {
@@ -86,7 +89,9 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
       <div className="flex-1 min-w-0">
         <p className="truncate text-sm font-medium text-fg">{toast.title}</p>
         {toast.detail && toast.variant !== "error" && (
-          <p className="mt-0.5 truncate text-xs text-fg-secondary">{toast.detail}</p>
+          <p className="mt-0.5 truncate text-xs text-fg-secondary">
+            {toast.detail}
+          </p>
         )}
         {canExpand && (
           <>

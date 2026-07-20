@@ -119,6 +119,36 @@ fn write_srt(path: &Path, text: &str) {
     std::fs::write(path, format!("1\n00:00:00,200 --> 00:00:01,500\n{text}\n")).unwrap();
 }
 
+/// A cp1252 subtitle: one accented cue, one pure-ASCII cue.
+///
+/// This shape is the whole point. ffmpeg drops only the cues it cannot
+/// decode and exits 0, so a file that is *mostly* ASCII loses a line or two
+/// and still reports success — the silent case. A file where every cue is
+/// undecodable fails loudly instead, and would not catch the regression.
+fn write_cp1252_srt(path: &Path) {
+    let mut bytes = b"1\n00:00:00,200 --> 00:00:01,000\n".to_vec();
+    // "Cafe a cote de l'hotel" with cp1252 accents (0xE9 = e-acute,
+    // 0xE0 = a-grave, 0xF4 = o-circumflex).
+    bytes.extend_from_slice(b"Caf\xE9 \xE0 c\xF4t\xE9 de l'h\xF4tel\n\n");
+    bytes.extend_from_slice(b"2\n00:00:01,100 --> 00:00:01,800\nplain ascii cue\n");
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Number of cues in a subtitle file ffmpeg can read back.
+fn cue_count(r: &BinaryResolver, path: &Path) -> usize {
+    let ffmpeg = r.resolve("ffmpeg").expect("ffmpeg").path;
+    let out = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-c:s", "webvtt", "-f", "webvtt", "-"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("-->"))
+        .count()
+}
+
 /// A 2-second colour clip with a silent audio track.
 fn make_source(ffmpeg: &Path, out: &Path) {
     let status = Command::new(ffmpeg)
@@ -229,6 +259,126 @@ async fn soft_embed_produces_a_playable_subtitle_track() {
     // `-c copy` followed by `-c:s mov_text` must transcode only the
     // subtitle and leave the a/v streams copied.
     assert_eq!(subtitle_codecs(&r, &out), vec!["mov_text"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_embed_keeps_every_cue_of_a_legacy_codepage_subtitle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let subs = tmp.path().join("subs.srt");
+    let out = tmp.path().join("out.mp4");
+    make_source(&ffmpeg, &src);
+    write_cp1252_srt(&subs);
+
+    // Guard the guard: without -sub_charenc ffmpeg keeps only the ASCII
+    // cue, so a 2-cue result below really is the fix working rather than
+    // the fixture being decodable all along.
+    assert_eq!(
+        cue_count(&r, &subs),
+        1,
+        "fixture must lose a cue when read as UTF-8, or this test proves nothing"
+    );
+
+    convert(
+        &r,
+        &request(
+            &src,
+            &out,
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: subs.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        ),
+    )
+    .await
+    .expect("soft embed of a cp1252 subtitle should succeed");
+
+    assert_eq!(
+        cue_count(&r, &out),
+        2,
+        "the accented cue was dropped: the encoding was not detected"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn extracting_from_a_container_leaves_utf8_text_untouched() {
+    // Extraction shares its request shape with standalone srt↔vtt
+    // conversion — no attached subtitle, subtitle target — so charset
+    // detection has to tell them apart by source kind. Sniffing the
+    // container guesses a codepage from binary media and forces it onto an
+    // embedded track that was already valid UTF-8, turning a byte-perfect
+    // extraction into mojibake while still exiting 0.
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let subs = tmp.path().join("subs.srt");
+    let container = tmp.path().join("with_subs.mkv");
+    let out = tmp.path().join("out.srt");
+
+    const TEXT: &str = "Café à côté de l'hôtel, très élégant";
+    make_source(&ffmpeg, &src);
+    write_srt(&subs, TEXT);
+    let status = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&src)
+        .arg("-i")
+        .arg(&subs)
+        .args(["-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt"])
+        .arg(&container)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to mux the subtitle into the mkv");
+
+    convert(&r, &request(&container, &out, TargetFormat::Srt, None))
+        .await
+        .expect("extraction should succeed");
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains(TEXT),
+        "embedded UTF-8 text was mangled on the way out: {text}"
+    );
+    assert!(
+        !text.contains("CafÃ"),
+        "text was re-decoded through a guessed codepage: {text}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn srt_to_vtt_keeps_every_cue_of_a_legacy_codepage_subtitle() {
+    // The standalone conversion path reads the subtitle as its *main*
+    // input, so it needs the encoding detected somewhere else entirely.
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let subs = tmp.path().join("subs.srt");
+    let out = tmp.path().join("out.vtt");
+    write_cp1252_srt(&subs);
+    assert_eq!(cue_count(&r, &subs), 1, "fixture must be lossy as UTF-8");
+
+    convert(&r, &request(&subs, &out, TargetFormat::Vtt, None))
+        .await
+        .expect("srt to vtt of a cp1252 subtitle should succeed");
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        text.lines().filter(|l| l.contains("-->")).count(),
+        2,
+        "cue dropped in conversion: {text}"
+    );
+    assert!(
+        text.contains("Café à côté de l'hôtel"),
+        "text was not decoded to UTF-8: {text}"
+    );
 }
 
 #[tokio::test]

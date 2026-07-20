@@ -48,6 +48,12 @@ pub enum WarningCode {
     /// browser, etc.) and the extractor retried without cookies. Emitted at most
     /// once per job: each extractor's fallback is a single non-looping retry.
     CookieFallback,
+    /// ffmpeg couldn't decode some subtitle cues, so they are missing from the
+    /// output. It drops undecodable cues and still exits 0, so without this the
+    /// job reports plain success and the lost lines are invisible — which is
+    /// the whole failure mode subtitle encoding detection exists to prevent.
+    /// Reaching this means detection guessed the character set wrong.
+    SubtitleCuesDropped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
