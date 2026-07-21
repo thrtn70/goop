@@ -183,6 +183,15 @@ fn is_safe_filter_label(label: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Subtitle codecs Matroska stores untouched.
+///
+/// Deliberately narrower than [`TEXT_SUBTITLE_CODECS`], which answers "can
+/// ffmpeg transcode this into a text codec". This one answers "can it be
+/// written into a `.mkv` as-is": `mov_text`, `microdvd` and the rest are
+/// text but have no Matroska mapping, and asking for a copy aborts the mux
+/// with "Subtitle codec … is not supported".
+const MATROSKA_NATIVE_SUBTITLE_CODECS: &[&str] = &["subrip", "srt", "text", "ass", "ssa", "webvtt"];
+
 /// Whether every existing subtitle stream can be carried into `target`.
 ///
 /// Unknown codecs count as "not text": preserving them risks aborting the
@@ -193,6 +202,112 @@ pub(crate) fn can_preserve_existing(subtitle_codecs: &[String]) -> bool {
         && subtitle_codecs
             .iter()
             .all(|c| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+}
+
+/// Whether `plan` transcodes audio rather than stream-copying it.
+///
+/// A re-encoding plan rewrites *every* mapped audio stream into the one
+/// codec it names, which is what makes carrying the source's secondary
+/// tracks safe even when they started out in something exotic.
+fn reencodes_audio(plan: &Plan) -> bool {
+    plan.args
+        .windows(2)
+        .any(|w| w[0] == "-c:a" && w[1] != "copy")
+}
+
+/// The `-map` selector for the source's audio streams.
+///
+/// Explicit maps replace ffmpeg's automatic selection wholesale, and that
+/// default keeps exactly one audio stream — so `0:a:0?` costs a
+/// multi-language film every track but the first. Mapping all of them is
+/// only safe when each one lands somewhere the container can describe:
+///
+/// * **Matroska** identifies codecs by CodecID string and accepts anything
+///   ffmpeg can demux, so it always takes the wide map.
+/// * **MP4 / MOV / WebM** only take it when the plan re-encodes audio.
+///   Under a stream copy the plan was chosen from the *first* audio stream
+///   alone — `ProbeResult::audio_codec` is single-stream — leaving a
+///   secondary track completely unvetted. WebM's muxer rejects one outright
+///   and aborts the job; MP4/MOV are worse, boxing a Vorbis stream under
+///   the `mp4a` (AAC) FourCC and still reporting success, so the track
+///   arrives silently undecodable. A missing track beats a corrupt one.
+///
+/// All three behaviours verified against the bundled ffmpeg 7.0.
+fn audio_map(target: TargetFormat, plan: &Plan) -> &'static str {
+    match target {
+        TargetFormat::Mkv => "0:a?",
+        _ if reencodes_audio(plan) => "0:a?",
+        _ => "0:a:0?",
+    }
+}
+
+/// The `-c:s` value for carrying the source's *own* subtitle streams into
+/// `target`, or `None` when `target` holds no text subtitle at all.
+///
+/// Matroska gets `copy` whenever every source stream is one it stores
+/// natively: rewriting an ASS track to SubRip would silently flatten its
+/// styling, and there is nothing to gain by doing so. Every other container
+/// (and any Matroska source carrying something exotic) is rewritten into
+/// the container's single text codec.
+pub(crate) fn preserve_codec(
+    target: TargetFormat,
+    source_codecs: &[String],
+) -> Option<&'static str> {
+    let codec = soft_codec(target)?;
+    let all_native = source_codecs
+        .iter()
+        .all(|c| MATROSKA_NATIVE_SUBTITLE_CODECS.contains(&c.as_str()));
+    if target == TargetFormat::Mkv && all_native {
+        return Some("copy");
+    }
+    Some(codec)
+}
+
+/// Map the source's own streams through when nothing is being attached.
+///
+/// Without this ffmpeg falls back to automatic stream selection, which
+/// keeps at most one subtitle stream — and none at all for MP4, whose
+/// muxer has no default subtitle codec, so the tracks vanish and the job
+/// still reports success.
+///
+/// Returns whether any args were added. Callers must have checked
+/// [`can_preserve_existing`] first; targets that carry no text subtitle
+/// (audio-only, GIF, images) and sources with no subtitle streams are
+/// left untouched here as well, so no stream maps are invented for files
+/// that don't need them.
+pub(crate) fn preserve_existing_in_plan(
+    plan: &mut Plan,
+    target: TargetFormat,
+    source_codecs: &[String],
+) -> bool {
+    if source_codecs.is_empty() {
+        return false;
+    }
+    // The abort this whole gate exists to prevent. Cheap insurance against a
+    // future caller dropping the `can_preserve_existing` check upstream.
+    debug_assert!(
+        can_preserve_existing(source_codecs),
+        "preserving {source_codecs:?} would force a bitmap subtitle into a text \
+         codec and abort the mux"
+    );
+    let Some(codec) = preserve_codec(target, source_codecs) else {
+        return false;
+    };
+    let audio = audio_map(target, plan);
+    plan.args.extend([
+        "-map".to_string(),
+        // Only the first video stream, matching the automatic selection
+        // this replaces. `0:v?` would additionally promote an attached
+        // cover image into a second, re-encoded video track.
+        "0:v:0?".to_string(),
+        "-map".to_string(),
+        audio.to_string(),
+        "-map".to_string(),
+        "0:s?".to_string(),
+        "-c:s".to_string(),
+        codec.to_string(),
+    ]);
+    true
 }
 
 /// Attach `sub_path` to `plan` according to `mode`.
@@ -231,15 +346,21 @@ pub(crate) fn apply_to_plan(
     match mode {
         SubtitleMode::Soft => {
             let codec = soft_codec(target).expect("supports() checked this target has a codec");
-            // Explicit maps: taking the first video and audio stream from
-            // input 0 and the subtitle from input 1. The `?` suffixes keep a
-            // video-only or silent source working. Without explicit maps
-            // ffmpeg's default stream selection ignores the second input.
+            // Explicit maps: the first video stream and *every* audio
+            // stream from input 0, plus the subtitle from input 1. The `?`
+            // suffixes keep a video-only or silent source working. Without
+            // explicit maps ffmpeg's default stream selection ignores the
+            // second input entirely.
+            //
+            // See [`audio_map`] for why the audio selector is not narrowed
+            // to `0:a:0?` the way the video one is: attaching a subtitle
+            // must not cost a film its other language tracks.
+            let audio = audio_map(target, plan);
             plan.args.extend([
                 "-map".to_string(),
                 "0:v:0?".to_string(),
                 "-map".to_string(),
-                "0:a:0?".to_string(),
+                audio.to_string(),
             ]);
             // Because the maps above are exhaustive, subtitle streams the
             // source already had are dropped unless they are named too.
@@ -782,10 +903,223 @@ mod tests {
         assert_eq!(
             plan.args,
             vec![
-                "-c", "copy", "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-map", "1:0",
+                "-c", "copy", "-map", "0:v:0?", "-map", "0:a?", "-map", "0:s?", "-map", "1:0",
                 "-c:s", "srt",
             ]
         );
+    }
+
+    #[test]
+    fn attaching_a_subtitle_keeps_every_audio_stream_it_safely_can() {
+        // Regression: `0:a:0?` silently discarded the commentary and
+        // second-language tracks of anything with more than one. Matroska
+        // can hold them whatever they are, so it gets the wide map even on
+        // the stream-copy fast path.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        apply_to_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            SubtitleMode::Soft,
+            Path::new("/tmp/s.srt"),
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert!(plan.args.iter().any(|a| a == "0:a?"));
+        assert!(!plan.args.iter().any(|a| a == "0:a:0?"));
+    }
+
+    #[test]
+    fn matroska_always_takes_every_audio_stream() {
+        // Matroska identifies codecs by CodecID string, so a secondary
+        // track needs no vetting no matter how the plan handles audio.
+        let copy = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(audio_map(TargetFormat::Mkv, &copy), "0:a?");
+    }
+
+    #[test]
+    fn a_stream_copy_into_mp4_or_webm_keeps_only_the_first_audio_stream() {
+        // The plan's copy-eligibility was decided from the *first* audio
+        // stream alone, so a secondary track is unvetted. WebM aborts on
+        // one; MP4/MOV silently box Vorbis under the `mp4a` (AAC) FourCC
+        // and still report success. Dropping it beats corrupting it.
+        // Source codecs are chosen per target so each lands on its own
+        // stream-copy fast path rather than an encoding plan.
+        for (t, vcodec, acodec) in [
+            (TargetFormat::Mp4, "h264", "aac"),
+            (TargetFormat::Mov, "h264", "aac"),
+            (TargetFormat::Webm, "vp9", "opus"),
+        ] {
+            let mut plan = crate::compat::decide(t, Some(vcodec), Some(acodec), None, None, None);
+            assert!(
+                !reencodes_audio(&plan),
+                "precondition: {t:?} should be a copy plan"
+            );
+            assert_eq!(audio_map(t, &plan), "0:a:0?", "{t:?}");
+
+            // ...but once audio is transcoded, every mapped stream lands in
+            // one known-good codec, so the wide map becomes safe.
+            plan.args.extend(["-c:a".to_string(), "aac".to_string()]);
+            assert_eq!(audio_map(t, &plan), "0:a?", "{t:?} re-encoding");
+        }
+    }
+
+    #[test]
+    fn an_explicit_audio_copy_is_not_mistaken_for_a_re_encode() {
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        plan.args.extend(["-c:a".to_string(), "copy".to_string()]);
+        assert!(!reencodes_audio(&plan));
+        assert_eq!(audio_map(TargetFormat::Mp4, &plan), "0:a:0?");
+    }
+
+    #[test]
+    fn preserving_into_webm_narrows_the_audio_map_on_a_copy_plan() {
+        // Guards the wiring between `preserve_existing_in_plan` and
+        // `audio_map`: WebM is the target where getting this wrong aborts
+        // the mux outright rather than merely corrupting a track.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Webm,
+            Some("vp9"),
+            Some("opus"),
+            None,
+            None,
+            None,
+        );
+        assert!(!plan.reencoded, "precondition: this is a remux plan");
+        assert!(preserve_existing_in_plan(
+            &mut plan,
+            TargetFormat::Webm,
+            &["subrip".to_string()]
+        ));
+
+        assert!(plan.args.iter().any(|a| a == "0:a:0?"));
+        assert!(!plan.args.iter().any(|a| a == "0:a?"));
+    }
+
+    // --- Preserving with nothing attached -------------------------------
+
+    #[test]
+    fn preserving_maps_video_audio_and_subtitles_with_a_container_codec() {
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(preserve_existing_in_plan(
+            &mut plan,
+            TargetFormat::Mp4,
+            &["subrip".to_string(), "subrip".to_string()]
+        ));
+
+        assert_eq!(
+            plan.args,
+            vec![
+                "-c", "copy", "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-c:s",
+                "mov_text",
+            ],
+            "an MP4 stream copy keeps only the vetted first audio stream"
+        );
+        // Carrying tracks the source already had must not force an encode.
+        assert!(!plan.reencoded);
+    }
+
+    #[test]
+    fn preserving_copies_matroska_native_codecs_instead_of_flattening_them() {
+        // Rewriting ASS to SubRip would silently drop its styling, and
+        // Matroska stores ASS as-is, so there is nothing to gain by it.
+        assert_eq!(
+            preserve_codec(TargetFormat::Mkv, &["ass".to_string()]),
+            Some("copy")
+        );
+        assert_eq!(
+            preserve_codec(
+                TargetFormat::Mkv,
+                &["subrip".to_string(), "ass".to_string()]
+            ),
+            Some("copy")
+        );
+        // mov_text is text, but Matroska has no mapping for it — a copy
+        // aborts the mux, so it has to be rewritten.
+        assert_eq!(
+            preserve_codec(TargetFormat::Mkv, &["mov_text".to_string()]),
+            Some("srt")
+        );
+        // Other containers always rewrite into their one text codec.
+        assert_eq!(
+            preserve_codec(TargetFormat::Mp4, &["ass".to_string()]),
+            Some("mov_text")
+        );
+        assert_eq!(
+            preserve_codec(TargetFormat::Webm, &["subrip".to_string()]),
+            Some("webvtt")
+        );
+    }
+
+    #[test]
+    fn preserving_leaves_targets_that_carry_no_subtitle_alone() {
+        // Audio-only, GIF and image targets must gain no stream maps at
+        // all — mapping `0:v:0?` into an MP3 would be nonsense.
+        for t in [
+            TargetFormat::Mp3,
+            TargetFormat::Wav,
+            TargetFormat::Flac,
+            TargetFormat::Gif,
+            TargetFormat::Avi,
+            TargetFormat::Png,
+        ] {
+            let mut plan = crate::compat::decide(t, Some("h264"), Some("aac"), None, None, None);
+            let before = plan.args.clone();
+            assert!(
+                !preserve_existing_in_plan(&mut plan, t, &["subrip".to_string()]),
+                "{t:?}"
+            );
+            assert_eq!(plan.args, before, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn preserving_adds_nothing_when_the_source_has_no_subtitles() {
+        // A file with no subtitle streams must not gain stream maps, which
+        // would needlessly override ffmpeg's automatic selection.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(!preserve_existing_in_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            &[]
+        ));
+        assert_eq!(plan.args, vec!["-c", "copy"]);
     }
 
     #[test]
