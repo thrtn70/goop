@@ -51,12 +51,24 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         .iter()
         .find(|s| s.codec_type.as_deref() == Some("audio"));
 
+    let subtitle_codecs: Vec<String> = streams
+        .iter()
+        .filter(|s| s.codec_type.as_deref() == Some("subtitle"))
+        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .collect();
+
     let has_video = video.is_some();
     let has_audio = audio.is_some();
+    let has_subtitles = !subtitle_codecs.is_empty();
+    // A container's kind is decided by its richest stream: a video with
+    // embedded subs is still a video. Only a file whose *only* content is
+    // a subtitle stream (a bare .srt / .vtt) is a Subtitle source.
     let source_kind = if has_video {
         goop_core::SourceKind::Video
     } else if has_audio {
         goop_core::SourceKind::Audio
+    } else if has_subtitles {
+        goop_core::SourceKind::Subtitle
     } else {
         goop_core::SourceKind::Video // fallback; image sources use a different probe
     };
@@ -74,6 +86,8 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         source_kind,
         color_space: None,
         image_format: None,
+        has_subtitles,
+        subtitle_codecs,
     })
 }
 
@@ -99,6 +113,68 @@ mod tests {
         { "codec_type": "audio", "codec_name": "opus" }
       ]
     }"#;
+
+    /// Real `ffprobe` output for a bare `.srt` — note there is no
+    /// `duration` key at all, and the only stream is a subtitle one.
+    const SRT_JSON: &[u8] = br#"{
+      "format": { "format_name": "srt", "size": "92" },
+      "streams": [
+        { "codec_type": "subtitle", "codec_name": "subrip" }
+      ]
+    }"#;
+
+    const VTT_JSON: &[u8] = br#"{
+      "format": { "format_name": "webvtt", "size": "64" },
+      "streams": [
+        { "codec_type": "subtitle", "codec_name": "webvtt" }
+      ]
+    }"#;
+
+    const MKV_WITH_SUBS: &[u8] = br#"{
+      "format": { "format_name": "matroska,webm", "duration": "60.0", "size": "8000000" },
+      "streams": [
+        { "codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720 },
+        { "codec_type": "audio", "codec_name": "aac" },
+        { "codec_type": "subtitle", "codec_name": "subrip" }
+      ]
+    }"#;
+
+    #[test]
+    fn parses_bare_srt_as_subtitle_source() {
+        let r = parse_probe_json(SRT_JSON).unwrap();
+        // Regression: before subtitle support this fell through to the
+        // Video fallback, leaving the target picker fully disabled.
+        assert_eq!(r.source_kind, goop_core::SourceKind::Subtitle);
+        assert!(r.has_subtitles);
+        assert_eq!(r.subtitle_codecs, vec!["subrip"]);
+        assert!(!r.has_video);
+        assert!(!r.has_audio);
+        assert_eq!(r.duration_ms, 0);
+    }
+
+    #[test]
+    fn parses_bare_vtt_as_subtitle_source() {
+        let r = parse_probe_json(VTT_JSON).unwrap();
+        assert_eq!(r.source_kind, goop_core::SourceKind::Subtitle);
+        assert_eq!(r.subtitle_codecs, vec!["webvtt"]);
+    }
+
+    #[test]
+    fn video_with_embedded_subs_stays_a_video_source() {
+        let r = parse_probe_json(MKV_WITH_SUBS).unwrap();
+        assert_eq!(r.source_kind, goop_core::SourceKind::Video);
+        assert!(r.has_video);
+        assert!(r.has_audio);
+        assert!(r.has_subtitles);
+        assert_eq!(r.subtitle_codecs, vec!["subrip"]);
+    }
+
+    #[test]
+    fn sources_without_subtitles_report_none() {
+        let r = parse_probe_json(MP4_JSON).unwrap();
+        assert!(!r.has_subtitles);
+        assert!(r.subtitle_codecs.is_empty());
+    }
 
     #[test]
     fn parses_mp4() {

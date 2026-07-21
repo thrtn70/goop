@@ -47,7 +47,10 @@ pub fn decide(
             None => plan_webm(vcodec, acodec),
         },
         TargetFormat::Gif => plan_gif(gif_opts),
-        TargetFormat::Avi => plan_avi(vcodec, acodec),
+        TargetFormat::Avi => match force_preset {
+            Some(_) => plan_avi_encode(),
+            None => plan_avi(vcodec, acodec),
+        },
         TargetFormat::Mov => {
             let mut p = match force_preset {
                 Some(q) => plan_mp4_encode(q),
@@ -64,6 +67,7 @@ pub fn decide(
         TargetFormat::Ogg => plan_audio_only(acodec, audio_ogg),
         TargetFormat::Aac => plan_audio_only(acodec, audio_aac_raw),
         TargetFormat::ExtractAudioKeepCodec => plan_extract_audio(acodec),
+        TargetFormat::Srt | TargetFormat::Vtt => crate::subtitle::plan_extract(target),
         // Image targets are handled by ImageMagick, not ffmpeg.
         TargetFormat::Png
         | TargetFormat::Jpeg
@@ -83,6 +87,7 @@ pub fn decide(
     if let Some(cap) = res_cap {
         if cap != ResolutionCap::Original
             && !target.is_image()
+            && !target.is_subtitle()
             && plan.args.iter().all(|a| a != "-vn")
         {
             let w = match cap {
@@ -262,21 +267,25 @@ fn plan_avi(vcodec: Option<&str>, acodec: Option<&str>) -> Plan {
             reencoded: false,
             ext: "avi",
         },
-        _ => Plan {
-            args: args(&[
-                "-c:v",
-                "libxvid",
-                "-q:v",
-                "4",
-                "-c:a",
-                "libmp3lame",
-                "-q:a",
-                "2",
-            ]),
-            video_filters: vec![],
-            reencoded: true,
-            ext: "avi",
-        },
+        _ => plan_avi_encode(),
+    }
+}
+
+fn plan_avi_encode() -> Plan {
+    Plan {
+        args: args(&[
+            "-c:v",
+            "libxvid",
+            "-q:v",
+            "4",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ]),
+        video_filters: vec![],
+        reencoded: true,
+        ext: "avi",
     }
 }
 
@@ -566,6 +575,9 @@ pub fn decide_compression(
             }
         }
         TargetFormat::ExtractAudioKeepCodec => plan_extract_audio(acodec),
+        // Subtitle extraction has no size to compress — the Compress tab
+        // never offers these targets, so fall back to the convert plan.
+        TargetFormat::Srt | TargetFormat::Vtt => crate::subtitle::plan_extract(target),
         // Image targets handled above.
         TargetFormat::Png
         | TargetFormat::Jpeg
@@ -778,6 +790,92 @@ mod tests {
 
     fn d(target: TargetFormat, vc: Option<&str>, ac: Option<&str>) -> Plan {
         decide(target, vc, ac, None, None, None)
+    }
+
+    // --- Subtitle targets + burn-in prerequisites ---
+
+    #[test]
+    fn srt_target_extracts_first_subtitle_stream() {
+        let p = d(TargetFormat::Srt, None, None);
+        assert_eq!(p.args, vec!["-map", "0:s:0", "-c:s", "srt"]);
+        assert_eq!(p.ext, "srt");
+        assert!(p.reencoded);
+        assert!(p.video_filters.is_empty());
+    }
+
+    #[test]
+    fn vtt_target_extracts_first_subtitle_stream() {
+        let p = d(TargetFormat::Vtt, None, None);
+        assert_eq!(p.args, vec!["-map", "0:s:0", "-c:s", "webvtt"]);
+        assert_eq!(p.ext, "vtt");
+    }
+
+    #[test]
+    fn resolution_cap_is_ignored_for_subtitle_targets() {
+        // A subtitle-only output has no video stream to scale; a stray cap
+        // (e.g. left over from a preset) must not add a `scale` filter.
+        let p = decide(
+            TargetFormat::Srt,
+            None,
+            None,
+            None,
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        assert!(p.video_filters.is_empty());
+    }
+
+    #[test]
+    fn avi_quality_preset_forces_reencode() {
+        // Every other target honours an explicit preset; AVI used to ignore
+        // it and remux, which would silently skip burn-in.
+        let p = decide(
+            TargetFormat::Avi,
+            Some("mpeg4"),
+            Some("mp3"),
+            Some(QualityPreset::Fast),
+            None,
+            None,
+        );
+        assert!(p.reencoded, "an explicit preset must force an encode");
+        assert!(p.args.iter().any(|a| a == "libxvid"));
+    }
+
+    #[test]
+    fn avi_without_preset_still_remuxes_compatible_streams() {
+        let p = d(TargetFormat::Avi, Some("mpeg4"), Some("mp3"));
+        assert!(!p.reencoded);
+        assert_eq!(p.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn hw_substitution_preserves_trailing_subtitle_args() {
+        // Soft-embed appends `-map`/`-c:s` to the end of plan.args. The HW
+        // encoder rewrite walks the `-c:v libx264` window; everything after
+        // it must survive verbatim and in order, or the muxed subtitle
+        // track vanishes whenever GPU encoding kicks in.
+        let mut p = decide(
+            TargetFormat::Mp4,
+            Some("hevc"),
+            Some("aac"),
+            Some(QualityPreset::Balanced),
+            None,
+            None,
+        );
+        p.args
+            .extend(args(&["-map", "0:v:0?", "-map", "1:0", "-c:s", "mov_text"]));
+        let out = substitute_h264_hw(&p.args, "h264_videotoolbox", Some(QualityPreset::Balanced))
+            .expect("libx264 plan must substitute");
+        assert!(out.windows(2).any(|w| w == ["-c:v", "h264_videotoolbox"]));
+        let tail: Vec<&str> = out
+            .iter()
+            .skip_while(|a| *a != "-map")
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            tail,
+            vec!["-map", "0:v:0?", "-map", "1:0", "-c:s", "mov_text"]
+        );
     }
 
     // --- Existing v0.1.3 tests (adapted to new signature) ---

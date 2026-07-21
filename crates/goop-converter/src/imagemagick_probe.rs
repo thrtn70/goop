@@ -39,6 +39,8 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         source_kind: SourceKind::Image,
         color_space: Some("sRGB".to_string()),
         image_format,
+        has_subtitles: false,
+        subtitle_codecs: vec![],
     })
 }
 

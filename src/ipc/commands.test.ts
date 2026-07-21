@@ -325,3 +325,31 @@ describe("queue job-control wire canaries", () => {
     expect(invokeMock).toHaveBeenCalledWith("queue_resume", { jobId: "abc" });
   });
 });
+
+// The subtitle payload crosses the IPC boundary as a nested object whose
+// field names must match the serde shape of `SubtitleOptions` exactly —
+// a rename on either side would only surface at runtime.
+describe("convert subtitle wire canary", () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+  });
+
+  it("passes subtitle options through untouched", async () => {
+    const req = {
+      input_path: "/in.mp4",
+      output_path: "/out.mp4",
+      target: "mp4",
+      quality_preset: null,
+      resolution_cap: null,
+      gif_options: null,
+      compress_mode: null,
+      batch_id: null,
+      metadata_policy: null,
+      subtitle: { source_path: "/subs.srt", mode: "burn_in" },
+    } as const;
+
+    await api.convert.fromFile(req);
+
+    expect(invokeMock).toHaveBeenCalledWith("convert_from_file", { req });
+  });
+});

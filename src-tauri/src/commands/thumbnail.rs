@@ -51,6 +51,10 @@ fn infer_source_kind(payload: &serde_json::Value, output_path: &std::path::Path)
         "pdf" => SourceKind::Pdf,
         "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" => SourceKind::Image,
         "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "opus" => SourceKind::Audio,
+        // Without this a subtitle output falls through to Video and the
+        // ffmpeg generator fails with a decode error instead of a clean
+        // "no preview".
+        "srt" | "vtt" => SourceKind::Subtitle,
         _ => SourceKind::Video,
     }
 }

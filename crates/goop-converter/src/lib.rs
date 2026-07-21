@@ -14,6 +14,7 @@ pub mod metadata;
 pub mod naming;
 pub mod probe_json;
 pub mod progress;
+pub mod subtitle;
 
 pub use backend::{backend_for_extension, BackendKind, ConversionBackend};
 pub use compat::{decide, Plan};

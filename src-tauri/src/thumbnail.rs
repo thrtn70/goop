@@ -54,6 +54,11 @@ pub enum ThumbError {
     /// closed during teardown produces this.
     #[error("thumbnail service unavailable: {0}")]
     Unavailable(String),
+    /// The output has nothing to render a preview from — a subtitle file
+    /// is text, not pixels. Not a failure: the caller shows the generic
+    /// file icon it already falls back to.
+    #[error("no preview for this file type")]
+    NoPreview,
 }
 
 /// Service handle — cheap to clone. Callers keep it in the Tauri `AppState`
@@ -158,6 +163,7 @@ impl ThumbnailService {
                 .await?
             }
             SourceKind::Audio => generate_audio_waveform(resolver, output_path, &cached).await?,
+            SourceKind::Subtitle => return Err(ThumbError::NoPreview),
         }
 
         self.evict_if_over_budget();

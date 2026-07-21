@@ -25,6 +25,10 @@ pub enum TargetFormat {
     Ogg,
     Aac,
     ExtractAudioKeepCodec,
+    // Subtitle. Standalone subtitle-to-subtitle conversion; also the
+    // extraction target for a subtitle stream inside a container.
+    Srt,
+    Vtt,
     // Image
     Png,
     Jpeg,
@@ -59,6 +63,10 @@ impl TargetFormat {
         )
     }
 
+    pub fn is_subtitle(self) -> bool {
+        matches!(self, Self::Srt | Self::Vtt)
+    }
+
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mp4 => "mp4",
@@ -75,6 +83,8 @@ impl TargetFormat {
             Self::Ogg => "ogg",
             Self::Aac => "aac",
             Self::ExtractAudioKeepCodec => "mka",
+            Self::Srt => "srt",
+            Self::Vtt => "vtt",
             Self::Png => "png",
             Self::Jpeg => "jpg",
             Self::Webp => "webp",
@@ -142,6 +152,34 @@ pub struct GifOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Subtitle options
+// ---------------------------------------------------------------------------
+
+/// How an external subtitle file is attached to a video conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum SubtitleMode {
+    /// Mux as a selectable track. Keeps the remux fast path when the
+    /// audio/video streams are already compatible with the target.
+    Soft,
+    /// Render the subtitles into the video frames. Always re-encodes,
+    /// and the result can't be turned off in the player.
+    BurnIn,
+}
+
+/// An external `.srt` / `.vtt` to attach during a video conversion.
+///
+/// `None` on a `ConvertRequest` means no subtitle handling at all — the
+/// pre-subtitle behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub struct SubtitleOptions {
+    pub source_path: String,
+    pub mode: SubtitleMode,
+}
+
+// ---------------------------------------------------------------------------
 // Source kind (set by probe)
 // ---------------------------------------------------------------------------
 
@@ -153,6 +191,7 @@ pub enum SourceKind {
     Audio,
     Image,
     Pdf,
+    Subtitle,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +255,11 @@ pub struct ConvertRequest {
     /// `StripAll` opts in to scrubbing.
     #[serde(default)]
     pub metadata_policy: Option<MetadataPolicy>,
+    /// External subtitle to soft-embed or burn in. `None` skips all
+    /// subtitle handling, so pre-subtitle presets and queued job
+    /// payloads keep deserializing unchanged.
+    #[serde(default)]
+    pub subtitle: Option<SubtitleOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -233,6 +277,16 @@ pub struct ProbeResult {
     pub source_kind: SourceKind,
     pub color_space: Option<String>,
     pub image_format: Option<String>,
+    /// True when the source carries at least one subtitle stream —
+    /// either a bare `.srt` / `.vtt` or a container with embedded subs.
+    #[serde(default)]
+    pub has_subtitles: bool,
+    /// Codecs of every subtitle stream, in stream order (`subrip`,
+    /// `webvtt`, `hdmv_pgs_subtitle`, …). The full list matters because
+    /// text and bitmap subtitles can't be transcoded into each other, so
+    /// preserving existing tracks is only safe when they are all text.
+    #[serde(default)]
+    pub subtitle_codecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -283,5 +337,90 @@ mod tests {
         assert_eq!(GifSizePreset::Small.width(), 320);
         assert_eq!(GifSizePreset::Medium.width(), 480);
         assert_eq!(GifSizePreset::Large.width(), 720);
+    }
+
+    #[test]
+    fn is_subtitle_identifies_subtitle_targets() {
+        assert!(TargetFormat::Srt.is_subtitle());
+        assert!(TargetFormat::Vtt.is_subtitle());
+        assert!(!TargetFormat::Mp4.is_subtitle());
+        assert!(!TargetFormat::Mp3.is_subtitle());
+        assert!(!TargetFormat::Png.is_subtitle());
+        // Subtitle targets must never be mistaken for image targets: the
+        // worker branches on `is_image()` to pick the ImageMagick backend.
+        assert!(!TargetFormat::Srt.is_image());
+        assert!(!TargetFormat::Vtt.is_image());
+    }
+
+    #[test]
+    fn subtitle_target_extensions() {
+        assert_eq!(TargetFormat::Srt.extension(), "srt");
+        assert_eq!(TargetFormat::Vtt.extension(), "vtt");
+    }
+
+    #[test]
+    fn subtitle_options_round_trip_snake_case() {
+        let opts = SubtitleOptions {
+            source_path: "/tmp/subs.srt".into(),
+            mode: SubtitleMode::BurnIn,
+        };
+        let s = serde_json::to_string(&opts).unwrap();
+        assert_eq!(s, r#"{"source_path":"/tmp/subs.srt","mode":"burn_in"}"#);
+        assert_eq!(serde_json::from_str::<SubtitleOptions>(&s).unwrap(), opts);
+    }
+
+    #[test]
+    fn subtitle_mode_soft_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SubtitleMode::Soft).unwrap(),
+            r#""soft""#
+        );
+    }
+
+    #[test]
+    fn convert_request_without_subtitle_key_deserializes() {
+        // Back-compat canary: presets and queued job payloads written
+        // before subtitle support must still deserialize.
+        let json = r#"{
+            "input_path": "/in.mp4",
+            "output_path": "/out.mkv",
+            "target": "mkv",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": null
+        }"#;
+        let req: ConvertRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.subtitle, None);
+        assert_eq!(req.metadata_policy, None);
+    }
+
+    #[test]
+    fn convert_request_round_trips_with_subtitle() {
+        let json = r#"{
+            "input_path": "/in.mp4",
+            "output_path": "/out.mp4",
+            "target": "mp4",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": null,
+            "metadata_policy": null,
+            "subtitle": { "source_path": "/subs.vtt", "mode": "soft" }
+        }"#;
+        let req: ConvertRequest = serde_json::from_str(json).unwrap();
+        let sub = req.subtitle.as_ref().expect("subtitle should deserialize");
+        assert_eq!(sub.source_path, "/subs.vtt");
+        assert_eq!(sub.mode, SubtitleMode::Soft);
+    }
+
+    #[test]
+    fn source_kind_subtitle_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SourceKind::Subtitle).unwrap(),
+            r#""subtitle""#
+        );
     }
 }

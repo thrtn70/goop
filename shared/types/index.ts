@@ -59,6 +59,8 @@ export * from './SidecarEvent';
 export * from './SidecarStatus';
 export * from './Source';
 export * from './SourceKind';
+export * from './SubtitleMode';
+export * from './SubtitleOptions';
 export * from './TargetFormat';
 export * from './Theme';
 export * from './UpdateInfo';

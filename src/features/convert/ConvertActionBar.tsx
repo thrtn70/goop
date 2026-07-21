@@ -3,7 +3,9 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
-import type { GifOptions, MetadataPolicy, TargetFormat } from "@/types";
+import { subtitleForTarget } from "./FileRow";
+import { useAppStore } from "@/store/appStore";
+import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat } from "@/types";
 
 export interface FileEntry {
   path: string;
@@ -11,6 +13,7 @@ export interface FileEntry {
   sourceDir: string;
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
+  subtitle: SubtitleOptions | null;
 }
 
 interface ConvertActionBarProps {
@@ -45,7 +48,28 @@ export default function ConvertActionBar({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const count = files.length;
+
+  /** Warn about subtitles the chosen output format can't carry.
+   *
+   * A row clears its own subtitle when you change its format, but a preset
+   * or "apply to all" sets `target` from outside the row, so the mismatch
+   * can survive until submit. Reconciling silently would drop the file
+   * with nothing on screen ever having said so. */
+  function warnAboutDroppedSubtitles(entries: FileEntry[]) {
+    const dropped = entries.filter((f) => f.subtitle && !subtitleForTarget(f.subtitle, f.target));
+    if (dropped.length === 0) return;
+    const formats = [...new Set(dropped.map((f) => f.target.toUpperCase()))].join(", ");
+    enqueueToast({
+      variant: "info",
+      title:
+        dropped.length === 1
+          ? "Subtitle left out of the conversion"
+          : `${dropped.length} subtitles left out of the conversion`,
+      detail: `${formats} can't carry subtitles. Everything else was converted as set.`,
+    });
+  }
 
   async function pickOverrideDir() {
     const picked = await open({ directory: true, title: "Choose output folder" });
@@ -58,6 +82,7 @@ export default function ConvertActionBar({
     if (count === 0) return;
     setBusy(true);
     setError(null);
+    warnAboutDroppedSubtitles(files);
     try {
       if (count === 1) {
         const f = files[0];
@@ -79,6 +104,10 @@ export default function ConvertActionBar({
           compress_mode: null,
           batch_id: null,
           metadata_policy: f.metadataPolicy,
+          // Reconcile here, not just in the row: a preset or "apply to all"
+          // can change `target` without the row's coercion ever running,
+          // which would otherwise send a pairing the backend rejects.
+          subtitle: subtitleForTarget(f.subtitle, f.target),
         });
       } else {
         // Tag every enqueue in this batch with a shared id so toast
@@ -96,6 +125,7 @@ export default function ConvertActionBar({
               compress_mode: null,
               batch_id: batchId,
               metadata_policy: f.metadataPolicy,
+              subtitle: subtitleForTarget(f.subtitle, f.target),
             }),
           ),
         );
@@ -180,6 +210,8 @@ function extFor(target: TargetFormat): string {
     ogg: "ogg",
     aac: "aac",
     extract_audio_keep_codec: "audio",
+    srt: "srt",
+    vtt: "vtt",
     png: "png",
     jpeg: "jpg",
     webp: "webp",

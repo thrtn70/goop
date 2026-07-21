@@ -65,6 +65,8 @@ function extFor(target: TargetFormat): string {
     ogg: "ogg",
     aac: "aac",
     extract_audio_keep_codec: "audio",
+    srt: "srt",
+    vtt: "vtt",
     png: "png",
     jpeg: "jpg",
     webp: "webp",
@@ -127,6 +129,7 @@ export default function CompressActionBar({
           // Compress preserves source metadata by default — the user
           // is asking for a smaller file, not a re-encoded clean copy.
           metadata_policy: "preserve",
+          subtitle: null,
         });
       } else {
         const batchId = newBatchId();
@@ -142,6 +145,7 @@ export default function CompressActionBar({
               compress_mode: normalizeCompressMode(f.mode),
               batch_id: batchId,
               metadata_policy: "preserve",
+              subtitle: null,
             }),
           ),
         );

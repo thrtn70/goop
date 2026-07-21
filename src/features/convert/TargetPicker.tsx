@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import type { TargetFormat, ProbeResult } from "@/types";
 
-type TargetGroup = "video" | "audio" | "image";
+type TargetGroup = "video" | "audio" | "image" | "subtitle";
 
 type TargetOption = {
   value: TargetFormat;
@@ -35,16 +35,21 @@ const TARGETS: TargetOption[] = [
   { value: "jpeg_xl", label: "JXL", hint: "Modern format, great quality at small sizes", group: "image" },
   { value: "tiff", label: "TIFF", hint: "Lossless, great for editing", group: "image" },
   { value: "bmp", label: "BMP", hint: "Uncompressed bitmap", group: "image" },
+  // Subtitle
+  { value: "srt", label: "SRT", hint: "SubRip, works in most players", group: "subtitle" },
+  { value: "vtt", label: "WebVTT", hint: "Subtitle format for web players", group: "subtitle" },
 ];
 
 const GROUP_LABELS: Record<TargetGroup, string> = {
   video: "Video",
   audio: "Audio",
   image: "Image",
+  subtitle: "Subtitle",
 };
 
 function visibleGroups(probe: ProbeResult): TargetGroup[] {
   if (probe.source_kind === "image") return ["image"];
+  if (probe.source_kind === "subtitle") return ["subtitle"];
   const groups: TargetGroup[] = [];
   if (probe.has_video) groups.push("video");
   if (probe.has_audio) groups.push("audio");
@@ -62,11 +67,17 @@ function isAvailable(t: TargetOption, probe: ProbeResult): { ok: boolean; reason
   if (t.value === "extract_audio_keep_codec" && !probe.has_audio) {
     return { ok: false, reason: "No audio to extract" };
   }
+  if (t.group === "subtitle" && !probe.has_subtitles) {
+    return { ok: false, reason: "No subtitle stream" };
+  }
   return { ok: true };
 }
 
 export function smartDefault(probe: ProbeResult): TargetFormat {
   if (probe.source_kind === "image") return "png";
+  // Offer the other subtitle format, since converting to the one it
+  // already is would be a no-op.
+  if (probe.source_kind === "subtitle") return probe.subtitle_codecs[0] === "webvtt" ? "srt" : "vtt";
   if (!probe.has_video && probe.has_audio) return "extract_audio_keep_codec";
   const vc = probe.video_codec ?? "";
   const ac = probe.audio_codec ?? "";

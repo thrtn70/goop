@@ -4,6 +4,7 @@ import type { GifOptions } from "./GifOptions";
 import type { MetadataPolicy } from "./MetadataPolicy";
 import type { QualityPreset } from "./QualityPreset";
 import type { ResolutionCap } from "./ResolutionCap";
+import type { SubtitleOptions } from "./SubtitleOptions";
 import type { TargetFormat } from "./TargetFormat";
 
 export type ConvertRequest = { input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
@@ -12,4 +13,10 @@ export type ConvertRequest = { input_path: string, output_path: string, target: 
  * callers / presets don't need to migrate; an explicit
  * `StripAll` opts in to scrubbing.
  */
-metadata_policy: MetadataPolicy | null, };
+metadata_policy: MetadataPolicy | null, 
+/**
+ * External subtitle to soft-embed or burn in. `None` skips all
+ * subtitle handling, so pre-subtitle presets and queued job
+ * payloads keep deserializing unchanged.
+ */
+subtitle: SubtitleOptions | null, };

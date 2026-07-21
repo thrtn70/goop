@@ -18,6 +18,12 @@ pub enum GoopError {
     Queue(String),
     #[error("config error: {0}")]
     Config(String),
+    /// The request itself is impossible to satisfy — e.g. a subtitle
+    /// attached to an output format that can't carry one. Distinct from
+    /// `SubprocessFailed`: the tool was never run, so there is no stderr
+    /// to interpret, and no retry will help.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("cancelled")]
     Cancelled,
     /// Control-flow sibling of `Cancelled`: the job's pause signal fired
@@ -78,6 +84,7 @@ pub enum IpcError {
     SubprocessFailed(String),
     Queue(String),
     Config(String),
+    InvalidRequest(String),
     Cancelled,
     Unknown(String),
 }
@@ -96,6 +103,7 @@ impl From<GoopError> for IpcError {
             }
             GoopError::Queue(x) => Self::Queue(x),
             GoopError::Config(x) => Self::Config(x),
+            GoopError::InvalidRequest(x) => Self::InvalidRequest(x),
             GoopError::Cancelled => Self::Cancelled,
             // Defensive: Paused is scheduler control flow and should be
             // consumed before any IPC boundary. If it ever leaks, surface
@@ -244,6 +252,13 @@ const PATTERNS: &[(&str, &str)] = &[
     (
         "HTTPError: 429",
         "The site rate-limited the request. Wait a few minutes before trying again.",
+    ),
+    // Burn-in needs an ffmpeg built with libass. The bundled sidecars have
+    // it, but the dev-mode PATH fallback (Homebrew's ffmpeg) does not, and
+    // "No such filter" gives no clue which feature just became unavailable.
+    (
+        "No such filter: 'subtitles'",
+        "This copy of ffmpeg can't burn in subtitles (it was built without libass). Add the subtitles as a track instead, or reinstall Goop to restore the bundled ffmpeg.",
     ),
     (
         "[Errno 2] No such file or directory",
@@ -549,6 +564,18 @@ mod tests {
     fn user_message_passes_through_non_subprocess_variants() {
         let ge = GoopError::Cancelled;
         assert_eq!(ge.user_message(), "cancelled");
+    }
+
+    #[test]
+    fn friendly_message_explains_a_missing_libass_build() {
+        let stderr = "[AVFilterGraph @ 0x74d0c18580] No such filter: 'subtitles'\n\
+                      Error opening output files: Filter not found";
+        let m = friendly_message(stderr).expect("missing libass must map to friendly text");
+        assert!(m.contains("burn in subtitles"), "{m}");
+        assert!(
+            m.contains("track"),
+            "should point at the working alternative: {m}"
+        );
     }
 
     #[test]

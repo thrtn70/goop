@@ -121,6 +121,21 @@ jobs:
           # in-.app variant on macOS only, and only on tags).
           "./src-tauri/bin/gs-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/tesseract-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+      # Subtitle support depends on optional ffmpeg build features, which
+      # differ between the macOS and Windows sources: burn-in needs libass
+      # (the `subtitles` filter) and the muxers need the text encoders.
+      # Assert them per-PR so a sidecar version bump can't quietly remove
+      # a shipped feature.
+      - name: Subtitle capability check
+        shell: bash
+        run: |
+          FFMPEG="./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          "$FFMPEG" -hide_banner -filters | grep -qw subtitles \
+            || { echo "::error::ffmpeg is missing the libass 'subtitles' filter (burn-in)"; exit 1; }
+          for enc in mov_text srt webvtt; do
+            "$FFMPEG" -hide_banner -encoders | grep -qw "$enc" \
+              || { echo "::error::ffmpeg is missing the '$enc' subtitle encoder"; exit 1; }
+          done
       # v0.2.8: per-OS static HEIC stack + link guards. These graduated
       # from the Phase 0 spike (.github/workflows/heic-spike.yml,
       # deleted after the gate passed) so every PR re-proves the
@@ -187,3 +202,14 @@ jobs:
           cargo test -p goop-converter heic
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      # The capability check earlier proves the ffmpeg features exist; this
+      # runs the conversion pipeline against them, and is the only place the
+      # `#[ignore]`d tests act as a standing gate rather than a manual one.
+      #
+      # Must come after the per-OS HEIC setup above: linking goop-converter
+      # needs the static libheif those steps install. Placed earlier it fails
+      # on Windows with `cannot open input file 'heif.lib'` — and passes on
+      # macOS only because Homebrew's libheif masks the missing static one.
+      - name: Subtitle conversions (real ffmpeg)
+        shell: bash
+        run: cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored

@@ -108,28 +108,14 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             }
         };
         let probe = FfmpegBackend::probe(self.resolver, &input).await?;
-        let mut plan = if let Some(mode) = req.compress_mode {
-            crate::compat::decide_compression(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                mode,
-                probe.duration_ms,
-            )
-        } else {
-            decide(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                req.quality_preset,
-                req.resolution_cap,
-                req.gif_options.as_ref(),
-            )
-        };
+        let (mut plan, subtitle_input) = build_plan(req, &probe)?;
 
         let output_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
 
-        let hw_encoder = self.maybe_apply_hw(&mut plan, req.quality_preset);
+        // Same effective quality the plan was built with, so the GPU
+        // encoder's quality args can't drift from the software ones.
+        let quality = effective_quality(req.quality_preset, req.subtitle.as_ref().map(|s| s.mode));
+        let hw_encoder = self.maybe_apply_hw(&mut plan, quality);
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
 
@@ -139,6 +125,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 &input,
                 &output_path,
                 &plan,
+                &subtitle_input,
                 &probe,
                 job_id,
                 current_encoder,
@@ -159,15 +146,23 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                     "hardware encode failed; retrying with software"
                 );
                 let _ = std::fs::remove_file(&output_path);
-                let plan_sw = self.rebuild_software_plan(req, &probe);
+                // Rebuild through the same function so the software retry
+                // carries identical subtitle args — deriving it separately
+                // is how a soft-muxed track would silently vanish on
+                // fallback.
+                let Ok((plan_sw, subtitle_sw)) = build_plan(req, &probe) else {
+                    // Only reachable if the subtitle file vanished between
+                    // the two attempts. Report the encode failure that got
+                    // us here rather than that red herring.
+                    return Err(GoopError::SubprocessFailed { binary, stderr });
+                };
                 current_encoder = None;
-                let _ = stderr; // capture so the error type matches; debug-logged above
-                let _ = binary;
                 self.run_ffmpeg(
                     &bin.path,
                     &input,
                     &output_path,
                     &plan_sw,
+                    &subtitle_sw,
                     &probe,
                     job_id,
                     current_encoder,
@@ -205,30 +200,6 @@ impl<'a> FfmpegBackend<'a> {
         maybe_apply_hw_h264(plan, encoders, quality)
     }
 
-    fn rebuild_software_plan(&self, req: &ConvertRequest, probe: &ProbeResult) -> Plan {
-        // Re-derive the plan without HW substitution. The original `decide`
-        // result is the software baseline; we don't cache it because compat
-        // is cheap and this path only runs after a HW failure.
-        if let Some(mode) = req.compress_mode {
-            crate::compat::decide_compression(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                mode,
-                probe.duration_ms,
-            )
-        } else {
-            decide(
-                req.target,
-                probe.video_codec.as_deref(),
-                probe.audio_codec.as_deref(),
-                req.quality_preset,
-                req.resolution_cap,
-                req.gif_options.as_ref(),
-            )
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn run_ffmpeg(
         &self,
@@ -236,6 +207,7 @@ impl<'a> FfmpegBackend<'a> {
         input: &Path,
         output_path: &Path,
         plan: &Plan,
+        subtitle: &SubtitleInput,
         probe: &ProbeResult,
         job_id: JobId,
         encoder: Option<&'static str>,
@@ -251,12 +223,15 @@ impl<'a> FfmpegBackend<'a> {
             for a in &plan.args[..idx] {
                 cmd.arg(a);
             }
-            cmd.arg("-i").arg(input);
+            // A soft-embedded subtitle is a second input. It must follow the
+            // main `-i` and precede every output option, which is exactly
+            // where the plan's post-input args begin.
+            push_inputs(&mut cmd, input, subtitle);
             for a in &plan.args[idx + 1..] {
                 cmd.arg(a);
             }
         } else {
-            cmd.arg("-i").arg(input);
+            push_inputs(&mut cmd, input, subtitle);
             for a in &plan.args {
                 cmd.arg(a);
             }
@@ -342,12 +317,186 @@ impl<'a> FfmpegBackend<'a> {
             });
         }
 
+        // ffmpeg drops undecodable subtitle cues and still exits 0, so this
+        // line is the only trace that anything went missing. Encoding
+        // detection should have prevented it, but a wrong guess degrades the
+        // same silent way — so route it to the UI rather than a log file the
+        // user of a packaged app will never open.
+        if stderr_tail.contains("Invalid UTF-8 in decoded subtitles") {
+            self.sink.emit_sidecar(goop_core::SidecarEvent::Warning {
+                code: goop_core::WarningCode::SubtitleCuesDropped,
+                message: "Some subtitle lines couldn't be read and are missing from the \
+                              output. The subtitle file's character encoding wasn't recognised."
+                    .to_string(),
+            });
+        }
+
         Ok(plan.reencoded)
     }
 }
 
 /// Backward-compat alias.
 pub type Ffmpeg<'a> = FfmpegBackend<'a>;
+
+/// What ffmpeg needs in order to read this conversion's subtitle text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SubtitleInput {
+    /// Path to open as a second `-i`. `Some` only for soft-embed.
+    path: Option<PathBuf>,
+    /// The `-sub_charenc` value, applied to whichever input carries the
+    /// subtitle text: the second one when `path` is set, the main one
+    /// otherwise (a standalone srt↔vtt conversion reads the subtitle as
+    /// its only input).
+    ///
+    /// Burn-in never sets this — it reads the file through the filtergraph,
+    /// where an input option would never reach it, so the encoding rides on
+    /// the `subtitles=` filter instead.
+    charenc: Option<String>,
+}
+
+/// Emit the `-i` arguments, placing `-sub_charenc` immediately before the
+/// input whose text it describes.
+///
+/// Position is load-bearing: `-sub_charenc` is an *input* option, and ffmpeg
+/// applies it to the next `-i` only. Put it after, and it is silently
+/// ignored — which looks exactly like the bug it is meant to fix.
+fn push_inputs(cmd: &mut Command, input: &Path, subtitle: &SubtitleInput) {
+    match &subtitle.path {
+        Some(sub) => {
+            cmd.arg("-i").arg(input);
+            if let Some(enc) = &subtitle.charenc {
+                cmd.arg("-sub_charenc").arg(enc);
+            }
+            cmd.arg("-i").arg(sub);
+        }
+        None => {
+            if let Some(enc) = &subtitle.charenc {
+                cmd.arg("-sub_charenc").arg(enc);
+            }
+            cmd.arg("-i").arg(input);
+        }
+    }
+}
+
+/// Which quality preset the plan should actually be built with.
+///
+/// Burn-in has to draw onto decoded frames, so a plan that stream-copies
+/// would drop the subtitles without a word. `None` and `Original` both
+/// mean "remux when you can", so they are upgraded to `Balanced`; an
+/// explicitly chosen preset already re-encodes and is left alone.
+fn effective_quality(
+    requested: Option<goop_core::QualityPreset>,
+    mode: Option<goop_core::SubtitleMode>,
+) -> Option<goop_core::QualityPreset> {
+    use goop_core::{QualityPreset, SubtitleMode};
+    match (mode, requested) {
+        (Some(SubtitleMode::BurnIn), None | Some(QualityPreset::Original)) => {
+            Some(QualityPreset::Balanced)
+        }
+        _ => requested,
+    }
+}
+
+/// Build the ffmpeg plan for `req`, plus the path (if any) that must be
+/// opened as a second input.
+///
+/// Both the first attempt and the hardware→software retry go through here,
+/// so the retry can't drift from the original invocation.
+fn build_plan(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+) -> Result<(Plan, SubtitleInput), GoopError> {
+    let mode = req.subtitle.as_ref().map(|s| s.mode);
+
+    let mut plan = if let Some(compress) = req.compress_mode {
+        crate::compat::decide_compression(
+            req.target,
+            probe.video_codec.as_deref(),
+            probe.audio_codec.as_deref(),
+            compress,
+            probe.duration_ms,
+        )
+    } else {
+        decide(
+            req.target,
+            probe.video_codec.as_deref(),
+            probe.audio_codec.as_deref(),
+            effective_quality(req.quality_preset, mode),
+            req.resolution_cap,
+            req.gif_options.as_ref(),
+        )
+    };
+
+    let Some(sub) = req.subtitle.as_ref() else {
+        // A standalone srt↔vtt conversion has no *attached* subtitle: the
+        // subtitle is the main input. Its encoding still has to be detected,
+        // or the conversion drops the very cues that needed it.
+        //
+        // The source kind is what makes that safe to assume. An identical
+        // request shape — no attachment, subtitle target — is also how an
+        // embedded track gets extracted from a *container*, and detecting on
+        // that would feed a whole media file to the charset guesser and then
+        // force its guess onto subtitle text that was already correct UTF-8.
+        // Targeting on the container alone turns a byte-perfect extraction
+        // into silent mojibake.
+        let charenc = (matches!(probe.source_kind, goop_core::SourceKind::Subtitle)
+            && matches!(req.target, TargetFormat::Srt | TargetFormat::Vtt))
+        .then(|| crate::subtitle::detect_charenc_of_file(&goop_core::path::expand(&req.input_path)))
+        .flatten();
+        return Ok((
+            plan,
+            SubtitleInput {
+                path: None,
+                charenc,
+            },
+        ));
+    };
+
+    // Expand but deliberately do NOT canonicalize: on Windows that returns
+    // a `\\?\`-prefixed path, which the filter-graph parser can't consume.
+    let sub_path = goop_core::path::expand(&sub.source_path);
+    if !sub_path.is_file() {
+        return Err(GoopError::InvalidRequest(format!(
+            "subtitle file does not exist: {}",
+            sub.source_path
+        )));
+    }
+
+    let preserve_existing = crate::subtitle::can_preserve_existing(&probe.subtitle_codecs);
+    if sub.mode == goop_core::SubtitleMode::Soft && probe.has_subtitles && !preserve_existing {
+        // Bitmap subtitles (Blu-ray PGS, DVD) can't become text, so the
+        // source's own tracks are left behind rather than aborting the
+        // conversion. Losing them is invisible in the output, so say so
+        // somewhere at least.
+        tracing::warn!(
+            codecs = ?probe.subtitle_codecs,
+            "source subtitle tracks can't be converted to the target's text codec; \
+             they will not be carried over"
+        );
+    }
+    let charenc = crate::subtitle::detect_charenc_of_file(&sub_path);
+    let extra_input = crate::subtitle::apply_to_plan(
+        &mut plan,
+        req.target,
+        sub.mode,
+        &sub_path,
+        preserve_existing,
+        charenc.as_deref(),
+    )?;
+    Ok((
+        plan,
+        SubtitleInput {
+            path: extra_input,
+            // Burn-in already consumed the encoding on the filter. Passing
+            // it again as an input option would aim it at the *video*
+            // input, where it does nothing useful.
+            charenc: match sub.mode {
+                goop_core::SubtitleMode::BurnIn => None,
+                goop_core::SubtitleMode::Soft => charenc,
+            },
+        },
+    ))
+}
 
 fn resolve_output_path(
     input_path: &str,
@@ -383,7 +532,317 @@ pub fn target_extension(target: TargetFormat, acodec: Option<&str>) -> &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goop_core::{QualityPreset, SubtitleMode, SubtitleOptions};
     use std::fs;
+
+    fn req_with(target: TargetFormat, subtitle: Option<SubtitleOptions>) -> ConvertRequest {
+        ConvertRequest {
+            input_path: "/in.mp4".into(),
+            output_path: "/out".into(),
+            target,
+            quality_preset: None,
+            resolution_cap: None,
+            gif_options: None,
+            compress_mode: None,
+            batch_id: None,
+            metadata_policy: None,
+            subtitle,
+        }
+    }
+
+    fn probe_h264_aac() -> ProbeResult {
+        ProbeResult {
+            duration_ms: 1000,
+            width: Some(1920),
+            height: Some(1080),
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            file_size: 1000,
+            container: Some("mov,mp4".into()),
+            has_video: true,
+            has_audio: true,
+            source_kind: goop_core::SourceKind::Video,
+            color_space: None,
+            image_format: None,
+            has_subtitles: false,
+            subtitle_codecs: vec![],
+        }
+    }
+
+    #[test]
+    fn burn_in_upgrades_a_remuxing_quality_to_an_encoding_one() {
+        // `None` / `Original` would remux, which silently drops burn-in.
+        for q in [None, Some(QualityPreset::Original)] {
+            assert_eq!(
+                effective_quality(q, Some(SubtitleMode::BurnIn)),
+                Some(QualityPreset::Balanced),
+                "{q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn burn_in_respects_an_explicitly_chosen_quality() {
+        for q in [QualityPreset::Fast, QualityPreset::Small] {
+            assert_eq!(
+                effective_quality(Some(q), Some(SubtitleMode::BurnIn)),
+                Some(q)
+            );
+        }
+    }
+
+    #[test]
+    fn soft_embed_and_no_subtitle_leave_quality_untouched() {
+        assert_eq!(effective_quality(None, Some(SubtitleMode::Soft)), None);
+        assert_eq!(effective_quality(None, None), None);
+        assert_eq!(
+            effective_quality(Some(QualityPreset::Original), None),
+            Some(QualityPreset::Original)
+        );
+    }
+
+    #[test]
+    fn build_plan_without_a_subtitle_asks_for_no_second_input() {
+        let (plan, extra) =
+            build_plan(&req_with(TargetFormat::Mp4, None), &probe_h264_aac()).unwrap();
+        assert_eq!(extra, SubtitleInput::default());
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    // --- -sub_charenc placement ---------------------------------------
+    //
+    // The option applies to the *next* `-i` only. Emitted after the input
+    // it describes, ffmpeg ignores it silently and cues go on vanishing —
+    // the exact bug it exists to fix — so position is pinned here.
+
+    #[test]
+    fn charenc_precedes_the_subtitle_input_when_soft_embedding() {
+        let mut cmd = Command::new("ffmpeg");
+        push_inputs(
+            &mut cmd,
+            Path::new("/tmp/movie.mp4"),
+            &SubtitleInput {
+                path: Some(PathBuf::from("/tmp/sub.srt")),
+                charenc: Some("windows-1252".into()),
+            },
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-i",
+                "/tmp/movie.mp4",
+                "-sub_charenc",
+                "windows-1252",
+                "-i",
+                "/tmp/sub.srt",
+            ],
+            "charenc must sit between the video input and the subtitle input"
+        );
+    }
+
+    #[test]
+    fn charenc_precedes_the_main_input_when_converting_a_subtitle_file() {
+        // srt↔vtt: the subtitle is the only input, so the option goes first.
+        let mut cmd = Command::new("ffmpeg");
+        push_inputs(
+            &mut cmd,
+            Path::new("/tmp/in.srt"),
+            &SubtitleInput {
+                path: None,
+                charenc: Some("windows-1251".into()),
+            },
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["-sub_charenc", "windows-1251", "-i", "/tmp/in.srt"]
+        );
+    }
+
+    #[test]
+    fn utf8_subtitles_add_no_charenc_argument() {
+        let mut cmd = Command::new("ffmpeg");
+        push_inputs(
+            &mut cmd,
+            Path::new("/tmp/movie.mp4"),
+            &SubtitleInput {
+                path: Some(PathBuf::from("/tmp/sub.srt")),
+                charenc: None,
+            },
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args.iter().any(|a| a == "-sub_charenc"),
+            "UTF-8 is ffmpeg's default; naming it only adds noise: {args:?}"
+        );
+    }
+
+    #[test]
+    fn burn_in_keeps_the_encoding_on_the_filter_not_the_input() {
+        // -sub_charenc would land on the video input and do nothing, so the
+        // filter has to carry it instead.
+        let sub = tempfile_cp1252("build-plan-burn-charenc");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::BurnIn,
+            }),
+        );
+        let (plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra.charenc, None, "burn-in must not set an input option");
+        assert!(
+            plan.video_filters
+                .iter()
+                .any(|f| f.contains("charenc=windows-1252")),
+            "filters: {:?}",
+            plan.video_filters
+        );
+        fs::remove_file(&sub).ok();
+    }
+
+    #[test]
+    fn extracting_from_a_container_does_not_sniff_the_container() {
+        // Extraction shares its request shape with standalone srt↔vtt
+        // conversion: no attached subtitle, subtitle target. Only the
+        // source kind separates them. Sniffing a container would guess a
+        // codepage from binary media and force it onto an embedded track
+        // that was already correct UTF-8 — turning a byte-perfect
+        // extraction into mojibake, at exit 0.
+        let src = tempfile_cp1252("extract-container");
+        let mut req = req_with(TargetFormat::Srt, None);
+        req.input_path = src.to_string_lossy().into_owned();
+        let probe = ProbeResult {
+            has_subtitles: true,
+            subtitle_codecs: vec!["subrip".into()],
+            ..probe_h264_aac()
+        };
+        assert!(matches!(probe.source_kind, goop_core::SourceKind::Video));
+
+        let (_plan, extra) = build_plan(&req, &probe).unwrap();
+        assert_eq!(
+            extra.charenc, None,
+            "a video container must never be charset-sniffed"
+        );
+        fs::remove_file(&src).ok();
+    }
+
+    #[test]
+    fn converting_a_subtitle_file_still_detects_its_encoding() {
+        // The other side of the guard above: a genuine subtitle source must
+        // still be detected, or srt↔vtt silently drops its accented cues.
+        let src = tempfile_cp1252("convert-subtitle-source");
+        let mut req = req_with(TargetFormat::Vtt, None);
+        req.input_path = src.to_string_lossy().into_owned();
+        let probe = ProbeResult {
+            source_kind: goop_core::SourceKind::Subtitle,
+            has_subtitles: true,
+            subtitle_codecs: vec!["subrip".into()],
+            ..probe_h264_aac()
+        };
+
+        let (_plan, extra) = build_plan(&req, &probe).unwrap();
+        assert_eq!(extra.charenc.as_deref(), Some("windows-1252"));
+        fs::remove_file(&src).ok();
+    }
+
+    #[test]
+    fn soft_embed_detects_a_legacy_codepage() {
+        let sub = tempfile_cp1252("build-plan-soft-charenc");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        );
+        let (_plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra.charenc.as_deref(), Some("windows-1252"));
+        fs::remove_file(&sub).ok();
+    }
+
+    /// A cp1252 subtitle: accented cues plus one ASCII cue, the shape that
+    /// makes ffmpeg drop lines while still reporting success.
+    fn tempfile_cp1252(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("goop-{tag}-{}.srt", std::process::id()));
+        let mut bytes = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+        bytes.extend_from_slice(b"Caf\xE9 \xE0 c\xF4t\xE9 de l'h\xF4tel\n\n");
+        bytes.extend_from_slice(b"2\n00:00:03,000 --> 00:00:04,000\nplain ascii\n");
+        fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn build_plan_soft_embed_returns_the_subtitle_as_a_second_input() {
+        let sub = tempfile_srt("build-plan-soft");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        );
+        let (plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra.path, Some(sub.clone()));
+        assert!(plan.args.windows(2).any(|w| w == ["-c:s", "mov_text"]));
+        fs::remove_file(&sub).ok();
+    }
+
+    #[test]
+    fn build_plan_burn_in_forces_an_encode_and_adds_the_filter() {
+        let sub = tempfile_srt("build-plan-burn");
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: sub.to_string_lossy().into_owned(),
+                mode: SubtitleMode::BurnIn,
+            }),
+        );
+        // Source is h264/aac, which would otherwise remux.
+        let (plan, extra) = build_plan(&req, &probe_h264_aac()).unwrap();
+        assert_eq!(extra.path, None);
+        assert!(plan.reencoded, "burn-in must never stream-copy");
+        assert!(plan
+            .video_filters
+            .iter()
+            .any(|f| f.starts_with("subtitles=")));
+        fs::remove_file(&sub).ok();
+    }
+
+    #[test]
+    fn build_plan_rejects_a_missing_subtitle_file() {
+        let req = req_with(
+            TargetFormat::Mp4,
+            Some(SubtitleOptions {
+                source_path: "/definitely/not/here.srt".into(),
+                mode: SubtitleMode::Soft,
+            }),
+        );
+        let err = build_plan(&req, &probe_h264_aac()).unwrap_err();
+        assert!(
+            matches!(err, GoopError::InvalidRequest(ref m) if m.contains("not/here.srt")),
+            "got {err:?}"
+        );
+    }
+
+    fn tempfile_srt(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("goop-{tag}-{}.srt", std::process::id()));
+        fs::write(&p, "1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
+        p
+    }
 
     #[test]
     fn resolve_treats_dir_as_dir() {
