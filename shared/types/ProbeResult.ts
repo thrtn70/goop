@@ -13,4 +13,15 @@ has_subtitles: boolean,
  * text and bitmap subtitles can't be transcoded into each other, so
  * preserving existing tracks is only safe when they are all text.
  */
-subtitle_codecs: Array<string>, };
+subtitle_codecs: Array<string>, 
+/**
+ * Codecs of every audio stream, in stream order (`aac`, `ac3`,
+ * `vorbis`, …).
+ *
+ * `audio_codec` above names only the *first* stream, which is all the
+ * remux-or-re-encode decision needs. Carrying the source's secondary
+ * tracks through a stream copy needs the whole list instead: each one
+ * lands in the output untouched, so each has to be checked against
+ * what the target container can actually describe.
+ */
+audio_codecs: Array<string>, };

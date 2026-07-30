@@ -287,6 +287,16 @@ pub struct ProbeResult {
     /// preserving existing tracks is only safe when they are all text.
     #[serde(default)]
     pub subtitle_codecs: Vec<String>,
+    /// Codecs of every audio stream, in stream order (`aac`, `ac3`,
+    /// `vorbis`, …).
+    ///
+    /// `audio_codec` above names only the *first* stream, which is all the
+    /// remux-or-re-encode decision needs. Carrying the source's secondary
+    /// tracks through a stream copy needs the whole list instead: each one
+    /// lands in the output untouched, so each has to be checked against
+    /// what the target container can actually describe.
+    #[serde(default)]
+    pub audio_codecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

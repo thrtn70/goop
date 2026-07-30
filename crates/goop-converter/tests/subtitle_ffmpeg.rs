@@ -264,6 +264,89 @@ fn make_multi_track_source(ffmpeg: &Path, out: &Path, tmp: &Path) {
     assert!(status.success(), "failed to build the multi-track source");
 }
 
+/// A 2-second clip with **two** audio tracks and **no** subtitle streams.
+///
+/// The absent subtitles are the whole point. The no-attachment path used to
+/// emit stream maps only when the source carried subtitles, so a file of
+/// this shape got no `-map` at all — and ffmpeg's automatic selection then
+/// kept exactly one audio track, silently, at exit 0.
+///
+/// `second` names the encoder for the second track so a caller can build
+/// both the vettable case (`aac`, which every container here maps to a
+/// registered codec tag) and the unvettable one (`libvorbis`, which MP4
+/// can only box under the `mp4a` catch-all).
+fn make_multi_audio_source(ffmpeg: &Path, out: &Path, second: &str) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=160x120:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:d=2",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx264",
+            "-c:a:0",
+            "aac",
+            "-c:a:1",
+            second,
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to build the multi-audio source (second track: {second})"
+    );
+}
+
+/// The `codec_tag_string` of each of `out`'s audio streams, in order.
+///
+/// Counting streams is not enough to catch the failure this guards against:
+/// MP4 will accept a codec it has no mapping for by boxing it under the
+/// `mp4a` (AAC) FourCC, producing a stream that ffmpeg itself still reads
+/// back through the ESDS descriptor while every ordinary player sees an AAC
+/// track full of something that is not AAC.
+fn audio_tags(r: &BinaryResolver, out: &Path) -> Vec<String> {
+    let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
+    let probe = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_tag_string",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(out)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().trim_end_matches(',').to_string())
+        .collect()
+}
+
 fn request(
     input: &Path,
     output: &Path,
@@ -534,11 +617,13 @@ async fn an_mp4_conversion_keeps_every_existing_subtitle_track() {
         vec!["mov_text", "mov_text"],
         "SubRip has to be rewritten as mov_text to enter an MP4"
     );
-    // Audio deliberately stays at one: this is a stream-copy plan, whose
-    // copy-eligibility was decided from the first audio stream alone, and
-    // MP4 will happily box an unvetted second track under the wrong FourCC
-    // while still reporting success. See `audio_map`.
-    assert_eq!(stream_codecs(&r, &out, "a").len(), 1, "audio tracks");
+    // Both audio tracks are AAC, which MP4 names properly, so the stream
+    // copy carries them both. The unvettable case — where MP4 would box a
+    // track under the wrong FourCC and still report success — narrows the
+    // map instead, and is covered by
+    // `an_unvettable_second_audio_track_is_dropped_not_corrupted`.
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+    assert_eq!(audio_tags(&r, &out), vec!["mp4a", "mp4a"]);
 }
 
 #[tokio::test]
@@ -594,6 +679,110 @@ async fn attaching_a_subtitle_keeps_every_audio_track() {
     // first audio stream would drop the film's other language tracks.
     assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
     assert_eq!(stream_codecs(&r, &out, "s").len(), 3, "2 existing + 1 new");
+}
+
+// --- Multi-audio sources that carry no subtitles ----------------------
+//
+// These four cover the path that emitted no `-map` at all: a source with
+// several audio tracks and no subtitle track. ffmpeg's automatic stream
+// selection keeps one stream per type, so every track but the first was
+// dropped on the way out — on every target, at exit 0, with no warning.
+
+#[tokio::test]
+#[ignore]
+async fn a_subtitle_free_mkv_conversion_keeps_every_audio_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("two-audio.mkv");
+    let out = tmp.path().join("out.mkv");
+    make_multi_audio_source(&ffmpeg, &src, "aac");
+
+    convert(&r, &request(&src, &out, TargetFormat::Mkv, None))
+        .await
+        .expect("mkv -> mkv with two audio tracks should succeed");
+
+    assert!(
+        stream_codecs(&r, &out, "s").is_empty(),
+        "the source had no subtitles, so the output must gain none"
+    );
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_subtitle_free_mp4_conversion_keeps_every_vetted_audio_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("two-audio.mkv");
+    let out = tmp.path().join("out.mp4");
+    make_multi_audio_source(&ffmpeg, &src, "aac");
+
+    convert(&r, &request(&src, &out, TargetFormat::Mp4, None))
+        .await
+        .expect("mkv -> mp4 with two AAC tracks should succeed");
+
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+    // Both must land on the real AAC mapping rather than merely being
+    // present — see `audio_tags`.
+    assert_eq!(audio_tags(&r, &out), vec!["mp4a", "mp4a"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_subtitle_free_re_encode_keeps_every_audio_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("two-audio.mkv");
+    let out = tmp.path().join("out.mp4");
+    // Vorbis is deliberately unvettable for a *copy* into MP4; re-encoding
+    // rewrites every mapped stream into one known-good codec, which is what
+    // makes the wide map safe regardless of what the source carried.
+    make_multi_audio_source(&ffmpeg, &src, "libvorbis");
+
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.quality_preset = Some(goop_core::QualityPreset::Fast);
+    convert(&r, &req).await.expect("mkv -> mp4 re-encode");
+
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+    assert_eq!(audio_tags(&r, &out), vec!["mp4a", "mp4a"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_unvettable_second_audio_track_is_dropped_not_corrupted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("two-audio.mkv");
+    let out = tmp.path().join("out.mp4");
+    make_multi_audio_source(&ffmpeg, &src, "libvorbis");
+
+    // h264 + aac stream-copies into MP4, so nothing re-encodes the Vorbis
+    // track into something MP4 can describe. Mapping it anyway boxes it
+    // under the `mp4a` FourCC: the job still exits 0 and the file still
+    // plays, right up until a player reaches a track it cannot decode.
+    convert(&r, &request(&src, &out, TargetFormat::Mp4, None))
+        .await
+        .expect("the conversion must still succeed, just without the track");
+
+    assert_eq!(
+        stream_codecs(&r, &out, "a").len(),
+        1,
+        "an unvettable track must be left behind, not mis-tagged into the output"
+    );
+    assert_eq!(
+        audio_tags(&r, &out),
+        vec!["mp4a"],
+        "the surviving track is the vetted AAC one"
+    );
+    assert_eq!(stream_codecs(&r, &out, "a"), vec!["aac"]);
 }
 
 #[tokio::test]

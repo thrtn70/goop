@@ -215,6 +215,62 @@ fn reencodes_audio(plan: &Plan) -> bool {
         .any(|w| w[0] == "-c:a" && w[1] != "copy")
 }
 
+/// Audio codecs `target` can stream-copy into a mapping that players other
+/// than ffmpeg will recognise.
+///
+/// The entries are the codecs that land on a **dedicated, registered codec
+/// tag** — `ac-3`, `ec-3`, `alac`, `fLaC`, `Opus`, `.mp3`, `dtsc`, `sowt` —
+/// plus AAC and MP3, which are the canonical payloads of MP4's `mp4a` box.
+///
+/// What rules a codec *out* is the `mp4a` catch-all. Handed a codec it has
+/// no mapping for, the MP4 muxer does not refuse: it writes the packets
+/// under `mp4a` and records the real codec only in the ESDS descriptor.
+/// ffmpeg reads that back and decodes the track perfectly, so a round-trip
+/// through ffmpeg alone reports success — while every ordinary player sees
+/// an AAC track full of something that is not AAC. Vorbis and DTS into MP4
+/// both do this, and are absent here for that reason.
+///
+/// Measured against the bundled ffmpeg 7.0 by copying each codec into each
+/// container and reading back the resulting `codec_tag_string`; a wrong
+/// entry here fails silently, so nothing goes in on inference alone.
+///
+/// `None` means the target never takes a wide audio map: audio-only, image
+/// and GIF targets hold exactly one audio stream by definition, and
+/// Matroska is handled ahead of this list because it accepts anything.
+fn copyable_audio_codecs(target: TargetFormat) -> Option<&'static [&'static str]> {
+    match target {
+        // flac -> fLaC and opus -> Opus are ISOBMFF-registered; both are
+        // rejected outright by the MOV muxer, hence the two lists.
+        TargetFormat::Mp4 => Some(&["aac", "mp3", "ac3", "eac3", "alac", "flac", "opus"]),
+        // dts -> dtsc and pcm_s16le -> sowt are proper QuickTime tags. In
+        // MP4 the same two codecs fall back to `mp4a`, so they are MOV-only.
+        TargetFormat::Mov => Some(&["aac", "mp3", "ac3", "eac3", "alac", "dts", "pcm_s16le"]),
+        // The muxer accepts nothing else — it aborts the job rather than
+        // mis-tagging, but a job that fails is still worse than one that
+        // quietly keeps the track it was always going to keep.
+        TargetFormat::Webm => Some(&["opus", "vorbis"]),
+        TargetFormat::Avi => Some(&["mp3", "ac3", "aac", "pcm_s16le"]),
+        _ => None,
+    }
+}
+
+/// Whether every one of `audio_codecs` survives a stream copy into `target`.
+///
+/// All-or-nothing, because the `-map` selector is: `0:a?` takes every audio
+/// stream or none, so one unvettable track makes the wide map unsafe for
+/// the whole file. An empty list fails closed for the same reason
+/// [`can_preserve_existing`] does — nothing to vet means nothing to carry.
+///
+/// Answers `false` for Matroska, which has no list because it needs none.
+/// Ask [`audio_map`] rather than this function directly: it settles the
+/// containers that accept anything before the list is ever consulted.
+fn all_audio_copyable(target: TargetFormat, audio_codecs: &[String]) -> bool {
+    let Some(allowed) = copyable_audio_codecs(target) else {
+        return false;
+    };
+    !audio_codecs.is_empty() && audio_codecs.iter().all(|c| allowed.contains(&c.as_str()))
+}
+
 /// The `-map` selector for the source's audio streams.
 ///
 /// Explicit maps replace ffmpeg's automatic selection wholesale, and that
@@ -224,21 +280,72 @@ fn reencodes_audio(plan: &Plan) -> bool {
 ///
 /// * **Matroska** identifies codecs by CodecID string and accepts anything
 ///   ffmpeg can demux, so it always takes the wide map.
-/// * **MP4 / MOV / WebM** only take it when the plan re-encodes audio.
-///   Under a stream copy the plan was chosen from the *first* audio stream
-///   alone — `ProbeResult::audio_codec` is single-stream — leaving a
-///   secondary track completely unvetted. WebM's muxer rejects one outright
-///   and aborts the job; MP4/MOV are worse, boxing a Vorbis stream under
-///   the `mp4a` (AAC) FourCC and still reporting success, so the track
-///   arrives silently undecodable. A missing track beats a corrupt one.
+/// * **A re-encoding plan** rewrites every mapped stream into the one codec
+///   it names, so what the source carried stops mattering.
+/// * **Otherwise** each stream is vetted individually against
+///   [`copyable_audio_codecs`]. Under a stream copy the plan itself was
+///   chosen from the *first* audio stream alone — `ProbeResult::audio_codec`
+///   is single-stream — so the rest need checking on their own account.
 ///
 /// All three behaviours verified against the bundled ffmpeg 7.0.
-fn audio_map(target: TargetFormat, plan: &Plan) -> &'static str {
+fn audio_map(target: TargetFormat, plan: &Plan, audio_codecs: &[String]) -> &'static str {
     match target {
         TargetFormat::Mkv => "0:a?",
         _ if reencodes_audio(plan) => "0:a?",
+        _ if all_audio_copyable(target, audio_codecs) => "0:a?",
         _ => "0:a:0?",
     }
+}
+
+/// Video containers that can hold more than one audio stream.
+///
+/// Audio-only, image and GIF targets carry exactly one by definition, and
+/// giving them stream maps would override ffmpeg's selection to no purpose.
+pub(crate) fn holds_multiple_audio_streams(target: TargetFormat) -> bool {
+    matches!(
+        target,
+        TargetFormat::Mp4
+            | TargetFormat::Mov
+            | TargetFormat::Mkv
+            | TargetFormat::Webm
+            | TargetFormat::Avi
+    )
+}
+
+/// Map the source's audio streams through when there is no subtitle work to
+/// justify a map of its own.
+///
+/// Without this a source carrying several audio tracks and *no* subtitles
+/// got no `-map` at all, leaving ffmpeg's automatic selection to thin it to
+/// one track — silently, at exit 0. [`preserve_existing_in_plan`] covers
+/// the same ground for sources that do have subtitles.
+///
+/// Returns whether any args were added; `false` leaves the plan untouched
+/// so ffmpeg's defaults stay in place.
+pub(crate) fn preserve_audio_in_plan(
+    plan: &mut Plan,
+    target: TargetFormat,
+    audio_codecs: &[String],
+) -> bool {
+    // A single stream is exactly what automatic selection already keeps, so
+    // maps would be noise — and noise that overrides ffmpeg's own pick of
+    // the *best* stream rather than merely the first.
+    if !holds_multiple_audio_streams(target) || audio_codecs.len() < 2 {
+        return false;
+    }
+    if audio_map(target, plan, audio_codecs) != "0:a?" {
+        return false;
+    }
+    plan.args.extend([
+        "-map".to_string(),
+        // Matches the automatic selection this replaces; `0:v?` would
+        // additionally promote an attached cover image into a second,
+        // re-encoded video track.
+        "0:v:0?".to_string(),
+        "-map".to_string(),
+        "0:a?".to_string(),
+    ]);
+    true
 }
 
 /// The `-c:s` value for carrying the source's *own* subtitle streams into
@@ -279,6 +386,7 @@ pub(crate) fn preserve_existing_in_plan(
     plan: &mut Plan,
     target: TargetFormat,
     source_codecs: &[String],
+    audio_codecs: &[String],
 ) -> bool {
     if source_codecs.is_empty() {
         return false;
@@ -293,7 +401,7 @@ pub(crate) fn preserve_existing_in_plan(
     let Some(codec) = preserve_codec(target, source_codecs) else {
         return false;
     };
-    let audio = audio_map(target, plan);
+    let audio = audio_map(target, plan, audio_codecs);
     plan.args.extend([
         "-map".to_string(),
         // Only the first video stream, matching the automatic selection
@@ -331,6 +439,7 @@ pub(crate) fn apply_to_plan(
     sub_path: &Path,
     preserve_existing: bool,
     charenc: Option<&str>,
+    audio_codecs: &[String],
 ) -> Result<Option<PathBuf>, GoopError> {
     if !supports(target, mode) {
         let what = match mode {
@@ -355,7 +464,7 @@ pub(crate) fn apply_to_plan(
             // See [`audio_map`] for why the audio selector is not narrowed
             // to `0:a:0?` the way the video one is: attaching a subtitle
             // must not cost a film its other language tracks.
-            let audio = audio_map(target, plan);
+            let audio = audio_map(target, plan, audio_codecs);
             plan.args.extend([
                 "-map".to_string(),
                 "0:v:0?".to_string(),
@@ -550,6 +659,7 @@ mod tests {
             Path::new("/tmp/sub.srt"),
             false,
             Some("windows-1252"),
+            &[],
         )
         .unwrap();
         let filter = plan
@@ -573,6 +683,7 @@ mod tests {
             Path::new("/tmp/sub.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
         let filter = plan
@@ -697,6 +808,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
 
@@ -728,6 +840,7 @@ mod tests {
                 Path::new("/tmp/s.srt"),
                 false,
                 None,
+                &[],
             )
             .unwrap();
             let idx = plan.args.iter().position(|a| a == "-c:s").unwrap();
@@ -747,6 +860,7 @@ mod tests {
                 Path::new("/tmp/s.srt"),
                 false,
                 None,
+                &[],
             )
             .unwrap_err();
             assert!(
@@ -768,6 +882,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
 
@@ -797,6 +912,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
 
@@ -828,6 +944,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap_err();
         assert!(matches!(err, GoopError::InvalidRequest(_)));
@@ -844,6 +961,7 @@ mod tests {
                 Path::new("/tmp/s.srt"),
                 false,
                 None,
+                &[],
             )
             .unwrap_err();
             assert!(matches!(err, GoopError::InvalidRequest(_)), "{target:?}");
@@ -897,6 +1015,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             true,
             None,
+            &[],
         )
         .unwrap();
 
@@ -930,6 +1049,7 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
 
@@ -949,7 +1069,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(audio_map(TargetFormat::Mkv, &copy), "0:a?");
+        assert_eq!(audio_map(TargetFormat::Mkv, &copy, &[]), "0:a?");
     }
 
     #[test]
@@ -970,12 +1090,12 @@ mod tests {
                 !reencodes_audio(&plan),
                 "precondition: {t:?} should be a copy plan"
             );
-            assert_eq!(audio_map(t, &plan), "0:a:0?", "{t:?}");
+            assert_eq!(audio_map(t, &plan, &[]), "0:a:0?", "{t:?}");
 
             // ...but once audio is transcoded, every mapped stream lands in
             // one known-good codec, so the wide map becomes safe.
             plan.args.extend(["-c:a".to_string(), "aac".to_string()]);
-            assert_eq!(audio_map(t, &plan), "0:a?", "{t:?} re-encoding");
+            assert_eq!(audio_map(t, &plan, &[]), "0:a?", "{t:?} re-encoding");
         }
     }
 
@@ -991,7 +1111,7 @@ mod tests {
         );
         plan.args.extend(["-c:a".to_string(), "copy".to_string()]);
         assert!(!reencodes_audio(&plan));
-        assert_eq!(audio_map(TargetFormat::Mp4, &plan), "0:a:0?");
+        assert_eq!(audio_map(TargetFormat::Mp4, &plan, &[]), "0:a:0?");
     }
 
     #[test]
@@ -1011,7 +1131,8 @@ mod tests {
         assert!(preserve_existing_in_plan(
             &mut plan,
             TargetFormat::Webm,
-            &["subrip".to_string()]
+            &["subrip".to_string()],
+            &[],
         ));
 
         assert!(plan.args.iter().any(|a| a == "0:a:0?"));
@@ -1033,7 +1154,8 @@ mod tests {
         assert!(preserve_existing_in_plan(
             &mut plan,
             TargetFormat::Mp4,
-            &["subrip".to_string(), "subrip".to_string()]
+            &["subrip".to_string(), "subrip".to_string()],
+            &[],
         ));
 
         assert_eq!(
@@ -1095,7 +1217,7 @@ mod tests {
             let mut plan = crate::compat::decide(t, Some("h264"), Some("aac"), None, None, None);
             let before = plan.args.clone();
             assert!(
-                !preserve_existing_in_plan(&mut plan, t, &["subrip".to_string()]),
+                !preserve_existing_in_plan(&mut plan, t, &["subrip".to_string()], &[]),
                 "{t:?}"
             );
             assert_eq!(plan.args, before, "{t:?}");
@@ -1117,7 +1239,8 @@ mod tests {
         assert!(!preserve_existing_in_plan(
             &mut plan,
             TargetFormat::Mkv,
-            &[]
+            &[],
+            &[],
         ));
         assert_eq!(plan.args, vec!["-c", "copy"]);
     }
@@ -1139,10 +1262,244 @@ mod tests {
             Path::new("/tmp/s.srt"),
             false,
             None,
+            &[],
         )
         .unwrap();
 
         assert!(!plan.args.iter().any(|a| a == "0:s?"));
+    }
+
+    // --- Per-container audio copy vetting -------------------------------
+    //
+    // The entries these assert on were measured against the bundled ffmpeg
+    // 7.0 by copying each codec into each container and reading back the
+    // resulting `codec_tag_string`. A wrong entry fails silently — the
+    // track arrives mis-tagged at exit 0 — so they are pinned here and
+    // covered end to end in `tests/subtitle_ffmpeg.rs`.
+
+    #[test]
+    fn a_copy_into_mp4_widens_only_for_codecs_mp4_can_name() {
+        let copy = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(!reencodes_audio(&copy), "precondition: a copy plan");
+
+        for good in [["aac", "ac3"], ["aac", "eac3"], ["aac", "alac"]] {
+            let codecs: Vec<String> = good.iter().map(|c| c.to_string()).collect();
+            assert_eq!(
+                audio_map(TargetFormat::Mp4, &copy, &codecs),
+                "0:a?",
+                "{good:?} all map to a registered tag"
+            );
+        }
+        // Vorbis and DTS both fall back to the `mp4a` catch-all in MP4,
+        // which lies about the track's contents rather than refusing it.
+        for bad in [["aac", "vorbis"], ["aac", "dts"], ["aac", "wmav2"]] {
+            let codecs: Vec<String> = bad.iter().map(|c| c.to_string()).collect();
+            assert_eq!(
+                audio_map(TargetFormat::Mp4, &copy, &codecs),
+                "0:a:0?",
+                "{bad:?} must narrow"
+            );
+        }
+    }
+
+    #[test]
+    fn mov_and_mp4_do_not_share_an_allowlist() {
+        // The same codec is registered in one and a catch-all in the other,
+        // so a single shared list would be wrong in both directions.
+        let mov = copyable_audio_codecs(TargetFormat::Mov).unwrap();
+        let mp4 = copyable_audio_codecs(TargetFormat::Mp4).unwrap();
+        // dts -> dtsc in MOV, but -> mp4a in MP4.
+        assert!(mov.contains(&"dts"));
+        assert!(!mp4.contains(&"dts"));
+        // flac -> fLaC in MP4, but the MOV muxer rejects it outright.
+        assert!(mp4.contains(&"flac"));
+        assert!(!mov.contains(&"flac"));
+    }
+
+    #[test]
+    fn webm_widens_only_for_the_two_codecs_it_accepts() {
+        let copy = crate::compat::decide(
+            TargetFormat::Webm,
+            Some("vp9"),
+            Some("opus"),
+            None,
+            None,
+            None,
+        );
+        let ok: Vec<String> = ["opus", "vorbis"].iter().map(|c| c.to_string()).collect();
+        assert_eq!(audio_map(TargetFormat::Webm, &copy, &ok), "0:a?");
+        // Anything else aborts the mux, which is louder than a lost track
+        // but still a job the user expected to succeed.
+        let bad: Vec<String> = ["opus", "aac"].iter().map(|c| c.to_string()).collect();
+        assert_eq!(audio_map(TargetFormat::Webm, &copy, &bad), "0:a:0?");
+    }
+
+    #[test]
+    fn one_unvettable_track_narrows_the_whole_map() {
+        // `0:a?` is all-or-nothing, so a single bad stream spoils it.
+        let copy = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        let codecs: Vec<String> = ["aac", "aac", "aac", "vorbis"]
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        assert_eq!(audio_map(TargetFormat::Mp4, &copy, &codecs), "0:a:0?");
+    }
+
+    #[test]
+    fn an_unknown_audio_codec_fails_closed() {
+        let copy = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(!all_audio_copyable(
+            TargetFormat::Mp4,
+            &["something_new".to_string()]
+        ));
+        assert_eq!(
+            audio_map(TargetFormat::Mp4, &copy, &["something_new".to_string()]),
+            "0:a:0?"
+        );
+        // Nothing to vet is not the same as everything vetting clean.
+        assert!(!all_audio_copyable(TargetFormat::Mp4, &[]));
+    }
+
+    #[test]
+    fn matroska_needs_no_allowlist() {
+        // It accepts anything ffmpeg can demux, so it is answered before
+        // the list is ever consulted.
+        assert!(copyable_audio_codecs(TargetFormat::Mkv).is_none());
+        let copy = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            audio_map(TargetFormat::Mkv, &copy, &["wmav2".to_string()]),
+            "0:a?"
+        );
+    }
+
+    #[test]
+    fn re_encoding_outranks_the_allowlist() {
+        // Every mapped stream lands in the codec the plan names, so what
+        // the source carried stops mattering.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        plan.args.extend(["-c:a".to_string(), "aac".to_string()]);
+        assert_eq!(
+            audio_map(TargetFormat::Mp4, &plan, &["vorbis".to_string()]),
+            "0:a?"
+        );
+    }
+
+    // --- preserve_audio_in_plan ------------------------------------------
+
+    #[test]
+    fn preserving_audio_maps_video_and_every_stream() {
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(preserve_audio_in_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            &["aac".to_string(), "ac3".to_string()]
+        ));
+        assert_eq!(
+            plan.args,
+            vec!["-c", "copy", "-map", "0:v:0?", "-map", "0:a?"]
+        );
+        // Carrying tracks the source already had must not force an encode.
+        assert!(!plan.reencoded);
+    }
+
+    #[test]
+    fn preserving_audio_leaves_a_single_stream_alone() {
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mkv,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(!preserve_audio_in_plan(
+            &mut plan,
+            TargetFormat::Mkv,
+            &["aac".to_string()]
+        ));
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn preserving_audio_skips_targets_that_hold_one_stream() {
+        for t in [
+            TargetFormat::Mp3,
+            TargetFormat::Wav,
+            TargetFormat::Flac,
+            TargetFormat::Gif,
+            TargetFormat::Png,
+            TargetFormat::M4a,
+        ] {
+            let mut plan = crate::compat::decide(t, Some("h264"), Some("aac"), None, None, None);
+            let before = plan.args.clone();
+            assert!(
+                !preserve_audio_in_plan(&mut plan, t, &["aac".to_string(), "aac".to_string()]),
+                "{t:?}"
+            );
+            assert_eq!(plan.args, before, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn preserving_audio_adds_nothing_when_the_map_would_narrow() {
+        // No maps beats maps that keep only what ffmpeg would have kept
+        // anyway — and beats maps that carry a mis-taggable track.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            None,
+            None,
+        );
+        assert!(!preserve_audio_in_plan(
+            &mut plan,
+            TargetFormat::Mp4,
+            &["aac".to_string(), "vorbis".to_string()]
+        ));
+        assert_eq!(plan.args, vec!["-c", "copy"]);
     }
 
     // --- Extraction ----------------------------------------------------

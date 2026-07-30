@@ -53,6 +53,7 @@ const mp4Probe: ProbeResult = {
   image_format: null,
   has_subtitles: false,
   subtitle_codecs: [],
+  audio_codecs: ["aac"],
 };
 
 const audioOnlyProbe: ProbeResult = {
@@ -70,6 +71,7 @@ const audioOnlyProbe: ProbeResult = {
   image_format: null,
   has_subtitles: false,
   subtitle_codecs: [],
+  audio_codecs: ["opus"],
 };
 
 const imageProbe: ProbeResult = {
@@ -87,6 +89,7 @@ const imageProbe: ProbeResult = {
   image_format: "PNG",
   has_subtitles: false,
   subtitle_codecs: [],
+  audio_codecs: [],
 };
 
 const srtProbe: ProbeResult = {
@@ -104,6 +107,7 @@ const srtProbe: ProbeResult = {
   image_format: null,
   has_subtitles: true,
   subtitle_codecs: ["subrip"],
+  audio_codecs: [],
 };
 
 function renderPage() {
