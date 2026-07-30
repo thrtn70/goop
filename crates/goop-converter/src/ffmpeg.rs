@@ -397,6 +397,23 @@ fn effective_quality(
     }
 }
 
+/// Note that the source's own subtitle tracks are being left behind.
+///
+/// Bitmap subtitles (Blu-ray PGS, DVD) can only be transcoded to other
+/// bitmap codecs, so forcing one into a text codec aborts the whole
+/// conversion. Skipping them costs a track; aborting costs everything. The
+/// loss is invisible in the output, so it is at least worth saying out loud
+/// somewhere. `fate` describes what actually becomes of them, which differs
+/// between the two call sites.
+fn warn_subtitles_not_preserved(codecs: &[String], fate: &str) {
+    tracing::warn!(
+        codecs = ?codecs,
+        fate,
+        "source subtitle tracks are not text and can't be rewritten into the target's \
+         subtitle codec"
+    );
+}
+
 /// Build the ffmpeg plan for `req`, plus the path (if any) that must be
 /// opened as a second input.
 ///
@@ -443,6 +460,38 @@ fn build_plan(
             && matches!(req.target, TargetFormat::Srt | TargetFormat::Vtt))
         .then(|| crate::subtitle::detect_charenc_of_file(&goop_core::path::expand(&req.input_path)))
         .flatten();
+
+        // Nothing attached, but the source may still carry subtitle tracks
+        // of its own. Left to ffmpeg's automatic stream selection they are
+        // silently thinned to one — and to none for MP4, whose muxer has no
+        // default subtitle codec — while the job still reports success.
+        //
+        // Disjoint from the detection above: no target that takes a soft
+        // track is also a subtitle target, so the two never both apply.
+        // A bare subtitle file probes as having subtitles too, so without
+        // the source-kind check a stray `.srt` aimed at a video container —
+        // which "apply to all" and presets can do, since they set the target
+        // without consulting each row's own kind — would gain maps for video
+        // and audio streams it does not have. The conversion is nonsense
+        // either way; this at least keeps it from being nonsense of our
+        // making.
+        if !matches!(probe.source_kind, goop_core::SourceKind::Subtitle)
+            && probe.has_subtitles
+            && crate::subtitle::supports(req.target, goop_core::SubtitleMode::Soft)
+        {
+            if crate::subtitle::can_preserve_existing(&probe.subtitle_codecs) {
+                crate::subtitle::preserve_existing_in_plan(
+                    &mut plan,
+                    req.target,
+                    &probe.subtitle_codecs,
+                );
+            } else {
+                // No maps at all, so ffmpeg's default handling stays in
+                // place: worse than preserving the tracks, far better than
+                // failing the job outright.
+                warn_subtitles_not_preserved(&probe.subtitle_codecs, "left as ffmpeg handles them");
+            }
+        }
         return Ok((
             plan,
             SubtitleInput {
@@ -464,15 +513,9 @@ fn build_plan(
 
     let preserve_existing = crate::subtitle::can_preserve_existing(&probe.subtitle_codecs);
     if sub.mode == goop_core::SubtitleMode::Soft && probe.has_subtitles && !preserve_existing {
-        // Bitmap subtitles (Blu-ray PGS, DVD) can't become text, so the
-        // source's own tracks are left behind rather than aborting the
-        // conversion. Losing them is invisible in the output, so say so
-        // somewhere at least.
-        tracing::warn!(
-            codecs = ?probe.subtitle_codecs,
-            "source subtitle tracks can't be converted to the target's text codec; \
-             they will not be carried over"
-        );
+        // Here the explicit maps *are* exhaustive, so the source's own
+        // tracks really do disappear rather than merely being thinned.
+        warn_subtitles_not_preserved(&probe.subtitle_codecs, "not carried over");
     }
     let charenc = crate::subtitle::detect_charenc_of_file(&sub_path);
     let extra_input = crate::subtitle::apply_to_plan(
@@ -645,6 +688,40 @@ mod tests {
         );
     }
 
+    /// `probe_h264_aac`, but the source already carries subtitle streams.
+    fn probe_with_subtitles(codecs: &[&str]) -> ProbeResult {
+        ProbeResult {
+            has_subtitles: !codecs.is_empty(),
+            subtitle_codecs: codecs.iter().map(|c| (*c).to_string()).collect(),
+            ..probe_h264_aac()
+        }
+    }
+
+    #[test]
+    fn build_plan_carries_existing_subtitles_when_nothing_is_attached() {
+        // Regression: with no attached subtitle no maps were emitted at
+        // all, so ffmpeg's automatic selection kept one subtitle track for
+        // MKV and none for MP4 — while the job still reported success.
+        let (plan, extra) = build_plan(
+            &req_with(TargetFormat::Mp4, None),
+            &probe_with_subtitles(&["subrip", "subrip"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            extra,
+            SubtitleInput::default(),
+            "nothing to open as a second input"
+        );
+        assert_eq!(
+            plan.args,
+            vec![
+                "-c", "copy", "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-c:s",
+                "mov_text",
+            ]
+        );
+    }
+
     #[test]
     fn charenc_precedes_the_main_input_when_converting_a_subtitle_file() {
         // srt↔vtt: the subtitle is the only input, so the option goes first.
@@ -783,6 +860,68 @@ mod tests {
         bytes.extend_from_slice(b"2\n00:00:03,000 --> 00:00:04,000\nplain ascii\n");
         fs::write(&p, bytes).unwrap();
         p
+    }
+
+    #[test]
+    fn build_plan_carries_existing_subtitles_through_a_compression_too() {
+        // Compression takes the other branch at the top of `build_plan`,
+        // so it needs its own guard against the tracks going missing.
+        let mut req = req_with(TargetFormat::Mp4, None);
+        req.compress_mode = Some(goop_core::CompressMode::Quality(50));
+        let (plan, _) = build_plan(&req, &probe_with_subtitles(&["subrip"])).unwrap();
+
+        assert!(plan.args.iter().any(|a| a == "0:s?"));
+        assert!(plan.args.windows(2).any(|w| w == ["-c:s", "mov_text"]));
+    }
+
+    #[test]
+    fn build_plan_leaves_a_subtitle_free_source_untouched() {
+        let (plan, extra) =
+            build_plan(&req_with(TargetFormat::Mkv, None), &probe_h264_aac()).unwrap();
+        assert_eq!(extra, SubtitleInput::default());
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn build_plan_does_not_map_bitmap_subtitles_it_cannot_transcode() {
+        // Forcing PGS into a text codec aborts the whole conversion, so the
+        // plan must stay map-free and let ffmpeg handle the streams itself.
+        let (plan, _) = build_plan(
+            &req_with(TargetFormat::Mp4, None),
+            &probe_with_subtitles(&["hdmv_pgs_subtitle"]),
+        )
+        .unwrap();
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn build_plan_does_not_map_a_bare_subtitle_source_into_a_container() {
+        // A `.srt` probes as source_kind Subtitle with has_subtitles true,
+        // so it otherwise satisfies the preserve condition and picks up
+        // maps for video and audio streams that do not exist. Reachable
+        // from the UI via "apply to all" and presets, which set a row's
+        // target without consulting its source kind.
+        let probe = ProbeResult {
+            source_kind: goop_core::SourceKind::Subtitle,
+            has_subtitles: true,
+            subtitle_codecs: vec!["subrip".into()],
+            ..probe_h264_aac()
+        };
+        let (plan, _) = build_plan(&req_with(TargetFormat::Mp4, None), &probe).unwrap();
+
+        assert!(!plan.args.iter().any(|a| a == "0:s?"));
+        assert!(!plan.args.iter().any(|a| a == "0:v:0?"));
+    }
+
+    #[test]
+    fn build_plan_does_not_map_subtitles_into_an_audio_only_target() {
+        let (plan, _) = build_plan(
+            &req_with(TargetFormat::Mp3, None),
+            &probe_with_subtitles(&["subrip"]),
+        )
+        .unwrap();
+        assert!(!plan.args.iter().any(|a| a == "0:s?"));
+        assert!(!plan.args.iter().any(|a| a == "0:v:0?"));
     }
 
     #[test]

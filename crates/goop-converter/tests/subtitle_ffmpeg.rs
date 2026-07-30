@@ -179,13 +179,18 @@ fn make_source(ffmpeg: &Path, out: &Path) {
 
 /// Codec names of `out`'s subtitle streams, in order.
 fn subtitle_codecs(r: &BinaryResolver, out: &Path) -> Vec<String> {
+    stream_codecs(r, out, "s")
+}
+
+/// Codec names of `out`'s streams of type `kind` ("v", "a", "s"), in order.
+fn stream_codecs(r: &BinaryResolver, out: &Path, kind: &str) -> Vec<String> {
     let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
     let probe = Command::new(ffprobe)
         .args([
             "-v",
             "error",
             "-select_streams",
-            "s",
+            kind,
             "-show_entries",
             "stream=codec_name",
             "-of",
@@ -199,6 +204,64 @@ fn subtitle_codecs(r: &BinaryResolver, out: &Path) -> Vec<String> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.trim().to_string())
         .collect()
+}
+
+/// A 2-second clip carrying **two** audio tracks and **two** SubRip tracks.
+///
+/// Both multiplicities matter: ffmpeg's automatic stream selection keeps
+/// exactly one stream per type, so a single-track fixture cannot tell a
+/// working `-map` from a missing one.
+fn make_multi_track_source(ffmpeg: &Path, out: &Path, tmp: &Path) {
+    let eng = tmp.join("eng.srt");
+    let spa = tmp.join("spa.srt");
+    write_srt(&eng, "ENGLISH");
+    write_srt(&spa, "SPANISH");
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=160x120:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:d=2",
+        ])
+        .arg("-i")
+        .arg(&eng)
+        .arg("-i")
+        .arg(&spa)
+        .args([
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-map",
+            "3",
+            "-map",
+            "4",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-c:s",
+            "srt",
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the multi-track source");
 }
 
 fn request(
@@ -426,6 +489,131 @@ async fn soft_embed_keeps_the_sources_own_subtitle_track() {
 
     // Attaching a subtitle must not silently discard the one already there.
     assert_eq!(subtitle_codecs(&r, &out), vec!["subrip", "subrip"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_mkv_remux_keeps_every_existing_subtitle_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("multi.mkv");
+    let out = tmp.path().join("out.mkv");
+    make_multi_track_source(&ffmpeg, &src, tmp.path());
+
+    convert(&r, &request(&src, &out, TargetFormat::Mkv, None))
+        .await
+        .expect("mkv -> mkv with no attached subtitle should succeed");
+
+    // Without explicit maps ffmpeg's automatic selection keeps exactly one
+    // stream per type, so both counts have to be asserted.
+    assert_eq!(stream_codecs(&r, &out, "s").len(), 2, "subtitle tracks");
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_mp4_conversion_keeps_every_existing_subtitle_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("multi.mkv");
+    let out = tmp.path().join("out.mp4");
+    make_multi_track_source(&ffmpeg, &src, tmp.path());
+
+    convert(&r, &request(&src, &out, TargetFormat::Mp4, None))
+        .await
+        .expect("mkv -> mp4 with no attached subtitle should succeed");
+
+    // MP4's muxer has no default subtitle codec, so automatic selection
+    // drops subtitles entirely — the `-c:s` is what makes these survive.
+    assert_eq!(
+        stream_codecs(&r, &out, "s"),
+        vec!["mov_text", "mov_text"],
+        "SubRip has to be rewritten as mov_text to enter an MP4"
+    );
+    // Audio deliberately stays at one: this is a stream-copy plan, whose
+    // copy-eligibility was decided from the first audio stream alone, and
+    // MP4 will happily box an unvetted second track under the wrong FourCC
+    // while still reporting success. See `audio_map`.
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 1, "audio tracks");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_re_encoding_mp4_conversion_keeps_every_audio_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("multi.mkv");
+    let out = tmp.path().join("out.mp4");
+    make_multi_track_source(&ffmpeg, &src, tmp.path());
+
+    // Re-encoding rewrites every mapped audio stream into one known-good
+    // codec, which is what makes the wide `0:a?` map safe here.
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.quality_preset = Some(goop_core::QualityPreset::Fast);
+    convert(&r, &req).await.expect("mkv -> mp4 re-encode");
+
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+    assert_eq!(stream_codecs(&r, &out, "s").len(), 2, "subtitle tracks");
+}
+
+#[tokio::test]
+#[ignore]
+async fn attaching_a_subtitle_keeps_every_audio_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("multi.mkv");
+    let extra = tmp.path().join("extra.srt");
+    let out = tmp.path().join("out.mkv");
+    make_multi_track_source(&ffmpeg, &src, tmp.path());
+    write_srt(&extra, "EXTRA");
+
+    convert(
+        &r,
+        &request(
+            &src,
+            &out,
+            TargetFormat::Mkv,
+            Some(SubtitleOptions {
+                source_path: extra.to_string_lossy().into_owned(),
+                mode: SubtitleMode::Soft,
+            }),
+        ),
+    )
+    .await
+    .expect("soft embed onto a multi-track source should succeed");
+
+    // The attach path's explicit maps are exhaustive: mapping only the
+    // first audio stream would drop the film's other language tracks.
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 2, "audio tracks");
+    assert_eq!(stream_codecs(&r, &out, "s").len(), 3, "2 existing + 1 new");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_source_without_subtitles_gains_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mkv");
+    make_source(&ffmpeg, &src);
+
+    convert(&r, &request(&src, &out, TargetFormat::Mkv, None))
+        .await
+        .expect("a plain remux should succeed");
+
+    assert!(stream_codecs(&r, &out, "s").is_empty());
+    assert_eq!(stream_codecs(&r, &out, "v").len(), 1);
+    assert_eq!(stream_codecs(&r, &out, "a").len(), 1);
 }
 
 #[tokio::test]
