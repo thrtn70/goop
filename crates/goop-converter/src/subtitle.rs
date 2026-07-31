@@ -242,13 +242,22 @@ fn copyable_audio_codecs(target: TargetFormat) -> Option<&'static [&'static str]
         // flac -> fLaC and opus -> Opus are ISOBMFF-registered; both are
         // rejected outright by the MOV muxer, hence the two lists.
         TargetFormat::Mp4 => Some(&["aac", "mp3", "ac3", "eac3", "alac", "flac", "opus"]),
-        // dts -> dtsc and pcm_s16le -> sowt are proper QuickTime tags. In
-        // MP4 the same two codecs fall back to `mp4a`, so they are MOV-only.
+        // dts -> dtsc and pcm_s16le -> sowt are proper QuickTime tags. dts
+        // is MOV-only because MP4 falls back to `mp4a` for it; pcm_s16le is
+        // listed here but left off MP4's list conservatively — MP4 gives it
+        // the registered `ipcm` tag and it does round-trip, so it could be
+        // added, but nothing needed it and an untested entry on a list whose
+        // whole job is preventing mis-tagged audio is not worth the trade.
         TargetFormat::Mov => Some(&["aac", "mp3", "ac3", "eac3", "alac", "dts", "pcm_s16le"]),
         // The muxer accepts nothing else — it aborts the job rather than
         // mis-tagging, but a job that fails is still worse than one that
         // quietly keeps the track it was always going to keep.
         TargetFormat::Webm => Some(&["opus", "vorbis"]),
+        // mp3 (0x0055), ac3 (0x2000) and pcm_s16le (0x0001) are registered
+        // `wFormatTag` values. aac (0x00ff) is not registered — it is a de
+        // facto convention, understood by ffmpeg, VLC and mpv but not
+        // guaranteed elsewhere. Kept because AVI is a legacy target where
+        // AAC audio is common and the alternative is dropping the track.
         TargetFormat::Avi => Some(&["mp3", "ac3", "aac", "pcm_s16le"]),
         _ => None,
     }

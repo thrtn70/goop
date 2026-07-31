@@ -324,6 +324,54 @@ fn make_multi_audio_source(ffmpeg: &Path, out: &Path, second: &str) {
 /// `mp4a` (AAC) FourCC, producing a stream that ffmpeg itself still reads
 /// back through the ESDS descriptor while every ordinary player sees an AAC
 /// track full of something that is not AAC.
+/// `make_multi_audio_source` with the video and first-audio codecs chosen by
+/// the caller.
+///
+/// A stream copy only stays a stream copy if *every* mapped stream suits the
+/// container: WebM will not take h264 or AAC at all, so a source built for
+/// MP4 lands on an encoding plan there and stops exercising the allowlist.
+fn make_multi_audio_source_as(ffmpeg: &Path, out: &Path, video: &str, first: &str, second: &str) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=160x120:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:d=2",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:v",
+            video,
+            "-c:a:0",
+            first,
+            "-c:a:1",
+            second,
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to build the multi-audio source ({video} / {first} / {second})"
+    );
+}
+
 fn audio_tags(r: &BinaryResolver, out: &Path) -> Vec<String> {
     let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
     let probe = Command::new(ffprobe)
@@ -783,6 +831,143 @@ async fn an_unvettable_second_audio_track_is_dropped_not_corrupted() {
         "the surviving track is the vetted AAC one"
     );
     assert_eq!(stream_codecs(&r, &out, "a"), vec!["aac"]);
+}
+
+// --- The rest of the per-container allowlists ---------------------------
+//
+// `an_unvettable_second_audio_track_is_dropped_not_corrupted` above guards
+// MP4 end to end. The MOV, WebM and AVI lists were only ever checked against
+// hardcoded strings in unit tests, which cannot notice that a *listed* codec
+// is in fact mis-tagged by the muxer — the failure this whole allowlist
+// exists to prevent. These drive real ffmpeg for the remaining three.
+//
+// Each container gets both directions: a listed codec must survive carrying
+// a tag of its own, and an unlisted one must be left behind rather than
+// written under a catch-all.
+
+#[tokio::test]
+#[ignore]
+async fn mov_carries_a_listed_codec_and_leaves_an_unlisted_one_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+
+    // pcm_s16le is on MOV's list and not on MP4's, so it also pins the two
+    // lists apart where it actually matters — in the muxed output.
+    let listed = tmp.path().join("listed.mov");
+    let src = tmp.path().join("mov-listed.mkv");
+    make_multi_audio_source_as(&ffmpeg, &src, "libx264", "aac", "pcm_s16le");
+    convert(&r, &request(&src, &listed, TargetFormat::Mov, None))
+        .await
+        .expect("mkv -> mov");
+    assert_eq!(
+        stream_codecs(&r, &listed, "a"),
+        vec!["aac", "pcm_s16le"],
+        "a listed codec must survive a copy into MOV"
+    );
+    let tags = audio_tags(&r, &listed);
+    assert!(
+        !tags.iter().any(|t| t == "mp4a") || tags[1] != "mp4a",
+        "the PCM track must not land under the mp4a catch-all: {tags:?}"
+    );
+
+    let unlisted = tmp.path().join("unlisted.mov");
+    let src2 = tmp.path().join("mov-unlisted.mkv");
+    make_multi_audio_source_as(&ffmpeg, &src2, "libx264", "aac", "libvorbis");
+    convert(&r, &request(&src2, &unlisted, TargetFormat::Mov, None))
+        .await
+        .expect("the conversion must still succeed, just without the track");
+    assert_eq!(
+        stream_codecs(&r, &unlisted, "a"),
+        vec!["aac"],
+        "an unlisted codec must be left behind rather than mis-tagged"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn webm_carries_a_listed_codec_and_leaves_an_unlisted_one_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+
+    // VP9 + Opus so the plan is a genuine stream copy; h264 or AAC would
+    // force an encode and the allowlist would never be consulted.
+    //
+    // The sources are `.mkv` rather than `.webm` because the WebM *muxer*
+    // refuses the very tracks these cases need to carry — an AAC second
+    // track cannot be written into a `.webm` at all, so the fixture could
+    // not be authored. Matroska holds every combination, which is the
+    // point of using it as the source container.
+    let listed = tmp.path().join("listed.webm");
+    let src = tmp.path().join("webm-listed.mkv");
+    make_multi_audio_source_as(&ffmpeg, &src, "libvpx-vp9", "libopus", "libvorbis");
+    convert(&r, &request(&src, &listed, TargetFormat::Webm, None))
+        .await
+        .expect("webm -> webm");
+    assert_eq!(
+        stream_codecs(&r, &listed, "a"),
+        vec!["opus", "vorbis"],
+        "both of WebM's two listed codecs must survive"
+    );
+
+    // WebM aborts the mux outright on an unknown codec rather than
+    // mis-tagging it, so the job would fail entirely without the narrowing.
+    let unlisted = tmp.path().join("unlisted.webm");
+    let src2 = tmp.path().join("webm-unlisted.mkv");
+    make_multi_audio_source_as(&ffmpeg, &src2, "libvpx-vp9", "libopus", "aac");
+    convert(&r, &request(&src2, &unlisted, TargetFormat::Webm, None))
+        .await
+        .expect("an unlisted track must not take the whole job down with it");
+    assert_eq!(
+        stream_codecs(&r, &unlisted, "a"),
+        vec!["opus"],
+        "an unlisted codec must be left behind, not aborted on"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn avi_carries_a_listed_codec_and_leaves_an_unlisted_one_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+
+    // mpeg4 video with mp3 as the *first* audio stream, which is the only
+    // combination `plan_avi` stream-copies — and a copy is the only plan
+    // where the allowlist applies at all, since a re-encode rewrites every
+    // stream into one known-good codec.
+    //
+    // Anything else takes `plan_avi_encode`, which names `libxvid`. The
+    // bundled ffmpeg is not built with it, so those conversions fail
+    // outright: a separate, pre-existing bug that makes AVI an offered
+    // target which cannot convert an ordinary h264 video.
+    let listed = tmp.path().join("listed.avi");
+    let src = tmp.path().join("avi-listed.avi");
+    make_multi_audio_source_as(&ffmpeg, &src, "mpeg4", "libmp3lame", "aac");
+    convert(&r, &request(&src, &listed, TargetFormat::Avi, None))
+        .await
+        .expect("avi -> avi");
+    assert_eq!(
+        stream_codecs(&r, &listed, "a"),
+        vec!["mp3", "aac"],
+        "a listed codec must survive a copy into AVI"
+    );
+
+    let unlisted = tmp.path().join("unlisted.avi");
+    let src2 = tmp.path().join("avi-unlisted.avi");
+    make_multi_audio_source_as(&ffmpeg, &src2, "mpeg4", "libmp3lame", "libvorbis");
+    convert(&r, &request(&src2, &unlisted, TargetFormat::Avi, None))
+        .await
+        .expect("the conversion must still succeed, just without the track");
+    assert_eq!(
+        stream_codecs(&r, &unlisted, "a"),
+        vec!["mp3"],
+        "an unlisted codec must be left behind rather than mis-tagged"
+    );
 }
 
 #[tokio::test]
