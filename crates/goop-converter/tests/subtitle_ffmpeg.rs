@@ -11,94 +11,16 @@
 //! cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
 //! ```
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
-use goop_converter::backend::ConversionBackend;
-use goop_converter::FfmpegBackend;
-use goop_core::{
-    ConvertRequest, EventSink, JobId, ProgressEvent, QueueEvent, SidecarEvent, SubtitleMode,
-    SubtitleOptions, TargetFormat,
+use common::{
+    bundled_resolver, convert, ffmpeg_path, make_source, request, stream_codecs, stream_tags,
 };
+use goop_core::{SubtitleMode, SubtitleOptions, TargetFormat};
 use goop_sidecar::BinaryResolver;
-use tokio_util::sync::CancellationToken;
-
-struct SilentSink;
-
-impl EventSink for SilentSink {
-    fn emit_progress(&self, _: ProgressEvent) {}
-    fn emit_queue(&self, _: QueueEvent) {}
-    fn emit_sidecar(&self, _: SidecarEvent) {}
-}
-
-/// A resolver pointed at a directory holding plainly-named copies of this
-/// checkout's sidecars.
-///
-/// `src-tauri/bin` stores them as `<name>-<target-triple>`, the layout
-/// Tauri's bundler consumes, whereas `BinaryResolver` looks for a bare
-/// `<name>` (which is what the packaged app ends up with). Symlinking into
-/// a temp dir bridges the two so these tests exercise the ffmpeg that
-/// actually ships rather than whatever is on `PATH`.
-fn bundled_resolver(link_dir: &Path) -> BinaryResolver {
-    let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src-tauri/bin")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("src-tauri/bin"));
-    let triple = current_triple();
-    for name in ["ffmpeg", "ffprobe"] {
-        // `BinaryResolver` appends `.exe` on Windows, so the link has to
-        // carry it too or the lookup misses and silently falls back to
-        // whatever is on `PATH`.
-        let (src_name, dst_name) = if cfg!(windows) {
-            (format!("{name}-{triple}.exe"), format!("{name}.exe"))
-        } else {
-            (format!("{name}-{triple}"), name.to_string())
-        };
-        let src = bin.join(src_name);
-        if src.is_file() {
-            let _ = symlink(&src, &link_dir.join(dst_name));
-        }
-    }
-    BinaryResolver::new(link_dir.to_path_buf())
-}
-
-#[cfg(unix)]
-fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
-#[cfg(windows)]
-fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::copy(src, dst).map(|_| ())
-}
-
-fn current_triple() -> &'static str {
-    // Only the two shipping targets need to resolve here; anything else
-    // falls through to the `PATH` lookup inside `BinaryResolver`.
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        "x86_64-pc-windows-msvc"
-    } else {
-        "unknown"
-    }
-}
-
-fn ffmpeg_path(r: &BinaryResolver) -> PathBuf {
-    let resolved = r
-        .resolve("ffmpeg")
-        .expect("ffmpeg must be resolvable for this ignored test");
-    // Without this the suite can pass green against a `PATH` ffmpeg that
-    // has nothing to do with what ships — which is exactly how the missing
-    // libass in Homebrew's build went unnoticed until it was looked for.
-    assert!(
-        !resolved.source_is_path,
-        "expected the bundled sidecar, got {} from PATH — run scripts/fetch-sidecars.sh",
-        resolved.path.display()
-    );
-    resolved.path
-}
 
 /// True when the resolved ffmpeg was built with libass. Burn-in needs it,
 /// and Homebrew's ffmpeg — the usual `PATH` fallback in a dev checkout —
@@ -149,61 +71,9 @@ fn cue_count(r: &BinaryResolver, path: &Path) -> usize {
         .count()
 }
 
-/// A 2-second colour clip with a silent audio track.
-fn make_source(ffmpeg: &Path, out: &Path) {
-    let status = Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=s=160x120:d=2",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:d=2",
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            "-shortest",
-        ])
-        .arg(out)
-        .status()
-        .unwrap();
-    assert!(status.success(), "failed to build the test source clip");
-}
-
 /// Codec names of `out`'s subtitle streams, in order.
 fn subtitle_codecs(r: &BinaryResolver, out: &Path) -> Vec<String> {
     stream_codecs(r, out, "s")
-}
-
-/// Codec names of `out`'s streams of type `kind` ("v", "a", "s"), in order.
-fn stream_codecs(r: &BinaryResolver, out: &Path, kind: &str) -> Vec<String> {
-    let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
-    let probe = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            kind,
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(out)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&probe.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string())
-        .collect()
 }
 
 /// A 2-second clip carrying **two** audio tracks and **two** SubRip tracks.
@@ -317,13 +187,6 @@ fn make_multi_audio_source(ffmpeg: &Path, out: &Path, second: &str) {
     );
 }
 
-/// The `codec_tag_string` of each of `out`'s audio streams, in order.
-///
-/// Counting streams is not enough to catch the failure this guards against:
-/// MP4 will accept a codec it has no mapping for by boxing it under the
-/// `mp4a` (AAC) FourCC, producing a stream that ffmpeg itself still reads
-/// back through the ESDS descriptor while every ordinary player sees an AAC
-/// track full of something that is not AAC.
 /// `make_multi_audio_source` with the video and first-audio codecs chosen by
 /// the caller.
 ///
@@ -372,54 +235,15 @@ fn make_multi_audio_source_as(ffmpeg: &Path, out: &Path, video: &str, first: &st
     );
 }
 
+/// The `codec_tag_string` of each of `out`'s audio streams, in order.
+///
+/// Counting streams is not enough to catch the failure this guards against:
+/// MP4 will accept a codec it has no mapping for by boxing it under the
+/// `mp4a` (AAC) FourCC, producing a stream that ffmpeg itself still reads
+/// back through the ESDS descriptor while every ordinary player sees an AAC
+/// track full of something that is not AAC.
 fn audio_tags(r: &BinaryResolver, out: &Path) -> Vec<String> {
-    let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
-    let probe = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a",
-            "-show_entries",
-            "stream=codec_tag_string",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(out)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&probe.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.trim().trim_end_matches(',').to_string())
-        .collect()
-}
-
-fn request(
-    input: &Path,
-    output: &Path,
-    target: TargetFormat,
-    sub: Option<SubtitleOptions>,
-) -> ConvertRequest {
-    ConvertRequest {
-        input_path: input.to_string_lossy().into_owned(),
-        output_path: output.to_string_lossy().into_owned(),
-        target,
-        quality_preset: None,
-        resolution_cap: None,
-        gif_options: None,
-        compress_mode: None,
-        batch_id: None,
-        metadata_policy: None,
-        subtitle: sub,
-    }
-}
-
-async fn convert(r: &BinaryResolver, req: &ConvertRequest) -> Result<(), goop_core::GoopError> {
-    FfmpegBackend::new(r, Arc::new(SilentSink))
-        .convert(JobId::new(), req, CancellationToken::new())
-        .await
-        .map(|_| ())
+    stream_tags(r, out, "a")
 }
 
 #[tokio::test]

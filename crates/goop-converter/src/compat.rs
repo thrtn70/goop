@@ -271,11 +271,33 @@ fn plan_avi(vcodec: Option<&str>, acodec: Option<&str>) -> Plan {
     }
 }
 
+/// MPEG-4 part 2 video + MP3 audio, the pairing AVI holds natively and
+/// the one `plan_avi` stream-copies, so an encode here round-trips.
+///
+/// Deliberately ffmpeg's built-in `mpeg4` encoder rather than `libxvid`,
+/// which this named previously: libxvid is an external GPL library that
+/// has to be compiled in, and the two prebuilt sidecars disagree about
+/// it — gyan's Windows build carries it, the osxexperts macOS build does
+/// not. Every AVI conversion needing a video encode — which is
+/// essentially all of them, h.264 being the norm — died on macOS with
+/// "Unknown encoder 'libxvid'". `mpeg4` is part of libavcodec itself, so
+/// it is present in both builds and produces the same codec.
+///
+/// `-vtag xvid` keeps the FourCC libxvid used to write. AVI's whole
+/// reason for being on the target list is players too old to know
+/// anything newer, and those dispatch on the FourCC — they recognise
+/// `xvid` where they may not recognise the native encoder's `FMP4`.
+/// It relabels only the container tag; the bitstream is unchanged, and
+/// ffprobe still reports the stream as `mpeg4`.
 fn plan_avi_encode() -> Plan {
     Plan {
         args: args(&[
             "-c:v",
-            "libxvid",
+            "mpeg4",
+            "-vtag",
+            "xvid",
+            // The same 1-31 qscale libxvid took, lower being better, so
+            // the output quality target is unchanged.
             "-q:v",
             "4",
             "-c:a",
@@ -838,7 +860,7 @@ mod tests {
             None,
         );
         assert!(p.reencoded, "an explicit preset must force an encode");
-        assert!(p.args.iter().any(|a| a == "libxvid"));
+        assert!(p.args.iter().any(|a| a == "mpeg4"));
     }
 
     #[test]
@@ -1054,7 +1076,22 @@ mod tests {
     fn avi_other_reencodes() {
         let p = d(TargetFormat::Avi, Some("h264"), Some("aac"));
         assert!(p.reencoded);
-        assert!(p.args.iter().any(|s| s == "libxvid"));
+        // `mpeg4` (libavcodec's own) rather than `libxvid` (an external
+        // library the macOS sidecar isn't built with) — see
+        // `plan_avi_encode`. Pinned because the arg vector is the only
+        // place the choice is visible without running ffmpeg.
+        assert!(p.args.iter().any(|s| s == "mpeg4"));
+        assert!(!p.args.iter().any(|s| s == "libxvid"));
+    }
+
+    #[test]
+    fn avi_encode_lands_on_the_codecs_the_remux_path_accepts() {
+        // Otherwise re-running an AVI conversion on its own output
+        // re-encodes every time instead of stream-copying.
+        let encoded = d(TargetFormat::Avi, Some("h264"), Some("aac"));
+        assert!(encoded.reencoded);
+        let again = d(TargetFormat::Avi, Some("mpeg4"), Some("mp3"));
+        assert!(!again.reencoded, "goop's own AVI output must remux");
     }
 
     #[test]
