@@ -1148,6 +1148,48 @@ mod tests {
         assert!(!plan.args.iter().any(|a| a == "0:a?"));
     }
 
+    #[test]
+    fn a_resolution_cap_does_not_widen_the_audio_map() {
+        // A capped plan has to encode video (a filtergraph can't feed a
+        // copied stream) but still *copies* audio, which is what keeps it
+        // on the vetted branch of `audio_map`: a vorbis track has no
+        // registered MP4 tag, so `all_audio_copyable` narrows the map and
+        // the track is dropped rather than boxed under `mp4a`.
+        //
+        // The obvious shortcut in `compat::force_video_encode` — swapping
+        // in the whole encode plan rather than only its video half — would
+        // make this `-c:a aac`, and a re-encoding plan takes the wide map
+        // unconditionally, since re-encoding is normally what makes the
+        // source codec stop mattering. Here it would instead hand vorbis
+        // straight past the allowlist that exists to catch it.
+        let mut plan = crate::compat::decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            Some(goop_core::ResolutionCap::R720p),
+            None,
+        );
+        assert!(
+            plan.reencoded,
+            "precondition: the cap forces a video encode"
+        );
+        assert!(
+            plan.args.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "precondition: the cap leaves audio copied, {:?}",
+            plan.args
+        );
+        assert!(preserve_existing_in_plan(
+            &mut plan,
+            TargetFormat::Mp4,
+            &["subrip".to_string()],
+            &["aac".to_string(), "vorbis".to_string()],
+        ));
+
+        assert!(plan.args.iter().any(|a| a == "0:a:0?"), "{:?}", plan.args);
+        assert!(!plan.args.iter().any(|a| a == "0:a?"), "{:?}", plan.args);
+    }
+
     // --- Preserving with nothing attached -------------------------------
 
     #[test]

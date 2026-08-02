@@ -104,6 +104,17 @@ pub fn ffmpeg_path(r: &BinaryResolver) -> PathBuf {
 
 /// A 2-second colour clip with a silent audio track.
 pub fn make_source(ffmpeg: &Path, out: &Path) {
+    make_source_sized(ffmpeg, out, 160, 120);
+}
+
+/// [`make_source`] at an explicit frame size.
+///
+/// A resolution cap only *caps* when the source is larger than it, so the
+/// 160x120 default would let a capped conversion pass by upscaling — which
+/// proves nothing about the filter and would bake the wrong expectation
+/// into the assertion.
+pub fn make_source_sized(ffmpeg: &Path, out: &Path, w: u32, h: u32) {
+    let size = format!("testsrc=s={w}x{h}:d=2");
     let status = Command::new(ffmpeg)
         .args([
             "-y",
@@ -113,7 +124,7 @@ pub fn make_source(ffmpeg: &Path, out: &Path) {
             "-f",
             "lavfi",
             "-i",
-            "testsrc=s=160x120:d=2",
+            &size,
             "-f",
             "lavfi",
             "-i",
@@ -138,6 +149,15 @@ pub fn stream_codecs(r: &BinaryResolver, out: &Path, kind: &str) -> Vec<String> 
 /// FourCC / codec tags of `out`'s streams of type `kind`, in order.
 pub fn stream_tags(r: &BinaryResolver, out: &Path, kind: &str) -> Vec<String> {
     probe_entries(r, out, kind, "stream=codec_tag_string")
+}
+
+/// `(width, height)` of `out`'s first video stream.
+pub fn video_dimensions(r: &BinaryResolver, out: &Path) -> (u32, u32) {
+    let entries = probe_entries(r, out, "v:0", "stream=width,height");
+    // `csv=p=0` puts both values on one line for a single stream.
+    let line = entries.first().expect("no video stream to measure");
+    let (w, h) = line.split_once(',').expect("expected 'width,height'");
+    (w.parse().expect("width"), h.parse().expect("height"))
 }
 
 fn probe_entries(r: &BinaryResolver, out: &Path, kind: &str, entries: &str) -> Vec<String> {
