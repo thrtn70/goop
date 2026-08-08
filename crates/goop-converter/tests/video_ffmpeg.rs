@@ -22,10 +22,11 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{
-    bundled_resolver, convert, ffmpeg_path, make_source, request, stream_codecs, stream_tags,
+    bundled_resolver, convert, ffmpeg_path, make_source, make_source_sized, request, stream_codecs,
+    stream_tags, video_dimensions,
 };
 use goop_converter::compat::{decide, decide_compression, Plan};
-use goop_core::{CompressMode, QualityPreset, TargetFormat};
+use goop_core::{CompressMode, QualityPreset, ResolutionCap, TargetFormat};
 
 // ---------------------------------------------------------------------------
 // The AVI regression
@@ -233,8 +234,8 @@ fn routed_through_ffmpeg(t: TargetFormat) -> bool {
     }
 }
 
-/// Every plan `target` can produce, across the source-codec and preset
-/// combinations that select different branches.
+/// Every plan `target` can produce, across the source-codec, preset and
+/// resolution-cap combinations that select different branches.
 fn plans_for(target: TargetFormat) -> Vec<Plan> {
     // Source codecs chosen to hit both the stream-copy arms and the
     // re-encode fallbacks of each `plan_*` matcher.
@@ -259,16 +260,136 @@ fn plans_for(target: TargetFormat) -> Vec<Plan> {
         CompressMode::TargetSizeBytes(1_000_000),
     ];
 
+    // A cap inserts a `scale` filter, and a filtergraph cannot feed a
+    // copied stream — so on a plan that would have remuxed, the cap is
+    // what *selects an encoder*, reaching a codec name no preset sweep
+    // above ever produces. Only paired with `None` here: against an
+    // explicit preset the cap changes the filters and nothing else, so
+    // those combinations name no further encoders.
+    const CAPS: &[Option<ResolutionCap>] = &[
+        Some(ResolutionCap::Original),
+        Some(ResolutionCap::R1080p),
+        Some(ResolutionCap::R720p),
+        Some(ResolutionCap::R480p),
+    ];
+
     let mut plans = vec![];
     for &(v, a) in SOURCES {
         for &q in PRESETS {
             plans.push(decide(target, v, a, q, None, None));
+        }
+        for &cap in CAPS {
+            plans.push(decide(target, v, a, None, cap, None));
         }
         for &mode in MODES {
             plans.push(decide_compression(target, v, a, mode, 10_000));
         }
     }
     plans
+}
+
+// ---------------------------------------------------------------------------
+// The resolution-cap regression
+// ---------------------------------------------------------------------------
+//
+// A cap inserts a `scale` filter, and ffmpeg refuses a filtergraph paired
+// with `-c copy`. The unit tests in `compat.rs` assert the plan no longer
+// pairs them, which is the shape of the fix; only running the command
+// proves ffmpeg accepts it. That gap is the entire bug — the old args
+// looked perfectly reasonable in a `Plan`.
+
+/// The common case: a source the target would otherwise have remuxed.
+#[tokio::test]
+#[ignore]
+async fn a_capped_mp4_conversion_scales_instead_of_failing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mp4");
+    // Larger than the cap, or the "cap" would pass by upscaling.
+    make_source_sized(&ffmpeg, &src, 1920, 1080);
+
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.resolution_cap = Some(ResolutionCap::R720p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped conversion must not pair -vf with a stream copy");
+
+    assert_eq!(video_dimensions(&r, &out), (1280, 720));
+    // Encoded, not copied — the cap is what forced it.
+    assert_eq!(stream_codecs(&r, &out, "v"), vec!["h264"]);
+    // ...but the audio it was going to copy stayed copied.
+    assert_eq!(stream_codecs(&r, &out, "a"), vec!["aac"]);
+}
+
+/// AVI reaches its encoder only through the cap here, and that encoder is
+/// the one the sidecars disagreed about. Both halves have to hold at once.
+#[tokio::test]
+#[ignore]
+async fn a_capped_avi_conversion_uses_an_encoder_the_sidecar_has() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let h264 = tmp.path().join("h264.mp4");
+    let src = tmp.path().join("src.avi");
+    let out = tmp.path().join("out.avi");
+    // The remux case specifically: AVI stream-copies an mpeg4+mp3 source,
+    // so the cap is the only thing that can force it to an encoder. An
+    // h264 source would already be encoding and would pass either way.
+    make_source_sized(&ffmpeg, &h264, 1920, 1080);
+    let status = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&h264)
+        .args(["-c:v", "mpeg4", "-vtag", "xvid", "-c:a", "libmp3lame"])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the mpeg4+mp3 AVI source");
+    assert_eq!(stream_codecs(&r, &src, "v"), vec!["mpeg4"]);
+    assert_eq!(stream_codecs(&r, &src, "a"), vec!["mp3"]);
+
+    let mut req = request(&src, &out, TargetFormat::Avi, None);
+    req.resolution_cap = Some(ResolutionCap::R480p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped AVI conversion must encode with a present encoder");
+
+    assert_eq!(video_dimensions(&r, &out), (854, 480));
+    assert_eq!(stream_codecs(&r, &out, "v"), vec!["mpeg4"]);
+    // The other half: the cap replaced the video codec only, so the mp3
+    // track AVI was going to copy is still copied.
+    assert_eq!(stream_codecs(&r, &out, "a"), vec!["mp3"]);
+    // The FourCC the forced-encode path sets has to survive the rewrite,
+    // since the cap takes the target's encode args rather than inventing
+    // its own.
+    assert_eq!(stream_tags(&r, &out, "v"), vec!["xvid"]);
+}
+
+/// The mirror: without a cap the same conversion must still remux, or the
+/// fix has cost every uncapped conversion its stream copy.
+#[tokio::test]
+#[ignore]
+async fn an_uncapped_conversion_still_remuxes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mkv");
+    make_source_sized(&ffmpeg, &src, 1920, 1080);
+
+    convert(&r, &request(&src, &out, TargetFormat::Mkv, None))
+        .await
+        .expect("an uncapped conversion must still succeed");
+
+    // Untouched dimensions and the source's own codecs: a remux.
+    assert_eq!(video_dimensions(&r, &out), (1920, 1080));
+    assert_eq!(stream_codecs(&r, &out, "v"), vec!["h264"]);
 }
 
 /// Encoder names a plan hands to ffmpeg — the token after each codec

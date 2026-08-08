@@ -97,11 +97,119 @@ pub fn decide(
                 ResolutionCap::Original => unreachable!(),
             };
             plan.video_filters.insert(0, format!("scale={w}:-2"));
+            // A filtergraph cannot be applied to a copied stream: ffmpeg
+            // rejects the whole command with "Filtering and streamcopy
+            // cannot be used together" and writes no output. So a cap on
+            // top of a remux plan has to become a real encode, not just a
+            // `reencoded` flag flip.
+            force_video_encode(&mut plan, target, quality);
             plan.reencoded = true;
         }
     }
 
     plan
+}
+
+/// Swap a plan's video stream-copy for `target`'s encode args, in place.
+///
+/// A no-op when the plan already encodes video. The audio side is carried
+/// over untouched — a resolution cap is a video filter, so audio the plan
+/// was going to copy stays copied (faster, and no extra lossy generation)
+/// and audio it was already re-encoding keeps those args.
+fn force_video_encode(plan: &mut Plan, target: TargetFormat, quality: Option<QualityPreset>) {
+    if !copies_video(&plan.args) {
+        return;
+    }
+    let Some(encode) = video_encode_plan(target, quality) else {
+        // Unreachable while `video_encode_plan` stays exhaustive, but the
+        // failure mode is silent and identical to the bug this function
+        // exists to prevent — `-c copy` left under the filter the caller
+        // just inserted — so say so loudly rather than ship it.
+        debug_assert!(
+            false,
+            "{target:?} stream-copies video but has no encode plan; a \
+             resolution cap on it would pair -vf with -c copy"
+        );
+        return;
+    };
+
+    // Every plan built above orders its args video-first, so the audio
+    // block is everything from the first `-c:a` onward. A plain `-c copy`
+    // has no such marker: it was copying audio too, so say so explicitly
+    // now that the blanket selector is going away.
+    let audio_start = |argv: &[String]| argv.iter().position(|a| a == "-c:a");
+    let audio: Vec<String> = match audio_start(&plan.args) {
+        Some(i) => plan.args[i..].to_vec(),
+        None => args(&["-c:a", "copy"]),
+    };
+
+    let mut new_args = match audio_start(&encode.args) {
+        Some(i) => encode.args[..i].to_vec(),
+        None => encode.args.clone(),
+    };
+    new_args.extend(audio);
+    plan.args = new_args;
+
+    debug_assert!(
+        !copies_video(&plan.args),
+        "{target:?} still stream-copies video after the rewrite: {:?}",
+        plan.args
+    );
+}
+
+/// Whether `args` hands the video stream to the `copy` pseudo-encoder,
+/// either on its own (`-c:v copy`), via a stream-indexed selector
+/// (`-c:v:0 copy`), or via the blanket selector (`-c copy`).
+///
+/// The indexed form matches nothing built today, but reading it as "not a
+/// copy" would be the silent-failure direction: the caller would leave
+/// `-vf` paired with a stream copy, which is the bug this guards.
+fn copies_video(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|w| (w[0] == "-c" || w[0].starts_with("-c:v")) && w[1] == "copy")
+}
+
+/// The encoding plan for a video container target, used when something
+/// (today: a resolution cap) forces an encode a remux plan didn't expect.
+///
+/// `None` for targets that never stream-copy video under a filter —
+/// audio-only, images, subtitles, and GIF, which always encodes.
+fn video_encode_plan(target: TargetFormat, quality: Option<QualityPreset>) -> Option<Plan> {
+    // `Original` maps to the same knobs as `Balanced` in every preset
+    // table below, so it needs no special case.
+    let q = quality.unwrap_or(QualityPreset::Balanced);
+    // Exhaustive on purpose rather than a `_ => None` wildcard: a new video
+    // container that stream-copies would otherwise fall through to `None`,
+    // silently keeping `-c copy` under a `scale` filter — the exact command
+    // ffmpeg refuses. Adding a variant stops this compiling instead, which
+    // is the prompt to decide which arm it belongs in.
+    match target {
+        TargetFormat::Mp4 | TargetFormat::Mov => Some(plan_mp4_encode(q)),
+        TargetFormat::Mkv => Some(plan_mkv_encode(q)),
+        TargetFormat::Webm => Some(plan_webm_encode(q)),
+        TargetFormat::Avi => Some(plan_avi_encode()),
+        // GIF always encodes, so it never reaches here with a copy plan.
+        // The rest carry no video stream for a filter to act on: audio-only
+        // and subtitle targets, and images (handled by ImageMagick).
+        TargetFormat::Gif
+        | TargetFormat::Mp3
+        | TargetFormat::M4a
+        | TargetFormat::Opus
+        | TargetFormat::Wav
+        | TargetFormat::Flac
+        | TargetFormat::Ogg
+        | TargetFormat::Aac
+        | TargetFormat::ExtractAudioKeepCodec
+        | TargetFormat::Srt
+        | TargetFormat::Vtt
+        | TargetFormat::Png
+        | TargetFormat::Jpeg
+        | TargetFormat::Webp
+        | TargetFormat::Bmp
+        | TargetFormat::Tiff
+        | TargetFormat::Avif
+        | TargetFormat::JpegXl => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,6 +1368,315 @@ mod tests {
             None,
         );
         assert!(p.video_filters.is_empty());
+    }
+
+    /// Every `(target, vcodec, acodec)` whose no-preset plan stream-copies
+    /// the video — the exact set a resolution cap has to convert into an
+    /// encode.
+    const REMUXING_SOURCES: &[(TargetFormat, Option<&str>, Option<&str>)] = &[
+        // `-c copy` (both streams)
+        (TargetFormat::Mp4, Some("h264"), Some("aac")),
+        (TargetFormat::Mkv, Some("hevc"), Some("flac")),
+        (TargetFormat::Mov, Some("h264"), Some("aac")),
+        (TargetFormat::Avi, Some("mpeg4"), Some("mp3")),
+        (TargetFormat::Webm, Some("vp9"), Some("opus")),
+        // `-c:v copy` with the audio already re-encoded
+        (TargetFormat::Mp4, Some("h264"), Some("mp3")),
+        (TargetFormat::Mov, Some("h264"), Some("mp3")),
+    ];
+
+    #[test]
+    fn a_capped_plan_never_stream_copies_the_video() {
+        // A filtergraph and stream copy are mutually exclusive — ffmpeg
+        // refuses the command outright with "Filtering and streamcopy
+        // cannot be used together" and writes nothing. Inserting the
+        // `scale` filter therefore has to replace the copy codec args,
+        // not just flip the `reencoded` flag.
+        for &(target, v, a) in REMUXING_SOURCES {
+            let uncapped = decide(target, v, a, None, None, None);
+            assert!(
+                copies_video(&uncapped.args),
+                "{target:?} {v:?}/{a:?} is meant to be a stream-copy case, \
+                 got {:?}",
+                uncapped.args
+            );
+
+            let p = decide(target, v, a, None, Some(ResolutionCap::R720p), None);
+            assert!(
+                p.video_filters.iter().any(|f| f.contains("scale=1280")),
+                "{target:?} {v:?}/{a:?} lost the cap: {:?}",
+                p.video_filters
+            );
+            assert!(p.reencoded, "{target:?} {v:?}/{a:?}");
+            assert!(
+                !copies_video(&p.args),
+                "{target:?} {v:?}/{a:?} pairs -vf with a video stream copy: {:?}",
+                p.args
+            );
+        }
+    }
+
+    #[test]
+    fn a_capped_plan_encodes_with_the_same_codec_as_a_forced_encode() {
+        // Asserted against the target's own encode plan rather than a
+        // hardcoded encoder name: the cap path must not invent a codec the
+        // container (or the bundled ffmpeg) doesn't take.
+        for &(target, v, a) in REMUXING_SOURCES {
+            let capped = decide(target, v, a, None, Some(ResolutionCap::R720p), None);
+            let forced = decide(target, v, a, Some(QualityPreset::Balanced), None, None);
+            let vcodec = |args: &[String]| {
+                args.windows(2)
+                    .find(|w| w[0] == "-c:v")
+                    .map(|w| w[1].clone())
+            };
+            assert_eq!(
+                vcodec(&capped.args),
+                vcodec(&forced.args),
+                "{target:?} {v:?}/{a:?}: capped {:?} vs forced {:?}",
+                capped.args,
+                forced.args
+            );
+        }
+    }
+
+    #[test]
+    fn a_capped_plan_keeps_the_audio_it_would_have_copied() {
+        // The cap is a *video* filter. Re-encoding audio that was going to
+        // be copied costs time and a generation of quality for nothing.
+        let p = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        assert!(
+            p.args.windows(2).any(|w| w == ["-c:a", "copy"]),
+            "{:?}",
+            p.args
+        );
+    }
+
+    #[test]
+    fn a_capped_plan_keeps_the_audio_re_encode_it_already_had() {
+        // h264+mp3 into MP4 copies video but transcodes audio to AAC. The
+        // cap replaces only the video half; dropping `-c:a aac` here would
+        // leave MP4 with an MP3 track it can't legally carry.
+        let p = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("mp3"),
+            None,
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        assert!(
+            p.args.windows(2).any(|w| w == ["-c:a", "aac"]),
+            "{:?}",
+            p.args
+        );
+        assert!(
+            p.args.windows(2).any(|w| w == ["-b:a", "192k"]),
+            "{:?}",
+            p.args
+        );
+    }
+
+    #[test]
+    fn a_capped_plan_that_already_encodes_is_left_alone() {
+        // The cap must not overwrite an explicit preset's own args.
+        let forced = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            Some(QualityPreset::Small),
+            None,
+            None,
+        );
+        let capped = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            Some(QualityPreset::Small),
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        assert_eq!(capped.args, forced.args);
+        assert!(capped
+            .video_filters
+            .iter()
+            .any(|f| f.contains("scale=1280")));
+    }
+
+    #[test]
+    fn a_capped_remux_still_takes_the_hw_encoder() {
+        // `substitute_h264_hw` finds its target by scanning for a
+        // `-c:v libx264` window. If the cap rewrite emitted the codec any
+        // other way, GPU encoding would silently stop applying to exactly
+        // the conversions that most need it — a scale plus a full encode.
+        let plan = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        let out = substitute_h264_hw(&plan.args, "h264_videotoolbox", None)
+            .expect("a capped remux must expose a libx264 window to substitute");
+        assert!(out.windows(2).any(|w| w == ["-c:v", "h264_videotoolbox"]));
+        // The carried-over audio copy has to survive that rewrite too.
+        assert!(out.windows(2).any(|w| w == ["-c:a", "copy"]), "{out:?}");
+    }
+
+    /// Every `TargetFormat`, so the two structural tests below cannot go
+    /// stale by omission. Exhaustive `match` rather than a literal list:
+    /// adding a variant stops this compiling, which is the prompt to add
+    /// it here too.
+    const ALL_TARGETS: &[TargetFormat] = &[
+        TargetFormat::Mp4,
+        TargetFormat::Mov,
+        TargetFormat::Mkv,
+        TargetFormat::Webm,
+        TargetFormat::Avi,
+        TargetFormat::Gif,
+        TargetFormat::Mp3,
+        TargetFormat::M4a,
+        TargetFormat::Opus,
+        TargetFormat::Wav,
+        TargetFormat::Flac,
+        TargetFormat::Ogg,
+        TargetFormat::Aac,
+        TargetFormat::ExtractAudioKeepCodec,
+        TargetFormat::Srt,
+        TargetFormat::Vtt,
+        TargetFormat::Png,
+        TargetFormat::Jpeg,
+        TargetFormat::Webp,
+        TargetFormat::Bmp,
+        TargetFormat::Tiff,
+        TargetFormat::Avif,
+        TargetFormat::JpegXl,
+    ];
+
+    #[test]
+    fn all_targets_is_complete() {
+        fn seen(t: TargetFormat) -> bool {
+            match t {
+                TargetFormat::Mp4
+                | TargetFormat::Mov
+                | TargetFormat::Mkv
+                | TargetFormat::Webm
+                | TargetFormat::Avi
+                | TargetFormat::Gif
+                | TargetFormat::Mp3
+                | TargetFormat::M4a
+                | TargetFormat::Opus
+                | TargetFormat::Wav
+                | TargetFormat::Flac
+                | TargetFormat::Ogg
+                | TargetFormat::Aac
+                | TargetFormat::ExtractAudioKeepCodec
+                | TargetFormat::Srt
+                | TargetFormat::Vtt
+                | TargetFormat::Png
+                | TargetFormat::Jpeg
+                | TargetFormat::Webp
+                | TargetFormat::Bmp
+                | TargetFormat::Tiff
+                | TargetFormat::Avif
+                | TargetFormat::JpegXl => true,
+            }
+        }
+        for &t in ALL_TARGETS {
+            assert!(seen(t));
+        }
+        assert_eq!(ALL_TARGETS.len(), 23, "a variant was added or removed");
+    }
+
+    #[test]
+    fn every_target_that_can_stream_copy_video_has_an_encode_plan() {
+        // `force_video_encode`'s `None` arm is guarded only by a
+        // `debug_assert!`, which compiles away in the release binary the
+        // app actually ships. Exhaustiveness makes `video_encode_plan`
+        // cover every variant but says nothing about which *arm* each one
+        // lands in — so moving a container to the `None` arm while its
+        // plan still stream-copies would compile, pass a debug test run
+        // only by luck, and in release silently leave `-c copy` under the
+        // `scale` filter: this exact bug, back again.
+        //
+        // Pin the real invariant instead: whatever can produce a
+        // copy-plan must have somewhere to be re-encoded to.
+        const PROBES: &[(Option<&str>, Option<&str>)] = &[
+            (Some("h264"), Some("aac")),
+            (Some("h264"), Some("mp3")),
+            (Some("mpeg4"), Some("mp3")),
+            (Some("vp9"), Some("opus")),
+            (Some("hevc"), Some("flac")),
+            (None, None),
+        ];
+        for &target in ALL_TARGETS {
+            for &(v, a) in PROBES {
+                let plan = decide(target, v, a, None, None, None);
+                if copies_video(&plan.args) {
+                    assert!(
+                        video_encode_plan(target, None).is_some(),
+                        "{target:?} stream-copies video for {v:?}/{a:?} but has \
+                         no encode plan, so a cap on it would pair -vf with -c copy"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_encode_plan_puts_nothing_but_audio_after_its_first_c_a() {
+        // `force_video_encode` splits both arg vectors at the first `-c:a`
+        // and treats the tail as the audio half. That is only sound while
+        // every plan keeps its video and container flags ahead of that
+        // marker — a convention no type enforces. A trailing
+        // `-movflags +faststart`, say, would be silently reclassified as
+        // audio and dropped whenever the source plan used a blanket
+        // `-c copy` (whose tail is synthesised, not carried over).
+        const AUDIO_FLAGS: &[&str] = &["-c:a", "-b:a", "-q:a", "-ar", "-ac", "-af"];
+        for &target in ALL_TARGETS {
+            for q in [
+                None,
+                Some(QualityPreset::Fast),
+                Some(QualityPreset::Balanced),
+                Some(QualityPreset::Small),
+            ] {
+                let Some(plan) = video_encode_plan(target, q) else {
+                    continue;
+                };
+                let Some(i) = plan.args.iter().position(|x| x == "-c:a") else {
+                    continue;
+                };
+                for flag in plan.args[i..].iter().filter(|x| x.starts_with('-')) {
+                    assert!(
+                        AUDIO_FLAGS.contains(&flag.as_str()),
+                        "{target:?} {q:?}: {flag} sits after -c:a, where \
+                         force_video_encode reads it as an audio arg: {:?}",
+                        plan.args
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_uncapped_plan_still_stream_copies() {
+        // The mirror of the tests above: nothing in the cap handling may
+        // cost the no-cap path its remux.
+        for &(target, v, a) in REMUXING_SOURCES {
+            let p = decide(target, v, a, None, Some(ResolutionCap::Original), None);
+            assert!(
+                copies_video(&p.args),
+                "{target:?} {v:?}/{a:?} lost its remux: {:?}",
+                p.args
+            );
+        }
     }
 
     // --- v0.1.6 compression tests ---
