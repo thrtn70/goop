@@ -57,6 +57,12 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         .map(|s| s.codec_name.clone().unwrap_or_default())
         .collect();
 
+    let audio_codecs: Vec<String> = streams
+        .iter()
+        .filter(|s| s.codec_type.as_deref() == Some("audio"))
+        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .collect();
+
     let has_video = video.is_some();
     let has_audio = audio.is_some();
     let has_subtitles = !subtitle_codecs.is_empty();
@@ -88,6 +94,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         image_format: None,
         has_subtitles,
         subtitle_codecs,
+        audio_codecs,
     })
 }
 
@@ -174,6 +181,33 @@ mod tests {
         let r = parse_probe_json(MP4_JSON).unwrap();
         assert!(!r.has_subtitles);
         assert!(r.subtitle_codecs.is_empty());
+    }
+
+    #[test]
+    fn every_audio_stream_is_listed_in_order() {
+        // `audio_codec` names only the first stream; carrying the rest
+        // through a stream copy needs each one checked on its own account.
+        let json = br#"{"streams":[
+            {"codec_type":"video","codec_name":"h264"},
+            {"codec_type":"audio","codec_name":"aac"},
+            {"codec_type":"audio","codec_name":"ac3"},
+            {"codec_type":"audio","codec_name":"vorbis"}
+        ]}"#;
+        let r = parse_probe_json(json).unwrap();
+        assert_eq!(r.audio_codecs, vec!["aac", "ac3", "vorbis"]);
+        assert_eq!(
+            r.audio_codec.as_deref(),
+            Some("aac"),
+            "the single-stream field still names the first"
+        );
+    }
+
+    #[test]
+    fn a_source_without_audio_lists_no_audio_codecs() {
+        let r = parse_probe_json(br#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#)
+            .unwrap();
+        assert!(r.audio_codecs.is_empty());
+        assert!(!r.has_audio);
     }
 
     #[test]

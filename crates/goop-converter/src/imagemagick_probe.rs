@@ -41,6 +41,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         image_format,
         has_subtitles: false,
         subtitle_codecs: vec![],
+        audio_codecs: vec![],
     })
 }
 

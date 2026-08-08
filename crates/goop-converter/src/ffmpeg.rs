@@ -414,6 +414,30 @@ fn warn_subtitles_not_preserved(codecs: &[String], fate: &str) {
     );
 }
 
+/// Note that the source's extra audio tracks are being left behind.
+///
+/// Reached whenever the plan stream-copies audio the target container has
+/// no registered mapping for. Naming those streams anyway would box them
+/// under a codec tag that lies about their contents, so they are dropped
+/// instead — the same trade the subtitle path makes, and just as invisible
+/// in the output, which is why it is at least said out loud somewhere.
+///
+/// Silent for the ordinary single-track case, which loses nothing, and for
+/// targets that hold one audio stream by definition — an MP3 or a GIF was
+/// never going to carry a film's commentary track, so saying so on every
+/// such conversion would be noise rather than news.
+fn warn_audio_not_preserved(target: TargetFormat, codecs: &[String]) {
+    if codecs.len() < 2 || !crate::subtitle::holds_multiple_audio_streams(target) {
+        return;
+    }
+    tracing::warn!(
+        codecs = ?codecs,
+        target = ?target,
+        "source has multiple audio tracks but the target container can't \
+         stream-copy all of them; keeping only the first"
+    );
+}
+
 /// Build the ffmpeg plan for `req`, plus the path (if any) that must be
 /// opened as a second input.
 ///
@@ -475,21 +499,39 @@ fn build_plan(
         // and audio streams it does not have. The conversion is nonsense
         // either way; this at least keeps it from being nonsense of our
         // making.
-        if !matches!(probe.source_kind, goop_core::SourceKind::Subtitle)
+        let bare_subtitle_source = matches!(probe.source_kind, goop_core::SourceKind::Subtitle);
+        let subtitles_need_maps = !bare_subtitle_source
             && probe.has_subtitles
-            && crate::subtitle::supports(req.target, goop_core::SubtitleMode::Soft)
-        {
+            && crate::subtitle::supports(req.target, goop_core::SubtitleMode::Soft);
+
+        if subtitles_need_maps {
             if crate::subtitle::can_preserve_existing(&probe.subtitle_codecs) {
                 crate::subtitle::preserve_existing_in_plan(
                     &mut plan,
                     req.target,
                     &probe.subtitle_codecs,
+                    &probe.audio_codecs,
                 );
             } else {
                 // No maps at all, so ffmpeg's default handling stays in
                 // place: worse than preserving the tracks, far better than
                 // failing the job outright.
+                //
+                // This costs the source's extra *audio* tracks too, since
+                // mapping those without also naming `0:s?` would turn a
+                // thinned-out subtitle track into no subtitle track at all.
+                // Bitmap subtitles are the rarer loss of the two.
                 warn_subtitles_not_preserved(&probe.subtitle_codecs, "left as ffmpeg handles them");
+            }
+        } else if !bare_subtitle_source {
+            // No subtitle work to justify a map — but automatic stream
+            // selection still keeps exactly one audio stream, so a source
+            // with several loses the rest unless they are named. Skipped
+            // for a bare `.srt` / `.vtt` for the same reason the subtitle
+            // branch is: it has no video or audio streams to map.
+            if !crate::subtitle::preserve_audio_in_plan(&mut plan, req.target, &probe.audio_codecs)
+            {
+                warn_audio_not_preserved(req.target, &probe.audio_codecs);
             }
         }
         return Ok((
@@ -525,6 +567,7 @@ fn build_plan(
         &sub_path,
         preserve_existing,
         charenc.as_deref(),
+        &probe.audio_codecs,
     )?;
     Ok((
         plan,
@@ -609,6 +652,19 @@ mod tests {
             image_format: None,
             has_subtitles: false,
             subtitle_codecs: vec![],
+            // One stream, matching `audio_codec` above. Multi-track cases
+            // build on this through `probe_with_audio`.
+            audio_codecs: vec!["aac".into()],
+        }
+    }
+
+    /// `probe_h264_aac`, but carrying the named audio streams in order.
+    fn probe_with_audio(codecs: &[&str]) -> ProbeResult {
+        ProbeResult {
+            audio_codec: codecs.first().map(|c| (*c).to_string()),
+            has_audio: !codecs.is_empty(),
+            audio_codecs: codecs.iter().map(|c| (*c).to_string()).collect(),
+            ..probe_h264_aac()
         }
     }
 
@@ -716,9 +772,10 @@ mod tests {
         assert_eq!(
             plan.args,
             vec![
-                "-c", "copy", "-map", "0:v:0?", "-map", "0:a:0?", "-map", "0:s?", "-c:s",
-                "mov_text",
-            ]
+                "-c", "copy", "-map", "0:v:0?", "-map", "0:a?", "-map", "0:s?", "-c:s", "mov_text",
+            ],
+            "the source's lone AAC stream is one MP4 can describe, so the \
+             audio map has nothing to narrow for"
         );
     }
 
@@ -879,6 +936,115 @@ mod tests {
         let (plan, extra) =
             build_plan(&req_with(TargetFormat::Mkv, None), &probe_h264_aac()).unwrap();
         assert_eq!(extra, SubtitleInput::default());
+        assert_eq!(
+            plan.args,
+            vec!["-c", "copy"],
+            "one audio stream and no subtitles needs no maps at all"
+        );
+    }
+
+    // --- Multi-audio sources carrying no subtitles ---------------------
+    //
+    // Regression: this branch emitted maps only when the source had
+    // subtitles, so a multi-audio file with none got no `-map` at all and
+    // ffmpeg's automatic selection thinned it to a single track, silently.
+
+    #[test]
+    fn build_plan_keeps_every_audio_track_of_a_subtitle_free_source() {
+        for target in [TargetFormat::Mkv, TargetFormat::Mp4, TargetFormat::Mov] {
+            let (plan, _) =
+                build_plan(&req_with(target, None), &probe_with_audio(&["aac", "aac"])).unwrap();
+            assert!(
+                plan.args.windows(2).any(|w| w == ["-map", "0:a?"]),
+                "{target:?} dropped the second audio track: {:?}",
+                plan.args
+            );
+            assert!(
+                !plan.args.iter().any(|a| a == "0:s?"),
+                "{target:?} invented a subtitle map for a source with none"
+            );
+        }
+    }
+
+    #[test]
+    fn build_plan_narrows_the_audio_map_for_a_codec_the_container_cannot_describe() {
+        // MP4 has no mapping for Vorbis and boxes it under the `mp4a` (AAC)
+        // FourCC rather than refusing, so the track arrives undecodable at
+        // exit 0. Dropping it is the lesser loss.
+        let (plan, _) = build_plan(
+            &req_with(TargetFormat::Mp4, None),
+            &probe_with_audio(&["aac", "vorbis"]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.args,
+            vec!["-c", "copy"],
+            "no maps: ffmpeg's own selection keeps the first track"
+        );
+    }
+
+    #[test]
+    fn build_plan_keeps_every_audio_track_when_matroska_is_the_target() {
+        // Matroska identifies codecs by CodecID string, so the codec that
+        // MP4 has to drop rides along here untouched.
+        let (plan, _) = build_plan(
+            &req_with(TargetFormat::Mkv, None),
+            &probe_with_audio(&["aac", "vorbis"]),
+        )
+        .unwrap();
+        assert!(plan.args.windows(2).any(|w| w == ["-map", "0:a?"]));
+    }
+
+    #[test]
+    fn build_plan_keeps_every_audio_track_when_the_plan_re_encodes() {
+        // Re-encoding rewrites every mapped stream into the one codec the
+        // plan names, so an otherwise unvettable source becomes safe.
+        let mut req = req_with(TargetFormat::Mp4, None);
+        req.quality_preset = Some(QualityPreset::Fast);
+        let (plan, _) = build_plan(&req, &probe_with_audio(&["aac", "vorbis"])).unwrap();
+        assert!(plan.args.windows(2).any(|w| w == ["-map", "0:a?"]));
+    }
+
+    #[test]
+    fn build_plan_adds_no_audio_maps_to_an_audio_only_target() {
+        // An MP3 holds one audio stream by definition; mapping `0:a?` into
+        // one would ask the muxer for a second stream it cannot write.
+        for target in [TargetFormat::Mp3, TargetFormat::Wav, TargetFormat::Flac] {
+            let (plan, _) =
+                build_plan(&req_with(target, None), &probe_with_audio(&["aac", "aac"])).unwrap();
+            assert!(
+                !plan.args.iter().any(|a| a == "0:a?" || a == "0:v:0?"),
+                "{target:?}: {:?}",
+                plan.args
+            );
+        }
+    }
+
+    #[test]
+    fn build_plan_adds_no_audio_maps_for_a_single_audio_stream() {
+        // Automatic selection already keeps the only track there is, and an
+        // explicit map would override ffmpeg's pick of the *best* stream
+        // rather than merely the first.
+        let (plan, _) = build_plan(
+            &req_with(TargetFormat::Mp4, None),
+            &probe_with_audio(&["aac"]),
+        )
+        .unwrap();
+        assert_eq!(plan.args, vec!["-c", "copy"]);
+    }
+
+    #[test]
+    fn build_plan_leaves_maps_alone_when_bitmap_subtitles_block_them() {
+        // A source with PGS subtitles and several audio tracks: naming the
+        // audio without also naming `0:s?` would turn a thinned-out
+        // subtitle track into no subtitle track at all, so this path stays
+        // map-free and both losses stay with ffmpeg's defaults.
+        let probe = ProbeResult {
+            has_subtitles: true,
+            subtitle_codecs: vec!["hdmv_pgs_subtitle".into()],
+            ..probe_with_audio(&["aac", "aac"])
+        };
+        let (plan, _) = build_plan(&req_with(TargetFormat::Mkv, None), &probe).unwrap();
         assert_eq!(plan.args, vec!["-c", "copy"]);
     }
 
