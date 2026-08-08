@@ -66,5 +66,5 @@ ico = "0.4"
 img-parts = "0.3"
 
 [dev-dependencies]
-# Scratch dirs for the `#[ignore]`d real-ffmpeg subtitle tests.
+# Scratch dirs for the `#[ignore]`d real-ffmpeg tests.
 tempfile = "3"

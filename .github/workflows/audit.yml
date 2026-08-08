@@ -213,3 +213,12 @@ jobs:
       - name: Subtitle conversions (real ffmpeg)
         shell: bash
         run: cargo test -p goop-converter --test subtitle_ffmpeg -- --ignored
+      # Video containers, and the guard that no conversion plan names an
+      # encoder the sidecar lacks. Both runners matter and neither is
+      # redundant: the two ffmpeg sources are built with different library
+      # sets, which is how AVI shipped naming `libxvid` — present in gyan's
+      # Windows build, absent from the osxexperts macOS one, so every AVI
+      # conversion needing a video encode failed on macOS only.
+      - name: Video conversions (real ffmpeg)
+        shell: bash
+        run: cargo test -p goop-converter --test video_ffmpeg -- --ignored
