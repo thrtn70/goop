@@ -370,6 +370,117 @@ async fn a_capped_avi_conversion_uses_an_encoder_the_sidecar_has() {
     assert_eq!(stream_tags(&r, &out, "v"), vec!["xvid"]);
 }
 
+/// A cap is a ceiling, not a target: a source already under it must come
+/// out untouched. `scale={w}:-2` has no source dimensions in play, so it
+/// enlarges anything smaller — turning a "cap" into an upscale that costs
+/// bitrate and invents detail that was never there.
+#[tokio::test]
+#[ignore]
+async fn a_cap_larger_than_the_source_leaves_it_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mp4");
+    // Comfortably under every cap the enum offers.
+    make_source_sized(&ffmpeg, &src, 640, 480);
+
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.resolution_cap = Some(ResolutionCap::R1080p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped conversion must run");
+
+    assert_eq!(
+        video_dimensions(&r, &out),
+        (640, 480),
+        "a 1080p cap must not enlarge a 640x480 source"
+    );
+}
+
+/// The same, through the smallest cap, so the assertion is not an artefact
+/// of one width — and paired with the downscale case above it pins both
+/// directions of the ceiling.
+#[tokio::test]
+#[ignore]
+async fn the_smallest_cap_still_leaves_a_smaller_source_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mp4");
+    make_source_sized(&ffmpeg, &src, 320, 240);
+
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.resolution_cap = Some(ResolutionCap::R480p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped conversion must run");
+
+    assert_eq!(video_dimensions(&r, &out), (320, 240));
+}
+
+/// An odd-sized source under the cap comes out at even dimensions.
+///
+/// The clamp hands the source's own width through, so an odd one survives
+/// to the output. Nothing here pins a pixel format, so ffmpeg carries
+/// 4:4:4 and encodes it without complaint — which is exactly why this
+/// needs pinning rather than trusting the encoder to object. 4:2:0 cannot
+/// represent an odd width at all (forcing it, libx264 refuses outright
+/// with "width not divisible by 2"), and it is what nearly everything
+/// downstream expects.
+///
+/// The source has to be 4:4:4 for the same reason: an odd-width 4:2:0
+/// file cannot exist, so there would be nothing to test with.
+#[tokio::test]
+#[ignore]
+async fn an_odd_sized_source_under_the_cap_still_produces_valid_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    let out = tmp.path().join("out.mp4");
+
+    let status = Command::new(&ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=641x481:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv444p",
+        ])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build the odd-sized source");
+    assert_eq!(video_dimensions(&r, &src), (641, 481));
+
+    let mut req = request(&src, &out, TargetFormat::Mp4, None);
+    req.resolution_cap = Some(ResolutionCap::R1080p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped conversion must run");
+
+    // Rounded down, never up: 641 -> 640 keeps it under the cap, where
+    // rounding up would be a one-pixel upscale of exactly the kind this
+    // clamp exists to prevent.
+    assert_eq!(video_dimensions(&r, &out), (640, 480));
+    assert!(std::fs::metadata(&out).unwrap().len() > 0);
+}
+
 /// The mirror: without a cap the same conversion must still remux, or the
 /// fix has cost every uncapped conversion its stream copy.
 #[tokio::test]

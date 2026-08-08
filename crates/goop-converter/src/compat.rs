@@ -96,7 +96,29 @@ pub fn decide(
                 ResolutionCap::R480p => 854,
                 ResolutionCap::Original => unreachable!(),
             };
-            plan.video_filters.insert(0, format!("scale={w}:-2"));
+            // A cap is a ceiling, not a target. `scale={w}:-2` has no
+            // source dimensions in play, so it enlarged anything already
+            // smaller — a 640x480 clip came out of a "1080p cap" at
+            // 1920x1440, spending bitrate to invent detail that was never
+            // in the source. `min(w,iw)` clamps it to a real ceiling.
+            //
+            // `trunc(../2)*2` then forces that width even. `-2` only ever
+            // rounded the height; the width was safe by luck before, being
+            // always the even cap constant. Clamping hands the source's
+            // own width through instead, so an odd one survives to the
+            // output. No plan here pins a pixel format, so ffmpeg carries
+            // 4:4:4 through and encodes it happily — but 4:2:0 cannot
+            // represent an odd width at all, and it is what nearly
+            // everything downstream expects. Rounding down keeps the
+            // output encodable anywhere without ever rounding *up* into
+            // the upscale this whole clamp exists to prevent.
+            //
+            // The quotes are ffmpeg's, not a shell's: args go straight to
+            // the process, and the commas inside the expression would
+            // otherwise read as filter separators once `video_filters` is
+            // joined into one `-vf`.
+            plan.video_filters
+                .insert(0, format!("scale='trunc(min({w},iw)/2)*2':-2"));
             // A filtergraph cannot be applied to a copied stream: ffmpeg
             // rejects the whole command with "Filtering and streamcopy
             // cannot be used together" and writes no output. So a cap on
@@ -1328,7 +1350,7 @@ mod tests {
             None,
         );
         assert!(p.reencoded);
-        assert!(p.video_filters.iter().any(|f| f.contains("1280")));
+        assert!(p.video_filters.iter().any(|f| f == CAPPED_720P));
     }
 
     #[test]
@@ -1341,7 +1363,10 @@ mod tests {
             Some(ResolutionCap::R1080p),
             None,
         );
-        assert!(p.video_filters.iter().any(|f| f.contains("1920")));
+        assert!(p
+            .video_filters
+            .iter()
+            .any(|x| x == "scale='trunc(min(1920,iw)/2)*2':-2"));
     }
 
     #[test]
@@ -1369,6 +1394,12 @@ mod tests {
         );
         assert!(p.video_filters.is_empty());
     }
+
+    /// The exact filter a 720p cap must produce. Asserted whole rather than
+    /// by substring: the `min()` clamp and its quoting are the point, and a
+    /// `contains("scale=1280")` check passed happily while the filter was
+    /// still upscaling every source smaller than the cap.
+    const CAPPED_720P: &str = "scale='trunc(min(1280,iw)/2)*2':-2";
 
     /// Every `(target, vcodec, acodec)` whose no-preset plan stream-copies
     /// the video — the exact set a resolution cap has to convert into an
@@ -1403,7 +1434,7 @@ mod tests {
 
             let p = decide(target, v, a, None, Some(ResolutionCap::R720p), None);
             assert!(
-                p.video_filters.iter().any(|f| f.contains("scale=1280")),
+                p.video_filters.iter().any(|f| f == CAPPED_720P),
                 "{target:?} {v:?}/{a:?} lost the cap: {:?}",
                 p.video_filters
             );
@@ -1503,10 +1534,7 @@ mod tests {
             None,
         );
         assert_eq!(capped.args, forced.args);
-        assert!(capped
-            .video_filters
-            .iter()
-            .any(|f| f.contains("scale=1280")));
+        assert!(capped.video_filters.iter().any(|f| f == CAPPED_720P));
     }
 
     #[test]
