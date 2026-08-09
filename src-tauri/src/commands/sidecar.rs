@@ -154,11 +154,14 @@ pub async fn sidecar_update_yt_dlp(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateStatus, IpcError> {
-    let checker = UpdateChecker::for_yt_dlp(&state.resolver);
-    let status = checker.update_in_place().await?;
-    // yt-dlp rewrites its own binary in place, so every cached version string
-    // for it is now wrong. Announce it so any view showing the version can
-    // re-read rather than waiting for an app restart.
+    // yt-dlp's own `-U` rewrites the binary sitting inside the signed app
+    // bundle. Goop downloads the latest GitHub release into the writable
+    // update dir the resolver prefers instead, leaving the bundle untouched.
+    // See goop_sidecar::yt_dlp_update.
+    let status = goop_sidecar::yt_dlp_update::update(&state.resolver).await?;
+    // A successful update swaps which binary the resolver hands out, so every
+    // cached version string for it is now wrong. Announce it so any view
+    // showing the version can re-read rather than waiting for an app restart.
     if let Some(event) = yt_dlp_updated_event(&status) {
         TauriSink(app).emit_sidecar(event);
     }
