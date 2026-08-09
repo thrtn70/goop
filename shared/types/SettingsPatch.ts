@@ -4,7 +4,7 @@ import type { HistoryViewMode } from "./HistoryViewMode";
 import type { MetadataPolicy } from "./MetadataPolicy";
 import type { Theme } from "./Theme";
 
-export type SettingsPatch = { output_dir: string | null, theme: Theme | null, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number | null, convert_concurrency: number | null, auto_check_updates: boolean | null, dismissed_update_version: string | null, history_view_mode: HistoryViewMode | null, queue_sidebar_width: number | null, hw_acceleration_enabled: boolean | null, 
+export type SettingsPatch = { output_dir: string | null, theme: Theme | null, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number | null, convert_concurrency: number | null, auto_check_updates: boolean | null, yt_dlp_auto_update: boolean | null, dismissed_update_version: string | null, history_view_mode: HistoryViewMode | null, queue_sidebar_width: number | null, hw_acceleration_enabled: boolean | null, 
 /**
  * Tri-state on the wire (see `double_option` helper above):
  * - field absent → `None` (no change)

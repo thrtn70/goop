@@ -12,6 +12,9 @@ use std::sync::Arc;
 pub struct AppState {
     pub resolver: Arc<BinaryResolver>,
     pub store: QueueStore,
+    /// Shared with the startup freshness check so a manual update from
+    /// Settings and the automatic one can never run at the same time.
+    pub yt_dlp_updates: Arc<crate::ytdlp_auto_update::YtDlpAutoUpdate>,
     /// Exclusive lock proving this process owns the shared queue. Held for the
     /// whole process lifetime; dropping it (on exit) releases the lock so a
     /// later instance can take over. Never read directly — presence is the point.

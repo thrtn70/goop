@@ -66,6 +66,9 @@ vi.mock("@/hooks/useAppVersion", () => ({
   }),
 }));
 
+// Captured before any test swaps it out, so `beforeEach` can put it back.
+const realPatchSettings = useAppStore.getState().patchSettings;
+
 function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     output_dir: "/Users/example/Downloads",
@@ -74,6 +77,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     extract_concurrency: 2,
     convert_concurrency: 1,
     auto_check_updates: true,
+    yt_dlp_auto_update: true,
     dismissed_update_version: null,
     history_view_mode: "list",
     queue_sidebar_width: 288,
@@ -122,6 +126,10 @@ beforeEach(() => {
     settings: makeSettings(),
     presets: [],
     updateInfo: null,
+    // Restored every test: several cases below swap this for a spy, and
+    // without putting the real one back the next test that relies on it
+    // patching through to `api.settings.set` silently does nothing.
+    patchSettings: realPatchSettings,
   });
 });
 
@@ -198,6 +206,31 @@ describe("SettingsPage sidecar updates refresh the version cache", () => {
 
     await screen.findByText("yt-dlp is up to date.");
     expect(loadVersions).not.toHaveBeenCalled();
+  });
+
+  it("switching off the automatic yt-dlp check patches the setting", async () => {
+    const patchSettings = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ patchSettings });
+    renderPage();
+
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Keep yt-dlp up to date automatically/i }),
+    );
+    expect(patchSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ yt_dlp_auto_update: false }),
+    );
+  });
+
+  it("reflects the stored value rather than defaulting the checkbox on", () => {
+    useAppStore.setState({ settings: makeSettings({ yt_dlp_auto_update: false }) });
+    renderPage();
+    // The DOM property, not the `checked` attribute: React only syncs that
+    // attribute on the initial mount, so asserting on it would quietly stop
+    // discriminating the moment this became a re-render rather than a mount.
+    const box = screen.getByRole("checkbox", {
+      name: /Keep yt-dlp up to date automatically/i,
+    }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
   });
 
   it("shows the deferral and skips the refresh when the binary was in use", async () => {

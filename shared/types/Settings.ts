@@ -4,7 +4,15 @@ import type { HistoryViewMode } from "./HistoryViewMode";
 import type { MetadataPolicy } from "./MetadataPolicy";
 import type { Theme } from "./Theme";
 
-export type Settings = { output_dir: string, theme: Theme, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number, convert_concurrency: number, auto_check_updates: boolean, dismissed_update_version: string | null, history_view_mode: HistoryViewMode, queue_sidebar_width: number, hw_acceleration_enabled: boolean, 
+export type Settings = { output_dir: string, theme: Theme, yt_dlp_last_update_ms: bigint | null, extract_concurrency: number, convert_concurrency: number, auto_check_updates: boolean, 
+/**
+ * Kill switch for the daily yt-dlp freshness check. On by default,
+ * because an extractor that silently rots is the failure this exists to
+ * prevent — but it is a background network request against a binary the
+ * user did not ask to change, so it has to be refusable. Off means the
+ * Settings button is the only way yt-dlp ever updates.
+ */
+yt_dlp_auto_update: boolean, dismissed_update_version: string | null, history_view_mode: HistoryViewMode, queue_sidebar_width: number, hw_acceleration_enabled: boolean, 
 /**
  * When set, every yt-dlp spawn (probe + download) is invoked with
  * `--cookies-from-browser <name>`. Lets users download videos from

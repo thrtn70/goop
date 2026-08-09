@@ -164,6 +164,7 @@ describe("UpdateBanner", () => {
     extract_concurrency: 4,
     convert_concurrency: 2,
     auto_check_updates: true,
+    yt_dlp_auto_update: true,
     dismissed_update_version: null,
     history_view_mode: "list",
     queue_sidebar_width: 288,

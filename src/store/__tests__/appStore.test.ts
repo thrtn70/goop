@@ -61,6 +61,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     extract_concurrency: 2,
     convert_concurrency: 1,
     auto_check_updates: true,
+    yt_dlp_auto_update: true,
     dismissed_update_version: null,
     history_view_mode: "list",
     queue_sidebar_width: 288,
