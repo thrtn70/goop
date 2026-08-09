@@ -29,6 +29,9 @@ tsconfig.tsbuildinfo
 Thumbs.db
 
 # Goop
+# generate-bindings.sh staging tree (removed on exit; ignored so a killed run
+# can never be committed and never masquerades as real bindings)
+/.bindings-stage.*
 # sidecar binaries fetched by fetch-sidecars.sh
 /src-tauri/bin/
 # macOS sidecar dylib bundle map — generated per-build by fetch-sidecars.sh
