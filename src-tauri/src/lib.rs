@@ -3,6 +3,7 @@ pub mod commands;
 pub mod events;
 pub mod state;
 pub mod thumbnail;
+pub mod ytdlp_auto_update;
 
 use events::TauriSink;
 use goop_config as cfg;
@@ -923,7 +924,7 @@ pub fn run() {
             // convert jobs).
             let scheduler = Scheduler::with_pids(
                 store.clone(),
-                sink,
+                sink.clone(),
                 settings.extract_concurrency,
                 settings.convert_concurrency,
                 1,
@@ -959,10 +960,30 @@ pub fn run() {
                 s_metadata.run_kind(goop_core::JobKind::Metadata).await
             });
 
+            // Daily yt-dlp freshness check. Shared with the Settings button so
+            // a manual check and the automatic one can't both run at once.
+            let yt_dlp_updates = Arc::new(ytdlp_auto_update::YtDlpAutoUpdate::production(
+                resolver.clone(),
+                settings_shared.clone(),
+                settings_path.clone(),
+                sink.clone(),
+            ));
+            {
+                // Deliberately after a delay: launch already contends for disk
+                // and network (window, webview, sidecar version reads), and
+                // nothing here is urgent enough to join that queue.
+                let coord = yt_dlp_updates.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    coord.check_if_due(ytdlp_auto_update::now_ms()).await;
+                });
+            }
+
             let thumbs = ThumbnailService::new(gpath::data_dir(), gs_resource_dir.clone());
             app.manage(AppState {
                 resolver,
                 store,
+                yt_dlp_updates,
                 instance_guard,
                 scheduler,
                 settings: settings_shared,

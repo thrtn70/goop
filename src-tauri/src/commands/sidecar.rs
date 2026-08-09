@@ -1,10 +1,10 @@
-use crate::events::TauriSink;
 use crate::state::AppState;
-use goop_core::{EventSink, IpcError, SidecarEvent};
+use crate::ytdlp_auto_update::now_ms;
+use goop_core::{IpcError, SidecarEvent};
 use goop_sidecar::tessdata::{self, LanguagePack};
 use goop_sidecar::updater::{UpdateChecker, UpdateStatus};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::State;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -139,7 +139,7 @@ pub async fn sidecar_status(state: State<'_, AppState>) -> Result<SidecarStatus,
 /// placeholder would let an unconfirmed version display as if it were checked.
 /// The Settings button that triggered the update refreshes on its own
 /// regardless, so nothing is lost by staying quiet.
-fn yt_dlp_updated_event(status: &UpdateStatus) -> Option<SidecarEvent> {
+pub(crate) fn yt_dlp_updated_event(status: &UpdateStatus) -> Option<SidecarEvent> {
     match (&status.previous_version, &status.new_version) {
         (Some(from), Some(to)) if from != to => Some(SidecarEvent::YtDlpUpdated {
             from_version: from.clone(),
@@ -150,22 +150,30 @@ fn yt_dlp_updated_event(status: &UpdateStatus) -> Option<SidecarEvent> {
 }
 
 #[tauri::command]
-pub async fn sidecar_update_yt_dlp(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<UpdateStatus, IpcError> {
-    // yt-dlp's own `-U` rewrites the binary sitting inside the signed app
-    // bundle. Goop downloads the latest GitHub release into the writable
-    // update dir the resolver prefers instead, leaving the bundle untouched.
-    // See goop_sidecar::yt_dlp_update.
-    let status = goop_sidecar::yt_dlp_update::update(&state.resolver).await?;
-    // A successful update swaps which binary the resolver hands out, so every
-    // cached version string for it is now wrong. Announce it so any view
-    // showing the version can re-read rather than waiting for an app restart.
-    if let Some(event) = yt_dlp_updated_event(&status) {
-        TauriSink(app).emit_sidecar(event);
+pub async fn sidecar_update_yt_dlp(state: State<'_, AppState>) -> Result<UpdateStatus, IpcError> {
+    // Routed through the same coordinator as the daily background check, so
+    // the two can't run at once — and so a manual check also resets the
+    // throttle rather than leaving the automatic one to repeat the work an
+    // hour later. The coordinator emits `YtDlpUpdated` on a real change, so
+    // this no longer needs the `AppHandle` it used to take.
+    match state.yt_dlp_updates.check_now(now_ms()).await {
+        Some(result) => result.map_err(Into::into),
+        // A check is mid-flight — either the daily one or a previous click.
+        // Saying so beats queueing behind a download and then repeating it.
+        //
+        // `previous_version` is deliberately left unread rather than filled in
+        // by spawning `yt-dlp --version` here. That subprocess would hold the
+        // binary open at exactly the moment the in-flight updater is trying to
+        // rename over it, and on Windows an open image is what makes a rename
+        // fail — so the diagnostic would manufacture the "in use, deferred"
+        // outcome it was only meant to describe, costing a real update a day.
+        None => Ok(UpdateStatus {
+            attempted: false,
+            previous_version: None,
+            new_version: None,
+            message: "Goop is already checking for a yt-dlp update.".into(),
+        }),
     }
-    Ok(status)
 }
 
 #[tauri::command]

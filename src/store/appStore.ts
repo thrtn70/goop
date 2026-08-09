@@ -257,6 +257,7 @@ function emptyPatch(): NoopPatch {
     extract_concurrency: null,
     convert_concurrency: null,
     auto_check_updates: null,
+    yt_dlp_auto_update: null,
     dismissed_update_version: null,
     history_view_mode: null,
     queue_sidebar_width: null,

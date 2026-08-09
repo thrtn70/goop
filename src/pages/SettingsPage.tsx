@@ -454,6 +454,15 @@ export default function SettingsPage() {
               : "You're running the latest version."}
           </span>
         </div>
+        <label className="flex items-center gap-2 text-sm text-fg">
+          <input
+            type="checkbox"
+            checked={settings.yt_dlp_auto_update}
+            onChange={(e) => void patch({ yt_dlp_auto_update: e.target.checked })}
+            className="h-4 w-4 rounded border-subtle bg-surface-2 accent-accent"
+          />
+          <span>Keep yt-dlp up to date automatically</span>
+        </label>
         <div className="flex items-center gap-3 pt-2">
           <button
             type="button"

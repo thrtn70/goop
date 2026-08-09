@@ -50,6 +50,13 @@ pub struct Settings {
     pub convert_concurrency: usize,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    /// Kill switch for the daily yt-dlp freshness check. On by default,
+    /// because an extractor that silently rots is the failure this exists to
+    /// prevent — but it is a background network request against a binary the
+    /// user did not ask to change, so it has to be refusable. Off means the
+    /// Settings button is the only way yt-dlp ever updates.
+    #[serde(default = "default_yt_dlp_auto_update")]
+    pub yt_dlp_auto_update: bool,
     #[serde(default)]
     pub dismissed_update_version: Option<String>,
     #[serde(default)]
@@ -112,6 +119,10 @@ pub fn is_supported_browser(name: &str) -> bool {
     SUPPORTED_BROWSERS.contains(&name)
 }
 
+fn default_yt_dlp_auto_update() -> bool {
+    true
+}
+
 fn default_auto_check_updates() -> bool {
     true
 }
@@ -135,6 +146,7 @@ impl Default for Settings {
             extract_concurrency: (num_cpus::get() / 2).max(2),
             convert_concurrency: (num_cpus::get() / 4).max(1),
             auto_check_updates: true,
+            yt_dlp_auto_update: default_yt_dlp_auto_update(),
             dismissed_update_version: None,
             history_view_mode: HistoryViewMode::default(),
             queue_sidebar_width: default_queue_sidebar_width(),
@@ -180,6 +192,7 @@ pub struct SettingsPatch {
     pub extract_concurrency: Option<usize>,
     pub convert_concurrency: Option<usize>,
     pub auto_check_updates: Option<bool>,
+    pub yt_dlp_auto_update: Option<bool>,
     pub dismissed_update_version: Option<String>,
     pub history_view_mode: Option<HistoryViewMode>,
     pub queue_sidebar_width: Option<u32>,
@@ -247,6 +260,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.auto_check_updates {
         next.auto_check_updates = v;
+    }
+    if let Some(v) = patch.yt_dlp_auto_update {
+        next.yt_dlp_auto_update = v;
     }
     if let Some(v) = patch.dismissed_update_version {
         next.dismissed_update_version = Some(v);
@@ -372,6 +388,47 @@ mod tests {
         .unwrap();
         let loaded = load(&p).unwrap();
         assert!(!loaded.has_seen_onboarding);
+    }
+
+    #[test]
+    fn yt_dlp_auto_update_defaults_on_and_survives_legacy_load() {
+        assert!(
+            Settings::default().yt_dlp_auto_update,
+            "a stale extractor is the failure this prevents, so it is opt-out"
+        );
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        assert!(
+            load(&p).unwrap().yt_dlp_auto_update,
+            "an existing install must not silently lose the check"
+        );
+    }
+
+    #[test]
+    fn yt_dlp_auto_update_can_be_switched_off_by_patch() {
+        let base = Settings::default();
+        let off = apply_patch(
+            &base,
+            SettingsPatch {
+                yt_dlp_auto_update: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!off.yt_dlp_auto_update);
+        // And back on, so the toggle isn't one-way.
+        let on = apply_patch(
+            &off,
+            SettingsPatch {
+                yt_dlp_auto_update: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(on.yt_dlp_auto_update);
     }
 
     #[test]
