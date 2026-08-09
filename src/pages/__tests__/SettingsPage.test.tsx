@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import SettingsPage from "@/pages/SettingsPage";
 import { useAppStore } from "@/store/appStore";
+import { restoreStoreActions } from "@/test/storeActions";
 import type { Settings } from "@/types";
 
 function renderPage(initialEntries: string[] = ["/settings"]) {
@@ -89,15 +90,13 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
-// The sidecar-update tests swap in a stubbed loadVersions; keep the real one
-// so each test starts from the store's actual implementation.
-const realLoadVersions = useAppStore.getState().loadVersions;
-
 beforeEach(() => {
   apiMocks.settings.set.mockReset();
   apiMocks.sidecar.updateYtDlp.mockReset();
   apiMocks.sidecar.updateGalleryDl.mockReset();
-  useAppStore.setState({ loadVersions: realLoadVersions });
+  // The sidecar-update tests swap in a stubbed loadVersions; put every action
+  // back so each test starts from the store's actual implementations.
+  restoreStoreActions();
   // Mirror the Rust backend's apply_patch: regular Option<T> fields use
   // `if let Some(v)` and so a `null` on the wire means "no change", not
   // "set to null". Spreading the patch verbatim would overwrite theme,
