@@ -10,6 +10,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # Seconds, and placed first so a broken download helper fails here
+      # rather than after the ten-minute HEIC build. Covers fetch_url's
+      # retry and fail-on-error-status behaviour plus the guard that no
+      # script downloads with a bare curl.
+      - name: Script tests
+        run: ./scripts/fetch-with-retry.test.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { components: "rustfmt,clippy" }
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -89,6 +95,13 @@ jobs:
 
   sidecar-smoke:
     strategy:
+      # The two legs fetch from different upstreams and assert different
+      # things (see the ffmpeg feature checks below — an encoder present
+      # in gyan's Windows build can be absent from the osxexperts macOS
+      # one). Cancelling one because the other failed hides half the
+      # answer and, when the cause is a transient download, turns one
+      # flaky fetch into two red checks.
+      fail-fast: false
       matrix:
         os: [macos-14, windows-latest]
     runs-on: ${{ matrix.os }}

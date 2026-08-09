@@ -25,6 +25,13 @@ mkdir -p "$OUT_DIR"
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/macos-dylib-bundle.sh"
 
+# fetch_url <url> <dest> — the only way this script downloads anything.
+# Retries transient network failures and fails on an HTTP error status
+# instead of writing the error page to the destination. See the helper
+# for the flag set and the CI break that motivated it.
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
+
 # Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
 # binary and its own `--update` targets GitHub (which no longer hosts the
 # release assets — they moved to Codeberg), so the bundled gallery-dl can't
@@ -67,18 +74,19 @@ TESSDATA_BASE="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_VER
 case "$TARGET" in
   x86_64-pc-windows-msvc)
     # ffmpeg — Gyan essentials (LGPL)
-    curl -L -o /tmp/ffmpeg.zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    fetch_url "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" /tmp/ffmpeg.zip
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
     # yt-dlp
-    curl -L -o "$OUT_DIR/yt-dlp-$TARGET.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "$OUT_DIR/yt-dlp-$TARGET.exe"
     # gallery-dl (Codeberg PyInstaller bundle)
-    curl -L -o "$OUT_DIR/gallery-dl-$TARGET.exe" "${GALLERY_DL_BASE}/gallery-dl.exe"
+    fetch_url "${GALLERY_DL_BASE}/gallery-dl.exe" "$OUT_DIR/gallery-dl-$TARGET.exe"
     # Ghostscript — Artifex official release. The installer is a 7z-
     # compressed self-extractor; 7z is preinstalled on windows-latest.
     GS_VER_NODOT="10040"
-    curl -L -o /tmp/gs.exe \
-      "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs${GS_VER_NODOT}/gs${GS_VER_NODOT}w64.exe"
+    fetch_url \
+      "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs${GS_VER_NODOT}/gs${GS_VER_NODOT}w64.exe" \
+      /tmp/gs.exe
     rm -rf /tmp/gs_extract
     # 7z isn't on Git Bash's PATH by default; use the absolute path the
     # windows-latest runner ships with.
@@ -106,7 +114,7 @@ case "$TARGET" in
     # DLL co-location needed. Zip layout (as of 1.27.0) is flat at
     # the root: mupdf.exe, mupdf-gl.exe, mutool.exe — we want only
     # mutool.exe; the viewer and the GL viewer are excluded.
-    curl -L -o /tmp/mupdf.zip "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip"
+    fetch_url "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip" /tmp/mupdf.zip
     rm -rf /tmp/mupdf_extract
     "$SEVENZIP" x /tmp/mupdf.zip -o/tmp/mupdf_extract -y > /dev/null
     MUTOOL_BIN="$(find /tmp/mupdf_extract -name 'mutool.exe' -type f | head -1)"
@@ -117,7 +125,7 @@ case "$TARGET" in
     # MSVC build composes cleanly with the other Windows sidecars.
     # Harvests tesseract.exe + every co-located DLL into $OUT_DIR so
     # Tauri's loader resolves them as siblings of the sidecar at runtime.
-    curl -L -o /tmp/tesseract.exe "$TESSERACT_URL"
+    fetch_url "$TESSERACT_URL" /tmp/tesseract.exe
     rm -rf /tmp/tesseract_extract
     "$SEVENZIP" x /tmp/tesseract.exe -o/tmp/tesseract_extract -y > /dev/null
     TESS_BIN="$(find /tmp/tesseract_extract -name 'tesseract.exe' -type f | head -1)"
@@ -147,18 +155,18 @@ case "$TARGET" in
     # and triggered Apple's Intel-deprecation warning. osxexperts.net
     # explicitly publishes arm64 (Apple Silicon) static builds; verified via
     # `lipo -archs` before switching.
-    curl -L -o /tmp/ffmpeg7arm.zip "https://osxexperts.net/ffmpeg7arm.zip"
+    fetch_url "https://osxexperts.net/ffmpeg7arm.zip" /tmp/ffmpeg7arm.zip
     unzip -o /tmp/ffmpeg7arm.zip -d /tmp/ffmpeg7arm/
     mv /tmp/ffmpeg7arm/ffmpeg "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
     rm -rf /tmp/ffmpeg7arm.zip /tmp/ffmpeg7arm/
-    curl -L -o /tmp/ffprobe7arm.zip "https://osxexperts.net/ffprobe7arm.zip"
+    fetch_url "https://osxexperts.net/ffprobe7arm.zip" /tmp/ffprobe7arm.zip
     unzip -o /tmp/ffprobe7arm.zip -d /tmp/ffprobe7arm/
     mv /tmp/ffprobe7arm/ffprobe "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
     rm -rf /tmp/ffprobe7arm.zip /tmp/ffprobe7arm/
     # yt-dlp
-    curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" "$OUT_DIR/yt-dlp-$TARGET"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
     # gallery-dl — built locally via PyInstaller because Codeberg ships
     # no macOS binary. The build script writes directly to OUT_DIR.
@@ -304,7 +312,7 @@ case "$TARGET" in
     # job never runs the binary — it only needs the file to exist.
     EXTRACT_DIR="$(mktemp -d)"
     trap 'rm -rf "$EXTRACT_DIR"' EXIT
-    curl -L -o "$EXTRACT_DIR/ffmpeg.tar.xz" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+    fetch_url "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" "$EXTRACT_DIR/ffmpeg.tar.xz"
     tar -xf "$EXTRACT_DIR/ffmpeg.tar.xz" -C "$EXTRACT_DIR/"
     FFMPEG_BIN="$(find "$EXTRACT_DIR" -name 'ffmpeg' -type f -perm -u+x 2>/dev/null | head -1)"
     [[ -n "$FFMPEG_BIN" ]] || { echo "ffmpeg binary not found in archive"; exit 1; }
@@ -315,11 +323,11 @@ case "$TARGET" in
     cp "$FFPROBE_BIN" "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
     # yt-dlp
-    curl -L -o "$OUT_DIR/yt-dlp-$TARGET" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" "$OUT_DIR/yt-dlp-$TARGET"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
     # gallery-dl (Codeberg PyInstaller bundle for Linux). Used by the
     # audit job's sidecar-smoke `--version` check; never shipped.
-    curl -L -o "$OUT_DIR/gallery-dl-$TARGET" "${GALLERY_DL_BASE}/gallery-dl.bin"
+    fetch_url "${GALLERY_DL_BASE}/gallery-dl.bin" "$OUT_DIR/gallery-dl-$TARGET"
     chmod +x "$OUT_DIR/gallery-dl-$TARGET"
     # gs stub — empty executable file. Satisfies Tauri's externalBin
     # existence check without shipping Ghostscript on Linux.
@@ -356,8 +364,8 @@ esac
 # into the app's data dir (Settings → OCR Languages).
 if [ ! -f "$OUT_DIR/tesseract-data/eng.traineddata" ]; then
   mkdir -p "$OUT_DIR/tesseract-data"
-  curl -L -o "$OUT_DIR/tesseract-data/eng.traineddata" \
-    "${TESSDATA_BASE}/eng.traineddata"
+  fetch_url "${TESSDATA_BASE}/eng.traineddata" \
+    "$OUT_DIR/tesseract-data/eng.traineddata"
 fi
 
 echo "Sidecars written to $OUT_DIR/"
