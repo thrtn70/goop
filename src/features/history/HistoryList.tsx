@@ -156,7 +156,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                       ({j.result.file_count} files)
                     </span>
                   )}
-                  {typeof j.state !== "string" && " error" in j.state && (
+                  {typeof j.state !== "string" && "error" in j.state && (
                     <span className="ml-2 text-[10px] uppercase text-error">{stateLabel(j.state)}</span>
                   )}
                 </td>
