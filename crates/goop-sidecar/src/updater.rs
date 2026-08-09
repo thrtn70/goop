@@ -1,7 +1,6 @@
 use crate::binaries::BinaryResolver;
 use goop_core::GoopError;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tokio::process::Command;
 use ts_rs::TS;
 
@@ -14,33 +13,34 @@ pub struct UpdateStatus {
     pub message: String,
 }
 
-/// Version + in-place-update wrapper for a sidecar binary. Different
-/// sidecars expose version info under different flags (`yt-dlp
-/// --version`, `mutool -v`, `gs --version`) and only some support a
-/// self-update flag (`yt-dlp -U`, `gallery-dl --update`; mutool and gs
-/// are bundled binaries with no self-update). The struct captures both
-/// per-binary command lists. `update_args` empty = update is a no-op.
+/// Version reader for a sidecar binary. Different sidecars expose their
+/// version under different flags (`yt-dlp --version`, `mutool -v`, `gs
+/// --version`) and write it to different streams, so the flag list is
+/// per-binary and `current_version` normalises whatever comes back.
+///
+/// Nothing here updates anything. Every sidecar that *can* be updated is
+/// updated by downloading a fresh binary into the resolver's writable update
+/// dir (`yt_dlp_update`, `gallery_dl_update`), never by running the tool's own
+/// `-U` / `--update` against the copy inside the app bundle — that would
+/// rewrite a signed bundle in place. The rest (gs, mutool, tesseract) ship
+/// with Goop and change when Goop does.
 pub struct UpdateChecker<'a> {
     resolver: &'a BinaryResolver,
     binary_name: &'static str,
     version_args: &'static [&'static str],
-    update_args: &'static [&'static str],
-    /// Status message returned when there's no usable self-update
-    /// (`update_args` empty). Lets each bundled tool explain itself
-    /// instead of sharing one generic string. Unused for tools that do
-    /// self-update (non-empty `update_args`).
-    no_update_message: &'static str,
 }
 
 impl<'a> UpdateChecker<'a> {
-    /// Updater configured for yt-dlp.
+    /// Version-only checker for yt-dlp. Updates go through the goop-native
+    /// `yt_dlp_update` module, which downloads the latest GitHub release into
+    /// the resolver's writable update dir. yt-dlp's own `-U` is deliberately
+    /// never invoked: it rewrites the running binary in place, which inside a
+    /// signed bundle means mutating the shipped app.
     pub fn for_yt_dlp(resolver: &'a BinaryResolver) -> Self {
         Self {
             resolver,
             binary_name: "yt-dlp",
             version_args: &["--version"],
-            update_args: &["-U", "--update-to", "latest"],
-            no_update_message: "yt-dlp has no self-update mechanism",
         }
     }
 
@@ -50,16 +50,12 @@ impl<'a> UpdateChecker<'a> {
     /// release binaries (they moved to Codeberg), and there's no macOS build —
     /// so updates go through the goop-native `gallery_dl_update` module
     /// instead, which downloads from Codeberg on Windows/Linux and is a
-    /// ship-with-Goop no-op on macOS. `update_args` is therefore empty here;
-    /// `no_update_message` is only the fallback if `update_in_place` is ever
-    /// called directly on this checker.
+    /// ship-with-Goop no-op on macOS.
     pub fn for_gallery_dl(resolver: &'a BinaryResolver) -> Self {
         Self {
             resolver,
             binary_name: "gallery-dl",
             version_args: &["--version"],
-            update_args: &[],
-            no_update_message: "gallery-dl ships with Goop and updates when you update Goop.",
         }
     }
 
@@ -70,8 +66,6 @@ impl<'a> UpdateChecker<'a> {
             resolver,
             binary_name: "gs",
             version_args: &["--version"],
-            update_args: &[],
-            no_update_message: "gs has no self-update mechanism",
         }
     }
 
@@ -83,8 +77,6 @@ impl<'a> UpdateChecker<'a> {
             resolver,
             binary_name: "mutool",
             version_args: &["-v"],
-            update_args: &[],
-            no_update_message: "mutool has no self-update mechanism",
         }
     }
 
@@ -96,8 +88,6 @@ impl<'a> UpdateChecker<'a> {
             resolver,
             binary_name: "tesseract",
             version_args: &["--version"],
-            update_args: &[],
-            no_update_message: "tesseract has no self-update mechanism",
         }
     }
 
@@ -133,49 +123,6 @@ impl<'a> UpdateChecker<'a> {
             }
         };
         Ok(normalize_version(self.binary_name, raw))
-    }
-
-    /// Run the configured `--update`-style command on the binary. If
-    /// the sidecar dir is read-only (signed app, App Store install),
-    /// returns a warning status without panicking — caller decides
-    /// whether to download into `$APPDATA` instead.
-    pub async fn update_in_place(&self) -> Result<UpdateStatus, GoopError> {
-        if self.update_args.is_empty() {
-            return Ok(UpdateStatus {
-                attempted: false,
-                previous_version: self.current_version().await.ok(),
-                new_version: None,
-                message: self.no_update_message.to_string(),
-            });
-        }
-        let prev = self.current_version().await.ok();
-        let bin = self.resolver.resolve(self.binary_name)?;
-        let out = tokio::time::timeout(
-            Duration::from_secs(60),
-            Command::new(&bin.path).args(self.update_args).output(),
-        )
-        .await
-        .map_err(|_| GoopError::SubprocessFailed {
-            binary: self.binary_name.into(),
-            stderr: "update timed out after 60s".into(),
-        })??;
-
-        if !out.status.success() {
-            return Ok(UpdateStatus {
-                attempted: true,
-                previous_version: prev,
-                new_version: None,
-                message: String::from_utf8_lossy(&out.stderr).to_string(),
-            });
-        }
-
-        let new = self.current_version().await.ok();
-        Ok(UpdateStatus {
-            attempted: true,
-            previous_version: prev,
-            new_version: new,
-            message: String::from_utf8_lossy(&out.stdout).to_string(),
-        })
     }
 }
 
@@ -248,33 +195,15 @@ mod tests {
         let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
         let c = UpdateChecker::for_yt_dlp(&r);
         assert_eq!(c.binary_name, "yt-dlp");
-        assert_eq!(c.update_args, &["-U", "--update-to", "latest"]);
+        assert_eq!(c.version_args, &["--version"]);
     }
 
     #[test]
-    fn gallery_dl_constructor_has_no_self_update() {
+    fn gallery_dl_constructor_uses_correct_binary_and_args() {
         let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
         let c = UpdateChecker::for_gallery_dl(&r);
         assert_eq!(c.binary_name, "gallery-dl");
-        assert!(
-            c.update_args.is_empty(),
-            "gallery-dl can't self-update in our bundle: --update targets GitHub \
-             (no longer hosts the assets) and there's no macOS binary"
-        );
-    }
-
-    #[tokio::test]
-    async fn gallery_dl_update_reports_ships_with_app() {
-        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
-        let c = UpdateChecker::for_gallery_dl(&r);
-        let status = c.update_in_place().await.expect("noop must not error");
-        assert!(!status.attempted);
-        // gallery-dl gets a tailored message, not the generic bundled-tool one.
-        assert!(
-            status.message.contains("ships with Goop"),
-            "unexpected message: {}",
-            status.message
-        );
+        assert_eq!(c.version_args, &["--version"]);
     }
 
     #[test]
@@ -283,7 +212,6 @@ mod tests {
         let c = UpdateChecker::for_mutool(&r);
         assert_eq!(c.binary_name, "mutool");
         assert_eq!(c.version_args, &["-v"]);
-        assert!(c.update_args.is_empty(), "mutool has no --update flag");
     }
 
     #[test]
@@ -292,7 +220,6 @@ mod tests {
         let c = UpdateChecker::for_ghostscript(&r);
         assert_eq!(c.binary_name, "gs");
         assert_eq!(c.version_args, &["--version"]);
-        assert!(c.update_args.is_empty(), "gs has no --update flag");
     }
 
     #[test]
@@ -301,7 +228,6 @@ mod tests {
         let c = UpdateChecker::for_tesseract(&r);
         assert_eq!(c.binary_name, "tesseract");
         assert_eq!(c.version_args, &["--version"]);
-        assert!(c.update_args.is_empty(), "tesseract has no --update flag");
     }
 
     #[test]
@@ -350,14 +276,5 @@ mod tests {
             normalize_version("tesseract", "tesseract 5.4.1-20231212".into()),
             "5.4.1-20231212"
         );
-    }
-
-    #[tokio::test]
-    async fn update_in_place_is_noop_when_update_args_empty() {
-        let r = BinaryResolver::new(PathBuf::from("/nonexistent"));
-        let c = UpdateChecker::for_mutool(&r);
-        let status = c.update_in_place().await.expect("noop must not error");
-        assert!(!status.attempted);
-        assert!(status.message.contains("no self-update"));
     }
 }

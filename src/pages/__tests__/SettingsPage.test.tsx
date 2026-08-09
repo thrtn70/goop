@@ -200,6 +200,29 @@ describe("SettingsPage sidecar updates refresh the version cache", () => {
     expect(loadVersions).not.toHaveBeenCalled();
   });
 
+  it("shows the deferral and skips the refresh when the binary was in use", async () => {
+    const loadVersions = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ loadVersions });
+    // Windows refuses to rename over a running executable, so the download
+    // succeeds but the swap doesn't: `attempted` is true while `new_version`
+    // stays null. Nothing changed on disk, so re-reading the version would
+    // only confirm the old one — and the message must reach the user rather
+    // than being rendered as a completed update.
+    apiMocks.sidecar.updateYtDlp.mockResolvedValue({
+      attempted: true,
+      previous_version: "2026.06.09",
+      new_version: null,
+      message:
+        "yt-dlp is in use right now, so the update was deferred. It will be applied the next time you check.",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Update yt-dlp" }));
+
+    await screen.findByText(/the update was deferred/);
+    expect(loadVersions).not.toHaveBeenCalled();
+  });
+
   it("skips the refresh when the update failed", async () => {
     const loadVersions = vi.fn().mockResolvedValue(undefined);
     useAppStore.setState({ loadVersions });
