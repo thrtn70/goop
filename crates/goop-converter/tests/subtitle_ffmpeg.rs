@@ -17,9 +17,10 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{
-    bundled_resolver, convert, ffmpeg_path, make_source, request, stream_codecs, stream_tags,
+    bundled_resolver, convert, ffmpeg_path, make_source, make_source_sized, request, stream_codecs,
+    stream_tags, video_dimensions,
 };
-use goop_core::{SubtitleMode, SubtitleOptions, TargetFormat};
+use goop_core::{ResolutionCap, SubtitleMode, SubtitleOptions, TargetFormat};
 use goop_sidecar::BinaryResolver;
 
 /// True when the resolved ffmpeg was built with libass. Burn-in needs it,
@@ -853,6 +854,53 @@ async fn burn_in_renders_through_the_libass_filter() {
     .expect("burn-in should succeed (needs an ffmpeg built with libass)");
 
     // Burned-in subtitles live in the pixels, not in a stream.
+    assert!(subtitle_codecs(&r, &out).is_empty());
+    assert!(std::fs::metadata(&out).unwrap().len() > 0);
+}
+
+/// Burn-in under a resolution cap: the riskiest filtergraph goop builds.
+///
+/// `video_filters` is comma-joined into one `-vf`, so the cap's own comma
+/// (inside `min()`, quoted) sits in the same string as a `subtitles=`
+/// filter whose path carries a comma of its own. Either escape failing
+/// takes the whole graph down, and the unit tests only compare the vector
+/// before it is ever joined.
+#[tokio::test]
+#[ignore]
+async fn burn_in_survives_the_join_with_a_resolution_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = bundled_resolver(links.path());
+    let ffmpeg = ffmpeg_path(&r);
+    let src = tmp.path().join("src.mp4");
+    // Same filtergraph-hostile name the uncapped burn-in test uses.
+    let subs = tmp.path().join("my subs, take 2.srt");
+    let out = tmp.path().join("out.mp4");
+    if !has_subtitles_filter(&ffmpeg) {
+        eprintln!("skipping: {} was built without libass", ffmpeg.display());
+        return;
+    }
+    make_source_sized(&ffmpeg, &src, 1920, 1080);
+    write_srt(&subs, "Burned in");
+
+    let mut req = request(
+        &src,
+        &out,
+        TargetFormat::Mp4,
+        Some(SubtitleOptions {
+            source_path: subs.to_string_lossy().into_owned(),
+            mode: SubtitleMode::BurnIn,
+        }),
+    );
+    req.resolution_cap = Some(ResolutionCap::R720p);
+
+    convert(&r, &req)
+        .await
+        .expect("a capped burn-in must not break the filtergraph");
+
+    // The cap applied, so both filters ran rather than one silently
+    // swallowing the other.
+    assert_eq!(video_dimensions(&r, &out), (1280, 720));
     assert!(subtitle_codecs(&r, &out).is_empty());
     assert!(std::fs::metadata(&out).unwrap().len() > 0);
 }

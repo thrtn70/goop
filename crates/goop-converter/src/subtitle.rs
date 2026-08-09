@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(
             plan.video_filters,
             vec![
-                "scale=1280:-2".to_string(),
+                "scale='trunc(min(1280,iw)/2)*2':-2".to_string(),
                 "subtitles=filename=/tmp/s.srt".to_string(),
             ]
         );
