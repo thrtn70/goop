@@ -73,6 +73,41 @@ impl GoopError {
             other => other.to_string(),
         }
     }
+
+    /// The raw text behind `user_message()`, when there is any.
+    ///
+    /// `user_message` deliberately throws the original away: a matched
+    /// pattern returns one friendly sentence and the stderr that produced it
+    /// is gone. That is right for the headline and wrong for everything else —
+    /// a failure nobody wrote a pattern for has nothing left to read, and a
+    /// matched one can't be checked against what the tool actually said.
+    ///
+    /// `SubprocessFailed` is the only variant that actually *loses* anything
+    /// — it is the one `friendly_message` rewrites — so it is the only one
+    /// where this recovers information. `Network` is included because its
+    /// text is the transport's own words and worth keeping verbatim for a bug
+    /// report, but note it currently duplicates the headline: `user_message`
+    /// for that variant is just `Display`, i.e. the same string under a
+    /// `network error:` prefix. Anything rendering this should suppress a
+    /// detail block that only repeats the message back.
+    ///
+    /// `None` everywhere else, for the same reason: those variants' `Display`
+    /// already is the whole story.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::SubprocessFailed { stderr, .. } => Some(stderr.clone()),
+            Self::Network(msg) => Some(msg.clone()),
+            Self::SidecarMissing(_)
+            | Self::Queue(_)
+            | Self::Config(_)
+            | Self::InvalidRequest(_)
+            | Self::Cancelled
+            | Self::Paused
+            | Self::WaitingExternal { .. }
+            | Self::Io(_)
+            | Self::Serde(_) => None,
+        }
+    }
 }
 
 /// Serializable error surface for Tauri IPC.
@@ -1013,6 +1048,44 @@ mod tests {
                 !is_transient_network_stderr(s),
                 "should NOT be transient: {s}"
             );
+        }
+    }
+
+    #[test]
+    fn detail_carries_raw_stderr_for_subprocess_failures() {
+        // The friendly message replaces the stderr for display; `detail` is
+        // what keeps the original around for anyone who wants to read it.
+        let raw = "ERROR: [youtube] xyz: Sign in to confirm your age\n  File \"...\"";
+        let e = GoopError::SubprocessFailed {
+            binary: "yt-dlp".into(),
+            stderr: raw.into(),
+        };
+        assert_eq!(e.detail().as_deref(), Some(raw));
+        assert_ne!(
+            e.detail().as_deref(),
+            Some(e.user_message().as_str()),
+            "detail must be the raw stderr, not the friendly rewrite"
+        );
+    }
+
+    #[test]
+    fn detail_carries_the_message_for_network_failures() {
+        let e = GoopError::Network("connection reset by peer".into());
+        assert_eq!(e.detail().as_deref(), Some("connection reset by peer"));
+    }
+
+    #[test]
+    fn detail_is_absent_where_there_is_nothing_extra_to_show() {
+        // These render the same either way, so a detail block would just
+        // repeat the message back at the user.
+        for e in [
+            GoopError::Cancelled,
+            GoopError::SidecarMissing("yt-dlp".into()),
+            GoopError::InvalidRequest("subtitles not supported".into()),
+            GoopError::Queue("db locked".into()),
+            GoopError::Config("bad path".into()),
+        ] {
+            assert!(e.detail().is_none(), "expected no detail for {e:?}");
         }
     }
 }

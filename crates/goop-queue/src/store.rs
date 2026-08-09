@@ -33,6 +33,12 @@ impl QueueStore {
         // external service can park in `queued` with a wake-up deadline
         // instead of pinning a concurrency permit while it polls.
         ensure_not_before_column(&conn)?;
+        // Migration 0004: add `error_detail` so a failure can keep the raw
+        // stderr that `friendly_message` replaced. Nullable, and outside the
+        // `state` string on purpose — the `error:{message}` encoding stays
+        // exactly as it was, so every `LIKE 'error:%'` predicate and every
+        // pre-existing row keeps working with no backfill.
+        ensure_error_detail_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -41,8 +47,8 @@ impl QueueStore {
     pub fn insert(&self, job: &Job) -> Result<(), GoopError> {
         let c = self.conn.lock();
         c.execute(
-            "INSERT INTO jobs (id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO jobs (id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 job.id.0.to_string(),
                 kind_to_str(&job.kind),
@@ -54,6 +60,14 @@ impl QueueStore {
                 job.created_at,
                 job.started_at,
                 job.finished_at,
+                // Enqueue always inserts a Queued job, so this is None in
+                // practice — but carrying it keeps insert and update_state
+                // symmetric, so a Job round-tripped through insert can't
+                // silently lose its detail.
+                match &job.state {
+                    JobState::Error { detail, .. } => detail.as_ref(),
+                    _ => None,
+                },
             ],
         )
         .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -81,10 +95,19 @@ impl QueueStore {
         } else {
             None
         };
+        // Written unconditionally rather than COALESCEd: every non-error
+        // state must CLEAR it. A retry goes error → queued → running, and if
+        // the old detail survived that, a second failure carrying none would
+        // display the first attempt's stderr as though it were its own.
+        let error_detail: Option<&String> = match state {
+            JobState::Error { detail, .. } => detail.as_ref(),
+            _ => None,
+        };
         c.execute(
             "UPDATE jobs SET state = ?2, result = ?3,
                 started_at = COALESCE(?4, started_at),
-                finished_at = COALESCE(?5, finished_at)
+                finished_at = COALESCE(?5, finished_at),
+                error_detail = ?6
              WHERE id = ?1",
             params![
                 id.0.to_string(),
@@ -92,6 +115,7 @@ impl QueueStore {
                 result.and_then(|r| serde_json::to_string(r).ok()),
                 started_at,
                 finished_at,
+                error_detail,
             ],
         )
         .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -105,7 +129,7 @@ impl QueueStore {
         // the flag so cleared jobs still show up there.
         let mut stmt = c
             .prepare(
-                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
+                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
                  FROM jobs WHERE hidden_from_queue = 0
                  ORDER BY priority DESC, created_at ASC",
             )
@@ -160,7 +184,7 @@ impl QueueStore {
         let c = self.conn.lock();
         let mut stmt = c
             .prepare(
-                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
+                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
                  FROM jobs WHERE state = 'queued' AND kind = ?1
                    AND (not_before IS NULL OR not_before <= ?2)
                  ORDER BY priority DESC, created_at ASC LIMIT 1",
@@ -213,10 +237,12 @@ impl QueueStore {
         let c = self.conn.lock();
         let n = c
             .execute(
-                "UPDATE jobs SET state = ?1, finished_at = ?2 WHERE state = 'running'",
+                "UPDATE jobs SET state = ?1, finished_at = ?2, error_detail = NULL
+                 WHERE state = 'running'",
                 params![
                     state_to_str(&JobState::Error {
-                        message: "interrupted".into()
+                        message: "interrupted".into(),
+                        detail: None
                     }),
                     now_ms()
                 ],
@@ -323,8 +349,16 @@ impl QueueStore {
         let c = self.conn.lock();
         let n = c
             .execute(
+                // `error_detail` is cleared here for the same reason `result`
+                // is: this row is no longer describing the attempt that
+                // failed. `update_state` would overwrite it at the next
+                // terminal write anyway, but leaving it set in the meantime
+                // means a queued or running row carries the previous
+                // attempt's stderr — true only by accident of nothing
+                // reading the column outside an error state.
                 "UPDATE jobs SET state = ?2, result = NULL, started_at = NULL,
                     finished_at = NULL, attempts = attempts + 1, hidden_from_queue = 0,
+                    error_detail = NULL,
                     priority = (SELECT COALESCE(MAX(priority), 0) + 10
                                 FROM jobs WHERE state = 'queued')
                  WHERE id = ?1 AND state LIKE 'error:%'",
@@ -360,7 +394,7 @@ impl QueueStore {
         let c = self.conn.lock();
         let mut stmt = c
             .prepare(
-                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
+                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
                  FROM jobs WHERE id = ?1",
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -380,7 +414,7 @@ impl QueueStore {
     /// in user input are escaped so they're treated literally.
     pub fn list_terminal(&self, filter: &HistoryFilter) -> Result<Vec<Job>, GoopError> {
         let mut sql = String::from(
-            "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at
+            "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
              FROM jobs
              WHERE (state = 'done' OR state = 'cancelled' OR state LIKE 'error:%')",
         );
@@ -519,7 +553,8 @@ fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<Job> {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })?),
         kind: str_to_kind(&row.get::<_, String>(1)?).ok_or(rusqlite::Error::InvalidQuery)?,
-        state: str_to_state(&row.get::<_, String>(2)?).ok_or(rusqlite::Error::InvalidQuery)?,
+        state: str_to_state(&row.get::<_, String>(2)?, row.get::<_, Option<String>>(10)?)
+            .ok_or(rusqlite::Error::InvalidQuery)?,
         payload: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or(serde_json::Value::Null),
         result: row
             .get::<_, Option<String>>(4)?
@@ -560,14 +595,18 @@ fn state_to_str(s: &JobState) -> String {
         JobState::Paused => "paused".into(),
         JobState::Done => "done".into(),
         JobState::Cancelled => "cancelled".into(),
-        JobState::Error { message } => format!("error:{message}"),
+        // `detail` is deliberately NOT encoded here. Keeping the string form
+        // as `error:{message}` is what lets every `LIKE 'error:%'` predicate
+        // and every row written before this column existed keep working.
+        JobState::Error { message, .. } => format!("error:{message}"),
     }
 }
 
-fn str_to_state(s: &str) -> Option<JobState> {
+fn str_to_state(s: &str, detail: Option<String>) -> Option<JobState> {
     if let Some(msg) = s.strip_prefix("error:") {
         return Some(JobState::Error {
             message: msg.into(),
+            detail,
         });
     }
     match s {
@@ -614,6 +653,24 @@ fn ensure_hidden_from_queue_column(conn: &Connection) -> Result<(), GoopError> {
     Ok(())
 }
 
+/// Idempotent migration for the `error_detail` column. Same shape as
+/// `ensure_hidden_from_queue_column`, and specialized for the same reason:
+/// the table, column and declaration stay compile-time literals rather than
+/// identifiers formatted into raw SQL.
+fn ensure_error_detail_column(conn: &Connection) -> Result<(), GoopError> {
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'error_detail'")
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    let exists = stmt
+        .exists([])
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+    if !exists {
+        conn.execute("ALTER TABLE jobs ADD COLUMN error_detail TEXT", [])
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+    }
+    Ok(())
+}
+
 fn ensure_not_before_column(conn: &Connection) -> Result<(), GoopError> {
     let mut stmt = conn
         .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'not_before'")
@@ -638,6 +695,164 @@ mod tests {
         let d = tempdir().unwrap();
         let s = QueueStore::open(&d.path().join("q.db")).unwrap();
         (s, d)
+    }
+
+    /// Persisting a failure keeps the raw detail alongside the friendly
+    /// message, and hands both back on every read path.
+    #[test]
+    fn error_detail_round_trips_through_get_and_list() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        let state = JobState::Error {
+            message: "yt-dlp: This video is unavailable.".into(),
+            detail: Some("ERROR: [youtube] abc: Video unavailable\nTraceback...".into()),
+        };
+        s.update_state(j.id, &state, None, 1).unwrap();
+
+        let got = s.get_by_id(j.id).unwrap().expect("job");
+        assert_eq!(got.state, state, "get_by_id must return message and detail");
+
+        let listed = s.list_terminal(&HistoryFilter::default()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, state, "list_terminal must too");
+    }
+
+    /// A failure with nothing worth keeping stores NULL rather than an empty
+    /// string, so `detail: None` survives the round trip unchanged.
+    #[test]
+    fn error_without_detail_round_trips_as_none() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Convert, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        let state = JobState::Error {
+            message: "cancelled by user".into(),
+            detail: None,
+        };
+        s.update_state(j.id, &state, None, 1).unwrap();
+        assert_eq!(s.get_by_id(j.id).unwrap().unwrap().state, state);
+    }
+
+    /// Retrying clears the previous run's detail. Otherwise a second failure
+    /// that carries none would display the first attempt's stderr as if it
+    /// were its own.
+    #[test]
+    fn retrying_clears_the_previous_detail() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        s.update_state(
+            j.id,
+            &JobState::Error {
+                message: "first".into(),
+                detail: Some("first stderr".into()),
+            },
+            None,
+            1,
+        )
+        .unwrap();
+        s.retry_errored(j.id).unwrap();
+        s.update_state(
+            j.id,
+            &JobState::Error {
+                message: "second".into(),
+                detail: None,
+            },
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_by_id(j.id).unwrap().unwrap().state,
+            JobState::Error {
+                message: "second".into(),
+                detail: None,
+            },
+            "the first attempt's stderr must not resurface on the second failure"
+        );
+    }
+
+    /// The column itself must be clear while the row is queued, not merely
+    /// invisible through `str_to_state`. A queued row holding the previous
+    /// attempt's stderr is stale data waiting for the first query that reads
+    /// the column directly.
+    #[test]
+    fn retrying_clears_the_detail_column_itself() {
+        let (s, _tmp) = temp_store();
+        let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+        s.insert(&j).unwrap();
+        s.update_state(
+            j.id,
+            &JobState::Error {
+                message: "boom".into(),
+                detail: Some("stderr from the first attempt".into()),
+            },
+            None,
+            1,
+        )
+        .unwrap();
+        s.retry_errored(j.id).unwrap();
+
+        let stored: Option<String> = s
+            .conn
+            .lock()
+            .query_row(
+                "SELECT error_detail FROM jobs WHERE id = ?1",
+                params![j.id.0.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, None, "a queued row must not hold a stale detail");
+    }
+
+    /// A database written before the column existed must still open, and its
+    /// error rows must load with `detail: None` rather than failing the read.
+    #[test]
+    fn pre_existing_database_without_the_column_still_loads() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("q.db");
+        {
+            let s = QueueStore::open(&path).unwrap();
+            let j = Job::new(JobKind::Extract, serde_json::Value::Null);
+            s.insert(&j).unwrap();
+            s.update_state(
+                j.id,
+                &JobState::Error {
+                    message: "old failure".into(),
+                    detail: None,
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        }
+        // Drop the column to reproduce a pre-migration file, then reopen.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("ALTER TABLE jobs DROP COLUMN error_detail", [])
+                .expect("sqlite >= 3.35 supports DROP COLUMN");
+        }
+        let s = QueueStore::open(&path).unwrap();
+        let all = s.list().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0].state,
+            JobState::Error {
+                message: "old failure".into(),
+                detail: None,
+            }
+        );
+    }
+
+    /// Opening the same file twice must not fail on the ALTER.
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("q.db");
+        let first = QueueStore::open(&path).unwrap();
+        drop(first);
+        let second = QueueStore::open(&path).expect("second open must not re-run the ALTER");
+        assert!(second.list().unwrap().is_empty());
     }
 
     #[test]
@@ -768,6 +983,7 @@ mod tests {
         cancelled.state = JobState::Cancelled;
         errored.state = JobState::Error {
             message: "boom".into(),
+            detail: None,
         };
         s.insert(&done).unwrap();
         s.insert(&cancelled).unwrap();
@@ -911,6 +1127,7 @@ mod tests {
             job.id,
             &JobState::Error {
                 message: "interrupted".into(),
+                detail: None,
             },
             None,
             2000,
@@ -1017,6 +1234,7 @@ mod tests {
         let mut failed = Job::new(JobKind::Extract, serde_json::Value::Null);
         failed.state = JobState::Error {
             message: "boom".into(),
+            detail: None,
         };
         s.insert(&failed).unwrap();
         // Simulate the user having cleared completed jobs from the queue tab.
@@ -1070,7 +1288,9 @@ mod tests {
         let n = s.reconcile().unwrap();
         assert_eq!(n, 1);
         let all = s.list().unwrap();
-        assert!(matches!(&all[0].state, JobState::Error { message } if message == "interrupted"));
+        assert!(
+            matches!(&all[0].state, JobState::Error { message, .. } if message == "interrupted")
+        );
     }
 
     #[test]

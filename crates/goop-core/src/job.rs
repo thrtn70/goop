@@ -42,7 +42,23 @@ pub enum JobState {
     Running,
     Paused,
     Done,
-    Error { message: String },
+    /// `message` is the user-facing line (already through `friendly_message`).
+    /// `detail` is the raw text it replaced — the full stderr tail, kept so a
+    /// failure nobody has a friendly pattern for is still readable and
+    /// reportable instead of being thrown away.
+    ///
+    /// Persistence does not go through serde — the SQLite encoding is the
+    /// custom `state_to_str`/`str_to_state` pair, which keeps `detail` in its
+    /// own column rather than in the `state` string, so every `LIKE 'error:%'`
+    /// predicate and every pre-existing row keeps working unchanged.
+    /// `#[serde(default)]` is therefore defensive rather than load-bearing: it
+    /// costs nothing and means a `JobState` that ever does get round-tripped
+    /// through JSON won't fail on an older payload.
+    Error {
+        message: String,
+        #[serde(default)]
+        detail: Option<String>,
+    },
     Cancelled,
 }
 
@@ -164,6 +180,7 @@ mod tests {
         assert!(j.is_terminal());
         j.state = JobState::Error {
             message: "x".into(),
+            detail: None,
         };
         assert!(j.is_terminal());
         j.state = JobState::Cancelled;

@@ -100,7 +100,7 @@ describe("JobStateAnnouncer", () => {
       useAppStore.setState({
         jobs: [
           makeJob("a", {
-            state: { error: { message: "ffmpeg failed" } } as unknown as Job["state"],
+            state: { error: { message: "ffmpeg failed", detail: null } },
           }),
         ],
       });

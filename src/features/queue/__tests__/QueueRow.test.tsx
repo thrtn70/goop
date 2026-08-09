@@ -366,7 +366,7 @@ describe("QueueRow retry button and error text", () => {
       <QueueRow
         job={makeJob({
           kind: "extract",
-          state: { error: { message: "HTTP 403" } },
+          state: { error: { message: "HTTP 403", detail: null } },
           payload: { url: "https://example.com/video" },
         })}
         index={0}
@@ -377,7 +377,7 @@ describe("QueueRow retry button and error text", () => {
 
   it("hides the retry button on a failed convert job", () => {
     render(
-      <QueueRow job={makeJob({ state: { error: { message: "boom" } } })} index={0} />,
+      <QueueRow job={makeJob({ state: { error: { message: "boom", detail: null } } })} index={0} />,
     );
     expect(screen.queryByRole("button", { name: /^Retry/ })).toBeNull();
   });
@@ -411,7 +411,7 @@ describe("QueueRow retry button and error text", () => {
     const user = userEvent.setup();
     const job = makeJob({
       kind: "extract",
-      state: { error: { message: "connection reset" } },
+      state: { error: { message: "connection reset", detail: null } },
       payload: { url: "https://example.com/video" },
     });
     render(<QueueRow job={job} index={0} />);
@@ -425,7 +425,7 @@ describe("QueueRow retry button and error text", () => {
     queueMocks.retry.mockRejectedValueOnce({ code: "queue", message: "job_not_retryable" });
     const job = makeJob({
       kind: "extract",
-      state: { error: { message: "boom" } },
+      state: { error: { message: "boom", detail: null } },
       payload: { url: "https://example.com/video" },
     });
     render(<QueueRow job={job} index={0} />);
@@ -441,7 +441,7 @@ describe("QueueRow retry button and error text", () => {
       <QueueRow
         job={makeJob({
           kind: "extract",
-          state: { error: { message: "connection reset by peer" } },
+          state: { error: { message: "connection reset by peer", detail: null } },
           payload: { url: "https://example.com/video" },
         })}
         index={0}
@@ -456,7 +456,7 @@ describe("QueueRow retry button and error text", () => {
       <QueueRow
         job={makeJob({
           kind: "extract",
-          state: { error: { message: "" } },
+          state: { error: { message: "", detail: null } },
           payload: { url: "https://example.com/video" },
         })}
         index={0}
