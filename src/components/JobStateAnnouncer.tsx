@@ -65,10 +65,15 @@ export default function JobStateAnnouncer() {
   );
 }
 
-// Today `JobState`'s only object variant is `{ error: { message } }`. If
-// a future variant is added, this comparator returns `false` for it and
-// will cause a spurious re-announcement until the comparator is taught
-// the new shape — acceptable for now, just be aware on enum changes.
+// `JobState`'s only object variant is the error one. It also carries a
+// `detail`, which this deliberately ignores: `announcementFor` reads only
+// `message`, so two errors differing solely in `detail` would announce
+// identical text and re-announcing it would be noise. The comparison is
+// scoped to what is actually spoken, not to the whole object.
+//
+// If a NEW object variant is added, this returns `false` for it and causes
+// a spurious re-announcement until it is taught the shape — acceptable, but
+// be aware on enum changes.
 function statesEqual(a: JobState, b: JobState): boolean {
   if (typeof a === "string" && typeof b === "string") return a === b;
   if (typeof a === "object" && typeof b === "object") {

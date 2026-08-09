@@ -322,6 +322,11 @@ impl Scheduler {
                         // see the raw stderr on the GoopError variant.
                         JobState::Error {
                             message: e.user_message(),
+                            // The raw text `user_message` just replaced. Kept
+                            // so a failure with no friendly pattern is still
+                            // readable, and a matched one can still be checked
+                            // against what the tool actually said.
+                            detail: e.detail(),
                         },
                         None,
                     ),
@@ -1066,6 +1071,7 @@ mod tests {
         let mut job = Job::new(JobKind::Extract, serde_json::Value::Null);
         job.state = JobState::Error {
             message: "connection reset".into(),
+            detail: None,
         };
         store.insert(&job).unwrap();
 

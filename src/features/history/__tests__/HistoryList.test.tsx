@@ -50,7 +50,7 @@ describe("HistoryList terminal-state badge", () => {
   afterEach(cleanup);
 
   it("marks a failed job with the error badge", () => {
-    renderList([makeJob({ id: "job-failed", state: { error: { message: "yt-dlp exited 1" } } })]);
+    renderList([makeJob({ id: "job-failed", state: { error: { message: "yt-dlp exited 1", detail: null } } })]);
     expect(screen.getByText("error")).toBeTruthy();
   });
 
@@ -67,7 +67,7 @@ describe("HistoryList terminal-state badge", () => {
   it("badges only the failed rows in a mixed list", () => {
     renderList([
       makeJob({ id: "job-done", state: "done" }),
-      makeJob({ id: "job-failed", state: { error: { message: "boom" } } }),
+      makeJob({ id: "job-failed", state: { error: { message: "boom", detail: null } } }),
       makeJob({ id: "job-cancelled", state: "cancelled" }),
     ]);
     expect(screen.getAllByText("error")).toHaveLength(1);

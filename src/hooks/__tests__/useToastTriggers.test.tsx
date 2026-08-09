@@ -56,7 +56,7 @@ describe("useToastTriggers across retry transitions", () => {
       </MemoryRouter>,
     );
 
-    setJobs({ error: { message: "connection reset" } });
+    setJobs({ error: { message: "connection reset", detail: null } });
     expect(errorToastCount()).toBe(1);
 
     // Manual retry: the job leaves its terminal state...
@@ -65,7 +65,7 @@ describe("useToastTriggers across retry transitions", () => {
     expect(errorToastCount()).toBe(1);
 
     // ...and the second failure must toast again.
-    setJobs({ error: { message: "connection reset again" } });
+    setJobs({ error: { message: "connection reset again", detail: null } });
     expect(errorToastCount()).toBe(2);
   });
 
@@ -76,9 +76,9 @@ describe("useToastTriggers across retry transitions", () => {
       </MemoryRouter>,
     );
 
-    setJobs({ error: { message: "boom" } });
+    setJobs({ error: { message: "boom", detail: null } });
     // Unrelated store churn re-publishes the same terminal state.
-    setJobs({ error: { message: "boom" } });
+    setJobs({ error: { message: "boom", detail: null } });
     expect(errorToastCount()).toBe(1);
   });
 });
