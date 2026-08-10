@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import HistoryFilterChips from "@/features/history/HistoryFilterChips";
 import PdfOperationPicker from "@/features/pdf/PdfOperationPicker";
 import DeleteMenu from "@/features/preview/DeleteMenu";
+import { api } from "@/ipc/commands";
 import { useAppStore } from "@/store/appStore";
+import { restoreStoreActions } from "@/test/storeActions";
 import type { HistoryCounts, Job, JobKind } from "@/types";
 
 vi.mock("@/ipc/commands", () => ({
@@ -35,6 +37,11 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     ...overrides,
   } as unknown as Job;
 }
+
+// Several tests below swap a store action for a spy. Zustand keeps that
+// binding for the rest of the file, so put the real implementations back before
+// each test rather than leaving the next one to run against a stale spy.
+beforeEach(restoreStoreActions);
 
 function resetStoreHistory(counts: HistoryCounts | null, kind: JobKind | null = null) {
   useAppStore.setState((s) => ({
@@ -143,7 +150,11 @@ describe("PdfOperationPicker", () => {
 
 describe("DeleteMenu", () => {
   afterEach(cleanup);
-  beforeEach(() => resetStoreHistory({ all: 0, extract: 0, convert: 0, pdf: 0 }));
+  beforeEach(() => {
+    resetStoreHistory({ all: 0, extract: 0, convert: 0, pdf: 0 });
+    vi.mocked(api.file.moveToTrash).mockClear();
+    vi.mocked(api.job.forget).mockClear();
+  });
 
   it("shows both options when the menu opens", async () => {
     render(<DeleteMenu job={makeJob()} />);
@@ -170,6 +181,19 @@ describe("DeleteMenu", () => {
     expect(trashJobs).toHaveBeenCalledWith([
       expect.objectContaining({ path: "/tmp/out.mp4" }),
     ]);
+  });
+
+  // Guards the restore in the file-level beforeEach. The two tests above swap
+  // `forgetJobs` and `trashJobs` for spies; without the restore this one runs
+  // the leftover `trashJobs` spy and never reaches the IPC layer. `trashJobs`
+  // also calls `forgetJobs` through `get()`, so it covers the indirect case
+  // too — a stale `forgetJobs` spy would break the second assertion alone.
+  it("reaches the IPC layer through the real trashJobs", async () => {
+    render(<DeleteMenu job={makeJob()} />);
+    await userEvent.click(screen.getByRole("button", { name: /Delete/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Move to Trash/ }));
+    await waitFor(() => expect(api.file.moveToTrash).toHaveBeenCalledWith("/tmp/out.mp4"));
+    await waitFor(() => expect(api.job.forget).toHaveBeenCalledWith("job-1"));
   });
 
   it("disables Move to Trash when the job has no output path", async () => {
