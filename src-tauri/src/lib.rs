@@ -174,15 +174,29 @@ pub fn run() {
             // to the IPC layer.
             let settings_shared = Arc::new(parking_lot::RwLock::new(settings.clone()));
 
+            // yt-dlp update coordinator. Built here rather than next to the
+            // startup task it also drives, because the extract worker below
+            // needs it: a job that fails the way a stale extractor fails asks
+            // it for a fresh binary. Shared, so a manual check from Settings,
+            // the daily check, and a failing job can never run three at once.
+            let yt_dlp_updates = Arc::new(ytdlp_auto_update::YtDlpAutoUpdate::production(
+                resolver.clone(),
+                settings_shared.clone(),
+                settings_path.clone(),
+                sink.clone(),
+            ));
+
             let r_for_extract = resolver.clone();
             let sink_for_extract = sink.clone();
             let settings_for_extract = settings_shared.clone();
             let store_for_extract = store.clone();
+            let updates_for_extract = yt_dlp_updates.clone();
             let extract_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_extract.clone();
                 let s = sink_for_extract.clone();
                 let settings = settings_for_extract.clone();
                 let store = store_for_extract.clone();
+                let updates = updates_for_extract.clone();
                 Box::pin(async move {
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
@@ -212,6 +226,19 @@ pub fn run() {
                             }),
                         }
                     });
+                    // Asked only when a failure looks like yt-dlp itself has
+                    // gone stale, and answered `Some` only when a genuinely
+                    // different binary lands on disk. The coordinator owns
+                    // the kill switch and the 30-minute window, so a rotted
+                    // site costs one version check rather than one per job.
+                    let hook: goop_extractor::UpdateHook = Arc::new(move || {
+                        let updates = updates.clone();
+                        Box::pin(async move {
+                            updates
+                                .check_after_stale_failure(ytdlp_auto_update::now_ms())
+                                .await
+                        })
+                    });
                     // Route via the dispatcher: it picks yt-dlp or
                     // gallery-dl based on the URL's classifier output and
                     // falls back to the OTHER extractor on a
@@ -219,7 +246,16 @@ pub fn run() {
                     // network failures with backoff. Downloads honor both
                     // signals: cancel deletes partials, pause keeps them
                     // for resume.
-                    let outcome = goop_extractor::dispatch(&r, s, id, &req, signals, debrid).await?;
+                    let outcome = goop_extractor::dispatch_with_update_hook(
+                        &r,
+                        s,
+                        id,
+                        &req,
+                        signals,
+                        debrid,
+                        Some(hook),
+                    )
+                    .await?;
                     Ok(JobResult {
                         output_path: Some(outcome.output_path),
                         bytes: Some(outcome.bytes),
@@ -960,14 +996,7 @@ pub fn run() {
                 s_metadata.run_kind(goop_core::JobKind::Metadata).await
             });
 
-            // Daily yt-dlp freshness check. Shared with the Settings button so
-            // a manual check and the automatic one can't both run at once.
-            let yt_dlp_updates = Arc::new(ytdlp_auto_update::YtDlpAutoUpdate::production(
-                resolver.clone(),
-                settings_shared.clone(),
-                settings_path.clone(),
-                sink.clone(),
-            ));
+            // Daily yt-dlp freshness check, on the coordinator built above.
             {
                 // Deliberately after a delay: launch already contends for disk
                 // and network (window, webview, sidecar version reads), and

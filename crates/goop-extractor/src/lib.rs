@@ -6,5 +6,8 @@ pub mod gallery_dl;
 mod retry;
 pub mod ytdlp;
 
-pub use backend::{cleanup_partials_for, dispatch, BackendOutcome, ResultKindTag};
+pub use backend::{
+    cleanup_partials_for, dispatch, dispatch_with_update_hook, BackendOutcome, BinaryUpdated,
+    ResultKindTag, UpdateHook,
+};
 pub use classify::{classify, classify_extractor, ExtractorChoice, Source};

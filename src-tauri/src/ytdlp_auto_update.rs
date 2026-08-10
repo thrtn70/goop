@@ -14,6 +14,7 @@
 use crate::commands::sidecar::yt_dlp_updated_event;
 use goop_config::Settings;
 use goop_core::{EventSink, GoopError};
+use goop_extractor::BinaryUpdated;
 use goop_sidecar::updater::UpdateStatus;
 use goop_sidecar::BinaryResolver;
 use parking_lot::RwLock;
@@ -25,6 +26,17 @@ use std::sync::Arc;
 /// One check a day. yt-dlp releases every few days at most, and the cost of
 /// being a few hours stale is nil next to a request per launch.
 const CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// How long a failure-triggered check stands for.
+///
+/// Shorter than the daily throttle because a job that just failed is real
+/// evidence and a calendar is not. Long enough that a rotted site — which
+/// fails every job pointed at it, each failure looking exactly as stale as
+/// the first — costs one request rather than one per item in the batch.
+///
+/// Kept in memory only. The window exists to collapse a burst, and a burst
+/// does not survive a relaunch.
+const STALE_CHECK_INTERVAL_MS: i64 = 30 * 60 * 1000;
 
 /// Wall-clock milliseconds. Taken as a parameter everywhere below so the
 /// throttle is testable without waiting a day.
@@ -78,6 +90,10 @@ pub struct YtDlpAutoUpdate {
     sink: Arc<dyn EventSink>,
     update: UpdateFn,
     in_flight: tokio::sync::Mutex<()>,
+    /// When the last failure-triggered check completed. Separate from
+    /// `Settings.yt_dlp_last_update_ms`, which is the daily throttle this
+    /// path deliberately bypasses.
+    last_failure_check_ms: RwLock<Option<i64>>,
 }
 
 impl YtDlpAutoUpdate {
@@ -95,6 +111,7 @@ impl YtDlpAutoUpdate {
             sink,
             update,
             in_flight: tokio::sync::Mutex::new(()),
+            last_failure_check_ms: RwLock::new(None),
         }
     }
 
@@ -177,6 +194,51 @@ impl YtDlpAutoUpdate {
             }
             Err(e) => tracing::warn!(error = %e, "settings save task failed"),
         }
+    }
+
+    /// Entry point for the dispatcher's stale-failure hook: a job just failed
+    /// in a way only a newer yt-dlp can fix
+    /// (`goop_core::is_stale_extractor_suspect`).
+    ///
+    /// `Some` ONLY when different bytes are now on disk, because that is the
+    /// only outcome that justifies re-running the job. "Already current", "the
+    /// check failed" and "another check is in flight" are all `None`.
+    ///
+    /// Two throttles apply and one does not. The daily one is deliberately
+    /// bypassed — a job failing now is better evidence than a calendar — which
+    /// is exactly why the kill switch has to be honoured here by hand:
+    /// `check_now` does not consult it, since the Settings button that also
+    /// calls it *is* the user asking.
+    pub async fn check_after_stale_failure(&self, now_ms: i64) -> Option<BinaryUpdated> {
+        if !self.settings.read().yt_dlp_auto_update {
+            return None;
+        }
+        if let Some(last) = *self.last_failure_check_ms.read() {
+            // `now_ms >= last` first: a clock that moved backwards must not
+            // lock checks out until real time catches up, same as
+            // `should_check`.
+            if now_ms >= last && now_ms.saturating_sub(last) < STALE_CHECK_INTERVAL_MS {
+                return None;
+            }
+        }
+        let outcome = self.check_now(now_ms).await?;
+        // Recorded for any COMPLETED check, not only fruitless ones: half a
+        // minute after an update there is nothing newer to find either. The
+        // `?` above skips this when another check is in flight — that one
+        // does its own recording.
+        *self.last_failure_check_ms.write() = Some(now_ms);
+
+        let status = outcome.ok()?;
+        // `new_version` is set only where a fresh binary was actually
+        // installed (see `goop_sidecar::yt_dlp_update`), so this is the
+        // "different bytes on disk" test rather than a version comparison.
+        let to = status.new_version?;
+        Some(BinaryUpdated {
+            from: status
+                .previous_version
+                .unwrap_or_else(|| "unknown".to_string()),
+            to,
+        })
     }
 
     /// Throttled entry point for the startup task. Never returns an error:
@@ -502,5 +564,153 @@ mod tests {
             h.sink.sidecar.lock().is_empty(),
             "a failed background check must not surface anything to the user"
         );
+    }
+
+    // ---- check_after_stale_failure --------------------------------------
+
+    const MINUTE: i64 = 60 * 1000;
+
+    /// The daily throttle is deliberately bypassed here — a job failing
+    /// *now* is better evidence than a calendar — so the kill switch is the
+    /// only thing standing between "switched off" and a network request per
+    /// failed job.
+    #[tokio::test]
+    async fn a_stale_failure_check_respects_the_kill_switch() {
+        let (f, calls) = instant_update(status(Some("1"), Some("2")));
+        let h = harness(f, calls);
+        h.settings.write().yt_dlp_auto_update = false;
+        assert!(h.coord.check_after_stale_failure(10 * DAY).await.is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The daily throttle must NOT apply: the whole point is that a job just
+    /// failed in a way a fresher binary fixes, which is news the calendar
+    /// does not have.
+    #[tokio::test]
+    async fn a_stale_failure_check_ignores_the_daily_throttle() {
+        let (f, calls) = instant_update(status(Some("2026.06.09"), Some("2026.07.04")));
+        let h = harness(f, calls);
+        let now = 10 * DAY;
+        h.settings.write().yt_dlp_last_update_ms = Some(now - 1000);
+
+        let updated = h
+            .coord
+            .check_after_stale_failure(now)
+            .await
+            .expect("a changed binary");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(updated.from, "2026.06.09");
+        assert_eq!(updated.to, "2026.07.04");
+    }
+
+    /// A site that has genuinely rotted fails every job pointed at it, and
+    /// each of those failures looks exactly as stale as the first. Without
+    /// this, a twenty-item batch is twenty version checks.
+    #[tokio::test]
+    async fn a_second_failure_within_the_window_does_not_check_again() {
+        let (f, calls) = instant_update(status(Some("1"), None));
+        let h = harness(f, calls);
+        let now = 10 * DAY;
+
+        assert!(h.coord.check_after_stale_failure(now).await.is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+
+        for offset in [1, MINUTE, 29 * MINUTE] {
+            assert!(h
+                .coord
+                .check_after_stale_failure(now + offset)
+                .await
+                .is_none());
+        }
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1, "still just the one");
+
+        assert!(h
+            .coord
+            .check_after_stale_failure(now + 30 * MINUTE)
+            .await
+            .is_none());
+        assert_eq!(
+            h.calls.load(Ordering::SeqCst),
+            2,
+            "the window has passed, so the question is worth asking again"
+        );
+    }
+
+    /// The window covers checks that DID change the binary too. Half a
+    /// minute after an update there is nothing newer to find, so a second
+    /// failing job asking again is the same wasted request as after an
+    /// "already up to date".
+    #[tokio::test]
+    async fn the_window_applies_after_a_successful_update_too() {
+        let (f, calls) = instant_update(status(Some("2026.06.09"), Some("2026.07.04")));
+        let h = harness(f, calls);
+        let now = 10 * DAY;
+
+        assert!(h.coord.check_after_stale_failure(now).await.is_some());
+        assert!(h
+            .coord
+            .check_after_stale_failure(now + MINUTE)
+            .await
+            .is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// "Checked, already current" is the common case, and it must read as
+    /// "nothing changed" — re-running the job against identical bytes would
+    /// fail identically while claiming a fix had been tried.
+    #[tokio::test]
+    async fn an_already_current_binary_reports_no_change() {
+        let (f, calls) = instant_update(status(Some("2026.07.04"), None));
+        let h = harness(f, calls);
+        assert!(h.coord.check_after_stale_failure(DAY).await.is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1, "it did ask");
+    }
+
+    /// A failed check is not evidence the binary changed.
+    #[tokio::test]
+    async fn a_failed_check_reports_no_change() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let f: UpdateFn = Arc::new(move |_| {
+            let c = c.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(GoopError::Queue("yt-dlp update: offline".into()))
+            })
+        });
+        let h = harness(f, calls);
+        assert!(h.coord.check_after_stale_failure(DAY).await.is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A first install has no previous version to read. The note the user
+    /// eventually sees still has to say something in that slot.
+    #[tokio::test]
+    async fn an_unknown_previous_version_still_names_itself() {
+        let (f, calls) = instant_update(status(None, Some("2026.07.04")));
+        let h = harness(f, calls);
+        let updated = h
+            .coord
+            .check_after_stale_failure(DAY)
+            .await
+            .expect("changed");
+        assert_eq!(updated.from, "unknown");
+        assert_eq!(updated.to, "2026.07.04");
+    }
+
+    /// Same reasoning as `should_check`: a clock that moved backwards must
+    /// not lock checks out until real time catches up.
+    #[tokio::test]
+    async fn a_backwards_clock_does_not_lock_out_stale_failure_checks() {
+        let (f, calls) = instant_update(status(Some("1"), None));
+        let h = harness(f, calls);
+        let now = 10 * DAY;
+        assert!(h.coord.check_after_stale_failure(now).await.is_none());
+        assert!(h
+            .coord
+            .check_after_stale_failure(now - 5 * DAY)
+            .await
+            .is_none());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     }
 }
