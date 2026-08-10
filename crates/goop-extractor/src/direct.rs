@@ -85,19 +85,20 @@ pub async fn probe(url: &str) -> Result<DirectFileInfo, GoopError> {
     let head = client.head(url).timeout(PROBE_TIMEOUT).send().await;
     let resp = match head {
         Ok(r) if r.status().is_success() => r,
+        // Classified the same way the download path classifies its own
+        // transport failures. A probe that called everything a `Queue`
+        // error left the retry layer above it unable to tell a dropped
+        // connection from a 404, so neither was retried.
         _ => client
             .get(url)
             .header(RANGE, "bytes=0-0")
             .timeout(PROBE_TIMEOUT)
             .send()
             .await
-            .map_err(|e| GoopError::Queue(format!("direct download: probe: {e}")))?,
+            .map_err(|e| classify_reqwest("probe", &e))?,
     };
     if !resp.status().is_success() {
-        return Err(GoopError::Queue(format!(
-            "direct download: probe HTTP {} for {url}",
-            resp.status()
-        )));
+        return Err(status_error(resp.status(), url));
     }
     // A 206 from the ranged-GET fallback proves the server honours ranges
     // even if it omits `Accept-Ranges` (which RFC 9110 does not mandate).
@@ -214,6 +215,21 @@ pub async fn download(
         .filename_hint
         .clone()
         .unwrap_or_else(|| filename_from_headers(resp.headers(), &req.url));
+    // The direct downloader is the last resort after both extractors shrug,
+    // so it is routinely pointed at things that are not files. A login wall
+    // or an interstitial answers 200 with HTML, and without this the job
+    // "succeeds": an error page lands on disk under the URL's filename and
+    // only announces itself when the user opens it.
+    //
+    // Keyed on the MISMATCH, not on the content type: someone downloading
+    // an actual `.html` is getting exactly what they asked for.
+    if is_unwanted_html(resp.headers(), &filename) {
+        return Err(GoopError::InvalidRequest(
+            "The link returned a web page, not a file. It may need a login, \
+             or the direct link may have expired."
+                .into(),
+        ));
+    }
     let total = if append {
         content_range_total(resp.headers())
             .or_else(|| header_u64(resp.headers(), CONTENT_LENGTH).map(|cl| resume_from + cl))
@@ -336,6 +352,36 @@ fn classify_reqwest(context: &str, e: &reqwest::Error) -> GoopError {
 /// HTTP failure classified by status: retryable statuses (408/429/5xx —
 /// see `retry::transient_status`) become `Network`, the rest stay `Queue`.
 /// Message text is identical either way.
+/// True when the server sent an HTML document but the download is not
+/// supposed to be one.
+///
+/// `text/html` alone is not the signal — a user saving a web page is
+/// entitled to. The pair (HTML body, non-HTML filename) is what says the
+/// server answered with something other than what was asked for.
+fn is_unwanted_html(headers: &HeaderMap, filename: &str) -> bool {
+    let is_html = header_str(headers, CONTENT_TYPE)
+        .map(|v| v.to_ascii_lowercase().starts_with("text/html"))
+        .unwrap_or(false);
+    if !is_html {
+        return false;
+    }
+    // A `Content-Disposition` filename is the server saying "this is a
+    // download, call it this". That is a deliberate statement of intent,
+    // where a `text/html` content type is frequently just a default
+    // (nginx's `default_type`, an extensionless endpoint) — so the
+    // explicit header wins. Narrows the false-positive surface to a URL
+    // with no extension, no disposition, AND a mislabelled type.
+    if header_str(headers, CONTENT_DISPOSITION)
+        .as_deref()
+        .and_then(parse_content_disposition_filename)
+        .is_some()
+    {
+        return false;
+    }
+    let name = filename.to_ascii_lowercase();
+    !(name.ends_with(".html") || name.ends_with(".htm"))
+}
+
 fn status_error(status: StatusCode, url: &str) -> GoopError {
     let msg = format!("direct download: HTTP {status} for {url}");
     if transient_status(status) {
@@ -1349,5 +1395,244 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"abcdef");
+    }
+
+    // ---- probe failures are classified, not lumped together --------------
+
+    /// A probe that fails on a 503 must read as transient, or the retry
+    /// helper above it cannot tell it apart from a 404 and a momentarily
+    /// overloaded host looks permanently broken.
+    #[tokio::test]
+    async fn a_transient_probe_status_is_a_network_error() {
+        for status in [408u16, 429, 500, 502, 503, 504] {
+            let server = MockServer::start().await;
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let err = probe(&format!("{}/f.zip", server.uri()))
+                .await
+                .expect_err("the server refuses");
+            assert!(
+                matches!(err, GoopError::Network(_)),
+                "HTTP {status} should be transient, got {err:?}"
+            );
+        }
+    }
+
+    /// And a permanent one must not, or the probe retries something that
+    /// will never change and the card just takes longer to appear.
+    #[tokio::test]
+    async fn a_permanent_probe_status_is_not_a_network_error() {
+        for status in [400u16, 401, 403, 404, 410] {
+            let server = MockServer::start().await;
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let err = probe(&format!("{}/f.zip", server.uri()))
+                .await
+                .expect_err("the server refuses");
+            assert!(
+                !matches!(err, GoopError::Network(_)),
+                "HTTP {status} is permanent, got {err:?}"
+            );
+        }
+    }
+
+    /// A transport failure — nothing listening — is the same kind of thing
+    /// as a 503 and has to classify the same way. The download path already
+    /// treats it so (`classify_reqwest`); the probe used to call everything
+    /// a `Queue` error.
+    #[tokio::test]
+    async fn a_probe_transport_failure_is_a_network_error() {
+        // Port 1 on loopback: reserved, and nothing is listening.
+        let err = probe("http://127.0.0.1:1/file.zip")
+            .await
+            .expect_err("nothing is listening");
+        assert!(matches!(err, GoopError::Network(_)), "{err:?}");
+    }
+
+    // ---- the "that's a web page, not a file" guard -----------------------
+
+    /// The direct downloader is the last resort after both extractors shrug,
+    /// so it is routinely pointed at pages that are not files at all. A
+    /// login wall or an interstitial answers 200 with HTML, and the result
+    /// was a "download" of the error page, named after the URL, that only
+    /// announces itself when the user opens it.
+    #[tokio::test]
+    async fn an_html_page_is_not_downloaded_as_a_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/video"))
+            .respond_with(
+                // `set_body_raw`, not `set_body_string`: the latter forces
+                // `Content-Type: text/plain` and would quietly test nothing.
+                ResponseTemplate::new(200).set_body_raw(
+                    b"<!doctype html><title>Sign in</title>".to_vec(),
+                    "text/html; charset=utf-8",
+                ),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let err = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/video", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect_err("HTML is not the file that was asked for");
+
+        let msg = err.user_message();
+        assert!(
+            msg.to_lowercase().contains("web page"),
+            "the message has to say what actually happened: {msg}"
+        );
+        assert!(
+            !matches!(err, GoopError::Network(_)),
+            "a login wall does not heal on retry: {err:?}"
+        );
+    }
+
+    /// Someone downloading an actual `.html` file is downloading exactly
+    /// what they asked for. The guard keys on the mismatch, not on the
+    /// content type alone.
+    #[tokio::test]
+    async fn an_html_file_the_user_asked_for_still_downloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page.html"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(b"<h1>saved</h1>".to_vec(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/page.html", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect("an .html file is a legitimate download");
+        assert!(outcome.output_path.ends_with("page.html"));
+    }
+
+    /// A server that names the file in `Content-Disposition` is stating
+    /// intent: this is a download. That beats a `text/html` content type,
+    /// which is frequently just a default for an extensionless endpoint.
+    #[tokio::test]
+    async fn a_named_download_survives_a_mislabelled_content_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-disposition", "attachment; filename=\"clip.mp4\"")
+                    .set_body_raw(b"realbytes".to_vec(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/download", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect("the server said this is a file called clip.mp4");
+        assert!(outcome.output_path.ends_with("clip.mp4"));
+    }
+
+    /// ⚠️ The remaining false positive, pinned so it is known rather than
+    /// discovered. An extensionless URL, no `Content-Disposition`, and a
+    /// server that labels a real file `text/html` is rejected. That
+    /// combination is much more often a login wall than a file, and the
+    /// alternative — saving the interstitial to disk under the URL's name
+    /// and finding out on open — is worse. But it is not free.
+    #[tokio::test]
+    async fn an_extensionless_url_mislabelled_as_html_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(b"realbytes".to_vec(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let err = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/download", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect_err("documenting, not endorsing");
+        assert!(err.user_message().to_lowercase().contains("web page"));
+    }
+
+    /// The message is Goop's own sentence, so it must not arrive wearing
+    /// `invalid request:` — the queue row shows `user_message()` verbatim.
+    #[tokio::test]
+    async fn the_web_page_message_reads_as_a_sentence() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/video"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(b"<html>".to_vec(), "text/html"))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let err = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/video", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect_err("HTML");
+        let msg = err.user_message();
+        assert!(
+            msg.starts_with("The link returned a web page"),
+            "got {msg:?}"
+        );
+        assert!(!msg.contains("invalid request"), "got {msg:?}");
+    }
+
+    /// And a real file is unaffected however the server labels it.
+    #[tokio::test]
+    async fn a_non_html_content_type_is_untouched() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip.mp4"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(b"mp4data".to_vec()),
+            )
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let outcome = download(
+            sink(),
+            JobId::new(),
+            &req(&format!("{}/clip.mp4", server.uri()), dir.path()),
+            JobSignals::new(),
+        )
+        .await
+        .expect("a real file");
+        assert_eq!(std::fs::read(&outcome.output_path).unwrap(), b"mp4data");
     }
 }

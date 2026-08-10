@@ -133,6 +133,55 @@ where
     }
 }
 
+/// How many times a probe is attempted in total. Two: a probe runs while the
+/// user is watching, and the Try-again button is right there.
+///
+/// What that costs depends on the caller, so keep it to callers that return
+/// quickly. The extractor probes are subprocess round-trips measured in
+/// seconds, so a second attempt is cheap. `direct::probe` is deliberately NOT
+/// wrapped: a HEAD plus a fallback GET, each bounded by its own 30s timeout,
+/// already costs a minute against a black-holed host, and doubling that would
+/// park the user on a spinner they cannot cancel.
+pub const PROBE_ATTEMPTS: u32 = 2;
+
+/// Gap between probe attempts. Long enough to outlast a dropped connection
+/// or a load balancer reshuffling, short enough not to read as a hang.
+pub const PROBE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Run a probe, retrying ONLY a transient failure.
+///
+/// A probe is the first thing a URL does, so a single dropped connection
+/// currently shows a red card for a link that is perfectly fine — and the
+/// user's only recourse is to press Try again, which is exactly what this
+/// does, minus the trip through a failure state.
+///
+/// Deliberately narrower than `with_retry`: no backoff curve, no signals
+/// (a probe has no job to cancel), and no progress events (nothing is
+/// running yet). It shares the transient test, which is the part that must
+/// not drift — a permanent verdict like a 404 has to surface immediately or
+/// the card just takes longer to say the same thing.
+pub async fn with_probe_retry<T, F, Fut>(
+    delay: std::time::Duration,
+    mut op: F,
+) -> Result<T, GoopError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, GoopError>>,
+{
+    let mut attempt = 1u32;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < PROBE_ATTEMPTS && is_transient(&e) => {
+                tracing::info!(attempt, reason = %e, "probe failed transiently; retrying");
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +413,92 @@ mod tests {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert!(rec.progress.lock().is_empty());
         }
+    }
+
+    // ---- probe retry -----------------------------------------------------
+
+    /// A dropped connection on the probe currently shows a red card for a
+    /// link that is perfectly fine. One quiet retry beats making the user
+    /// press Try again to learn the same thing.
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_probe_failure_is_retried_once() {
+        let calls = AtomicU32::new(0);
+        let res = with_probe_retry(Duration::from_millis(1), || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(GoopError::Network("connection reset".into()))
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+        assert_eq!(res.unwrap(), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A permanent verdict has to surface immediately. Retrying a 404 only
+    /// makes the card take longer to say the same thing.
+    #[tokio::test(start_paused = true)]
+    async fn a_permanent_probe_failure_is_not_retried() {
+        for err in [
+            (|| GoopError::Queue("direct download: HTTP 404 Not Found".into()))
+                as fn() -> GoopError,
+            || GoopError::SubprocessFailed {
+                binary: "yt-dlp".into(),
+                stderr: "ERROR: Private video".into(),
+            },
+            || GoopError::InvalidRequest("nope".into()),
+        ] {
+            let calls = AtomicU32::new(0);
+            let res: Result<(), _> = with_probe_retry(Duration::from_millis(1), || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { Err(err()) }
+            })
+            .await;
+            assert!(res.is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "one attempt only");
+        }
+    }
+
+    /// Two attempts, not a budget. A site that is genuinely down must not
+    /// hold the probe card hostage.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_gives_up_after_two_attempts() {
+        let calls = AtomicU32::new(0);
+        let res: Result<(), _> = with_probe_retry(Duration::from_millis(1), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move { Err(GoopError::Network("still down".into())) }
+        })
+        .await;
+        assert!(
+            matches!(res, Err(GoopError::Network(_))),
+            "the LAST error surfaces"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), PROBE_ATTEMPTS);
+    }
+
+    /// The transient test is shared with `with_retry` on purpose: a probe
+    /// and a download must not disagree about what is worth another go.
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_subprocess_probe_failure_is_retried_too() {
+        let calls = AtomicU32::new(0);
+        let res = with_probe_retry(Duration::from_millis(1), || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(GoopError::SubprocessFailed {
+                        binary: "yt-dlp".into(),
+                        stderr: "ERROR: unable to download webpage: HTTP Error 503".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

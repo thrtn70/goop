@@ -1125,6 +1125,78 @@ exit 0
         assert_eq!(gd.extractor, Some(ExtractorChoice::GalleryDl));
     }
 
+    /// The retry helper is only useful if what a real probe returns on a
+    /// transient failure actually classifies as transient. That is the
+    /// join between two independently-correct pieces, and getting it wrong
+    /// means the retry never fires in production while every unit test
+    /// stays green.
+    #[tokio::test]
+    async fn a_real_transient_probe_failure_is_retried_and_recovers() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let counter = out.path().join("runs");
+        // 503 first, then a valid `-J` payload.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "echo run >> '{}'\n                 if [ $(wc -l < '{}') -eq 1 ]; then
+                   echo 'ERROR: Unable to download webpage: HTTP Error 503: Service Unavailable' >&2
+                   exit 1
+                 fi
+                 echo '{{\"title\":\"clip\",\"formats\":[]}}'
+                 exit 0
+",
+                counter.display(),
+                counter.display()
+            ),
+        );
+        let resolver = resolver_at(bins.path());
+
+        let probe = crate::retry::with_probe_retry(std::time::Duration::from_millis(1), || {
+            YtDlp::probe(&resolver, "https://example.com/x", None)
+        })
+        .await
+        .expect("the second attempt succeeds");
+
+        assert_eq!(probe.title, "clip");
+        assert_eq!(
+            runs(&counter),
+            2,
+            "the 503 must have been recognised as transient"
+        );
+    }
+
+    /// And a permanent one must not be retried, or every dead link costs an
+    /// extra spawn and a wait before saying the same thing.
+    #[tokio::test]
+    async fn a_real_permanent_probe_failure_is_not_retried() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let counter = out.path().join("runs");
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &counting(
+                &counter,
+                "echo 'ERROR: [youtube] abc: Private video' >&2\nexit 1\n",
+            ),
+        );
+        let resolver = resolver_at(bins.path());
+
+        let res = crate::retry::with_probe_retry(std::time::Duration::from_millis(1), || {
+            YtDlp::probe(&resolver, "https://example.com/x", None)
+        })
+        .await;
+
+        assert!(res.is_err());
+        assert_eq!(
+            runs(&counter),
+            1,
+            "a private video is not going to become public"
+        );
+    }
+
     /// Legacy payloads. Every job queued before this field existed is still
     /// in the store, and the worker deserializes straight from SQLite.
     #[test]
