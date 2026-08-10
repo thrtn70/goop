@@ -1055,6 +1055,88 @@ done
         );
     }
 
+    /// The `--print after_move:filepath` line is the only stdout line under
+    /// the download argv that carries a title, and it is the line the
+    /// wrapper learns the output path from. yt-dlp writes it through
+    /// `write_string`, which encodes with the stream's own encoding and an
+    /// `ignore` error handler — for a redirected pipe on Windows, the ANSI
+    /// codepage. Both halves of that lose the download, and the second one
+    /// silently:
+    ///
+    /// - a character the codepage CAN represent becomes a legacy byte
+    ///   (cp1252 `é` -> 0xE9), which is not valid UTF-8, so the line never
+    ///   decodes and no path is ever reported;
+    /// - a character it CANNOT is DROPPED by `ignore`, so a Japanese or
+    ///   Cyrillic title yields a perfectly decodable path that does not
+    ///   exist on disk. The `.exists()` guard rejects it, `output_path`
+    ///   stays None, and the run fails as "no output file reported" with
+    ///   nothing in the log to say why.
+    ///
+    /// The output DIRECTORY rides in that same line, so a profile path like
+    /// `C:\Users\José\Downloads` breaks it even when the title is ASCII.
+    ///
+    /// `--encoding` reaches exactly this path: `--print` writes via
+    /// `to_stdout` -> `YoutubeDL._write_string`, which hands
+    /// `params['encoding']` to `write_string`. Same class as gallery-dl's
+    /// `-o output.stdout=utf-8`.
+    ///
+    /// This asserts the COMMAND LINE specifically, because the environment
+    /// is not an option: the shipped 2026.06.09 PyInstaller build ignores
+    /// `PYTHONIOENCODING` outright, so a future "simplification" that moves
+    /// the pin into an env var would be silently inert on the one platform
+    /// it exists for.
+    ///
+    /// Reads the argv off a fake that dumps it, which is the only way to see
+    /// what was actually spawned.
+    #[tokio::test]
+    async fn the_yt_dlp_stdout_encoding_is_pinned_on_the_command_line() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Its own directory: the binary resolver reads `bins` and the
+        // wrapper canonicalizes `out`, and the dump belongs to neither.
+        let dumped = TempDir::new().unwrap();
+        let argv = dumped.path().join("argv");
+        // Dump argv, then succeed, so the run ends without a fallback spawn
+        // appending a second invocation to the same file.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "for a in \"$@\"; do echo \"$a\" >> '{}'; done\n{}",
+                argv.display(),
+                yt_dlp_succeeds(out.path())
+            ),
+        );
+
+        let mut req = request("https://example.com/x", out.path());
+        req.cookies_from_browser = None;
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+        assert!(res.is_ok(), "the fake yt-dlp succeeds: {res:?}");
+
+        let sent: Vec<String> = std::fs::read_to_string(&argv)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        // Adjacency, not presence: `--encoding` takes its value as the next
+        // argv word, so a stray `utf-8` anywhere else would prove nothing.
+        assert!(
+            sent.windows(2)
+                .any(|w| w[0] == "--encoding" && w[1] == "utf-8"),
+            "missing `--encoding utf-8` in argv:\n{}",
+            sent.join("\n")
+        );
+    }
+
     // ---- the probe's extractor verdict ----------------------------------
 
     /// Writes a witness file so a test can prove a binary was NEVER run.

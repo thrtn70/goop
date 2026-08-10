@@ -399,7 +399,52 @@ impl<'a> YtDlp<'a> {
             .arg("-o")
             .arg(out_template)
             .arg("--print")
-            .arg("after_move:filepath");
+            .arg("after_move:filepath")
+            // And pin the ENCODING of that line, not just its content.
+            //
+            // The `after_move:filepath` line is the only stdout line under
+            // this argv that carries a title, and it is where `output_path`
+            // below comes from. yt-dlp writes it with
+            // `buffer.write(s.encode(enc, 'ignore'))`, where `enc` falls
+            // back to the stream's own encoding — for a redirected pipe on
+            // Windows, the ANSI codepage. Both halves of that lose the
+            // download:
+            //
+            //   - a character the codepage CAN represent becomes a legacy
+            //     byte (cp1252 `é` -> 0xE9), which is not valid UTF-8. The
+            //     stdout arm below takes that line with `?`, so a download
+            //     that actually succeeded returns a raw IO error instead;
+            //   - a character it CANNOT is DROPPED by `ignore`, so a
+            //     Japanese or Cyrillic title decodes cleanly into a path
+            //     that does not exist. The `.exists()` guard rejects it,
+            //     `output_path` stays None, and the run fails as "no output
+            //     file reported" with nothing in the log — silently.
+            //
+            // The output directory rides in the same line, so a profile
+            // path like `C:\Users\José\Downloads` breaks it even when the
+            // title is pure ASCII.
+            //
+            // `--encoding` lands on exactly this path: `--print` writes via
+            // `to_stdout` -> `YoutubeDL._write_string`, which passes
+            // `params['encoding']` down to `write_string`. Same class as
+            // gallery-dl's `-o output.stdout=utf-8`.
+            //
+            // On the command line rather than through the environment,
+            // because the environment does not reach this sidecar: against
+            // the shipped 2026.06.09 PyInstaller build, `PYTHONIOENCODING`
+            // is ignored outright — `-v` reports `out utf-8` with and
+            // without it — so neither it nor `PYTHONUTF8=1` can be relied on
+            // to pin the stream. Accepted by that same build with no change
+            // to output shape: the `[download]` progress lines `parse_progress`
+            // reads are byte-identical, and the path line still lands last.
+            //
+            // Unlike gallery-dl's `-o` pins, this one cannot be undone by a
+            // user-level config. Goop passes no `--ignore-config` to either
+            // tool, but yt-dlp's `Config.all_args` yields config-file args
+            // BEFORE the command line and `--encoding` is a plain `store`,
+            // so ours is the one that lands.
+            .arg("--encoding")
+            .arg("utf-8");
         if req.audio_only {
             cmd.arg("-x").arg("--audio-format").arg("mp3");
         }
@@ -538,6 +583,14 @@ impl<'a> YtDlp<'a> {
                         // after the first bad byte, and the caller's
                         // decisions are substring tests over the whole
                         // message.
+                        //
+                        // The `--encoding utf-8` pinned above does NOT make
+                        // this unreachable, so don't delete it. It only
+                        // covers what yt-dlp writes itself: `FFmpegFD`
+                        // spawns ffmpeg with stdout and stderr INHERITED,
+                        // so ffmpeg writes into this pipe directly, in
+                        // whatever encoding it pleases, with no Python in
+                        // between to honour the flag.
                         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
                         // A real IO error won't clear on the next poll.
                         Err(_) => err_done = true,
