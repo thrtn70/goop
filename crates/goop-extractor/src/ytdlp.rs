@@ -435,6 +435,10 @@ impl<'a> YtDlp<'a> {
         // in the final SubprocessFailed.stderr regardless of truncation.
         let mut cookie_error_line: Option<String> = None;
         let mut last_progress_line: Option<String> = None;
+        // Stdout lines dropped because they weren't valid UTF-8. Counted
+        // rather than logged where they happen: reported once after the
+        // loop, below.
+        let mut undecodable_stdout: u32 = 0;
 
         // Drain BOTH streams to EOF rather than stopping at stdout's. The
         // loop is biased, so it polls stdout first; a child that closed
@@ -462,8 +466,8 @@ impl<'a> YtDlp<'a> {
                     return Err(finish_interrupt(int, output_dir, last_progress_line.as_deref()));
                 }
                 line = out_reader.next_line(), if !out_done => {
-                    match line? {
-                        Some(l) => {
+                    match line {
+                        Ok(Some(l)) => {
                             if let Some(ev) = parse_progress(job_id, &l) {
                                 self.sink.emit_progress(ev);
                                 last_progress_line = Some(l);
@@ -471,7 +475,35 @@ impl<'a> YtDlp<'a> {
                                 output_path = Some(l);
                             }
                         }
-                        None => out_done = true,
+                        Ok(None) => out_done = true,
+                        // Same treatment as stderr below, for the same
+                        // reason. The line at risk here is the printed
+                        // filepath: under this argv it is the only stdout
+                        // line carrying a title, and a title is what
+                        // arrives mis-encoded. `--print`'s implicit quiet
+                        // (see the flags above) suppresses the status lines
+                        // that would otherwise name the file — `[download]
+                        // Destination:` is not rerouted, it is never
+                        // written — and the progress lines that do survive
+                        // carry no filename.
+                        //
+                        // Do NOT propagate. An early return here leaves the
+                        // child neither killed nor waited for, and nothing
+                        // downstream kills it either: no spawn in this tree
+                        // sets `kill_on_drop`. yt-dlp carries on downloading
+                        // into the user's folder after the job has already
+                        // reported failure, and the Retry button then lands
+                        // a second one on the same `--continue`d `.part`.
+                        //
+                        // Counted, unlike stderr, where losing one line of a
+                        // message is cosmetic: lose the path line and the
+                        // run fails as "no output file reported" having
+                        // downloaded the file perfectly.
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                            undecodable_stdout += 1;
+                        }
+                        // A real IO error won't clear on the next poll.
+                        Err(_) => out_done = true,
                     }
                 }
                 line = err_reader.next_line(), if !err_done => {
@@ -520,13 +552,25 @@ impl<'a> YtDlp<'a> {
                 // both streams EOF together when the child exits.
                 _ = tokio::time::sleep(STDERR_DRAIN_GRACE), if out_done && !err_done => {
                     tracing::warn!(
-                        "yt-dlp stderr still open after stdout EOF; \
+                        "yt-dlp stderr still open after stdout finished; \
                          proceeding with the {} bytes collected so far",
                         stderr_tail.len()
                     );
                     err_done = true;
                 }
             }
+        }
+
+        // Once per run rather than once per line: a playlist whose titles
+        // are all mis-encoded would otherwise write one warning per file
+        // into the rolling log. The error carries nothing the count
+        // doesn't — tokio's message for this kind is a fixed string.
+        if undecodable_stdout > 0 {
+            tracing::warn!(
+                ?job_id,
+                lines = undecodable_stdout,
+                "skipped yt-dlp stdout lines that were not valid UTF-8"
+            );
         }
 
         let status = child.wait().await?;
@@ -545,9 +589,18 @@ impl<'a> YtDlp<'a> {
                 stderr,
             });
         }
+        // Say so here too, not just in the log. Skipping the bad line is
+        // what keeps the child from being abandoned, but it also means a
+        // mis-encoded path leaves this as the only thing the user sees —
+        // and the decode error it replaced at least named the cause.
+        // Nothing that matches on this field keys on these words, so the
+        // longer message can't reroute a dispatch.
         let output_path = output_path.ok_or_else(|| GoopError::SubprocessFailed {
             binary: "yt-dlp".into(),
-            stderr: "no output file reported".into(),
+            stderr: match undecodable_stdout {
+                0 => "no output file reported".into(),
+                n => format!("no output file reported; {n} stdout line(s) were not valid UTF-8"),
+            },
         })?;
         let bytes = std::fs::metadata(&output_path)
             .map(|m| m.len())
