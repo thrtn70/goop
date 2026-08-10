@@ -65,9 +65,15 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
+# fetch_url retries transient network failures. These two tarballs are
+# fetched in the same CI jobs as the sidecars and share their failure
+# mode: without retries a single dropped connection fails the job.
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
+
 fetch_verify() {
   local url="$1" sha="$2" out="$3"
-  curl -fsSL "${url}" -o "${out}"
+  fetch_url "${url}" "${out}"
   echo "${sha}  ${out}" | shasum -a 256 -c -
 }
 
