@@ -50,4 +50,6 @@ Thumbs.db
 
 # Release notes are applied via gh release edit; not tracked
 .release-notes/
-/.heif-deps/
+# No trailing slash: a directory in the main checkout, a symlink in linked
+# worktrees. A dir-only pattern would not match the symlink.
+/.heif-deps
