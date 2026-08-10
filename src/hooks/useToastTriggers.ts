@@ -45,6 +45,9 @@ interface Batch {
   failedLabels: string[];
 }
 
+/** The fields this hook reads off a job's untyped payload. */
+type JobPayload = { batch_id?: string; input_path?: string; url?: string };
+
 const MAX_FAILED_LABELS = 3;
 
 /**
@@ -108,6 +111,10 @@ export function useToastTriggers(): void {
 
       const prev = previousStatesRef.current;
       const { enqueueToast, incrementUnseen } = state;
+      const notificationsEnabled = state.settings?.notifications_enabled === true;
+      // Batches touched by this publish, flushed once the whole snapshot has
+      // been folded in — see the loop below this one.
+      const touchedBatches = new Set<string>();
 
       for (const job of state.jobs) {
         const key = jobIdKey(job.id);
@@ -124,12 +131,10 @@ export function useToastTriggers(): void {
         if (currentTerm && currentTerm !== prevTerm) {
           prev.set(key, currentTerm);
 
-          const payload = job.payload as { batch_id?: string; input_path?: string; url?: string } | null;
+          const payload = job.payload as JobPayload | null;
           const batchId = payload?.batch_id ?? null;
           const sourceLabel = jobLabel(job, payload);
           const outputPath = job.result?.output_path ?? null;
-
-          const notificationsEnabled = state.settings?.notifications_enabled === true;
 
           if (batchId) {
             const batch = batchesRef.current.get(batchId) ?? {
@@ -162,18 +167,7 @@ export function useToastTriggers(): void {
             if (outputPath) batch.lastOutputPath = outputPath;
             batch.kind = job.kind;
             batchesRef.current.set(batchId, batch);
-
-            const stillOpen = state.jobs.some((j) => {
-              const p = j.payload as { batch_id?: string } | null;
-              return p?.batch_id === batchId && terminalName(j.state) === null;
-            });
-            if (!stillOpen) {
-              emitBatchToast(enqueueToast, batch);
-              if (notificationsEnabled) {
-                void fireNativeNotification(batchNotificationTitle(batch));
-              }
-              batchesRef.current.delete(batchId);
-            }
+            touchedBatches.add(batchId);
           } else {
             emitIndividualToast(enqueueToast, job.kind, currentTerm, sourceLabel, outputPath, errorMessage(job.state, job.kind));
             if (notificationsEnabled && currentTerm !== "cancelled") {
@@ -195,6 +189,31 @@ export function useToastTriggers(): void {
             }
           }
         }
+      }
+
+      // Flush only after the whole snapshot has been folded in. `state.jobs`
+      // is one immutable snapshot, so a member's "is anyone still running?"
+      // answer is the same no matter where in the loop it is asked — deciding
+      // inside the loop just means the first terminal member of a
+      // multi-terminal publish sees a settled batch, summarizes itself alone,
+      // and drops the accumulator the rest would have joined. Wholesale
+      // `api.queue.list()` refreshes deliver exactly that: several members
+      // already terminal in a single publish.
+      for (const batchId of touchedBatches) {
+        const batch = batchesRef.current.get(batchId);
+        if (!batch) continue;
+
+        const stillOpen = state.jobs.some((j) => {
+          const p = j.payload as JobPayload | null;
+          return p?.batch_id === batchId && terminalName(j.state) === null;
+        });
+        if (stillOpen) continue;
+
+        emitBatchToast(enqueueToast, batch);
+        if (notificationsEnabled) {
+          void fireNativeNotification(batchNotificationTitle(batch));
+        }
+        batchesRef.current.delete(batchId);
       }
     });
     return () => unsubscribe();

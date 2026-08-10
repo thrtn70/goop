@@ -141,13 +141,9 @@ describe("useToastTriggers batch failure detail", () => {
     // any of them finishes, or the first to land looks like a batch of one.
     //
     // One transition per publish, which is what the queue's own events
-    // produce. It is NOT the only sequencing that reaches this code: a
-    // wholesale `api.queue.list()` snapshot can deliver several already-
-    // terminal members at once, and the accumulator mishandles that —
-    // flushing a batch of one per member. That is a pre-existing bug in
-    // `emitBatchToast`'s flush placement, not in the labels added here, and
-    // it is tracked separately. So read these assertions as covering the
-    // label content, not the aggregation.
+    // produce. The other sequencing — a wholesale `api.queue.list()` snapshot
+    // carrying several already-terminal members at once — is covered by
+    // "batch aggregation across snapshots" below.
     const running = jobs.map((j) => ({ ...j, state: "running" as JobState }));
     act(() => {
       useAppStore.setState({ jobs: running });
@@ -248,5 +244,146 @@ describe("useToastTriggers batch failure detail", () => {
     const toast = lastToast();
     expect(toast?.variant).toBe("success");
     expect(toast?.detail).toBeUndefined();
+  });
+});
+
+describe("useToastTriggers batch aggregation across snapshots", () => {
+  function failed(message: string): JobState {
+    return { error: { message, detail: null } };
+  }
+
+  /**
+   * The other sequencing that reaches this code: `jobs` replaced wholesale by
+   * an `api.queue.list()` snapshot (refresh / refreshJobs / loadAll), which can
+   * carry several already-terminal members in a single publish. `applyQueue`
+   * early-returns for a job not yet in `s.jobs`, so the window between
+   * `ConvertActionBar`'s enqueue loop and `onEnqueued()`'s refresh is exactly
+   * where fast members first appear already finished.
+   */
+  function publish(jobs: Job[]): void {
+    act(() => {
+      useAppStore.setState({ jobs });
+    });
+  }
+
+  function toastCount(): number {
+    return useAppStore.getState().toasts.length;
+  }
+
+  function lastToast() {
+    const toasts = useAppStore.getState().toasts;
+    return toasts[toasts.length - 1];
+  }
+
+  beforeEach(() => {
+    render(
+      <MemoryRouter>
+        <Probe />
+      </MemoryRouter>,
+    );
+  });
+
+  it("summarizes one batch once when two members settle in a single publish", () => {
+    const jobs = [
+      batchJob(1, failed("The site blocked the request."), "https://a.example/one"),
+      batchJob(2, failed("age verification required"), "https://b.example/two"),
+    ];
+    publish(jobs.map((j) => ({ ...j, state: "running" as JobState })));
+    publish(jobs);
+
+    expect(toastCount()).toBe(1);
+    const toast = lastToast();
+    expect(toast?.variant).toBe("error");
+    expect(toast?.title).toBe("2 files failed");
+    expect(toast?.detail).toContain("a.example/one — The site blocked the request.");
+    expect(toast?.detail).toContain("b.example/two — age verification required");
+  });
+
+  it("still caps the reasons when the whole batch settles at once", () => {
+    const jobs = [1, 2, 3, 4, 5].map((n) =>
+      batchJob(n, failed(`reason ${n}`), `https://s${n}.example/x`),
+    );
+    publish(jobs.map((j) => ({ ...j, state: "running" as JobState })));
+    publish(jobs);
+
+    expect(toastCount()).toBe(1);
+    expect(lastToast()?.title).toBe("5 files failed");
+    const detail = lastToast()?.detail ?? "";
+    expect(detail).toContain("reason 1");
+    expect(detail).toContain("reason 3");
+    expect(detail).not.toContain("reason 4");
+    expect(detail).toContain("2 more");
+  });
+
+  it("mixes outcomes from one publish into a single summary", () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    publish(jobs.map((j) => ({ ...j, state: "running" as JobState })));
+    publish(jobs);
+
+    expect(toastCount()).toBe(1);
+    const toast = lastToast();
+    expect(toast?.title).toBe("1 done · 1 failed · 1 cancelled");
+    expect(toast?.detail).toContain("b.example/two — The site blocked the request.");
+  });
+
+  it("waits for the stragglers when a snapshot settles only part of the batch", () => {
+    const jobs = [
+      batchJob(1, failed("reason 1"), "https://a.example/one"),
+      batchJob(2, failed("reason 2"), "https://b.example/two"),
+      batchJob(3, failed("reason 3"), "https://c.example/three"),
+    ];
+    const running = jobs.map((j) => ({ ...j, state: "running" as JobState }));
+    publish(running);
+    // Two land together, the third is still going: nothing to summarize yet.
+    publish([jobs[0]!, jobs[1]!, running[2]!]);
+    expect(toastCount()).toBe(0);
+
+    publish(jobs);
+    expect(toastCount()).toBe(1);
+    expect(lastToast()?.title).toBe("3 files failed");
+  });
+
+  it("stays silent while any member is still going", () => {
+    // The flush now runs once per publish rather than once per member, so
+    // guard the other direction too: repeated snapshots that settle more of
+    // the batch must not summarize it early.
+    const jobs = [1, 2, 3, 4].map((n) =>
+      batchJob(n, failed(`reason ${n}`), `https://s${n}.example/x`),
+    );
+    const running = jobs.map((j) => ({ ...j, state: "running" as JobState }));
+    publish(running);
+
+    for (let settled = 1; settled < jobs.length; settled += 1) {
+      publish(jobs.map((j, idx) => (idx < settled ? j : running[idx]!)));
+      expect(toastCount()).toBe(0);
+    }
+
+    publish(jobs);
+    expect(toastCount()).toBe(1);
+    expect(lastToast()?.title).toBe("4 files failed");
+  });
+
+  it("keeps separate batches separate within one publish", () => {
+    const first = [
+      batchJob(1, failed("reason 1"), "https://a.example/one"),
+      batchJob(2, failed("reason 2"), "https://b.example/two"),
+    ];
+    const second = [3, 4].map((n) =>
+      makeJob("done", {
+        id: `00000000-0000-7000-8000-00000000000${n}` as Job["id"],
+        payload: { url: `https://c.example/${n}`, batch_id: "batch-2" },
+      }),
+    );
+    const all = [...first, ...second];
+    publish(all.map((j) => ({ ...j, state: "running" as JobState })));
+    publish(all);
+
+    const toasts = useAppStore.getState().toasts;
+    expect(toasts).toHaveLength(2);
+    expect(toasts.map((t) => t.title).sort()).toEqual(["2 files downloaded", "2 files failed"]);
   });
 });
