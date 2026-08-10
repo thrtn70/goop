@@ -54,6 +54,13 @@ pub enum WarningCode {
     /// the whole failure mode subtitle encoding detection exists to prevent.
     /// Reaching this means detection guessed the character set wrong.
     SubtitleCuesDropped,
+    /// A format or audio-only choice reached gallery-dl, which has no
+    /// notion of either — it saves whatever the site holds. The download
+    /// succeeds and the file is real, so failing the job would be wrong;
+    /// but the user picked a quality and silently did not get it, which is
+    /// exactly the kind of thing that only surfaces much later, when the
+    /// file turns out to be the wrong size.
+    FormatFallback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

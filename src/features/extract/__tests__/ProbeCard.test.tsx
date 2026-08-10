@@ -17,6 +17,7 @@ function baseProbe(overrides: Partial<UrlProbe>): UrlProbe {
     formats: [],
     direct: null,
     debrid: null,
+    extractor: null,
     ...overrides,
   };
 }

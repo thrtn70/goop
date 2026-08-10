@@ -70,6 +70,10 @@ export default function UrlHero({ url }: { url?: string }) {
         // remaining fields are owned by the backend debrid resolver and
         // cleared at the IPC boundary regardless.
         debrid: probe.debrid != null,
+        // Which extractor actually answered the probe. The download would
+        // otherwise re-guess from the URL's shape and spawn the wrong one
+        // first on anything the classifier gets wrong.
+        extractor_hint: probe.extractor,
         debrid_item: null,
         resume_key: null,
         filename_hint: null,

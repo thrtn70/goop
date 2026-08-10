@@ -944,6 +944,7 @@ mod tests {
             debrid_item: item.map(str::to_string),
             resume_key: None,
             filename_hint: None,
+            extractor_hint: None,
         }
     }
 

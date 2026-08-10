@@ -594,6 +594,7 @@ mod tests {
             debrid_item: None,
             resume_key: None,
             filename_hint: None,
+            extractor_hint: None,
         }
     }
 

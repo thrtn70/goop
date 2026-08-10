@@ -103,6 +103,19 @@ pub struct ExtractRequest {
     /// URL may be opaque. Internal.
     #[serde(default)]
     pub filename_hint: Option<String>,
+    /// Which extractor the probe actually got an answer out of.
+    ///
+    /// `classify_extractor` guesses from the URL's shape and is right most
+    /// of the time; the probe KNOWS, because one of them just returned
+    /// metadata. Carrying that verdict forward skips a doomed spawn on
+    /// every misclassified URL — the whole cost of a wrong guess today.
+    ///
+    /// Purely an optimisation, exactly like `direct`: the cross-extractor
+    /// fallback is unchanged, so a stale or absent hint degrades to
+    /// today's behaviour rather than failing. `#[serde(default)]` because
+    /// jobs queued before this field existed are still in the store.
+    #[serde(default)]
+    pub extractor_hint: Option<crate::classify::ExtractorChoice>,
 }
 
 /// Metadata for a plain file the extractors don't handle, surfaced by the
@@ -148,6 +161,12 @@ pub struct UrlProbe {
     /// card. `None` everywhere else.
     #[serde(default)]
     pub debrid: Option<DebridProbeInfo>,
+    /// Which extractor produced this probe. Echoed back by the UI as
+    /// `ExtractRequest::extractor_hint` so the download skips the guess —
+    /// same round trip as `direct` and `debrid`. `None` for direct and
+    /// debrid probes, where no extractor was involved.
+    #[serde(default)]
+    pub extractor: Option<crate::classify::ExtractorChoice>,
 }
 
 /// Probe metadata for a debrid-routed link. Sibling of `DirectFileInfo`
@@ -252,6 +271,10 @@ impl<'a> YtDlp<'a> {
                     formats: Vec::new(),
                     direct: Some(info),
                     debrid: None,
+                    // No extractor is involved in a direct download, and
+                    // `req.direct` already routes it — a hint here would
+                    // only be a second, weaker way to say the same thing.
+                    extractor: None,
                 });
             }
         }
@@ -267,6 +290,7 @@ impl<'a> YtDlp<'a> {
                 .unwrap_or_default(),
             direct: None,
             debrid: None,
+            extractor: Some(crate::classify::ExtractorChoice::YtDlp),
         })
     }
 
@@ -801,6 +825,7 @@ mod tests {
             debrid_item: None,
             resume_key: None,
             filename_hint: None,
+            extractor_hint: None,
         };
         assert!(req_no_cookies.cookies_from_browser.is_none());
     }
