@@ -102,8 +102,17 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
             >
               {expanded ? "Hide details" : "Details"}
             </button>
+            {/* Capped and scrollable. The container grows upward from the
+             *  bottom of the viewport and an error toast never
+             *  auto-dismisses, so an uncapped block pushes this toast's own
+             *  dismiss button off the top of the screen and strands it
+             *  there. `tabIndex` because a scroll container a keyboard user
+             *  cannot focus is a scroll container they cannot read. */}
             {expanded && (
-              <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-[10px] text-fg-secondary">
+              <pre
+                tabIndex={0}
+                className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-[10px] text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              >
                 {toast.detail}
               </pre>
             )}

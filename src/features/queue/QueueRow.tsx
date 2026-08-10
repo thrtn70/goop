@@ -5,6 +5,7 @@ import { api } from "@/ipc/commands";
 import { formatError, parseIpcError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useSpringValue } from "@/hooks/useSpringValue";
+import { canRetryKind, failureView } from "@/lib/jobFailure";
 
 type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
 
@@ -50,12 +51,29 @@ function isPausable(job: Job): boolean {
  * typically deterministic — though the backend command is kind-generic.
  */
 function isRetryable(job: Job): boolean {
-  return job.kind === "extract" && stateName(job.state) === "error";
+  return canRetryKind(job.kind) && stateName(job.state) === "error";
 }
 
-function errorText(state: JobState): string | null {
-  if (typeof state === "string") return null;
-  return "error" in state && state.error.message ? state.error.message : null;
+/**
+ * Turn a backoff stage into something that reads as waiting rather than as
+ * a stalled download. `retry.rs` emits the wait on `eta_secs` alongside a
+ * stage of `retrying (attempt n/total)`; splicing them keeps that contract
+ * in one place instead of duplicating the attempt counter on the wire.
+ */
+/**
+ * What the Copy button puts on the clipboard: the tool's own output AND
+ * Goop's note about what it already tried. The note is lifted out of the
+ * detail for rendering, but a bug report that omits "yt-dlp was auto-updated
+ * and this was the second attempt" is missing the one Goop-specific fact in
+ * the whole failure.
+ */
+function copyText(failure: { detail: string | null; note: string | null }): string {
+  return [failure.detail, failure.note].filter(Boolean).join("\n");
+}
+
+function retryingLabel(stage: string, etaSecs: number | null): string {
+  if (etaSecs == null) return stage;
+  return stage.replace(/^retrying/, `retrying in ${Math.max(0, Math.round(etaSecs))}s`);
 }
 
 /**
@@ -177,7 +195,17 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
     name === "paused" ? null : progress?.eta_secs != null ? progress.eta_secs : null;
   const settledEta = useSpringValue(targetEta);
   const outputPath = job.result?.output_path ?? null;
-  const failureText = name === "error" ? errorText(job.state) : null;
+  const failure = failureView(job.state, canRetryKind(job.kind));
+  const detailId = `job-failure-detail-${jobIdKey(job.id)}`;
+  const [detailOpen, setDetailOpen] = useState(false);
+  // Reverts a couple of seconds after a copy so the button doesn't claim
+  // "Copied" for the rest of the row's life.
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const handle = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(handle);
+  }, [copied]);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Download pauses are asynchronous: the IPC returns once the pause is
@@ -212,6 +240,25 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
       enqueueToast({
         variant: "error",
         title: "Couldn't pause",
+        detail: formatError(err),
+      });
+    }
+  }
+
+  /**
+   * The whole point of the detail block is pasting it somewhere else, so a
+   * failure to copy has to say so rather than silently doing nothing.
+   * `navigator.clipboard` is absent in insecure contexts and in some
+   * webviews, which is a `TypeError` rather than a rejected promise.
+   */
+  async function handleCopyDetail(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't copy",
         detail: formatError(err),
       });
     }
@@ -396,9 +443,58 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         )}
       </div>
-      {failureText && (
-        <div className="mt-1 truncate text-xs text-error/80" title={failureText}>
-          {failureText}
+      {failure && (
+        <div className="mt-1 space-y-1">
+          <div className="truncate text-xs text-error/80" title={failure.message}>
+            {failure.message}
+          </div>
+          {/* Goop's own note, not the tool's. Visible without expanding
+           *  anything: "we already tried the obvious fix" is the part that
+           *  changes what the user does next. */}
+          {failure.note && (
+            <div className="rounded border border-subtle bg-surface-1 px-1.5 py-1 text-[10px] leading-snug text-fg-secondary">
+              {failure.note}
+            </div>
+          )}
+          {failure.detail && (
+            <div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  aria-expanded={detailOpen}
+                  aria-controls={detailId}
+                  aria-label={`${detailOpen ? "Hide" : "Show"} details for ${shortLabel(job)}`}
+                  onClick={() => setDetailOpen((v) => !v)}
+                  className="text-[10px] text-accent transition duration-fast ease-out hover:text-accent-hover"
+                >
+                  {detailOpen ? "Hide details" : "Show details"}
+                </button>
+                {detailOpen && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyDetail(copyText(failure))}
+                    aria-label={`Copy error detail for ${shortLabel(job)}`}
+                    className="text-[10px] text-accent transition duration-fast ease-out hover:text-accent-hover"
+                  >
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                )}
+              </div>
+              {/* The queue sidebar is 288px wide and this is a Python
+               *  traceback with URLs in it. `break-words` plus a capped
+               *  height keeps it from widening the column or pushing the
+               *  rest of the queue off-screen. */}
+              {detailOpen && (
+                <pre
+                  id={detailId}
+                  tabIndex={0}
+                  className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-1.5 text-[10px] leading-snug text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                >
+                  {failure.detail}
+                </pre>
+              )}
+            </div>
+          )}
         </div>
       )}
       {menuOpen && name === "queued" && (
@@ -488,7 +584,15 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
              *  needed. */}
             {progress?.stage.startsWith("downloaded ") ||
             (name === "running" && progress?.stage.startsWith("retrying")) ? (
-              <span>{progress.stage}</span>
+              <span>
+                {progress.stage.startsWith("retrying")
+                  ? // The raw `eta_secs`, not the spring-settled one: a
+                    // backoff wait is a single discrete number the retry
+                    // layer states once, and interpolating towards it would
+                    // show a countdown that was never happening.
+                    retryingLabel(progress.stage, progress.eta_secs ?? null)
+                  : progress.stage}
+              </span>
             ) : (
               <>
                 <span>{pct.toFixed(1)}%</span>

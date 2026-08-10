@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
 import type { Job, JobKind, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { canRetryKind, failureView } from "@/lib/jobFailure";
 
 async function fireNativeNotification(title: string, body?: string): Promise<void> {
   if (typeof document !== "undefined" && document.hasFocus()) return;
@@ -35,6 +36,34 @@ interface Batch {
   cancelled: number;
   lastOutputPath: string | null;
   kind: JobKind | null;
+  /**
+   * `label — reason` for the first few failures, so the toast can say what
+   * went wrong rather than only how often. Capped at `MAX_FAILED_LABELS`:
+   * a forty-item batch that fails wholesale must not paste forty lines
+   * into a toast. `failed` still counts them all.
+   */
+  failedLabels: string[];
+}
+
+const MAX_FAILED_LABELS = 3;
+
+/**
+ * And a length cap per line, not just a count cap.
+ *
+ * `failureView` already clips its headline, but this does not depend on that:
+ * an error toast is sticky (`ttlMs: null`) and its `<pre>` grows the toast
+ * upward from the bottom of the viewport, so enough text pushes the toast's
+ * own dismiss button off the top of the screen and leaves it there. A count
+ * cap alone does not prevent that — three unbounded dumps do it just as well
+ * as thirty short ones.
+ */
+const MAX_LABEL_CHARS = 160;
+
+function clampLabel(text: string): string {
+  const oneLine = text.split("\n", 1)[0] ?? "";
+  const clipped = oneLine.length !== text.length;
+  if (oneLine.length <= MAX_LABEL_CHARS) return clipped ? `${oneLine}…` : oneLine;
+  return `${oneLine.slice(0, MAX_LABEL_CHARS).trimEnd()}…`;
 }
 
 function terminalName(state: JobState): "done" | "error" | "cancelled" | null {
@@ -110,6 +139,7 @@ export function useToastTriggers(): void {
               cancelled: 0,
               lastOutputPath: null,
               kind: null,
+              failedLabels: [],
             };
             // Count each job once per batch lifetime. A retried job
             // reaches a terminal state twice (error -> queued -> done);
@@ -119,8 +149,15 @@ export function useToastTriggers(): void {
             if (!batch.ids.has(key)) {
               batch.ids.add(key);
               if (currentTerm === "done") batch.done += 1;
-              else if (currentTerm === "error") batch.failed += 1;
-              else batch.cancelled += 1;
+              else if (currentTerm === "error") {
+                batch.failed += 1;
+                if (batch.failedLabels.length < MAX_FAILED_LABELS) {
+                  const why = failureView(job.state, canRetryKind(job.kind))?.message;
+                  batch.failedLabels.push(
+                    why ? clampLabel(`${sourceLabel} — ${why}`) : sourceLabel,
+                  );
+                }
+              } else batch.cancelled += 1;
             }
             if (outputPath) batch.lastOutputPath = outputPath;
             batch.kind = job.kind;
@@ -138,7 +175,7 @@ export function useToastTriggers(): void {
               batchesRef.current.delete(batchId);
             }
           } else {
-            emitIndividualToast(enqueueToast, job.kind, currentTerm, sourceLabel, outputPath, errorMessage(job.state));
+            emitIndividualToast(enqueueToast, job.kind, currentTerm, sourceLabel, outputPath, errorMessage(job.state, job.kind));
             if (notificationsEnabled && currentTerm !== "cancelled") {
               void fireNativeNotification(
                 individualNotificationTitle(job.kind, currentTerm, sourceLabel),
@@ -180,10 +217,13 @@ function jobLabel(
   return "job";
 }
 
-function errorMessage(state: JobState): string | undefined {
-  if (typeof state === "string") return undefined;
-  if ("error" in state) return state.error?.message ?? undefined;
-  return undefined;
+/**
+ * Extract jobs are never batched, so this is THE surface for a single failed
+ * download — the one that would otherwise show a bare "interrupted" or a raw
+ * `[goop]` marker while the queue row beside it showed neither.
+ */
+function errorMessage(state: JobState, kind: JobKind): string | undefined {
+  return failureView(state, canRetryKind(kind))?.message;
 }
 
 function emitIndividualToast(
@@ -248,6 +288,19 @@ function batchNotificationTitle(batch: {
   return parts.join(" · ");
 }
 
+/**
+ * The failure reasons behind a batch's count, for the toast's Details
+ * expander. `undefined` rather than an empty string when there is nothing
+ * to say — that is what keeps the expander from appearing at all.
+ */
+function failedDetail(batch: Batch): string | undefined {
+  if (batch.failedLabels.length === 0) return undefined;
+  const hidden = batch.failed - batch.failedLabels.length;
+  const lines = [...batch.failedLabels];
+  if (hidden > 0) lines.push(`…and ${hidden} more`);
+  return lines.join("\n");
+}
+
 function emitBatchToast(
   enqueueToast: (t: { variant: "success" | "error" | "cancelled" | "info"; title: string; detail?: string; outputPath?: string; ttlMs?: number | null }) => string,
   batch: Batch,
@@ -265,6 +318,7 @@ function emitBatchToast(
     enqueueToast({
       variant: "error",
       title: `${batch.failed} file${batch.failed !== 1 ? "s" : ""} failed`,
+      detail: failedDetail(batch),
       ttlMs: null,
     });
   } else {
@@ -275,6 +329,11 @@ function emitBatchToast(
     enqueueToast({
       variant: "info",
       title: parts.join(" · "),
+      // A partly-failed batch is the common outcome, and the reasons were
+      // collected either way. Rendered inline rather than behind an
+      // expander (Toast reserves that for the error variant), so the first
+      // one shows and the rest are in History.
+      detail: failedDetail(batch),
       outputPath: batch.lastOutputPath ?? undefined,
     });
   }

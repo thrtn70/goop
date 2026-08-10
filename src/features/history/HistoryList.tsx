@@ -1,7 +1,10 @@
-import { ChevronDown, ChevronsUpDown, ChevronUp, Eye, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, ChevronUp, Eye, FolderOpen, RotateCw } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
+import { api } from "@/ipc/commands";
+import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useRevealFile } from "@/hooks/useRevealFile";
+import { canRetryKind, failureView } from "@/lib/jobFailure";
 import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryListProps {
@@ -31,6 +34,27 @@ function timeAgo(finished: bigint | null | undefined): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+/**
+ * Something distinguishable to call a row in an accessible name. A failed job
+ * produced no file, so `basename(output_path)` is "—" for every one of them
+ * and several failed rows would otherwise all read as the same button.
+ */
+function rowLabel(job: Job): string {
+  const out = job.result?.output_path;
+  if (out) return basename(out);
+  const payload = job.payload as { url?: string; input_path?: string } | null;
+  if (payload?.input_path) return basename(payload.input_path);
+  if (payload?.url) {
+    try {
+      const url = new URL(payload.url);
+      return `${url.hostname}${url.pathname.slice(0, 24)}`;
+    } catch {
+      return payload.url.slice(0, 32);
+    }
+  }
+  return "download";
 }
 
 function stateLabel(s: JobState): string {
@@ -91,6 +115,25 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
   const search = useAppStore((s) => s.history.search);
   const kind = useAppStore((s) => s.history.kind);
   const revealFile = useRevealFile();
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
+
+  /**
+   * Re-queue a failed download. The row stays in History until the queue
+   * writes its new terminal state, so there is nothing to update here —
+   * only a failure to report, which would otherwise be a click that
+   * silently did nothing.
+   */
+  async function retryJob(job: Job): Promise<void> {
+    try {
+      await api.queue.retry(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't retry",
+        detail: formatError(err),
+      });
+    }
+  }
 
   if (jobs.length === 0) {
     const filtersActive = search.trim() !== "" || kind !== null;
@@ -122,6 +165,12 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
             const selected = selectedIds.has(key);
             const previewing = previewSelectedId === key;
             const outputPath = j.result?.output_path ?? null;
+            const failure = failureView(j.state, canRetryKind(j.kind));
+            // Same gate as the queue row: download failures are usually
+            // transient and the partials on disk turn a re-run into a
+            // resume, while a conversion failure is deterministic. The
+            // backend command is kind-generic; this restraint is the UI's.
+            const canRetry = failure !== null && canRetryKind(j.kind);
             return (
               <tr
                 key={key}
@@ -159,6 +208,18 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                   {typeof j.state !== "string" && "error" in j.state && (
                     <span className="ml-2 text-[10px] uppercase text-error">{stateLabel(j.state)}</span>
                   )}
+                  {/* The badge alone sent people back to a queue they had
+                   *  already cleared to find out what went wrong. The raw
+                   *  detail stays in the queue row — History is a list, and
+                   *  a traceback per row would drown it. */}
+                  {failure && (
+                    <div
+                      className="mt-0.5 max-w-[28rem] truncate text-[11px] text-error/80"
+                      title={failure.message}
+                    >
+                      {failure.message}
+                    </div>
+                  )}
                 </td>
                 <td className="p-2 text-right tabular-nums text-xs text-fg-muted">
                   {formatBytes(j.result?.bytes)}
@@ -168,6 +229,22 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                 </td>
                 <td className="p-2 pr-6 text-right">
                   <div className="flex items-center justify-end gap-2">
+                    {canRetry && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          // The row itself opens a preview. Without this the
+                          // retry also previews a job that produced no file.
+                          e.stopPropagation();
+                          void retryJob(j);
+                        }}
+                        className="inline-flex items-center justify-center text-accent transition duration-fast ease-out hover:text-accent-hover"
+                        aria-label={`Retry ${rowLabel(j)}`}
+                        title="Retry"
+                      >
+                        <RotateCw size={14} strokeWidth={2.5} aria-hidden="true" />
+                      </button>
+                    )}
                     {outputPath && (
                       <button
                         type="button"

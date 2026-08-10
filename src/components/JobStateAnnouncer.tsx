@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/store/appStore";
+import { canRetryKind, failureView } from "@/lib/jobFailure";
 import { jobIdKey } from "@/store/appStore";
 import type { Job, JobState } from "@/types";
 
@@ -90,7 +91,11 @@ function announcementFor(job: Job): string | null {
     return null;
   }
   if ("error" in job.state) {
-    return `${name} failed: ${job.state.error.message}`;
+    // Through `failureView` like every other surface: a screen reader must
+    // not be the one place that hears "interrupted" bare, or that gets read
+    // an untruncated 8KB stderr dump one character at a time.
+    const failure = failureView(job.state, canRetryKind(job.kind));
+    return `${name} failed: ${failure?.message ?? job.state.error.message}`;
   }
   return null;
 }
