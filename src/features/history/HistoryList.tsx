@@ -5,6 +5,7 @@ import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useRevealFile } from "@/hooks/useRevealFile";
 import { canRetryKind, failureView } from "@/lib/jobFailure";
+import { rowLabel } from "@/lib/jobLabel";
 import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryListProps {
@@ -34,27 +35,6 @@ function timeAgo(finished: bigint | null | undefined): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return `${Math.floor(diff / 86_400_000)}d ago`;
-}
-
-/**
- * Something distinguishable to call a row in an accessible name. A failed job
- * produced no file, so `basename(output_path)` is "—" for every one of them
- * and several failed rows would otherwise all read as the same button.
- */
-function rowLabel(job: Job): string {
-  const out = job.result?.output_path;
-  if (out) return basename(out);
-  const payload = job.payload as { url?: string; input_path?: string } | null;
-  if (payload?.input_path) return basename(payload.input_path);
-  if (payload?.url) {
-    try {
-      const url = new URL(payload.url);
-      return `${url.hostname}${url.pathname.slice(0, 24)}`;
-    } catch {
-      return payload.url.slice(0, 32);
-    }
-  }
-  return "download";
 }
 
 function stateLabel(s: JobState): string {

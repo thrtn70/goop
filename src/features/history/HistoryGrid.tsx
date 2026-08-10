@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, RotateCw } from "lucide-react";
 import type { Job, JobId, SourceKind } from "@/types";
+import { api } from "@/ipc/commands";
+import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useRevealFile } from "@/hooks/useRevealFile";
 import { useThumbnail } from "@/hooks/useThumbnail";
+import { canRetryKind, failureView } from "@/lib/jobFailure";
+import { rowLabel } from "@/lib/jobLabel";
 import EmptyHistory from "@/features/history/EmptyHistory";
 
 interface HistoryGridProps {
@@ -64,11 +68,28 @@ function Card({
   onQuickView: (j: Job) => void;
 }) {
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const revealFile = useRevealFile();
   const ref = useRef<HTMLButtonElement | null>(null);
   const [visible, setVisible] = useState(false);
   const outputPath = job.result?.output_path ?? null;
   const kind = kindOf(outputPath);
+  // Grid mode is persisted, so this is a view some users never leave. Without
+  // it a failed card was indistinguishable from a successful one.
+  //
+  // Two independent questions, kept independent exactly as the History row
+  // keeps them: `failed` is whether the state is terminal-error at all, and
+  // decides the badge; `failure` is whether there is anything renderable to
+  // say about it, and decides the message. `failureView` returns null for an
+  // error with an empty message, and a card that showed nothing at all for
+  // one would be the very bug this exists to close.
+  const failed = typeof job.state !== "string" && "error" in job.state;
+  const failure = failureView(job.state, canRetryKind(job.kind));
+  // Same gate as the History row and the queue row, from the same helper:
+  // download failures resume from the partials on disk, while a conversion
+  // failure is deterministic. `queue_retry` is kind-generic; the restraint
+  // is the UI's.
+  const canRetry = failure !== null && canRetryKind(job.kind);
   // Lazy-load thumbnails via IntersectionObserver so a grid of 500 rows
   // doesn't queue 500 simultaneous ffmpeg/gs invocations at mount.
   // Audio rows get a waveform PNG (Phase J) — same lazy treatment.
@@ -87,6 +108,24 @@ function Card({
     obs.observe(ref.current);
     return () => obs.disconnect();
   }, [visible]);
+
+  /**
+   * Re-queue a failed download. The card stays in History until the queue
+   * writes its new terminal state, so there is nothing to update here — only
+   * a failure to report, which would otherwise be a click that silently did
+   * nothing.
+   */
+  async function retry(): Promise<void> {
+    try {
+      await api.queue.retry(job.id);
+    } catch (err) {
+      enqueueToast({
+        variant: "error",
+        title: "Couldn't retry",
+        detail: formatError(err),
+      });
+    }
+  }
 
   return (
     <button
@@ -134,6 +173,19 @@ function Card({
               : String(job.kind)}
           </span>
         </div>
+        {/* The card otherwise reads as a success with a missing thumbnail.
+         *  The raw detail stays in the queue row — a card is smaller than a
+         *  table row, and a traceback in one would crowd out the grid. */}
+        {failed && (
+          <div className="mt-1">
+            <span className="text-[10px] uppercase text-error">error</span>
+            {failure && (
+              <div className="truncate text-[10px] text-error/80" title={failure.message}>
+                {failure.message}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <span
         onClick={(e) => {
@@ -159,28 +211,61 @@ function Card({
       >
         {selected ? "✓" : ""}
       </span>
-      {outputPath && (
-        <span
-          onClick={(e) => {
-            e.stopPropagation();
-            void revealFile(outputPath);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
+      {/* One row for the corner affordances. A failed job has no output path
+       *  today, so in practice only one of these renders — but sharing a flex
+       *  container means they sit side by side rather than on top of each
+       *  other if that ever stops being true. */}
+      <span className="absolute right-2 top-2 flex items-center gap-1">
+        {canRetry && (
+          <span
+            onClick={(e) => {
+              // The card itself opens a preview. Without this the retry also
+              // previews a job that produced no file.
+              e.stopPropagation();
+              void retry();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                void retry();
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label={`Retry ${rowLabel(job)}`}
+            title="Retry"
+            // Unlike the reveal affordance this stays visible: a failed card
+            // has no thumbnail to keep clear, and re-running is the only
+            // thing left to do with it.
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover"
+          >
+            <RotateCw size={12} strokeWidth={2.5} aria-hidden="true" />
+          </span>
+        )}
+        {outputPath && (
+          <span
+            onClick={(e) => {
               e.stopPropagation();
               void revealFile(outputPath);
-            }
-          }}
-          role="button"
-          tabIndex={0}
-          aria-label={`Show ${basename(outputPath)} in folder`}
-          title="Show in folder"
-          className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
-        >
-          <FolderOpen size={12} strokeWidth={2.5} aria-hidden="true" />
-        </span>
-      )}
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                void revealFile(outputPath);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label={`Show ${basename(outputPath)} in folder`}
+            title="Show in folder"
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
+          >
+            <FolderOpen size={12} strokeWidth={2.5} aria-hidden="true" />
+          </span>
+        )}
+      </span>
     </button>
   );
 }
