@@ -148,6 +148,7 @@ export const api = {
   settings: {
     get: () => invoke<Settings>("settings_get"),
     set: (patch: SettingsPatch) => invoke<Settings>("settings_set", { patch }),
+    openLogsFolder: () => invoke<void>("open_logs_folder"),
   },
   preset: {
     list: () => invoke<Preset[]>("preset_list"),

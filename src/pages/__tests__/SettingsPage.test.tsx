@@ -30,6 +30,7 @@ const apiMocks = vi.hoisted(() => ({
   settings: {
     set: vi.fn(),
     get: vi.fn(),
+    openLogsFolder: vi.fn(),
   },
   update: {
     openReleasesPage: vi.fn(),
@@ -96,6 +97,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
 
 beforeEach(() => {
   apiMocks.settings.set.mockReset();
+  apiMocks.settings.openLogsFolder.mockReset();
   apiMocks.sidecar.updateYtDlp.mockReset();
   apiMocks.sidecar.updateGalleryDl.mockReset();
   // The sidecar-update tests swap in a stubbed loadVersions; put every action
@@ -305,5 +307,41 @@ describe("SettingsPage Output folder Browse picker", () => {
 
     await waitFor(() => expect(dialogMocks.open).toHaveBeenCalled());
     expect(apiMocks.settings.set).not.toHaveBeenCalled();
+  });
+});
+
+describe("SettingsPage log folder", () => {
+  it("opens the log folder", async () => {
+    // The logs only pay for themselves if a user can hand them over, and
+    // "go to your application support directory" is not an instruction most
+    // people should have to follow.
+    apiMocks.settings.openLogsFolder.mockResolvedValue(undefined);
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Open log folder" }));
+
+    await waitFor(() => expect(apiMocks.settings.openLogsFolder).toHaveBeenCalled());
+  });
+
+  it("says so when the folder cannot be opened", async () => {
+    // A button that silently does nothing reads as a broken app, and this
+    // one fails for real reasons — an unwritable data dir, no file manager.
+    // Reported the way the rest of this page reports failures.
+    //
+    // Rejected with the shape Tauri actually delivers: the command returns
+    // `IpcError::Config`, which `formatError` maps to friendly prose rather
+    // than echoing the raw message. Rejecting with a bare `Error` here would
+    // take the raw-text fallback instead and prove the wrong path.
+    apiMocks.settings.openLogsFolder.mockRejectedValue({
+      code: "config",
+      message: "log folder unavailable: /data/goop/logs (permission denied)",
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Open log folder" }));
+
+    expect(
+      await screen.findByText(/Check that the selected folder exists/),
+    ).toBeTruthy();
   });
 });

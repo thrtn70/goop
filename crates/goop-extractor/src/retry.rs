@@ -100,6 +100,14 @@ where
                     GoopError::Network(m) if m.contains("HTTP 429") => policy.max_delay,
                     _ => policy.delay_for(attempt),
                 };
+                tracing::info!(
+                    ?job_id,
+                    attempt = attempt + 1,
+                    total,
+                    delay_ms = delay.as_millis() as u64,
+                    reason = %e,
+                    "retrying after a transient failure"
+                );
                 // The stage prefix "retrying" is a rendering contract with
                 // QueueRow.tsx; percent 0 tells the store to hold the last
                 // rendered percent, and eta_secs carries the wait.

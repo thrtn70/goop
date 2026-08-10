@@ -178,6 +178,14 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleOpenLogsFolder() {
+    try {
+      await api.settings.openLogsFolder();
+    } catch (e) {
+      setErr(formatError(e));
+    }
+  }
+
   async function handleOpenAboutLink(
     target: Parameters<typeof api.update.openAboutLink>[0],
   ): Promise<void> {
@@ -486,6 +494,21 @@ export default function SettingsPage() {
           {galleryDlUpdateMsg && (
             <span className="text-xs text-fg-muted">{galleryDlUpdateMsg}</span>
           )}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Diagnostics"
+        description="Goop keeps a week of daily log files. If something goes wrong, they are what to attach to a bug report."
+      >
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void handleOpenLogsFolder()}
+            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs text-fg-secondary transition duration-fast ease-out hover:text-fg"
+          >
+            Open log folder
+          </button>
         </div>
       </SettingsSection>
 
