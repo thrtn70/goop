@@ -1,6 +1,7 @@
 pub mod app_update;
 pub mod commands;
 pub mod events;
+pub mod logging;
 pub mod state;
 pub mod thumbnail;
 pub mod ytdlp_auto_update;
@@ -37,9 +38,11 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("goop=info,warn")
-        .init();
+    // Installs stderr AND a daily rolling file under `data_dir()/logs`. The
+    // writer thread is owned by the module for the whole process; see
+    // `logging::flush`, which every exit path below has to call because
+    // `process::exit` runs no destructors.
+    logging::init(&gpath::data_dir());
     // Single-instance guard (release builds only): a second launch focuses the
     // existing window instead of booting a second backend against the shared
     // queue. Not registered in debug builds so `tauri dev` can run alongside
@@ -129,6 +132,7 @@ pub fn run() {
                         .message("Goop is already running. Switch to the open window to manage your downloads.")
                         .kind(MessageDialogKind::Info)
                         .blocking_show();
+                    logging::flush();
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -141,6 +145,7 @@ pub fn run() {
                     // Nonzero: a genuine startup failure, distinct from the
                     // expected exit(0) "another instance owns it" case above,
                     // so supervisors and exit-code checks can tell them apart.
+                    logging::flush();
                     std::process::exit(1);
                 }
             };
@@ -996,6 +1001,17 @@ pub fn run() {
                 s_metadata.run_kind(goop_core::JobKind::Metadata).await
             });
 
+            // Which sidecar builds this session is running. Off the critical
+            // path — each one is a subprocess spawn — but early, so it lands
+            // near the top of the day's file rather than after the first
+            // failure it would have explained.
+            {
+                let r = resolver.clone();
+                tauri::async_runtime::spawn(async move {
+                    logging::log_sidecar_versions(&r).await;
+                });
+            }
+
             // Daily yt-dlp freshness check, on the coordinator built above.
             {
                 // Deliberately after a delay: launch already contends for disk
@@ -1057,6 +1073,7 @@ pub fn run() {
             commands::sidecar::sidecar_tessdata_remove,
             commands::settings::settings_get,
             commands::settings::settings_set,
+            commands::settings::open_logs_folder,
             commands::preset::preset_list,
             commands::preset::preset_save,
             commands::preset::preset_delete,
@@ -1079,8 +1096,24 @@ pub fn run() {
             commands::file::job_forget,
             commands::file::job_forget_many,
         ])
-        .run(tauri::generate_context!());
-    if let Err(error) = result {
-        eprintln!("error while running tauri application: {error}");
+        .build(tauri::generate_context!());
+    match result {
+        // `build` + `run(callback)` rather than plain `run()`, solely to get
+        // the `Exit` event. `tao`'s event loop ends in `process::exit` on
+        // both shipped platforms, which runs no destructors — so nothing
+        // drops the log guard on a normal quit and the flush-on-drop that
+        // `tracing-appender` documents never fires. The worker flushes after
+        // each batch it drains, so this is about the tail rather than the
+        // whole file, but the tail is the part that says what went wrong.
+        Ok(app) => app.run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                logging::flush();
+            }
+        }),
+        Err(error) => {
+            eprintln!("error while running tauri application: {error}");
+            tracing::error!(%error, "failed to start");
+            logging::flush();
+        }
     }
 }

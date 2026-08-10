@@ -314,22 +314,36 @@ impl Scheduler {
                     // Only reachable with the cancel token fired (the
                     // yield path above returns otherwise): cancel wins.
                     Err(GoopError::WaitingExternal { .. }) => (JobState::Cancelled, None),
-                    Err(e) => (
-                        // user_message() applies friendly_message at this
-                        // boundary so History rows show "age verification"
-                        // instead of a raw yt-dlp traceback. Internal
-                        // dispatch decisions (which run before this point)
-                        // see the raw stderr on the GoopError variant.
-                        JobState::Error {
-                            message: e.user_message(),
-                            // The raw text `user_message` just replaced. Kept
-                            // so a failure with no friendly pattern is still
-                            // readable, and a matched one can still be checked
-                            // against what the tool actually said.
-                            detail: e.detail(),
-                        },
-                        None,
-                    ),
+                    Err(e) => {
+                        // The full detail, not the friendly rewrite. The queue
+                        // row shows one clipped line and History keeps only
+                        // what fits; this is the copy that survives the row
+                        // being cleared, and it is the whole reason the file
+                        // log exists.
+                        tracing::warn!(
+                            ?job.id,
+                            kind = ?job.kind,
+                            message = %e.user_message(),
+                            detail = e.detail().as_deref().unwrap_or(""),
+                            "job failed"
+                        );
+                        (
+                            // user_message() applies friendly_message at this
+                            // boundary so History rows show "age verification"
+                            // instead of a raw yt-dlp traceback. Internal
+                            // dispatch decisions (which run before this point)
+                            // see the raw stderr on the GoopError variant.
+                            JobState::Error {
+                                message: e.user_message(),
+                                // The raw text `user_message` just replaced. Kept
+                                // so a failure with no friendly pattern is still
+                                // readable, and a matched one can still be checked
+                                // against what the tool actually said.
+                                detail: e.detail(),
+                            },
+                            None,
+                        )
+                    }
                 };
                 if let Err(e) = store.update_state(job.id, &state, result.as_ref(), now_ms()) {
                     tracing::warn!(?job.id, ?state, error = %e, "failed to persist terminal state; in-memory event still emitted");

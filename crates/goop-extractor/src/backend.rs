@@ -157,9 +157,12 @@ pub async fn dispatch_with_update_hook(
     if signals.check().is_some() || !stale_suspect(&err) {
         return Err(err);
     }
+    tracing::info!(?job_id, reason = %err, "failure looks stale; checking for a newer yt-dlp");
     let Some(updated) = hook().await else {
+        tracing::info!(?job_id, "no newer yt-dlp; not retrying");
         return Err(err);
     };
+    tracing::info!(?job_id, from = %updated.from, to = %updated.to, "yt-dlp updated; retrying once");
     // Checked again on the far side: an update is a download, and the user
     // can cancel during one.
     if signals.check().is_some() {
@@ -335,14 +338,17 @@ async fn dispatch_once(
                     .into(),
             ));
         };
+        tracing::info!(?job_id, route = "debrid", "dispatch");
         return debrid::run(sink, job_id, req, signals, ctx).await;
     }
     // Fast path: the probe already determined this is a plain file neither
     // extractor handles, so skip the two doomed extractor spawns.
     if req.direct {
+        tracing::info!(?job_id, route = "direct", "dispatch");
         return crate::direct::download(sink, job_id, req, signals).await;
     }
     let primary = classify_extractor(&req.url);
+    tracing::info!(?job_id, extractor = ?primary, "dispatch");
     let err = match run_one(
         resolver,
         sink.clone(),
@@ -361,6 +367,13 @@ async fn dispatch_once(
     if signals.check().is_some() || !warrants_other_extractor(&err) {
         return Err(err);
     }
+    tracing::info!(
+        ?job_id,
+        from = ?primary,
+        to = ?primary.other(),
+        reason = %err,
+        "falling back to the other extractor"
+    );
     let err2 = match run_one(
         resolver,
         sink.clone(),
@@ -382,6 +395,10 @@ async fn dispatch_once(
         // the direct download fails, hand off to the debrid backend as a
         // last resort (a supported hoster link the probe didn't pre-match).
         BothFailed::TryDirect => {
+            tracing::info!(
+                ?job_id,
+                "neither extractor claimed the URL; trying a direct download"
+            );
             match crate::direct::download(sink.clone(), job_id, req, signals.clone()).await {
                 Ok(outcome) => Ok(outcome),
                 Err(err3) => debrid_last_resort(sink, job_id, req, signals, debrid, err3).await,
