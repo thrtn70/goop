@@ -258,15 +258,28 @@ const PATTERNS: &[(&str, &str)] = &[
         "No suitable extractor found",
         "Neither extractor recognized this URL. Make sure the link points directly to a media page (post, album, or file).",
     ),
-    // 401/403, in BOTH dialects: yt-dlp writes "HTTP Error 403" (urllib,
-    // space) and gallery-dl "HTTPError: 403" (requests, colon). The pairs
-    // must stay in lockstep — keying only gallery-dl's dialect leaves the
-    // yt-dlp case falling through to raw Python stderr, which is exactly
-    // the output the commons.wikimedia.org report opened with. Both sit
-    // BELOW the specific auth-wall patterns above so an age-gate or
-    // private-video 403 still reports its actual cause.
+    // 401/403, in every dialect these two tools produce. yt-dlp (urllib)
+    // writes "HTTP Error 403" with a space. gallery-dl (requests) writes
+    // "HttpError: '403 Forbidden' for '<url>'" — mixed case, and the status
+    // inside a quote. A third spelling, "HTTPError: 403", is what this table
+    // was originally written against; it is kept because requests' own
+    // exception class really is spelled that way, but it is NOT what
+    // gallery-dl prints and never matched it.
+    //
+    // The groups must stay in lockstep — keying only one dialect leaves the
+    // others falling through to raw Python stderr, which is exactly the
+    // output the commons.wikimedia.org report opened with. Matching here is
+    // case-SENSITIVE (see `friendly_message`), so the spellings cannot be
+    // collapsed the way `squashed()` collapses them for the two boolean
+    // matchers below. All of them sit BELOW the specific auth-wall patterns
+    // above so an age-gate or private-video 403 still reports its actual
+    // cause.
     (
         "HTTPError: 401",
+        "The site requires authentication. Enable \"Cookies from browser\" in Settings if you have a logged-in account.",
+    ),
+    (
+        "HttpError: '401",
         "The site requires authentication. Enable \"Cookies from browser\" in Settings if you have a logged-in account.",
     ),
     (
@@ -282,6 +295,10 @@ const PATTERNS: &[(&str, &str)] = &[
         "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser and try again — or the site may be blocking automated downloads.",
     ),
     (
+        "HttpError: '403",
+        "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser and try again — or the site may be blocking automated downloads.",
+    ),
+    (
         "HTTP Error 403",
         "The site blocked the request. Your cookies may have expired — re-log in to the site in your browser and try again — or the site may be blocking automated downloads.",
     ),
@@ -290,7 +307,19 @@ const PATTERNS: &[(&str, &str)] = &[
         "The post or album is gone. The site may have removed it.",
     ),
     (
+        "HttpError: '404",
+        "The post or album is gone. The site may have removed it.",
+    ),
+    (
         "HTTPError: 429",
+        "The site rate-limited the request. Wait a few minutes before trying again.",
+    ),
+    // gallery-dl's 429 usually also carries the literal "Too Many Requests"
+    // matched above — but only because `reason` is whatever the server put on
+    // the status line, and a server is free to send "429 Slow Down". Key the
+    // code itself so the message doesn't depend on the site's phrasing.
+    (
+        "HttpError: '429",
         "The site rate-limited the request. Wait a few minutes before trying again.",
     ),
     // Burn-in needs an ffmpeg built with libass. The bundled sidecars have
@@ -346,6 +375,27 @@ pub fn is_cookie_db_error(stderr: &str) -> bool {
         || (stderr.contains("could not find") && stderr.contains("cookies database"))
 }
 
+/// Fold `stderr` to the form the status needles below are written in:
+/// lowercase, with ASCII single quotes removed.
+///
+/// The two tools disagree about how to print an HTTP status. yt-dlp (urllib)
+/// writes `HTTP Error 403: Forbidden`. gallery-dl (requests) writes
+/// `HttpError: '403 Forbidden' for '<url>'` — mixed case, and the status
+/// wrapped in a quote. Lowercasing settles the case; dropping the quote
+/// settles the rest. Without the second half, `httperror: 403` matched
+/// nothing gallery-dl has ever printed, which is how a gallery-dl 401/403
+/// came to skip the cross-extractor fallback and a gallery-dl 5xx came to
+/// never be retried.
+///
+/// Safe for every needle in the lists below: none of them contains a quote,
+/// so removing quotes can only make a match more likely, never less. The
+/// `PATTERNS` table above deliberately does NOT use this — it matches raw
+/// text, and one of its needles (`No such filter: 'subtitles'`) is quoted —
+/// so it carries an explicit entry per dialect instead.
+fn squashed(stderr: &str) -> String {
+    stderr.to_ascii_lowercase().replace('\'', "")
+}
+
 /// True when the raw stderr indicates the site refused the chosen
 /// extractor (401/403) in a way the OTHER extractor might not hit.
 ///
@@ -366,7 +416,7 @@ pub fn is_cookie_db_error(stderr: &str) -> bool {
 /// cost of a false positive is a wasted spawn, of a false negative one
 /// click of the Retry button.
 pub fn is_access_blocked_stderr(stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
+    let s = squashed(stderr);
     const NOT_A_BLOCK: &[&str] = &[
         "private video",
         "sign in to confirm",
@@ -391,7 +441,9 @@ pub fn is_access_blocked_stderr(stderr: &str) -> bool {
         // yt-dlp / urllib style
         "http error 401",
         "http error 403",
-        // gallery-dl / requests style
+        // requests style. Covers gallery-dl's own `HttpError: '403 ...` too:
+        // `squashed` has already dropped the quote that used to keep these
+        // from ever matching it.
         "httperror: 401",
         "httperror: 403",
     ];
@@ -472,7 +524,7 @@ fn shrugged(err: &GoopError) -> bool {
 /// retry on a permanent error wastes half a minute; a false negative
 /// costs one click of the Retry button.
 pub fn is_transient_network_stderr(stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
+    let s = squashed(stderr);
     const PERMANENT: &[&str] = &[
         // yt-dlp / urllib style
         "http error 400",
@@ -481,7 +533,8 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
         "http error 404",
         "http error 410",
         "http error 429",
-        // gallery-dl / requests style
+        // requests style, gallery-dl's `HttpError: '404 ...` included —
+        // `squashed` has already folded the case and dropped the quote.
         "httperror: 400",
         "httperror: 401",
         "httperror: 403",
@@ -879,6 +932,58 @@ mod tests {
     const COMMONS_403: &str = "ERROR: [generic] Unable to download webpage: \
          HTTP Error 403: Forbidden (caused by <HTTPError 403: Forbidden>)";
 
+    // ---- gallery-dl's real dialect ---------------------------------------
+    //
+    // Captured from gallery-dl 1.32.3 under the exact flags Goop spawns it
+    // with (`--quiet`, which pins the log level at ERROR), pointed at a local
+    // server returning canned status codes. gallery-dl builds this line
+    // generically — `exception.py` formats `'{status_code} {reason}' for
+    // '{url}'` and `job.py` logs it as `"%s: %s" % (exc.__class__.__name__,
+    // exc)` — so the shape is identical for every extractor; only the
+    // `[bracket]` tag differs.
+    //
+    // Note what it is NOT. The class is `HttpError`, not `HTTPError`, and the
+    // status sits inside a single quote. The dialect this file was originally
+    // written against (`HTTPError: 403`) therefore missed on both counts: on
+    // case in `friendly_message`, which compares raw text, and on the quote
+    // everywhere — including the two lowercasing matchers, where case alone
+    // would have been forgiven. Hence `squashed()`, and hence these strings
+    // kept verbatim rather than paraphrased.
+    const GDL_400: &str =
+        "[recursive][error] HttpError: '400 Bad Request' for 'http://127.0.0.1:8731/400'";
+    const GDL_401: &str =
+        "[recursive][error] HttpError: '401 Unauthorized' for 'http://127.0.0.1:8731/401'";
+    const GDL_403: &str =
+        "[recursive][error] HttpError: '403 Forbidden' for 'http://127.0.0.1:8731/403'";
+    const GDL_404: &str =
+        "[recursive][error] HttpError: '404 Not Found' for 'http://127.0.0.1:8731/404'";
+    const GDL_410: &str =
+        "[recursive][error] HttpError: '410 Gone' for 'http://127.0.0.1:8731/410'";
+    const GDL_429: &str =
+        "[recursive][error] HttpError: '429 Too Many Requests' for 'http://127.0.0.1:8731/429'";
+    const GDL_500: &str = "[recursive][error] HttpError: '500 Internal Server Error' \
+         for 'http://127.0.0.1:8731/500'";
+    const GDL_502: &str =
+        "[recursive][error] HttpError: '502 Bad Gateway' for 'http://127.0.0.1:8731/502'";
+    const GDL_503: &str = "[recursive][error] HttpError: '503 Service Unavailable' \
+         for 'http://127.0.0.1:8731/503'";
+    const GDL_504: &str =
+        "[recursive][error] HttpError: '504 Gateway Timeout' for 'http://127.0.0.1:8731/504'";
+
+    /// The statuses no retry and no second spawn can help.
+    const GDL_PERMANENT: &[&str] = &[GDL_400, GDL_401, GDL_403, GDL_404, GDL_410, GDL_429];
+    /// The statuses that earn an automatic retry.
+    const GDL_TRANSIENT: &[&str] = &[GDL_500, GDL_502, GDL_503, GDL_504];
+
+    /// gallery-dl's OTHER failure path, captured the same way. When the
+    /// failure happens while downloading a file rather than while extracting,
+    /// the line carrying the status code is logged at WARNING
+    /// (`downloader/http.py`: `'{code} {reason}' for '{url}'`) and `--quiet`
+    /// drops it. All that reaches Goop is this, identically for 401, 403,
+    /// 404, 429, 500 and 503 — there is no status code left to classify.
+    const GDL_DOWNLOAD_FAILED: &str =
+        "[download][error] Failed to download 127.0.0.1:8731__403.jpg";
+
     fn err(binary: &str, stderr: &str) -> GoopError {
         GoopError::SubprocessFailed {
             binary: binary.into(),
@@ -902,10 +1007,18 @@ mod tests {
         // ONLY the cookie remedy sends a user who was never logged in — the
         // commons.wikimedia.org case — off to re-log-in for nothing.
         //
-        // Both dialects must be covered. yt-dlp writes "HTTP Error 403"
-        // (space) and gallery-dl "HTTPError: 403"; testing only the latter
-        // would leave the very stderr that motivated this fallback
+        // yt-dlp writes "HTTP Error 403" (space); testing only the colon
+        // spelling would leave the very stderr that motivated this fallback
         // (COMMONS_403) falling through to raw Python output.
+        //
+        // The second string is NOT gallery-dl's dialect, despite what this
+        // test used to claim — gallery-dl prints `HttpError: '403 Forbidden'`
+        // (see the captured constants above, and
+        // `friendly_message_covers_gallery_dls_real_dialect`, which is where
+        // that case is actually covered). It is kept because
+        // `requests.exceptions.HTTPError` really is spelled this way, so a
+        // traceback that escapes gallery-dl's own handler could still carry
+        // it.
         for stderr in [COMMONS_403, "[site][album] HTTPError: 403 Forbidden"] {
             let m = friendly_message(stderr)
                 .unwrap_or_else(|| panic!("403 must map to friendly text: {stderr}"));
@@ -918,6 +1031,9 @@ mod tests {
         }
     }
 
+    /// yt-dlp's spelling and the bare `requests` one. gallery-dl's own
+    /// spelling is a third thing entirely and is covered by
+    /// `friendly_message_covers_gallery_dls_real_dialect`.
     #[test]
     fn friendly_401_covers_both_dialects() {
         for stderr in [
@@ -943,6 +1059,9 @@ mod tests {
         assert!(m.contains("age verification"), "specific must win: {m}");
     }
 
+    /// Again: these are yt-dlp's spelling and the bare `requests` one, not
+    /// gallery-dl's. `access_blocked_matches_gallery_dls_real_dialect` covers
+    /// what gallery-dl actually prints.
     #[test]
     fn access_blocked_matches_both_extractor_dialects() {
         for s in [
@@ -1145,6 +1264,138 @@ mod tests {
                 "should NOT be transient: {s}"
             );
         }
+    }
+
+    // ---- gallery-dl's real dialect, end to end ---------------------------
+
+    /// The regression this whole section exists for. Every one of these was
+    /// falling through to raw Python stderr, because `HTTPError: 404` matches
+    /// neither the case nor the quoting of what gallery-dl prints.
+    #[test]
+    fn friendly_message_covers_gallery_dls_real_dialect() {
+        for (stderr, expected) in [
+            (GDL_401, "authentication"),
+            (GDL_403, "automated"),
+            (GDL_404, "gone"),
+            (GDL_429, "rate-limited"),
+        ] {
+            let m = friendly_message(stderr)
+                .unwrap_or_else(|| panic!("must map to friendly text: {stderr}"));
+            assert!(
+                m.to_lowercase().contains(expected),
+                "expected {expected:?} in the friendly text for {stderr}: {m}"
+            );
+        }
+    }
+
+    /// Consequence #1 of the missed dialect: the cross-extractor fallback
+    /// never fired for a gallery-dl 401/403, so a site that blocks gallery-dl
+    /// but serves yt-dlp fine was reported as a failure without yt-dlp ever
+    /// being asked.
+    #[test]
+    fn access_blocked_matches_gallery_dls_real_dialect() {
+        for s in [GDL_401, GDL_403] {
+            assert!(is_access_blocked_stderr(s), "should be a block: {s}");
+        }
+    }
+
+    #[test]
+    fn access_blocked_ignores_gallery_dl_statuses_a_second_spawn_cannot_help() {
+        for s in [GDL_400, GDL_404, GDL_410, GDL_429, GDL_500, GDL_503] {
+            assert!(!is_access_blocked_stderr(s), "should NOT be a block: {s}");
+        }
+    }
+
+    /// Consequence #2: a gallery-dl 5xx was never classified transient, so
+    /// `with_retry` never retried it — the user got a failed job for a blip
+    /// that a second attempt would have ridden out.
+    #[test]
+    fn transient_stderr_matches_gallery_dls_real_5xx_dialect() {
+        for s in GDL_TRANSIENT {
+            assert!(is_transient_network_stderr(s), "should be transient: {s}");
+        }
+    }
+
+    /// The permanent statuses, in the real dialect, must never be retried.
+    ///
+    /// Be honest about what this proves: it pins the OUTCOME, not the
+    /// mechanism. Before the dialect fix these same inputs also returned
+    /// `false` — not because the deny list caught them but because the quote
+    /// kept them from matching either list, so the function fell through to
+    /// its default. Every assertion here is a negative, and every gallery-dl
+    /// string was a negative before the fix, so no test in this shape can be
+    /// regression coverage for it.
+    ///
+    /// Its value is forward defence, and the ordering itself is pinned by
+    /// `a_gallery_dl_permanent_marker_beats_a_transient_one_in_the_same_blob`
+    /// below — the one case where the deny list is what decides the answer.
+    #[test]
+    fn transient_stderr_deny_list_still_wins_for_gallery_dls_real_dialect() {
+        for s in GDL_PERMANENT {
+            assert!(
+                !is_transient_network_stderr(s),
+                "should NOT be transient: {s}"
+            );
+        }
+    }
+
+    /// Deny-list-first, pinned where the ordering is load-bearing.
+    ///
+    /// `stderr` is an accumulated tail of a whole run, and a gallery-dl run is
+    /// usually a whole album — so one blob really can carry a 5xx from one
+    /// item and a 404 from the next. That is the only shape where both lists
+    /// match and the ORDER decides: drop `httperror: 404` from `PERMANENT`
+    /// and this flips to transient, spending the retry budget re-fetching
+    /// something that is gone. Neither of the two lines is paraphrased.
+    #[test]
+    fn a_gallery_dl_permanent_marker_beats_a_transient_one_in_the_same_blob() {
+        let blob = format!("{GDL_503}\n{GDL_404}");
+        assert!(
+            !is_transient_network_stderr(&blob),
+            "a blob carrying a 404 must not be retried for its 503: {blob}"
+        );
+    }
+
+    /// Same contract the yt-dlp dialect is held to: a block must never also
+    /// look transient, or the cross-extractor fallback compounds with the
+    /// retry budget (5 attempts x 2 extractors).
+    #[test]
+    fn a_gallery_dl_block_is_disjoint_from_the_transient_and_unsupported_sets() {
+        for s in [GDL_401, GDL_403] {
+            assert!(is_access_blocked_stderr(s));
+            assert!(!is_transient_network_stderr(s), "block must not retry: {s}");
+            assert!(!is_no_matching_extractor(s), "block is not a shrug: {s}");
+        }
+    }
+
+    /// gallery-dl's download-time failures are deliberately left unclassified.
+    ///
+    /// Under `--quiet` the line naming the status is logged at WARNING and
+    /// never reaches Goop, so this stderr is the same whether the server said
+    /// 403 or 503 (verified for both, plus 401/404/429/500). Guessing either
+    /// way would be wrong half the time: read as a block it would spend a
+    /// doomed second spawn on a 404, read as transient it would retry a 403
+    /// five times. So it falls through to the raw text, which at least names
+    /// the file that failed.
+    ///
+    /// This is a pin, not an endorsement — recovering the status means
+    /// changing how gallery-dl is spawned, not adding a pattern here.
+    #[test]
+    fn a_gallery_dl_download_failure_carries_no_status_to_classify() {
+        assert!(friendly_message(GDL_DOWNLOAD_FAILED).is_none());
+        assert!(!is_access_blocked_stderr(GDL_DOWNLOAD_FAILED));
+        assert!(!is_transient_network_stderr(GDL_DOWNLOAD_FAILED));
+        assert!(!is_no_matching_extractor(GDL_DOWNLOAD_FAILED));
+    }
+
+    /// gallery-dl's unsupported-URL line, captured the same way. Unlike the
+    /// HTTP statuses this one always did match — recorded so a future
+    /// reword upstream is caught here rather than in the field.
+    #[test]
+    fn no_matching_extractor_matches_gallery_dls_real_dialect() {
+        assert!(is_no_matching_extractor(
+            "[gallery-dl][error] Unsupported URL 'http://127.0.0.1:8731/nope'"
+        ));
     }
 
     #[test]
