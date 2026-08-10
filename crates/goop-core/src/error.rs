@@ -523,6 +523,97 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
     TRANSIENT.iter().any(|p| s.contains(p))
 }
 
+/// True when a yt-dlp failure looks like the *binary* is out of date rather
+/// than like a fact about the URL — the one class of failure a fresher
+/// sidecar can actually fix.
+///
+/// Sites change their players and their bot defences continuously; yt-dlp
+/// ships a fix within days. The copy on disk does not move on its own, so a
+/// URL that worked last month can start failing with extractor internals
+/// nobody has a friendly message for. That is the case worth spending an
+/// update check on. Every other failure — the video is private, the page is
+/// gone, the account is rate limited — is equally true of the newest build.
+///
+/// Deny-list-first, mirroring `is_access_blocked_stderr` and
+/// `is_transient_network_stderr`, and for the same reason: yt-dlp accumulates
+/// a whole run's stderr, so a permanent verdict and a stale-looking token can
+/// share one blob. The permanent verdict wins.
+///
+/// **gallery-dl never fires this.** It is a separate binary on a separate
+/// update path, and the yt-dlp updater cannot help it.
+///
+/// A false positive costs one throttled version check and one re-run; a false
+/// negative costs the user one click of Retry. The unrecognised-stderr branch
+/// is deliberately generous within those stakes.
+pub fn is_stale_extractor_suspect(binary: &str, stderr: &str) -> bool {
+    if binary != "yt-dlp" {
+        return false;
+    }
+    // No diagnostics at all is not evidence of anything. It reads as a spawn
+    // or environment failure — a missing dylib, a kill signal — which a newer
+    // yt-dlp does not fix. Without this the unrecognised branch below would
+    // claim it, since empty text matches no deny list either.
+    if stderr.trim().is_empty() {
+        return false;
+    }
+    let s = stderr.to_ascii_lowercase();
+    const NOT_STALE: &[&str] = &[
+        // yt-dlp disowning the URL is the cross-extractor fallback's
+        // business, and then the direct downloader's. A newer build might
+        // add the extractor, but that is a feature request, not a fix.
+        "unsupported url",
+        "no suitable extractor",
+        // Facts about the content or the account. Every yt-dlp build,
+        // however fresh, reports these the same way.
+        "private video",
+        "sign in to confirm",
+        "members-only",
+        "login required",
+        "account is suspended",
+        "is geo restricted",
+        "video unavailable",
+        "http error 404",
+        "http error 410",
+        "http error 429",
+        "httperror: 404",
+        "httperror: 410",
+        "httperror: 429",
+        "too many requests",
+    ];
+    if NOT_STALE.iter().any(|p| s.contains(p)) {
+        return false;
+    }
+    const STALE: &[&str] = &[
+        // The extractor's own internals failing against a changed player.
+        "nsig",
+        "unable to extract player response",
+        "signature extraction failed",
+        // A 403 that survived the deny list is the bot-defence arms race,
+        // which upstream also fixes and ships. 401 is deliberately absent:
+        // that is a real auth wall.
+        "http error 403",
+        "httperror: 403",
+    ];
+    if STALE.iter().any(|p| s.contains(p)) {
+        return true;
+    }
+    // Nothing recognised it. Every path that owns a failure mode has now had
+    // its say, so what is left is a binary emitting text no version of Goop
+    // has seen — which is what rot looks like from here.
+    //
+    // Only the transient clause changes the answer today: cookie-DB, 401 and
+    // no-matching-extractor stderr all carry a friendly pattern, and the last
+    // is on the deny list above as well. They stay because each names a path
+    // that owns its failure, and that should not quietly depend on someone
+    // having written prose for it — deleting a `PATTERNS` entry would
+    // otherwise start routing those failures through an update check.
+    friendly_message(stderr).is_none()
+        && !is_transient_network_stderr(stderr)
+        && !is_cookie_db_error(stderr)
+        && !is_no_matching_extractor(stderr)
+        && !is_access_blocked_stderr(stderr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1163,172 @@ mod tests {
     fn detail_carries_the_message_for_network_failures() {
         let e = GoopError::Network("connection reset by peer".into());
         assert_eq!(e.detail().as_deref(), Some("connection reset by peer"));
+    }
+
+    // ---- is_stale_extractor_suspect -------------------------------------
+
+    /// The signatures a rotted yt-dlp actually emits. `nsig` and the player
+    /// -response failures are the extractor's own internals breaking against
+    /// a changed site; a bare 403 that survived the deny list below is the
+    /// bot-defence arms race, which is also fixed upstream and shipped.
+    #[test]
+    fn stale_signatures_fire_for_yt_dlp() {
+        for s in [
+            "ERROR: [youtube] abc123: Some formats may be missing: nsig extraction failed: Some formats may be missing",
+            "WARNING: [youtube] abc123: nsig extraction failed: You may experience throttling",
+            "ERROR: [youtube] abc123: Unable to extract player response; please report this issue",
+            "ERROR: [youtube] Signature extraction failed: Some formats may be missing",
+            COMMONS_403,
+            "[site][album] HTTPError: 403 Forbidden",
+        ] {
+            assert!(
+                is_stale_extractor_suspect("yt-dlp", s),
+                "should look stale: {s}"
+            );
+        }
+    }
+
+    /// Nobody wrote a pattern for it, it isn't transient, it isn't a cookie
+    /// DB failure, and neither extractor disowned the URL. An unreadable
+    /// failure from a binary that only gets older is the case this whole
+    /// path exists for.
+    #[test]
+    fn wholly_unrecognized_stderr_fires() {
+        for s in [
+            "ERROR: [youtube] abc123: unexpected token '<' in JSON at position 0",
+            "Traceback (most recent call last):\n  File \"yt_dlp/extractor/common.py\", line 1\nKeyError: 'streamingData'",
+        ] {
+            assert!(
+                is_stale_extractor_suspect("yt-dlp", s),
+                "unrecognised failure should look stale: {s}"
+            );
+        }
+    }
+
+    /// Facts about the content or the account, not about the binary. The
+    /// newest yt-dlp reports every one of these identically, so an update
+    /// buys nothing and the retry would just fail again slower.
+    #[test]
+    fn permanent_verdicts_do_not_fire() {
+        for s in [
+            "ERROR: Unsupported URL: https://example.com/x",
+            "ERROR: No suitable extractor found for URL",
+            "ERROR: [youtube] abc123: Private video. Sign in if you've been granted access",
+            "ERROR: [youtube] abc123: Sign in to confirm your age",
+            "ERROR: [youtube] abc123: Join this channel to get access to members-only content",
+            "ERROR: [youtube] abc123: Video unavailable",
+            "ERROR: [youtube] abc123: The uploader has not made this video available in your country (is geo restricted)",
+            "ERROR: unable to download webpage: HTTP Error 404: Not Found",
+            "ERROR: unable to download webpage: HTTP Error 410: Gone",
+            "ERROR: unable to download webpage: HTTP Error 429: Too Many Requests",
+            "[site][album] HTTPError: 404 Not Found",
+            "[site][album] HTTPError: 429 Too Many Requests",
+        ] {
+            assert!(
+                !is_stale_extractor_suspect("yt-dlp", s),
+                "should NOT look stale: {s}"
+            );
+        }
+    }
+
+    /// The deny list is checked FIRST, exactly as in the two matchers this
+    /// one is modelled on. A run that hit a 403 *and* an age gate is an age
+    /// gate: the site refused an unauthenticated request, which is what it
+    /// is supposed to do, and no yt-dlp release changes that.
+    #[test]
+    fn a_denied_marker_beats_a_stale_marker_in_the_same_blob() {
+        let mixed = "ERROR: [youtube] abc: HTTP Error 403: Forbidden\n\
+                     ERROR: [youtube] abc: Sign in to confirm your age";
+        assert!(
+            !is_stale_extractor_suspect("yt-dlp", mixed),
+            "the age gate is the real verdict; 403 is how the site says it"
+        );
+    }
+
+    /// A transient failure is `with_retry`'s business. This is the one
+    /// clause of the final branch that decides the answer on its own: no
+    /// `PATTERNS` entry covers a 503 or a reset connection, so deleting
+    /// `!is_transient_network_stderr` here flips both of these to `true` and
+    /// starts spending update checks on flaky wifi.
+    #[test]
+    fn a_transient_failure_does_not_fire() {
+        for s in [
+            "ERROR: unable to download video data: HTTP Error 503: Service Unavailable",
+            "ERROR: [download] Got error: [Errno 54] Connection reset by peer",
+        ] {
+            assert!(
+                !is_stale_extractor_suspect("yt-dlp", s),
+                "the retry layer owns this: {s}"
+            );
+        }
+    }
+
+    /// The rest of the final branch's clauses, pinned at the level they
+    /// actually hold: the *outcome*, not the mechanism.
+    ///
+    /// Be honest about what this proves. Every input below also carries a
+    /// `friendly_message`, so `friendly_message(stderr).is_none()` alone is
+    /// what fails them today — removing `!is_cookie_db_error`,
+    /// `!is_no_matching_extractor` or `!is_access_blocked_stderr`
+    /// individually would not turn this test red. Those clauses are forward
+    /// defence for the day a `PATTERNS` entry is reworded or dropped, and
+    /// there is no realistic stderr that isolates them: both cookie-DB
+    /// dialects and both 401 dialects have friendly text, and the no-match
+    /// strings are on the deny list above as well.
+    ///
+    /// What this test does guarantee is the contract users care about —
+    /// none of these ever costs an update check — and it will catch the
+    /// regression where a `PATTERNS` entry is deleted *and* the matching
+    /// guard clause is deleted with it.
+    #[test]
+    fn failures_another_path_already_explains_do_not_fire() {
+        for s in [
+            // cookie DB — the wrapper's own no-cookie retry owns it
+            "ERROR: Could not copy Chrome cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271",
+            "ERROR: could not find chrome cookies database in /home/x/.config",
+            // understood well enough that someone wrote prose about it
+            "ERROR: [Errno 2] No such file or directory",
+            // 401 is an auth wall, not the bot-defence arms race
+            "ERROR: Unable to download webpage: HTTP Error 401: Unauthorized",
+            "[site][album] HTTPError: 401 Unauthorized",
+        ] {
+            assert!(
+                !is_stale_extractor_suspect("yt-dlp", s),
+                "another path owns this: {s}"
+            );
+        }
+    }
+
+    /// An exit with no diagnostics at all is not evidence of a rotted
+    /// extractor — it is more likely a spawn or environment problem (a
+    /// missing dylib, a kill signal), which a newer yt-dlp does not fix.
+    /// Kept explicit because the unrecognised-stderr branch would otherwise
+    /// swallow it: empty text matches none of the deny lists either.
+    #[test]
+    fn empty_stderr_does_not_fire() {
+        assert!(!is_stale_extractor_suspect("yt-dlp", ""));
+        assert!(!is_stale_extractor_suspect("yt-dlp", "   \n  "));
+    }
+
+    /// gallery-dl is a different binary on a different update path
+    /// (Codeberg, and a no-op on macOS). Updating yt-dlp cannot fix it, so
+    /// its failures must never reach this predicate's true branch — not even
+    /// the ones whose text happens to look stale.
+    #[test]
+    fn gallery_dl_never_fires_whatever_it_says() {
+        for s in [
+            "[site][album] HTTPError: 403 Forbidden",
+            "ERROR: [youtube] abc: Unable to extract player response",
+            "ERROR: something nobody has ever seen before",
+            "",
+        ] {
+            assert!(
+                !is_stale_extractor_suspect("gallery-dl", s),
+                "gallery-dl must never trigger a yt-dlp update: {s}"
+            );
+        }
+        // Nor does anything else that might reach the dispatcher.
+        assert!(!is_stale_extractor_suspect("ffmpeg", "ERROR: unrecognised"));
     }
 
     #[test]

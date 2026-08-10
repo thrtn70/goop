@@ -17,6 +17,8 @@ use goop_core::{
     WarnOnceSink,
 };
 use goop_sidecar::BinaryResolver;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::classify::{classify_extractor, ExtractorChoice};
@@ -72,6 +74,203 @@ pub async fn dispatch(
         debrid,
     )
     .await
+}
+
+/// Reported by an `UpdateHook` when the sidecar on disk actually changed.
+/// `from` is `"unknown"` when the previous version couldn't be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryUpdated {
+    pub from: String,
+    pub to: String,
+}
+
+/// Asked to bring yt-dlp up to date after a failure that looks like the
+/// binary is stale (`goop_core::is_stale_extractor_suspect`).
+///
+/// `Some` ONLY when different bytes are now on disk. That is the entire
+/// justification for running the job again, so "checked, already current",
+/// "another check is in flight", "throttled" and "the check failed" are all
+/// `None` — each would otherwise buy a second identical spawn and a claim of
+/// a retry that fixed nothing.
+///
+/// The hook owns its own throttling and its own kill switch. This layer asks
+/// and believes the answer.
+pub type UpdateHook =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<BinaryUpdated>> + Send>> + Send + Sync>;
+
+/// The line appended to a second failure's raw stderr.
+fn update_marker(u: &BinaryUpdated) -> String {
+    format!(
+        "[goop] yt-dlp auto-updated {} -> {}; retried once",
+        u.from, u.to
+    )
+}
+
+/// `dispatch`, plus one shot at fixing a stale yt-dlp.
+///
+/// Extractors rot on a schedule nobody controls: a site changes its player,
+/// every installed yt-dlp starts failing on it, and upstream ships a fix
+/// within days. The binary on disk does not move on its own, so the user's
+/// half of that fix is noticing a Settings button exists. This closes the
+/// loop for the one failure class where it is warranted — and only there,
+/// because `is_stale_extractor_suspect` denies everything that is a fact
+/// about the URL rather than about the binary.
+///
+/// Deliberately wrapped AROUND `dispatch` rather than folded into it:
+///
+/// - not inside `with_retry`, which would spend the transient budget on an
+///   update check and could fire it several times per job;
+/// - not in the scheduler, which is kind-agnostic and has no business
+///   knowing what yt-dlp is.
+///
+/// The retried dispatch gets a fresh transient-retry budget. That is correct:
+/// it is a different binary, so its network failures are not a continuation
+/// of the first attempt's.
+pub async fn dispatch_with_update_hook(
+    resolver: &BinaryResolver,
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
+    debrid: Option<DebridCtx>,
+    hook: Option<UpdateHook>,
+) -> Result<BackendOutcome, GoopError> {
+    let err = match dispatch(
+        resolver,
+        sink.clone(),
+        job_id,
+        req,
+        signals.clone(),
+        debrid.clone(),
+    )
+    .await
+    {
+        Ok(outcome) => return Ok(outcome),
+        Err(err) => err,
+    };
+    let Some(hook) = hook else {
+        return Err(err);
+    };
+    // A fired signal (cancel OR pause) suppresses all of this, exactly as it
+    // suppresses the cross-extractor fallback: the user asked this job to
+    // stop, not to reach for the network on its way out.
+    if signals.check().is_some() || !stale_suspect(&err) {
+        return Err(err);
+    }
+    let Some(updated) = hook().await else {
+        return Err(err);
+    };
+    // Checked again on the far side: an update is a download, and the user
+    // can cancel during one.
+    if signals.check().is_some() {
+        return Err(err);
+    }
+    match dispatch(resolver, sink, job_id, req, signals, debrid).await {
+        Ok(outcome) => Ok(outcome),
+        Err(err2) => Err(note_update(err2, &updated)),
+    }
+}
+
+fn stale_suspect(err: &GoopError) -> bool {
+    match err {
+        GoopError::SubprocessFailed { binary, stderr } => {
+            goop_core::is_stale_extractor_suspect(binary, stderr)
+        }
+        _ => false,
+    }
+}
+
+/// Append the update note to a second failure's raw text.
+///
+/// Appended, never prepended: `user_message` shows the raw stderr whenever no
+/// friendly pattern matched, and burying the tool's own words under a line of
+/// Goop's bookkeeping is the wrong way round for whoever has to read it.
+///
+/// Only `SubprocessFailed` is annotated. `Network`'s detail *is* its headline
+/// (see `GoopError::detail`), so a note there would land in the message
+/// itself; and the control-flow variants have no detail to carry it.
+fn note_update(err: GoopError, updated: &BinaryUpdated) -> GoopError {
+    match err {
+        GoopError::SubprocessFailed { binary, stderr } => {
+            let sep = if stderr.ends_with('\n') { "" } else { "\n" };
+            GoopError::SubprocessFailed {
+                stderr: format!("{stderr}{sep}{}", update_marker(updated)),
+                binary,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Platform-independent, unlike `fake_sidecar_tests` below — the note is
+/// pure string work and its edges are worth pinning on Windows too.
+#[cfg(test)]
+mod note_update_tests {
+    use super::*;
+
+    fn updated() -> BinaryUpdated {
+        BinaryUpdated {
+            from: "2026.01.01".into(),
+            to: "2026.08.09".into(),
+        }
+    }
+
+    fn stderr_of(err: &GoopError) -> String {
+        match err {
+            GoopError::SubprocessFailed { stderr, .. } => stderr.clone(),
+            other => panic!("expected SubprocessFailed, got {other:?}"),
+        }
+    }
+
+    /// Real extractor stderr is line-buffered and arrives with a trailing
+    /// newline, so the common path must not add a blank line.
+    #[test]
+    fn a_trailing_newline_is_not_doubled() {
+        let err = note_update(
+            GoopError::SubprocessFailed {
+                binary: "yt-dlp".into(),
+                stderr: "ERROR: boom\n".into(),
+            },
+            &updated(),
+        );
+        assert_eq!(
+            stderr_of(&err),
+            "ERROR: boom\n[goop] yt-dlp auto-updated 2026.01.01 -> 2026.08.09; retried once"
+        );
+    }
+
+    /// A stderr tail truncated mid-stream has no trailing newline (the
+    /// wrapper caps it at 8KiB on a char boundary). Without the separator
+    /// the note would be glued onto the end of the tool's last word.
+    #[test]
+    fn a_truncated_tail_still_gets_its_own_line() {
+        let err = note_update(
+            GoopError::SubprocessFailed {
+                binary: "yt-dlp".into(),
+                stderr: "ERROR: boom".into(),
+            },
+            &updated(),
+        );
+        assert_eq!(
+            stderr_of(&err),
+            "ERROR: boom\n[goop] yt-dlp auto-updated 2026.01.01 -> 2026.08.09; retried once"
+        );
+    }
+
+    /// The note must not turn a control-flow error into something the
+    /// scheduler reads as a failure, and there is no raw text to carry it on
+    /// anyway.
+    #[test]
+    fn control_flow_errors_are_left_alone() {
+        for e in [
+            GoopError::Cancelled,
+            GoopError::Paused,
+            GoopError::Network("connection reset".into()),
+        ] {
+            let before = format!("{e:?}");
+            assert_eq!(format!("{:?}", note_update(e, &updated())), before);
+        }
+    }
 }
 
 /// Test seam: `dispatch` with an injectable retry policy so tests can
@@ -290,6 +489,7 @@ mod fake_sidecar_tests {
     use goop_core::{SidecarEvent, WarningCode};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -365,6 +565,70 @@ exit 0
             })
             .collect()
     }
+
+    /// A yt-dlp that succeeds: writes one file and echoes its absolute path
+    /// on stdout, which is how the wrapper learns what it produced (a line
+    /// that doesn't start with `[` and names an existing path). The path is
+    /// baked in at write time rather than parsed off argv — the wrapper's
+    /// flag spelling is not what these tests are about.
+    fn yt_dlp_succeeds(out: &std::path::Path) -> String {
+        let f = out.join("video.mp4");
+        let f = f.to_string_lossy();
+        format!("printf 'x' > '{f}'\necho '{f}'\nexit 0\n")
+    }
+
+    /// Appends one line per run, so a test can count spawns rather than
+    /// infer them from side effects.
+    fn counting(counter: &std::path::Path, body: &str) -> String {
+        format!("echo run >> '{}'\n{body}", counter.display())
+    }
+
+    fn runs(counter: &std::path::Path) -> usize {
+        std::fs::read_to_string(counter)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// Replaces a fake in place the way a real update does — via rename, so
+    /// the new script lands on a fresh inode. Overwriting the file the
+    /// previous spawn just exited from can still be ETXTBSY on Linux.
+    fn replace_fake(dir: &std::path::Path, name: &str, body: &str) {
+        write_fake(dir, "pending", body);
+        std::fs::rename(dir.join("pending"), dir.join(name)).unwrap();
+    }
+
+    fn hook_returning(
+        updated: Option<BinaryUpdated>,
+        on_call: impl Fn() + Send + Sync + 'static,
+    ) -> (UpdateHook, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let on_call = Arc::new(on_call);
+        let h: UpdateHook = Arc::new(move || {
+            let c = c.clone();
+            let updated = updated.clone();
+            let on_call = on_call.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                on_call();
+                updated
+            })
+        });
+        (h, calls)
+    }
+
+    fn updated() -> BinaryUpdated {
+        BinaryUpdated {
+            from: "2026.01.01".into(),
+            to: "2026.08.09".into(),
+        }
+    }
+
+    /// yt-dlp's extractor internals failing against a changed player. Not
+    /// transient, and not a no-match, so nothing else in the pipeline claims
+    /// it: it reaches the update hook or it reaches the user.
+    const STALE_FAILURE: &str =
+        "echo 'ERROR: [youtube] abc: Unable to extract player response' >&2\nexit 1\n";
 
     fn request(url: &str, output_dir: &std::path::Path) -> ExtractRequest {
         ExtractRequest {
@@ -672,5 +936,331 @@ exit 0
             "yt-dlp's 'Unsupported URL' came after the undecodable line and \
              must still drive the fallback; got {err:?}"
         );
+    }
+
+    // ---- update-and-retry-once ------------------------------------------
+
+    /// Sets up a bins dir where yt-dlp fails the stale way and gallery-dl is
+    /// a loud no-op, plus an output dir and a spawn counter for yt-dlp.
+    fn stale_yt_dlp() -> (TempDir, TempDir, std::path::PathBuf) {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let counter = out.path().join("yt-dlp.runs");
+        write_fake(bins.path(), "yt-dlp", &counting(&counter, STALE_FAILURE));
+        // Present so the resolver can't pick a real gallery-dl off $PATH. A
+        // stale failure is neither a no-match nor a block, so the
+        // cross-extractor fallback never reaches it — if it ever runs, the
+        // distinctive text says so.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
+        );
+        (bins, out, counter)
+    }
+
+    fn stale_request(out: &std::path::Path) -> ExtractRequest {
+        let mut req = request("https://example.com/x", out);
+        // No cookies: the no-cookie re-spawn is a different mechanism and
+        // would double every spawn count below.
+        req.cookies_from_browser = None;
+        req
+    }
+
+    /// The whole point. yt-dlp fails in a way only a newer yt-dlp can fix,
+    /// the hook installs one, and the second run carries the job — with no
+    /// trace of the first failure, because there was nothing wrong with the
+    /// request.
+    #[tokio::test]
+    async fn a_stale_failure_updates_yt_dlp_and_the_retry_carries_the_job() {
+        let (bins, out, counter) = stale_yt_dlp();
+        let bins_path = bins.path().to_path_buf();
+        let success = yt_dlp_succeeds(out.path());
+        let counter_for_hook = counter.clone();
+        let (hook, calls) = hook_returning(Some(updated()), move || {
+            replace_fake(
+                &bins_path,
+                "yt-dlp",
+                &counting(&counter_for_hook, &success.clone()),
+            );
+        });
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let req = stale_request(out.path());
+
+        let res = dispatch_with_update_hook(
+            &resolver,
+            rec,
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect("the updated yt-dlp succeeds");
+
+        assert!(res.output_path.ends_with("video.mp4"), "{res:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one update check, not one per attempt"
+        );
+        assert_eq!(
+            runs(&counter),
+            2,
+            "the original attempt and exactly one retry"
+        );
+    }
+
+    /// A private video is a private video on every yt-dlp ever released.
+    /// Asking GitHub about it on each such failure would be a request per
+    /// job for nothing.
+    #[tokio::test]
+    async fn a_permanent_verdict_never_asks_for_an_update() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let counter = out.path().join("yt-dlp.runs");
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &counting(
+                &counter,
+                "echo 'ERROR: [youtube] abc: Private video. Sign in if you have been granted access' >&2\nexit 1\n",
+            ),
+        );
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
+        );
+        let (hook, calls) = hook_returning(Some(updated()), || {});
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let req = stale_request(out.path());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect_err("a private video stays a failure");
+
+        assert!(
+            matches!(&err, GoopError::SubprocessFailed { stderr, .. } if stderr.contains("Private video")),
+            "the user must still see the real verdict: {err:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no update check");
+        assert_eq!(runs(&counter), 1, "no second attempt");
+    }
+
+    /// "Checked, already current" is the common case once the binary is
+    /// fresh. Nothing changed on disk, so a second run would spawn the same
+    /// bytes against the same URL and fail identically — slower, and with a
+    /// misleading claim of a retry attached.
+    #[tokio::test]
+    async fn no_update_means_no_second_attempt() {
+        let (bins, out, counter) = stale_yt_dlp();
+        let (hook, calls) = hook_returning(None, || {});
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let req = stale_request(out.path());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect_err("the fake yt-dlp always fails");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the hook was asked");
+        assert_eq!(
+            runs(&counter),
+            1,
+            "but nothing changed, so nothing was retried"
+        );
+        let detail = err.detail().unwrap_or_default();
+        assert!(
+            !detail.contains("[goop]"),
+            "no retry happened, so nothing should claim one: {detail}"
+        );
+    }
+
+    /// The update landed and the job failed anyway. The failure is the
+    /// user's to see, but so is the fact that Goop already tried the obvious
+    /// fix — otherwise the advice "make sure yt-dlp is up to date" wastes
+    /// their time. And it must stop there: one update, one retry, no loop.
+    #[tokio::test]
+    async fn a_second_stale_failure_is_marked_and_stops() {
+        let (bins, out, counter) = stale_yt_dlp();
+        let (hook, calls) = hook_returning(Some(updated()), || {});
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let req = stale_request(out.path());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect_err("the fake yt-dlp always fails");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one update check");
+        assert_eq!(runs(&counter), 2, "exactly one retry — this must not loop");
+
+        let detail = err
+            .detail()
+            .expect("a subprocess failure carries its stderr");
+        assert!(
+            detail.contains("Unable to extract player response"),
+            "the original stderr must survive intact: {detail}"
+        );
+        assert!(
+            detail
+                .trim_end()
+                .ends_with("[goop] yt-dlp auto-updated 2026.01.01 -> 2026.08.09; retried once"),
+            "the note belongs after the tool's own words, not in front of \
+             them: {detail}"
+        );
+    }
+
+    /// Cancel means stop, not "stop after one more download and one more
+    /// spawn". The signal is checked on both sides of the hook: before, so a
+    /// job cancelled while failing never reaches for the network at all;
+    /// after, because the update is itself a download the user can sit
+    /// through and give up on.
+    ///
+    /// The assertion is on the error's identity, not on the spawn count.
+    /// Dropping the post-hook check does NOT reliably change the count: the
+    /// second dispatch spawns the child and the already-fired token kills it,
+    /// usually before the shell reaches its first line — a race, and so
+    /// useless as a guard. What does change is what the user is left with.
+    /// Surfacing the real failure rather than manufacturing `Cancelled`
+    /// follows `dispatch_once`, which makes the same call twice.
+    #[tokio::test]
+    async fn a_cancel_during_the_update_wins() {
+        let (bins, out, counter) = stale_yt_dlp();
+        let signals = JobSignals::new();
+        let to_cancel = signals.clone();
+        let (hook, calls) = hook_returning(Some(updated()), move || to_cancel.cancel.cancel());
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let req = stale_request(out.path());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            signals.clone(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect_err("cancelled");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(&err, GoopError::SubprocessFailed { stderr, .. }
+                if stderr.contains("Unable to extract player response")),
+            "the cancel must pre-empt the retry, leaving the failure that \
+             started all this — not a `Cancelled` from a doomed second \
+             spawn; got {err:?}"
+        );
+        let detail = err.detail().unwrap_or_default();
+        assert!(
+            !detail.contains("[goop]"),
+            "no retry happened, so nothing should claim one: {detail}"
+        );
+        let _ = counter;
+    }
+
+    /// The predicate refuses gallery-dl by name, but that only helps if the
+    /// binary name reaching it is the one that actually failed. This drives
+    /// the whole wiring: a gallery-dl-classified URL, gallery-dl failing
+    /// with text that would look stale coming from yt-dlp, and no update
+    /// check. Hardcoding `"yt-dlp"` in `stale_suspect` — or reading the
+    /// wrong field — would make the yt-dlp updater run on gallery-dl's
+    /// behalf, which it cannot help.
+    #[tokio::test]
+    async fn a_gallery_dl_failure_never_asks_for_a_yt_dlp_update() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Same stderr as the yt-dlp stale case, so only the binary differs.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: [youtube] abc: Unable to extract player response' >&2\nexit 1\n",
+        );
+        // A stale failure is not a no-match, so the cross-extractor fallback
+        // never reaches this. Present so nothing is picked off $PATH.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
+        );
+        let (hook, calls) = hook_returning(Some(updated()), || {});
+
+        // imgur classifies to gallery-dl as primary.
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            Some(hook),
+        )
+        .await
+        .expect_err("the fake gallery-dl always fails");
+
+        assert!(
+            matches!(&err, GoopError::SubprocessFailed { binary, .. } if binary == "gallery-dl"),
+            "the test is only meaningful if gallery-dl is what failed: {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "updating yt-dlp cannot fix gallery-dl"
+        );
+    }
+
+    /// Without a hook this is plain `dispatch`. Pinned so the wiring can be
+    /// switched off (no coordinator, kill switch off) without changing what
+    /// a failure looks like.
+    #[tokio::test]
+    async fn without_a_hook_it_is_just_dispatch() {
+        let (bins, out, counter) = stale_yt_dlp();
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let req = stale_request(out.path());
+        let err = dispatch_with_update_hook(
+            &resolver,
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("the fake yt-dlp always fails");
+        assert_eq!(runs(&counter), 1);
+        assert!(!err.detail().unwrap_or_default().contains("[goop]"));
     }
 }
