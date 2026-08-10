@@ -838,74 +838,11 @@ mod tests {
 #[cfg(all(test, unix))]
 mod redownload_tests {
     use super::*;
+    use crate::test_fakes::write_fake;
     use goop_core::events::RecordingSink;
     use goop_core::{JobId, JobSignals};
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tempfile::TempDir;
-
-    /// Argv the exec probe hands a fake to prove it can be run. gallery-dl
-    /// is only ever passed URLs and its own flags, so nothing a real run
-    /// sends can collide with it.
-    const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
-
-    fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        // The guard answers the probe and exits before reaching the body,
-        // so probing costs nothing but a `/bin/sh` startup.
-        write!(
-            f,
-            "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}"
-        )
-        .unwrap();
-        drop(f);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        wait_until_executable(&path);
-    }
-
-    /// Blocks until `path` can actually be `exec`d, which is not the same
-    /// moment as "we finished writing it".
-    ///
-    /// A second copy of the helper #66 added to `backend.rs`, deliberately
-    /// rather than sharing one: consolidating them is a test-only refactor
-    /// that would touch that PR's own regression test, and there is a third
-    /// copy in `goop-tauri` that could not share it across crates anyway.
-    /// Tracked separately.
-    ///
-    /// Same hazard #66 fixed in `backend.rs`, and the same test binary:
-    /// Linux refuses to `execve` a file while any process holds it open for
-    /// writing, and a sibling test spawning a sidecar forks a child that
-    /// inherits a copy of our write descriptor which outlives our own close.
-    /// `O_CLOEXEC` fires at the child's exec rather than its fork — the gap
-    /// in between is the bug — and renaming does not help because the kernel
-    /// counts writers per inode. Nothing reopens a fake for writing, so one
-    /// successful exec proves the path stays runnable.
-    fn wait_until_executable(path: &std::path::Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut backoff = std::time::Duration::from_millis(1);
-        loop {
-            let busy = match std::process::Command::new(path)
-                .arg(EXEC_PROBE_ARG)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-            {
-                Ok(_) => return,
-                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => e,
-                Err(e) => panic!("fake {} could not be run at all: {e:?}", path.display()),
-            };
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fake {} was still held open for writing after 10s: {busy:?}",
-                path.display()
-            );
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(std::time::Duration::from_millis(25));
-        }
-    }
 
     /// The stdout contract is a set of `-o` pins, and nothing was checking
     /// they are actually passed. Every one of them is load-bearing:

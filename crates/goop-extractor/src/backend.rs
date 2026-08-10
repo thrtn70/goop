@@ -528,10 +528,9 @@ pub fn cleanup_partials_for(req: &ExtractRequest) {
 #[cfg(all(test, unix))]
 mod fake_sidecar_tests {
     use super::*;
+    use crate::test_fakes::write_fake;
     use goop_core::events::RecordingSink;
     use goop_core::{SidecarEvent, WarningCode};
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -581,72 +580,6 @@ exit 0
 
     fn resolver_at(bins: &std::path::Path) -> BinaryResolver {
         BinaryResolver::new(bins.to_path_buf())
-    }
-
-    /// Argv `wait_until_executable` hands a fake to prove it can be run.
-    /// The dispatcher passes URLs and yt-dlp/gallery-dl flags, so nothing
-    /// a real run sends can collide with it.
-    const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
-
-    fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
-        let path = dir.join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        // The guard answers the probe below and exits before reaching the
-        // body, so probing costs nothing but a `/bin/sh` startup.
-        write!(
-            f,
-            "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}"
-        )
-        .unwrap();
-        drop(f);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        wait_until_executable(&path);
-    }
-
-    /// Blocks until `path` can actually be `exec`d, which is not the same
-    /// moment as "we finished writing it".
-    ///
-    /// Linux refuses to `execve` a file while any process holds it open
-    /// for writing (`ETXTBSY`), and these tests run in parallel inside one
-    /// process. The window is between our `File::create` and our `drop`:
-    /// a sibling test that spawns a sidecar right then forks a child which
-    /// inherits a copy of our write descriptor, and that copy outlives our
-    /// own close — the kernel only drops it when the child reaches its
-    /// `execve`. Our exec, landing in between, is refused.
-    ///
-    /// Neither of the two obvious defences closes that window.
-    /// `File::create` already opens `O_CLOEXEC`, but cloexec fires at the
-    /// child's exec, not at its fork, and the gap in between is the whole
-    /// bug. Writing to a temp name and renaming into place does not help
-    /// either: the kernel counts writers per inode, and a rename does not
-    /// change the inode.
-    ///
-    /// So wait it out instead. Nothing ever reopens a fake for writing, so
-    /// the set of processes holding a copy only shrinks — one successful
-    /// exec proves the path stays runnable from here on.
-    fn wait_until_executable(path: &std::path::Path) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut backoff = Duration::from_millis(1);
-        loop {
-            let busy = match std::process::Command::new(path)
-                .arg(EXEC_PROBE_ARG)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-            {
-                Ok(_) => return,
-                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => e,
-                Err(e) => panic!("fake {} could not be run at all: {e:?}", path.display()),
-            };
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fake {} was still held open for writing after 10s: {busy:?}",
-                path.display()
-            );
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_millis(25));
-        }
     }
 
     fn warning_codes(sink: &RecordingSink) -> Vec<WarningCode> {
@@ -739,50 +672,6 @@ exit 0
             filename_hint: None,
             extractor_hint: None,
         }
-    }
-
-    /// Regression for an intermittent `ETXTBSY` on the Linux CI runner:
-    /// `dispatch` failed to spawn a fake that had just been written, so
-    /// the run reported a spawn error instead of whatever the test was
-    /// actually asserting.
-    ///
-    /// Pins the contract that keeps it away: `write_fake` returns only
-    /// once the script it wrote can be run. Provoked by handing an
-    /// unrelated process a writer on the same inode before the script is
-    /// written, which is the state a sibling test's forked sidecar leaves
-    /// behind — reproducing it through that fork would mean hitting a
-    /// microsecond window on purpose, and the kernel cannot tell the two
-    /// apart anyway.
-    ///
-    /// macOS does not enforce `ETXTBSY` for scripts, so there this only
-    /// checks the helper stays out of the way.
-    #[test]
-    fn a_fake_is_runnable_even_while_another_process_holds_a_writer() {
-        let bins = TempDir::new().unwrap();
-        let path = bins.path().join("yt-dlp");
-
-        // `>>` rather than `>`: the holder must not truncate the script
-        // out from under the run below. It creates the file, so waiting
-        // for the path to appear is enough to know the writer is open,
-        // and `write_fake`'s create truncates that same inode rather than
-        // making a new one.
-        let mut holder = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("exec 9>>\"$0\"; sleep 0.5")
-            .arg(&path)
-            .spawn()
-            .unwrap();
-        while !path.exists() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
-        write_fake(bins.path(), "yt-dlp", "exit 7\n");
-
-        let status = std::process::Command::new(&path)
-            .status()
-            .expect("a written fake must be runnable once write_fake returns");
-        assert_eq!(status.code(), Some(7), "the fake's own body must run");
-        holder.wait().unwrap();
     }
 
     /// Regression: yt-dlp cookie-fails and declines the URL, dispatch

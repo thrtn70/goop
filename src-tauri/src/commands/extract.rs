@@ -225,12 +225,68 @@ mod probe_retry_tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Argv `wait_until_executable` hands a fake to prove it can be run.
+    /// `probe_with` passes a URL and yt-dlp flags, so nothing a real run
+    /// sends can collide with it.
+    const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
+
     fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
-        write!(f, "#!/bin/sh\n{body}").unwrap();
+        // The guard answers the probe below and exits before reaching the
+        // body, so probing costs nothing but a `/bin/sh` startup.
+        write!(
+            f,
+            "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}"
+        )
+        .unwrap();
         drop(f);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&path);
+    }
+
+    /// Blocks until `path` can actually be `exec`d, which is not the same
+    /// moment as "we finished writing it". Linux refuses to `execve` a
+    /// file while any process holds it open for writing (`ETXTBSY`).
+    ///
+    /// The two tests below both write a fake and then fork one, in
+    /// parallel, inside this one test binary — so one test's `File::create`
+    /// window can be straddled by the other's spawn, whose child inherits
+    /// a copy of the write descriptor and holds it until its own `execve`.
+    /// Separate temp dirs do not help: the kernel counts writers per
+    /// inode, and the inherited descriptor is a writer on ours.
+    ///
+    /// This duplicates `goop_extractor::test_fakes`, which carries the
+    /// full rationale and the regression test that proves the wait does
+    /// anything. A `#[cfg(test)]` module is not importable across crates,
+    /// so sharing it would mean exposing it there as a `pub` module behind
+    /// a cargo feature this crate asks for in `[dev-dependencies]` — which
+    /// would not reach the shipped binary, but would put a public,
+    /// feature-gated API on `goop-extractor` for the sake of the two tests
+    /// below. It is copied instead. Keep the two in step by hand.
+    fn wait_until_executable(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut backoff = std::time::Duration::from_millis(1);
+        loop {
+            let busy = match std::process::Command::new(path)
+                .arg(EXEC_PROBE_ARG)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => e,
+                Err(e) => panic!("fake {} could not be run at all: {e:?}", path.display()),
+            };
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake {} was still held open for writing after 10s: {busy:?}",
+                path.display()
+            );
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(std::time::Duration::from_millis(25));
+        }
     }
 
     fn runs(counter: &std::path::Path) -> usize {
