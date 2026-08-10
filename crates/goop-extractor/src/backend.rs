@@ -979,6 +979,82 @@ done
         );
     }
 
+    /// The stdout counterpart of the test above, where the same bad line
+    /// cost more than a truncated message: the stdout arm propagated the
+    /// decode error with `?`, returning from `download_once` with the
+    /// child neither killed nor waited for. Nothing downstream cleaned
+    /// that up — no spawn in this tree sets `kill_on_drop` — so a live
+    /// yt-dlp kept writing into the user's folder after the job had
+    /// already reported failure, and the Retry button then landed a
+    /// second one on the same `--continue`d `.part`. No layer even
+    /// re-dispatched on its own to make that visible: `GoopError::Io` is
+    /// neither transient nor a no-match verdict, so the run just failed.
+    ///
+    /// What this observes is the success, not the process: the fake
+    /// writes its file AFTER the bad line, so finishing at all proves the
+    /// loop got past a line it couldn't read, drained to EOF, and reaped
+    /// the child for its exit status — the only route to `Ok` here. It
+    /// cannot tell a reaped failure from an abandoned one, which is why
+    /// the name claims the run, not the child.
+    #[tokio::test]
+    async fn an_undecodable_stdout_line_does_not_end_the_run() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let file = out.path().join("video.mp4");
+        let file = file.to_string_lossy().into_owned();
+        // `--print after_move:filepath` puts one absolute path on stdout
+        // per file finished, and that path is the only place a title
+        // reaches this stream. Here the first one is mis-encoded: `\351`
+        // is `é` in cp1252, which is what a title looks like once yt-dlp
+        // has encoded stdout in a legacy Windows codepage rather than
+        // UTF-8, and a lone 0xe9 is not valid UTF-8 in any position. The
+        // directory rides in as a `%s` argument so a `%` in the temp path
+        // can't be read as a conversion.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "printf '%s/Caf\\351.mp4\\n' '{dir}'\n\
+                 printf 'x' > '{file}'\n\
+                 echo '{file}'\n\
+                 exit 0\n",
+                dir = out.path().display()
+            ),
+        );
+        // Never reached: yt-dlp succeeds, and the IO error it used to
+        // return is not a no-match either. Present so the resolver can't
+        // silently pick up a real gallery-dl from $PATH.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
+        );
+
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://example.com/x", out.path());
+        // Isolate the decode path: no cookies, so nothing else can send
+        // the run around again.
+        req.cookies_from_browser = None;
+
+        let outcome = dispatch_with_policy(
+            &resolver,
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            &FAST_RETRIES,
+            None,
+        )
+        .await
+        .expect("the undecodable line must not end the run");
+
+        assert_eq!(
+            outcome.output_path, file,
+            "the path printed after the bad line must still be the result"
+        );
+    }
+
     // ---- the probe's extractor verdict ----------------------------------
 
     /// Writes a witness file so a test can prove a binary was NEVER run.
