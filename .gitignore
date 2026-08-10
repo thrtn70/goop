@@ -47,14 +47,7 @@ Thumbs.db
 
 # Local working notes (not for the public repo)
 /docs/
-CLAUDE.md
-.impeccable.md
-.superpowers/
-
-# Cursor IDE local state
-.cursor/
 
 # Release notes are applied via gh release edit; not tracked
 .release-notes/
-.gstack/
 /.heif-deps/
