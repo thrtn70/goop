@@ -502,16 +502,15 @@ async fn run_one(
 
 /// Best-effort removal of every partial-download artifact a run may have
 /// left behind for `req`: the direct downloader's hidden `.part`/`.meta`
-/// sidecars, recent yt-dlp/gallery-dl `.part`/`.ytdl` files, and the
-/// gallery-dl start marker. Used when a paused download is cancelled —
-/// pause keeps partials by contract, and the worker that would normally
-/// clean up on cancel already returned.
+/// sidecars and recent yt-dlp/gallery-dl `.part`/`.ytdl` files. Used when a
+/// paused download is cancelled — pause keeps partials by contract, and the
+/// worker that would normally clean up on cancel already returned.
 pub fn cleanup_partials_for(req: &ExtractRequest) {
     let expanded = goop_core::path::expand(&req.output_dir);
     let output_dir = std::fs::canonicalize(&expanded).unwrap_or(expanded);
     crate::direct::remove_partials(&output_dir, &req.url);
     crate::ytdlp::cleanup_partials(&output_dir, None);
-    crate::gallery_dl::cleanup_run_artifacts(&output_dir, &req.url);
+    crate::gallery_dl::cleanup_run_artifacts(&output_dir);
 }
 
 /// End-to-end dispatch tests driven by fake sidecars — shell scripts that
@@ -551,24 +550,14 @@ done
 "#;
 
     /// A successful gallery-dl run: one file into whatever `--directory`
-    /// it was handed. That file is what the post-exit scan tallies, so the
-    /// run counts as real work rather than "no extractable content".
+    /// it was handed, named on stdout the way the real tool names every
+    /// file it writes. That line is what the run is tallied from, so
+    /// without it the run is "no extractable content" however many files
+    /// are on disk.
     ///
-    /// The sleep is load-bearing, not padding. `scan_outputs` counts files
-    /// whose mtime is at or after a cutoff sampled from a fine-grained
-    /// `SystemTime::now()`, while Linux stamps mtimes from the kernel's
-    /// coarse clock — a jiffy wide (4ms at the CONFIG_HZ_250 most distro
-    /// kernels ship). A file written within a tick of the cutoff can carry
-    /// an mtime just behind it and go uncounted, failing the run as "no
-    /// extractable content". Real gallery-dl needs a network round-trip
-    /// before the first file lands, so only an instantaneous fake can hit
-    /// that window.
-    ///
-    /// The stdout line real gallery-dl prints per file only drives
-    /// progress, so it is tolerated failing — the drain fake below has
-    /// already closed stdout, and an unguarded `echo` to a closed fd would
-    /// put a shell error on stderr, which is the one stream those tests
-    /// care about.
+    /// The `|| true` guards the one fake that closes stdout deliberately:
+    /// an unguarded `echo` to a closed fd would put a shell error on
+    /// stderr, which is the stream that test is about.
     const GALLERY_DL_WRITES_ONE_FILE: &str = r#"
 dir=""
 prev=""
@@ -576,7 +565,6 @@ for a in "$@"; do
   if [ "$prev" = "--directory" ]; then dir="$a"; fi
   prev="$a"
 done
-sleep 0.05
 printf 'x' > "$dir/photo.jpg"
 echo "$dir/photo.jpg" 2>/dev/null || true
 exit 0
@@ -995,12 +983,25 @@ exit 0
                  exit 1\n"
             ),
         );
+        // gallery-dl closes stdout inside the cookie-failure branch instead
+        // of up front. That is the invocation whose stderr has to survive,
+        // so it is where the losing interleaving belongs — and it leaves the
+        // no-cookie retry able to report the file it downloaded, which is
+        // what the run is tallied from.
+        const CLOSE_STDOUT_THEN_COOKIE_FAIL: &str = r#"
+for a in "$@"; do
+  if [ "$a" = "--cookies-from-browser" ]; then
+    exec 1>&-
+    sleep 0.2
+    echo "ERROR: Could not copy Chrome cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271" >&2
+    exit 1
+  fi
+done
+"#;
         write_fake(
             bins.path(),
             "gallery-dl",
-            &format!(
-                "exec 1>&-\nsleep 0.2\n{COOKIE_FAIL_WITH_COOKIES}{GALLERY_DL_WRITES_ONE_FILE}"
-            ),
+            &format!("{CLOSE_STDOUT_THEN_COOKIE_FAIL}{GALLERY_DL_WRITES_ONE_FILE}"),
         );
 
         let resolver = BinaryResolver::new(bins.path().to_path_buf());
