@@ -387,21 +387,61 @@ mod tests {
         }
     }
 
+    /// `UPDATE_LOCK` is process-wide and a dozen other acquisitions in this
+    /// binary hold it across a mock download and a subprocess spawn, so no
+    /// assertion here may rest on how *long* a step takes. Measured on the
+    /// version that did: re-acquiring after a release took 0 ms with
+    /// `--test-threads 1` and 3.7–7.2 s at 64 threads on a loaded machine,
+    /// because that wait is other tests' queued updates draining rather than
+    /// anything the lock is doing — a 5 s deadline there failed 7 runs in 14.
+    /// Both halves below are ordering claims instead.
     #[tokio::test]
     async fn update_lock_excludes_a_second_holder() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
         let guard = lock_updates().await;
-        let blocked = tokio::time::timeout(Duration::from_millis(100), lock_updates()).await;
+
+        // A second caller, queued behind the guard on purpose — the shape two
+        // overlapping updates actually take. It reports back whether the
+        // release had already happened by the time it got in.
+        let released = Arc::new(AtomicBool::new(false));
+        let mut second = tokio::spawn({
+            let released = Arc::clone(&released);
+            async move {
+                let _guard = lock_updates().await;
+                released.load(Ordering::SeqCst)
+            }
+        });
+
+        // Exclusion. A deadline is sound on this half: it can only fail by the
+        // second caller getting *through* while the guard is alive, so a slow
+        // machine makes it less likely to fire, never more.
         assert!(
-            blocked.is_err(),
+            tokio::time::timeout(Duration::from_millis(100), &mut second)
+                .await
+                .is_err(),
             "a second update must not proceed while one is in flight"
         );
+
+        released.store(true, Ordering::SeqCst);
         drop(guard);
-        // Generous, because the other tests in this binary take the same lock
-        // across their (local, fast) mock downloads.
-        let reacquired = tokio::time::timeout(Duration::from_secs(5), lock_updates()).await;
+
+        // Release. What makes this assertion true is the flag — the waiter got
+        // in, and only after the guard went away. The ceiling is a backstop and
+        // nothing else: `cargo test` has no per-test timeout, so a lock that
+        // stopped releasing would otherwise hang the workspace run until CI's
+        // own limit hours later instead of naming the test that broke. It sits
+        // an order of magnitude above the 7.2 s worst case measured above, so
+        // unlike the 5 s deadline it replaces, it is not what the test passing
+        // depends on and must not be re-tuned as though it were.
+        let reacquired = tokio::time::timeout(Duration::from_secs(60), second)
+            .await
+            .expect("the queued update never got in — the lock stopped releasing")
+            .expect("the second holder panicked");
         assert!(
-            reacquired.is_ok(),
-            "the lock must be acquirable again once released"
+            reacquired,
+            "the queued update must get in only once the guard is released"
         );
     }
 
