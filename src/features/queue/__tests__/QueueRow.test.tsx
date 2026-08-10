@@ -466,6 +466,220 @@ describe("QueueRow retry button and error text", () => {
   });
 });
 
+describe("QueueRow failure detail", () => {
+  const MARKER = "[goop] yt-dlp auto-updated 2026.01.01 -> 2026.08.09; retried once";
+
+  function failedRow(message: string, detail: string | null) {
+    return (
+      <QueueRow
+        job={makeJob({
+          kind: "extract",
+          state: { error: { message, detail } },
+          payload: { url: "https://example.com/video" },
+        })}
+        index={0}
+      />
+    );
+  }
+
+  it("hides the raw text behind a toggle and shows it on demand", async () => {
+    const user = userEvent.setup();
+    const raw = 'ERROR: [youtube] abc: Sign in to confirm your age\n  File "common.py"';
+    const { container } = render(failedRow("age verification required", raw));
+
+    // Closed by default: a queue row is 288px wide and a Python traceback
+    // is not what someone scanning the queue came to read.
+    expect(screen.getByText("age verification required")).toBeTruthy();
+    expect(container.querySelector("pre")).toBeNull();
+
+    const toggle = screen.getByRole("button", { name: /show details/i });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(toggle);
+
+    // Read off the element rather than `getByText`, which collapses the
+    // newlines this block exists to preserve.
+    expect(container.querySelector("pre")?.textContent).toBe(raw);
+    const open = screen.getByRole("button", { name: /hide details/i });
+    expect(open.getAttribute("aria-expanded")).toBe("true");
+
+    await user.click(open);
+    expect(container.querySelector("pre")).toBeNull();
+  });
+
+  it("copies the raw text to the clipboard", async () => {
+    // `userEvent.setup()` installs its own clipboard stub, so the spy has
+    // to go on afterwards or it is silently replaced.
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const raw = "ERROR: [youtube] abc: nsig extraction failed";
+    render(failedRow("Something went wrong.", raw));
+
+    await user.click(screen.getByRole("button", { name: /show details/i }));
+    await user.click(screen.getByRole("button", { name: /copy error detail/i }));
+
+    // The point of the button is pasting into a bug report, so it has to be
+    // the raw text and not the friendly rewrite.
+    expect(writeText).toHaveBeenCalledWith(raw);
+    expect(writeText).not.toHaveBeenCalledWith("Something went wrong.");
+    expect(await screen.findByRole("button", { name: /copy error detail/i })).toHaveProperty(
+      "textContent",
+      "Copied",
+    );
+  });
+
+  it("says so when the clipboard is unavailable instead of failing silently", async () => {
+    // No `navigator.clipboard` in an insecure context or some webviews, and
+    // the access itself throws rather than rejecting. A Copy button that
+    // does nothing at all is worse than no button.
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: undefined,
+      configurable: true,
+    });
+    render(failedRow("Something went wrong.", "ERROR: nsig extraction failed"));
+
+    await user.click(screen.getByRole("button", { name: /show details/i }));
+    await user.click(screen.getByRole("button", { name: /copy error detail/i }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().toasts.some((t) => t.title === "Couldn't copy")).toBe(
+        true,
+      );
+    });
+  });
+
+  it("offers no details affordance on a row that predates the column", async () => {
+    // Rows written before `error_detail` existed carry null. There is
+    // nothing to backfill, so the button must be absent rather than
+    // present-and-empty.
+    render(failedRow("The site blocked the request.", null));
+    expect(screen.queryByRole("button", { name: /show details/i })).toBeNull();
+  });
+
+  it("offers no details affordance when the detail only repeats the message", () => {
+    render(
+      failedRow("network error: connection reset by peer", "connection reset by peer"),
+    );
+    expect(screen.queryByRole("button", { name: /show details/i })).toBeNull();
+  });
+
+  it("renders the auto-update note as its own line, not buried in the detail", async () => {
+    const user = userEvent.setup();
+    render(failedRow("The site blocked the request.", `ERROR: HTTP Error 403\n${MARKER}`));
+
+    // Visible without expanding anything: "Goop already tried the obvious
+    // fix" is the part that changes what the user does next.
+    expect(screen.getByText(MARKER)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /show details/i }));
+    expect(screen.getByText("ERROR: HTTP Error 403")).toBeTruthy();
+  });
+
+  it("explains an interrupted row instead of showing the bare word", () => {
+    render(failedRow("interrupted", null));
+    expect(screen.getByText(/Goop closed while this ran/)).toBeTruthy();
+    expect(screen.queryByText("interrupted")).toBeNull();
+  });
+
+  it("copies the auto-update note along with the tool's own output", async () => {
+    // The note is lifted out of the detail so it can be rendered on its own
+    // line, which silently removed it from what Copy produced — dropping the
+    // one Goop-specific fact a bug report needs.
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(failedRow("The site blocked the request.", `ERROR: HTTP Error 403\n${MARKER}`));
+
+    await user.click(screen.getByRole("button", { name: /show details/i }));
+    await user.click(screen.getByRole("button", { name: /copy error detail/i }));
+
+    expect(writeText).toHaveBeenCalledWith(`ERROR: HTTP Error 403\n${MARKER}`);
+  });
+
+  it("keeps the raw text reachable when the message is itself the dump", async () => {
+    // The regression this whole affordance exists to prevent: no friendly
+    // pattern matched, so the message IS the stderr, and a naive
+    // duplicate-suppression removed the expander for exactly the failures
+    // carrying the most text.
+    const user = userEvent.setup();
+    const stderr = [
+      "ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers",
+      "[matroska @ 0x7f8] Could not find codec parameters for stream 2",
+      "Conversion failed!",
+    ].join("\n");
+    const { container } = render(failedRow(`ffmpeg: ${stderr}`, stderr));
+
+    const toggle = screen.getByRole("button", { name: /show details/i });
+    await user.click(toggle);
+    expect(container.querySelector("pre")?.textContent).toContain("Conversion failed!");
+  });
+
+  it("gives each failed row its own accessible names", () => {
+    // Several rows can fail at once. Buttons that all read "Show details"
+    // are indistinguishable in a screen reader's control list.
+    render(
+      <>
+        <QueueRow
+          job={makeJob({
+            id: "00000000-0000-7000-8000-00000000000a",
+            kind: "extract",
+            state: { error: { message: "a", detail: "raw a" } },
+            payload: { url: "https://one.example/x" },
+          })}
+          index={0}
+        />
+        <QueueRow
+          job={makeJob({
+            id: "00000000-0000-7000-8000-00000000000b",
+            kind: "extract",
+            state: { error: { message: "b", detail: "raw b" } },
+            payload: { url: "https://two.example/y" },
+          })}
+          index={1}
+        />
+      </>,
+    );
+    expect(screen.getByRole("button", { name: /show details for one\.example/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /show details for two\.example/i })).toBeTruthy();
+  });
+
+  it("points the toggle at the block it opens", async () => {
+    const user = userEvent.setup();
+    const { container } = render(failedRow("boom", "raw text"));
+    const toggle = screen.getByRole("button", { name: /show details/i });
+    await user.click(toggle);
+    const controls = toggle.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(container.querySelector("pre")?.id).toBe(controls);
+  });
+
+  it("keeps the expanded block from widening the 288px sidebar", async () => {
+    // jsdom has no layout, so this pins the mechanism rather than the
+    // outcome: a traceback full of long unbroken URLs needs `break-words`
+    // to wrap at all, and the height cap plus `overflow-auto` is what
+    // stops a hundred-line failure pushing the rest of the queue
+    // off-screen. Losing either is invisible to every other test here.
+    const user = userEvent.setup();
+    const { container } = render(
+      failedRow("boom", `ERROR: https://example.com/${"a".repeat(300)}`),
+    );
+    await user.click(screen.getByRole("button", { name: /show details/i }));
+
+    const pre = container.querySelector("pre");
+    expect(pre?.className).toContain("whitespace-pre-wrap");
+    expect(pre?.className).toContain("break-words");
+    expect(pre?.className).toContain("overflow-auto");
+    expect(pre?.className).toContain("max-h-");
+    // A scroll container a keyboard user cannot focus is one they cannot
+    // read past the first screenful.
+    expect(pre?.getAttribute("tabindex")).toBe("0");
+  });
+});
+
 describe("QueueRow auto-retry stage rendering", () => {
   it("renders the retrying stage instead of percent during backoff", () => {
     const job = makeJob({
@@ -485,8 +699,32 @@ describe("QueueRow auto-retry stage rendering", () => {
       },
     });
     render(<QueueRow job={job} index={0} />);
-    expect(screen.getByText("retrying (attempt 2/5)")).toBeTruthy();
+    // The backoff wait is the one number that makes this row readable as
+    // "waiting" rather than as a stalled download. It rides along on
+    // `eta_secs` and used to be dropped on the floor here.
+    expect(screen.getByText("retrying in 8s (attempt 2/5)")).toBeTruthy();
     expect(screen.queryByText("37.2%")).toBeNull();
+  });
+
+  it("still names the attempt when the backoff wait is missing", () => {
+    const job = makeJob({
+      kind: "extract",
+      state: "running",
+      payload: { url: "https://example.com/video" },
+    });
+    useAppStore.setState({
+      progressById: {
+        [job.id]: {
+          percent: 37.2,
+          eta_secs: null,
+          speed_hr: null,
+          encoder: null,
+          stage: "retrying (attempt 2/5)",
+        },
+      },
+    });
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText("retrying (attempt 2/5)")).toBeTruthy();
   });
 
   it("drops the retrying stage once the job is paused", () => {

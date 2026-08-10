@@ -110,6 +110,37 @@ describe("JobStateAnnouncer", () => {
     expect(region.textContent).toMatch(/failed: ffmpeg failed/);
   });
 
+  it("announces the same explanation the rows show, not the raw state", () => {
+    // A screen reader must not be the one surface that hears "interrupted"
+    // bare, or that gets an 8KB stderr dump read out character by
+    // character. Both are what `failureView` exists to prevent.
+    useAppStore.setState({ jobs: [makeJob("a", { state: "running" })] });
+    const { container } = render(<JobStateAnnouncer />);
+    act(() => {
+      useAppStore.setState({
+        jobs: [makeJob("a", { state: { error: { message: "interrupted", detail: null } } })],
+      });
+    });
+    advance();
+    const region = container.querySelector('[role="status"]') as HTMLElement;
+    expect(region.textContent).toMatch(/Goop closed while this ran/);
+    expect(region.textContent).not.toMatch(/failed: interrupted/);
+  });
+
+  it("does not read an entire stderr dump aloud", () => {
+    useAppStore.setState({ jobs: [makeJob("a", { state: "running" })] });
+    const { container } = render(<JobStateAnnouncer />);
+    const stderr = `ffmpeg: ${"x".repeat(9000)}`;
+    act(() => {
+      useAppStore.setState({
+        jobs: [makeJob("a", { state: { error: { message: stderr, detail: stderr } } })],
+      });
+    });
+    advance();
+    const region = container.querySelector('[role="status"]') as HTMLElement;
+    expect((region.textContent ?? "").length).toBeLessThan(300);
+  });
+
   it("clears the region briefly between announcements (forces re-announce of identical messages)", () => {
     useAppStore.setState({ jobs: [makeJob("a", { state: "running" })] });
     const { container } = render(<JobStateAnnouncer />);
