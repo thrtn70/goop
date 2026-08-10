@@ -3,6 +3,7 @@ use goop_core::{
     SidecarEvent, WarningCode,
 };
 use goop_sidecar::BinaryResolver;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -35,8 +36,9 @@ pub struct GalleryDl<'a> {
 }
 
 /// Result of a gallery-dl `extract` call. `output_path` points at the
-/// folder gallery-dl wrote into; `file_count` is the number of files
-/// actually downloaded (parsed from gallery-dl's stderr).
+/// folder gallery-dl wrote into; `file_count` and `bytes` cover the files
+/// it named on stdout as belonging to this URL, whether it fetched them
+/// this run or found them already there.
 #[derive(Debug)]
 pub struct GalleryDlResult {
     pub output_path: String,
@@ -217,12 +219,59 @@ impl<'a> GalleryDl<'a> {
             .arg("--no-mtime")
             .arg("-o")
             .arg("output.metadata=null")
-            // Quiet INFO logs but keep the file-completion lines we need
-            // for progress counting. gallery-dl's default skip-existing
-            // behaviour is deliberately left in effect: it is what makes a
-            // paused or retried album re-run cheap (finished files are
-            // skipped, the in-flight `.part` is resumed).
-            .arg("--quiet");
+            // The tally is built from the paths gallery-dl reports on
+            // stdout, so pin the two config keys that decide what lands
+            // there — a user-level gallery-dl config can set either, and we
+            // don't pass `--config-ignore`:
+            //
+            //   mode=pipe  what it picks anyway when stdout is not a
+            //              terminal. "terminal" would shorten long paths to
+            //              a width we don't have; "null" prints nothing.
+            //   skip=true  the default. `false` drops the `# <path>` line
+            //              for a file already on disk — which on a re-run of
+            //              a complete album is every file it has.
+            //
+            // gallery-dl's own skip-existing behaviour is deliberately left
+            // in effect: it is what makes a paused or retried album re-run
+            // cheap (finished files are skipped, the in-flight `.part` is
+            // resumed).
+            //
+            // Deliberately NOT `--quiet`. It sets the log level to ERROR,
+            // and gallery-dl forces `output.mode=null` for any level at or
+            // above WARNING — after `-o` has been applied, so it cannot be
+            // pinned back. It silences the very lines this reads. Default
+            // INFO logging costs nothing in exchange: a successful run
+            // writes nothing to stderr, and a failing one is bounded by the
+            // tail window below.
+            //
+            // `probe_once` still passes `--quiet` and still reads stdout,
+            // which is not a contradiction: `-j` runs a different job type
+            // that writes its JSON to stdout directly, bypassing the output
+            // module this flag disables.
+            .arg("-o")
+            .arg("output.mode=pipe")
+            .arg("-o")
+            .arg("output.skip=true")
+            // And pin the ENCODING of that stream, not just what goes on it.
+            //
+            // gallery-dl reconfigures its own stdout with `errors="replace"`
+            // and leaves the encoding to Python, which for a redirected
+            // stream is the locale's — the ANSI codepage on Windows. Any
+            // character outside it is written as `?`, so a CJK, Cyrillic or
+            // emoji filename arrives here as a path that does not exist. The
+            // tally stats it, misses, and silently drops the file; with a
+            // whole album mangled the run reports "no extractable content"
+            // while every file sits on disk.
+            //
+            // Reproduced against gallery-dl 1.32.3 under `PYTHONIOENCODING=cp1252`:
+            // `…__日本語テスト.jpg` printed as `…__??????.jpg`, and correctly
+            // with this pin. Goes through gallery-dl's own config rather than
+            // `PYTHONUTF8=1`, which a PyInstaller build may ignore.
+            //
+            // The old directory walk never read a printed byte and was immune,
+            // so this is the cost of moving to identity — pay it here.
+            .arg("-o")
+            .arg("output.stdout=utf-8");
         if with_cookies {
             if let Some(browser) = validated_browser(req.cookies_from_browser.as_deref()) {
                 cmd.arg("--cookies-from-browser").arg(browser);
@@ -233,13 +282,6 @@ impl<'a> GalleryDl<'a> {
             .stderr(Stdio::piped());
 
         let started = std::time::Instant::now();
-        // The scan cutoff survives across pause/resume and retry re-runs
-        // via an on-disk marker, so the post-exit tally counts the whole
-        // album from the FIRST attempt's start — not just files touched by
-        // this run. Without it, a resume of an already-complete album
-        // would tally zero files and fail as "no extractable content".
-        let marker_path = start_marker_path(output_dir, &req.url);
-        let scan_cutoff = read_or_init_start_marker(&marker_path);
         let mut child: Child = cmd.spawn()?;
         // invariant: stdout was requested with Stdio::piped above.
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -248,12 +290,16 @@ impl<'a> GalleryDl<'a> {
         let mut out_reader = BufReader::new(stdout).lines();
         let mut err_reader = BufReader::new(stderr).lines();
 
-        // In-loop counting is best-effort — we use it only to drive
-        // progress events. The authoritative file count + bytes total
-        // comes from a post-exit directory scan (see `scan_outputs`
-        // below) so we don't suffer from a TOCTOU race between
-        // gallery-dl printing a path and the VFS materialising it.
-        let mut in_loop_count: u32 = 0;
+        // The files this run is answerable for, by identity rather than by
+        // timestamp. gallery-dl names every file it fetched or skipped, so
+        // this URL's tally stays this URL's even though every extract job
+        // shares one downloads folder by default. Sizing them is deferred
+        // to after the child exits — see `tally_reported`.
+        //
+        // Grows with the album and is not capped: one path per file, so a
+        // 50k-image profile crawl costs single-digit MB. Bounding it would
+        // mean choosing which files not to count.
+        let mut reported: HashSet<PathBuf> = HashSet::new();
         let mut stderr_tail = String::new();
         // Sticky witness for the cookie-DB error. See ytdlp.rs for the
         // full rationale: stderr_tail is a ring-buffer; we capture the
@@ -279,37 +325,51 @@ impl<'a> GalleryDl<'a> {
                 int = signals.interrupted() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    return Err(finish_interrupt(int, output_dir, &marker_path));
+                    return Err(finish_interrupt(int, output_dir));
                 }
                 line = out_reader.next_line(), if !out_done => {
-                    match line? {
-                        Some(l) => {
-                            // gallery-dl with --quiet still prints completed
-                            // file paths to stdout — one per line, no prefix.
-                            // Count any non-empty line as a completion for
-                            // progress purposes (the post-exit scan filters
-                            // for actual files). Treating every non-empty
-                            // line as a tick is intentional: an extractor
-                            // emitting an unexpected non-path line gives a
-                            // slightly inflated progress count, which is
-                            // strictly less bad than a false-negative
-                            // dropping a completed file from the tally.
-                            let trimmed = l.trim();
-                            if !trimmed.is_empty() {
-                                in_loop_count += 1;
-                                self.sink.emit_progress(ProgressEvent {
-                                    job_id,
-                                    percent: 0.0,
-                                    eta_secs: None,
-                                    speed_hr: None,
-                                    stage: format!(
-                                        "downloaded {in_loop_count} file(s)"
-                                    ),
-                                    encoder: None,
-                                });
+                    match line {
+                        Ok(Some(l)) => {
+                            // One reportable line per file gallery-dl
+                            // handled. New ones drive progress; the set is
+                            // what the post-exit tally is computed from.
+                            match reported_output(&l, output_dir) {
+                                Some(path) => if reported.insert(path) {
+                                    self.sink.emit_progress(ProgressEvent {
+                                        job_id,
+                                        percent: 0.0,
+                                        eta_secs: None,
+                                        speed_hr: None,
+                                        stage: format!(
+                                            "downloaded {} file(s)",
+                                            reported.len()
+                                        ),
+                                        encoder: None,
+                                    });
+                                },
+                                // Only blank lines are expected here. Log
+                                // the rest: a line we can't place is the
+                                // one symptom of a stdout contract that has
+                                // shifted under us, and the tally goes to
+                                // zero without it ever being visible.
+                                None if !l.trim().is_empty() => tracing::debug!(
+                                    line = %l,
+                                    dir = %output_dir.display(),
+                                    "gallery-dl named a path outside the output directory"
+                                ),
+                                None => {}
                             }
                         }
-                        None => out_done = true,
+                        Ok(None) => out_done = true,
+                        // Same treatment as stderr below: tokio has already
+                        // consumed the bad bytes, so skip the line and keep
+                        // reading. Do NOT propagate — an early return here
+                        // leaves the child unreaped and still writing into
+                        // the user's folder while the retry layer starts a
+                        // second one on the same URL and directory.
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
+                        // A real IO error won't clear on the next poll.
+                        Err(_) => out_done = true,
                     }
                 }
                 line = err_reader.next_line(), if !err_done => {
@@ -375,46 +435,38 @@ impl<'a> GalleryDl<'a> {
                 stderr,
             });
         }
-        // Authoritative count: walk the output directory for files
-        // created/modified after the run started. Avoids the TOCTOU
-        // race the in-loop is_file() check had where a freshly-renamed
-        // file might not show up as a regular file by the time the
-        // event-loop reads gallery-dl's stdout line for it.
-        let (file_count, bytes) = scan_outputs(output_dir, scan_cutoff);
+        // Authoritative count: the files gallery-dl named, sized now that
+        // it has exited. Skipped files count as much as fetched ones — a
+        // re-run of a complete album is all skips, and the album is still
+        // there. That is what makes re-running a link to pick up new posts
+        // succeed when there are none, which is the normal way to use these
+        // sites.
+        let reported_count = reported.len();
+        let (file_count, bytes) = tokio::task::spawn_blocking(move || tally_reported(&reported))
+            .await
+            .map_err(std::io::Error::other)?;
         if file_count == 0 {
-            // gallery-dl exited 0 but the output dir has no new files —
-            // likely the URL probed cleanly but had no extractable
-            // content (private album, empty user profile, etc.). The
-            // marker is kept so a manual retry still tallies from the
-            // original start.
+            // gallery-dl exited 0 having named no file that is on disk —
+            // the URL probed cleanly but had no extractable content
+            // (private album, empty user profile, etc.). Whatever else is
+            // in the output folder belongs to some other URL and cannot
+            // stand in for this one.
+            //
+            // `reported` separates "said nothing" (the honest empty album)
+            // from "named files that aren't there", which is the shape a
+            // config surprise takes — a per-extractor `base-directory`
+            // beating the root one `--directory` sets, say. Both reach the
+            // user as the same message, so leave a trail here.
+            tracing::warn!(
+                reported = reported_count,
+                dir = %output_dir.display(),
+                "gallery-dl exited 0 with nothing to tally"
+            );
             return Err(GoopError::SubprocessFailed {
                 binary: "gallery-dl".into(),
                 stderr: "URL valid but no extractable content".into(),
             });
         }
-        // The marker is KEPT on success, not deleted.
-        //
-        // It is the cutoff `scan_outputs` tallies from, and deleting it made
-        // the next run for this URL sample a fresh cutoff of `now`. gallery-dl
-        // skips what it already has, writes nothing, and exits 0 — correctly —
-        // and every file from the first download then sits behind the new
-        // cutoff, so the tally is zero and the branch above calls a complete
-        // album "no extractable content". Re-running a link to pick up new
-        // posts is the normal way to use these sites, and it failed every
-        // time there was nothing new.
-        //
-        // Keeping it makes a re-run tally from the FIRST attempt's start, so
-        // the album's own files still count and the run succeeds honestly.
-        // The zero-file branch above already keeps the marker for exactly
-        // this reason; the success path deleting it was the inconsistency.
-        //
-        // Cost: one hidden dotfile per URL stays in the output directory.
-        // `scan_outputs` already excludes it from the tally, and cancelling a
-        // run still removes it (`cleanup_run_artifacts`).
-        //
-        // Limit: `START_MARKER_MAX_AGE` is 7 days. Past that the marker is
-        // re-initialised to now and the false failure returns. Pinned by
-        // `the_fix_expires_after_the_marker_does`.
         Ok(GalleryDlResult {
             output_path: output_dir.to_string_lossy().into_owned(),
             bytes,
@@ -424,52 +476,69 @@ impl<'a> GalleryDl<'a> {
     }
 }
 
-/// Walk `output_dir` recursively for regular files modified at or after
-/// `cutoff`. Returns `(count, total_bytes)`. Used as the authoritative
-/// post-exit tally — robust against the in-loop `is_file()` race that
-/// could mis-count files freshly renamed during the download. The cutoff
-/// is the run's persisted start marker so pause/resume and retry re-runs
-/// tally every file the album produced since the first attempt.
-fn scan_outputs(output_dir: &std::path::Path, cutoff: std::time::SystemTime) -> (u32, u64) {
-    let started_wall = cutoff;
+/// gallery-dl's marker for "this file was already on disk, so I left it
+/// alone". Same two characters on every platform.
+const SKIP_PREFIX: &str = "# ";
+
+/// Resolve one line of gallery-dl's stdout to the output file it names, or
+/// `None` if the line does not name one.
+///
+/// Under `output.mode=pipe` gallery-dl prints exactly one line per file it
+/// handled: the path alone for a file it fetched, `# ` + the path for one
+/// it skipped as already present. Both belong to the URL being downloaded,
+/// which is the whole point — a tally built from these cannot pick up the
+/// file a concurrent job, or last week's job, wrote into the same folder.
+///
+/// Anything resolving outside `output_dir` is dropped. gallery-dl was
+/// handed it as `--directory`, so a path that escapes it is not a line we
+/// understand, and a filename is ultimately remote-controlled data. The
+/// containment test is lexical, not resolved — a path leaving the tree
+/// through a symlink would pass — which is enough here because the only
+/// thing done with the result is `metadata()`.
+///
+/// The comparison holds on Windows because gallery-dl prints the path it
+/// built from the `--directory` we gave it, not a re-resolved one, so both
+/// sides carry the same verbatim prefix that `canonical_output_dir` put
+/// there.
+fn reported_output(line: &str, output_dir: &std::path::Path) -> Option<PathBuf> {
+    let raw = line.strip_prefix(SKIP_PREFIX).unwrap_or(line);
+    if raw.trim().is_empty() {
+        return None;
+    }
+    // Not trimmed: the reader has already removed the line terminator, and
+    // a trailing space is a legal filename character. `join` takes an
+    // absolute `raw` as-is and resolves a relative one against the output
+    // directory, which is the behaviour we want for both.
+    let path = output_dir.join(raw);
+    let escapes = path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    (!escapes && path.starts_with(output_dir)).then_some(path)
+}
+
+/// Size up the files this run reported. Returns `(count, total_bytes)`.
+///
+/// Deferred until after the child exits on purpose. gallery-dl prints a
+/// path as it finalises the file, and the rename behind that can still be
+/// settling when the event loop reads the line — the TOCTOU race the
+/// previous directory-walk tally was written to avoid. Once the process is
+/// gone every rename it was going to do is done, so a single stat is
+/// enough, and identity survives where a timestamp cutoff could not.
+///
+/// A reported path that is not a regular file by then goes uncounted: the
+/// honest reading of "gallery-dl named this and it is not there".
+fn tally_reported(reported: &HashSet<PathBuf>) -> (u32, u64) {
     let mut count = 0u32;
     let mut bytes = 0u64;
-    let mut stack: Vec<PathBuf> = vec![output_dir.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for path in reported {
+        let Ok(meta) = std::fs::metadata(path) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !meta.is_file() {
-                continue;
-            }
-            // Skip gallery-dl's `.part` partials and hidden bookkeeping
-            // files (the run's start marker, the direct downloader's
-            // sidecars) — none are user-facing outputs and both would
-            // inflate the tally.
-            if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e == "part")
-                || path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with('.'))
-            {
-                continue;
-            }
-            let recent = meta.modified().map(|m| m >= started_wall).unwrap_or(false);
-            if recent {
-                count += 1;
-                bytes += meta.len();
-            }
+        if !meta.is_file() {
+            continue;
         }
+        count += 1;
+        bytes += meta.len();
     }
     (count, bytes)
 }
@@ -545,71 +614,29 @@ fn canonical_output_dir(raw: &str) -> Result<PathBuf, GoopError> {
 /// Best-effort cleanup of gallery-dl's `.part` files on cancel. Mirrors
 /// the cleanup_partials helper in `ytdlp.rs`. Limited to files modified
 /// in the last hour so we don't sweep stale partials from earlier runs.
-/// Cancel: the user is done — remove recent `.part` partials and the
-/// run's start marker. Pause: keep both; a re-run skips finished files
-/// (gallery-dl's default), resumes the in-flight `.part`, and tallies
-/// the album from the marker's original start time.
+/// Cancel: the user is done — remove recent `.part` partials. Pause: keep
+/// them; a re-run skips finished files (gallery-dl's default), resumes the
+/// in-flight `.part`, and reports the whole album either way, so the tally
+/// covers what earlier attempts already fetched.
 ///
 /// Caveat: resume relies on gallery-dl DEFAULTS (part files on, skip
 /// enabled); a user-level gallery-dl config that disables either turns
 /// resume into a re-download. Accepted for now — Goop doesn't pass
 /// `--config-ignore`.
-fn finish_interrupt(
-    int: Interrupt,
-    output_dir: &std::path::Path,
-    marker_path: &std::path::Path,
-) -> GoopError {
+fn finish_interrupt(int: Interrupt, output_dir: &std::path::Path) -> GoopError {
     match int {
         Interrupt::Cancel => {
             cleanup_partials(output_dir);
-            let _ = std::fs::remove_file(marker_path);
             GoopError::Cancelled
         }
         Interrupt::Pause => GoopError::Paused,
     }
 }
 
-/// The per-URL start marker: unix-millis of the first attempt's start,
-/// keyed by URL hash so concurrent albums in one folder don't collide.
-fn start_marker_path(output_dir: &std::path::Path, url: &str) -> PathBuf {
-    output_dir.join(format!(".{}.goopdl.t0", crate::direct::url_hash(url)))
-}
-
-/// How long a start marker stays trusted. A marker older than this is a
-/// leftover from an abandoned run (the queue never sits on a paused or
-/// failed job that long without the partials going stale too) — re-init
-/// rather than tally a week of unrelated files into the album.
-const START_MARKER_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
-
-/// Read the persisted run-start time, or initialise it to now. Garbage
-/// content, future timestamps, and stale markers all re-initialise.
-fn read_or_init_start_marker(marker_path: &std::path::Path) -> std::time::SystemTime {
-    let now = std::time::SystemTime::now();
-    if let Ok(content) = std::fs::read_to_string(marker_path) {
-        if let Ok(ms) = content.trim().parse::<u64>() {
-            let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
-            let fresh = now
-                .duration_since(t)
-                .map(|age| age <= START_MARKER_MAX_AGE)
-                .unwrap_or(false);
-            if fresh {
-                return t;
-            }
-        }
-    }
-    let ms = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let _ = std::fs::write(marker_path, ms.to_string());
-    now
-}
-
-/// Remove the URL's partials AND start marker — the full cancel-of-paused
-/// cleanup, callable from outside a running download.
-pub(crate) fn cleanup_run_artifacts(output_dir: &std::path::Path, url: &str) {
+/// Remove the run's partials — the cancel-of-paused cleanup, callable from
+/// outside a running download.
+pub(crate) fn cleanup_run_artifacts(output_dir: &std::path::Path) {
     cleanup_partials(output_dir);
-    let _ = std::fs::remove_file(start_marker_path(output_dir, url));
 }
 
 fn cleanup_partials(output_dir: &std::path::Path) {
@@ -701,105 +728,110 @@ mod tests {
     }
 
     #[test]
-    fn finish_interrupt_pause_keeps_part_and_marker_cancel_removes_both() {
+    fn finish_interrupt_pause_keeps_the_part_cancel_removes_it() {
         let dir = tempfile::tempdir().unwrap();
-        let url = "https://example.com/album";
         let part = dir.path().join("photo.jpg.part");
-        let marker = start_marker_path(dir.path(), url);
         std::fs::write(&part, b"x").unwrap();
-        std::fs::write(&marker, "1000").unwrap();
 
-        let err = finish_interrupt(Interrupt::Pause, dir.path(), &marker);
+        let err = finish_interrupt(Interrupt::Pause, dir.path());
         assert!(matches!(err, GoopError::Paused));
         assert!(part.exists(), "pause keeps the in-flight .part");
-        assert!(marker.exists(), "pause keeps the tally marker");
 
-        let err = finish_interrupt(Interrupt::Cancel, dir.path(), &marker);
+        let err = finish_interrupt(Interrupt::Cancel, dir.path());
         assert!(matches!(err, GoopError::Cancelled));
         assert!(!part.exists(), "cancel removes the .part");
-        assert!(!marker.exists(), "cancel removes the marker");
     }
 
     #[test]
-    fn start_marker_init_read_and_staleness() {
+    fn reported_output_reads_fetched_and_skipped_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join(".abc.goopdl.t0");
-        let now = std::time::SystemTime::now();
+        let out = dir.path();
 
-        // Missing: initialised to ~now and persisted.
-        let t = read_or_init_start_marker(&marker);
-        assert!(marker.exists());
-        assert!(now.duration_since(t).unwrap_or_default().as_secs() < 5);
+        // A fetched file, and the same file on a later run.
+        let fetched = out.join("photo.jpg");
+        assert_eq!(
+            reported_output(&fetched.to_string_lossy(), out).as_ref(),
+            Some(&fetched)
+        );
+        assert_eq!(
+            reported_output(&format!("# {}", fetched.display()), out).as_ref(),
+            Some(&fetched),
+            "a skipped file is still one of this URL's files"
+        );
 
-        // Valid recent value: returned as-is.
-        let hour_ago = now - std::time::Duration::from_secs(3600);
-        let ms = hour_ago
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        std::fs::write(&marker, ms.to_string()).unwrap();
-        let t = read_or_init_start_marker(&marker);
-        let drift = t
-            .duration_since(hour_ago)
-            .or_else(|_| hour_ago.duration_since(t))
-            .unwrap();
-        assert!(drift.as_millis() < 5, "persisted value round-trips");
+        // A subdirectory an extractor made under --directory.
+        let nested = out.join("album").join("01.jpg");
+        assert_eq!(
+            reported_output(&nested.to_string_lossy(), out).as_ref(),
+            Some(&nested)
+        );
 
-        // Garbage content: re-initialised.
-        std::fs::write(&marker, "not a number").unwrap();
-        let t = read_or_init_start_marker(&marker);
-        assert!(now.duration_since(t).unwrap_or_default().as_secs() < 5);
+        // Blank lines carry no file.
+        assert_eq!(reported_output("", out), None);
+        assert_eq!(reported_output("   ", out), None);
+        assert_eq!(reported_output(SKIP_PREFIX, out), None);
+    }
 
-        // Stale (8 days old): re-initialised.
-        let stale = now - std::time::Duration::from_secs(8 * 24 * 3600);
-        let ms = stale
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        std::fs::write(&marker, ms.to_string()).unwrap();
-        let t = read_or_init_start_marker(&marker);
-        assert!(
-            now.duration_since(t).unwrap_or_default().as_secs() < 5,
-            "stale marker must not be trusted"
+    #[test]
+    fn reported_output_refuses_paths_outside_the_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        assert_eq!(reported_output("/etc/passwd", out), None);
+        assert_eq!(reported_output("../escaped.jpg", out), None);
+        assert_eq!(
+            reported_output(&format!("# {}/../escaped.jpg", out.display()), out),
+            None,
+            "a skip line gets the same treatment as a fetch line"
         );
     }
 
     #[test]
-    fn scan_outputs_counts_from_cutoff_and_skips_bookkeeping_files() {
+    fn tally_reported_sizes_only_what_is_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        // Simulates a resumed run: the cutoff is an hour in the past (the
-        // first attempt's start), files on disk were written since then.
-        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        std::fs::write(dir.path().join("one.jpg"), b"aaaa").unwrap();
-        std::fs::write(dir.path().join("two.jpg"), b"bb").unwrap();
-        std::fs::write(dir.path().join("three.jpg.part"), b"cc").unwrap();
-        std::fs::write(dir.path().join(".xyz.goopdl.t0"), b"123").unwrap();
+        let one = dir.path().join("one.jpg");
+        let two = dir.path().join("two.jpg");
+        std::fs::write(&one, b"aaaa").unwrap();
+        std::fs::write(&two, b"bb").unwrap();
 
-        let (count, bytes) = scan_outputs(dir.path(), cutoff);
-        assert_eq!(count, 2, "partials and hidden bookkeeping are skipped");
+        let reported = HashSet::from([
+            one,
+            two,
+            // Named but gone by the time the process exited, and a
+            // directory, which is not a download.
+            dir.path().join("vanished.jpg"),
+            dir.path().to_path_buf(),
+        ]);
+        let (count, bytes) = tally_reported(&reported);
+        assert_eq!(count, 2);
         assert_eq!(bytes, 6);
     }
 
     #[test]
-    fn cleanup_run_artifacts_removes_partials_and_marker() {
+    fn tally_reported_counts_nothing_when_nothing_was_reported() {
+        assert_eq!(tally_reported(&HashSet::new()), (0, 0));
+    }
+
+    #[test]
+    fn cleanup_run_artifacts_removes_partials() {
         let dir = tempfile::tempdir().unwrap();
-        let url = "https://example.com/album";
         let part = dir.path().join("photo.jpg.part");
-        let marker = start_marker_path(dir.path(), url);
+        let keep = dir.path().join("photo.jpg");
         std::fs::write(&part, b"x").unwrap();
-        std::fs::write(&marker, "1000").unwrap();
-        cleanup_run_artifacts(dir.path(), url);
+        std::fs::write(&keep, b"x").unwrap();
+        cleanup_run_artifacts(dir.path());
         assert!(!part.exists());
-        assert!(!marker.exists());
+        assert!(keep.exists(), "finished downloads are not cleanup targets");
     }
 }
 
 /// Re-download behaviour, driven end-to-end through a fake `gallery-dl`.
 ///
-/// The tally is a filesystem scan with a time cutoff, and the cutoff is
-/// persisted per URL. That interaction is only visible across TWO runs, so
-/// none of the unit tests above can see it — they exercise the marker and the
-/// scan separately, and both are individually correct.
+/// What the tally counts is decided by what the subprocess says, so these
+/// drive the real loop rather than calling the helpers directly. The cases
+/// that matter — a complete album re-run, a second URL in the same folder,
+/// a resume — are only visible ACROSS runs, and the unit tests above,
+/// which exercise the parse and the sizing separately, cannot see any of
+/// them.
 ///
 /// Unix-only: the fakes are `/bin/sh` scripts. The logic under test is
 /// platform-independent.
@@ -813,37 +845,166 @@ mod redownload_tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    /// Argv the exec probe hands a fake to prove it can be run. gallery-dl
+    /// is only ever passed URLs and its own flags, so nothing a real run
+    /// sends can collide with it.
+    const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
+
     fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
-        write!(f, "#!/bin/sh\n{body}").unwrap();
+        // The guard answers the probe and exits before reaching the body,
+        // so probing costs nothing but a `/bin/sh` startup.
+        write!(
+            f,
+            "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}"
+        )
+        .unwrap();
         drop(f);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&path);
     }
 
-    /// Writes one file into `--directory`, the way a first download does.
+    /// Blocks until `path` can actually be `exec`d, which is not the same
+    /// moment as "we finished writing it".
     ///
-    /// The sleep is load-bearing for the same reason as in `backend.rs`'s
-    /// fakes: `scan_outputs` counts files whose mtime is at or after a cutoff
-    /// sampled from a fine-grained clock, while Linux stamps mtimes from a
-    /// coarse one. A file written within a tick of the cutoff can carry an
-    /// mtime just behind it and go uncounted.
-    const WRITES_ONE_FILE: &str = r#"
-dir=""
+    /// A second copy of the helper #66 added to `backend.rs`, deliberately
+    /// rather than sharing one: consolidating them is a test-only refactor
+    /// that would touch that PR's own regression test, and there is a third
+    /// copy in `goop-tauri` that could not share it across crates anyway.
+    /// Tracked separately.
+    ///
+    /// Same hazard #66 fixed in `backend.rs`, and the same test binary:
+    /// Linux refuses to `execve` a file while any process holds it open for
+    /// writing, and a sibling test spawning a sidecar forks a child that
+    /// inherits a copy of our write descriptor which outlives our own close.
+    /// `O_CLOEXEC` fires at the child's exec rather than its fork — the gap
+    /// in between is the bug — and renaming does not help because the kernel
+    /// counts writers per inode. Nothing reopens a fake for writing, so one
+    /// successful exec proves the path stays runnable.
+    fn wait_until_executable(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut backoff = std::time::Duration::from_millis(1);
+        loop {
+            let busy = match std::process::Command::new(path)
+                .arg(EXEC_PROBE_ARG)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => e,
+                Err(e) => panic!("fake {} could not be run at all: {e:?}", path.display()),
+            };
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake {} was still held open for writing after 10s: {busy:?}",
+                path.display()
+            );
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(std::time::Duration::from_millis(25));
+        }
+    }
+
+    /// The stdout contract is a set of `-o` pins, and nothing was checking
+    /// they are actually passed. Every one of them is load-bearing:
+    /// `mode=pipe` decides the format the tally parses, `skip=true` decides
+    /// whether an already-downloaded file is reported at all, and
+    /// `stdout=utf-8` decides whether a non-ASCII path arrives intact or as
+    /// `?`. A user-level gallery-dl config can set all three, and Goop does
+    /// not pass `--config-ignore`.
+    ///
+    /// Reads the argv off a fake that dumps it, which is the only way to see
+    /// what was actually spawned.
+    #[tokio::test]
+    async fn the_stdout_contract_is_pinned_on_the_command_line() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let argv = out.path().join("argv");
+        // Dump argv, then behave like a run that downloaded nothing so the
+        // call returns promptly.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            &format!(
+                "for a in \"$@\"; do echo \"$a\" >> '{}'; done\nexit 0\n",
+                argv.display()
+            ),
+        );
+
+        let _ = run(
+            bins.path(),
+            &request("https://example.com/album", out.path()),
+        )
+        .await;
+
+        let sent = std::fs::read_to_string(&argv).unwrap_or_default();
+        for pin in [
+            "output.mode=pipe",
+            "output.skip=true",
+            "output.stdout=utf-8",
+        ] {
+            assert!(sent.contains(pin), "missing `-o {pin}` in argv:\n{sent}");
+        }
+        // `--quiet` sets the log level to ERROR, and gallery-dl forces
+        // `output.mode=null` at WARNING and above AFTER `-o` is applied — so
+        // it silences the very lines the tally is built from and cannot be
+        // pinned back. Verified against 1.32.3: with `--quiet`, stdout is
+        // empty even with `output.mode=pipe` set.
+        assert!(
+            !sent.lines().any(|a| a == "--quiet"),
+            "--quiet would silence the stdout this tally reads:\n{sent}"
+        );
+    }
+
+    /// Body of a fake gallery-dl that writes `downloads` into `--directory`
+    /// and reports both lists on stdout the way the real tool does.
+    ///
+    /// The report format is gallery-dl's `PipeOutput`, which is what it
+    /// selects whenever stdout is not a terminal — a bare absolute path per
+    /// file it fetched, `# ` + the same path per file it skipped because the
+    /// album is already on disk. Verified against gallery-dl 1.32.3; the
+    /// `# ` prefix is the same on Windows.
+    fn fake(downloads: &[&str], skips: &[&str]) -> String {
+        let mut body = String::from(
+            r#"dir=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--directory" ]; then dir="$a"; fi
   prev="$a"
 done
-sleep 0.05
-printf 'x' > "$dir/photo.jpg"
-exit 0
-"#;
+"#,
+        );
+        for name in downloads {
+            body.push_str(&format!(
+                "printf 'x' > \"$dir/{name}\"\necho \"$dir/{name}\"\n"
+            ));
+        }
+        for name in skips {
+            body.push_str(&format!("echo \"# $dir/{name}\"\n"));
+        }
+        body.push_str("exit 0\n");
+        body
+    }
+
+    /// A first download: one new file.
+    fn downloads(name: &str) -> String {
+        fake(&[name], &[])
+    }
 
     /// The second run against an album already on disk: gallery-dl's
-    /// skip-existing behaviour. Exits 0 having written nothing, because
-    /// there was nothing new to fetch.
-    const SKIPS_EVERYTHING: &str = "sleep 0.05\nexit 0\n";
+    /// skip-existing behaviour. Writes nothing because there was nothing new
+    /// to fetch, and says so, once per file it left alone.
+    fn skips(name: &str) -> String {
+        fake(&[], &[name])
+    }
+
+    /// A URL that probed cleanly but yields nothing — a private album, an
+    /// empty profile. Exits 0 with no file and nothing to report.
+    fn reports_nothing() -> String {
+        fake(&[], &[])
+    }
 
     fn request(url: &str, output_dir: &std::path::Path) -> ExtractRequest {
         ExtractRequest {
@@ -862,13 +1023,22 @@ exit 0
         }
     }
 
+    async fn run_with_sink(
+        bins: &std::path::Path,
+        req: &ExtractRequest,
+    ) -> (Result<GalleryDlResult, GoopError>, Arc<RecordingSink>) {
+        let resolver = BinaryResolver::new(bins.to_path_buf());
+        let sink = Arc::new(RecordingSink::new());
+        let gd = GalleryDl::new(&resolver, sink.clone());
+        let res = gd.download(JobId::new(), req, JobSignals::new()).await;
+        (res, sink)
+    }
+
     async fn run(
         bins: &std::path::Path,
         req: &ExtractRequest,
     ) -> Result<GalleryDlResult, GoopError> {
-        let resolver = BinaryResolver::new(bins.to_path_buf());
-        let gd = GalleryDl::new(&resolver, Arc::new(RecordingSink::new()));
-        gd.download(JobId::new(), req, JobSignals::new()).await
+        run_with_sink(bins, req).await.0
     }
 
     /// The bug, as a test.
@@ -884,13 +1054,13 @@ exit 0
         let url = "https://example.com/album";
         let req = request(url, out.path());
 
-        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        write_fake(bins.path(), "gallery-dl", &downloads("photo.jpg"));
         let first = run(bins.path(), &req)
             .await
             .expect("the first run downloads");
         assert_eq!(first.file_count, 1);
 
-        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        write_fake(bins.path(), "gallery-dl", &skips("photo.jpg"));
         let second = run(bins.path(), &req).await;
 
         assert!(
@@ -904,157 +1074,146 @@ exit 0
         );
     }
 
-    /// The mechanism behind it: the success path used to delete the marker,
-    /// so a re-run sampled a fresh cutoff of `now` and every file already on
-    /// disk fell behind it.
+    /// The tally needs nothing persisted between runs, so it leaves nothing
+    /// in the user's downloads folder to persist it with.
     #[tokio::test]
-    async fn a_successful_run_keeps_its_start_marker() {
+    async fn a_run_leaves_no_bookkeeping_behind() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let url = "https://example.com/album";
-        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        write_fake(bins.path(), "gallery-dl", &downloads("photo.jpg"));
 
         run(bins.path(), &request(url, out.path()))
             .await
             .expect("downloads");
 
-        assert!(
-            start_marker_path(out.path(), url).exists(),
-            "without the marker a re-run tallies from now and sees nothing"
-        );
+        let left: Vec<_> = std::fs::read_dir(out.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec!["photo.jpg"], "the download, and nothing else");
     }
 
-    /// ⚠️ The other limitation, also pinned rather than left to be found.
-    ///
-    /// `scan_outputs` walks the whole output directory and decides purely on
-    /// mtime — it has no idea which file belongs to which URL. Every extract
-    /// job shares one downloads folder by default, so a re-run of album A
-    /// tallies anything written since A's marker, album B included.
-    ///
-    /// The mechanism is not new: a *resumed* run has always counted whatever
-    /// a concurrent job wrote into the same folder since it started (the
-    /// default extract concurrency is 2). What this fix changes is the
-    /// window — from one run's duration to the marker's lifetime.
-    ///
-    /// Kept in the "known and measured" column rather than fixed here.
-    /// Fixing it properly means tallying by file identity instead of by
-    /// timestamp, which is a different change from deleting one line. The
-    /// alternative — leaving the marker deleted — fails EVERY re-run of a
-    /// complete album, which is both worse and unconditional.
+    /// Two albums, one downloads folder — which is the default, and the
+    /// reason a tally cannot be a directory walk. A's count is A's files,
+    /// whatever else happens to be sitting beside them.
     #[tokio::test]
-    async fn a_shared_output_folder_over_counts_across_urls() {
+    async fn a_shared_output_folder_does_not_cross_urls() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let a = "https://example.com/album-a";
         let b = "https://example.com/album-b";
 
-        write_fake(
-            bins.path(),
-            "gallery-dl",
-            &WRITES_ONE_FILE.replace("photo.jpg", "a.jpg"),
-        );
+        write_fake(bins.path(), "gallery-dl", &downloads("a.jpg"));
         run(bins.path(), &request(a, out.path())).await.expect("a");
-        write_fake(
-            bins.path(),
-            "gallery-dl",
-            &WRITES_ONE_FILE.replace("photo.jpg", "b.jpg"),
-        );
+        write_fake(bins.path(), "gallery-dl", &downloads("b.jpg"));
         run(bins.path(), &request(b, out.path())).await.expect("b");
 
-        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        write_fake(bins.path(), "gallery-dl", &skips("a.jpg"));
         let again = run(bins.path(), &request(a, out.path()))
             .await
             .expect("succeeds");
         assert_eq!(
-            again.file_count, 2,
-            "documenting, not endorsing: a re-run of A counts B's file too"
+            again.file_count, 1,
+            "A has one file; B's is in the same folder and is still not A's"
         );
 
-        // The sharper edge of the same mechanism: with A's own file gone,
-        // A reports success on the strength of B's.
+        // The sharper edge: with nothing of its own left on disk and nothing
+        // to report, A must fail honestly rather than pass on B's file.
         std::fs::remove_file(out.path().join("a.jpg")).unwrap();
+        write_fake(bins.path(), "gallery-dl", &reports_nothing());
         let orphaned = run(bins.path(), &request(a, out.path())).await;
-        assert_eq!(
-            orphaned.expect("still 'succeeds'").file_count,
-            1,
-            "a tally by timestamp cannot tell whose file it found"
+        assert!(
+            orphaned.is_err(),
+            "a URL that produced nothing cannot borrow B's file to succeed: \
+             {orphaned:?}"
         );
     }
 
-    /// The marker is per URL, so one album's cutoff cannot silently become
-    /// another's.
+    /// The tripwire for the flag that started all this.
+    ///
+    /// The queue row's file count and the tally read the same stream, so
+    /// anything that silences gallery-dl's stdout takes out both at once —
+    /// silently, because an empty stdout looks exactly like an album with
+    /// nothing in it. `--quiet` did precisely that: it sets the log level to
+    /// ERROR, and gallery-dl forces `output.mode=null` at WARNING and above.
+    /// Progress had been dead the whole time it was passed; the tally only
+    /// survived because it walked the directory instead.
     #[tokio::test]
-    async fn two_urls_keep_separate_markers() {
-        let bins = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
-        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
-
-        let a = "https://example.com/album-a";
-        let b = "https://example.com/album-b";
-        run(bins.path(), &request(a, out.path())).await.expect("a");
-        run(bins.path(), &request(b, out.path())).await.expect("b");
-
-        let (ma, mb) = (
-            start_marker_path(out.path(), a),
-            start_marker_path(out.path(), b),
-        );
-        assert!(ma.exists() && mb.exists());
-        assert_ne!(ma, mb, "one marker for both URLs would cross the tallies");
-    }
-
-    /// Cancelling still cleans the marker up, so the file kept on the success
-    /// path is not a leak with no owner.
-    #[tokio::test]
-    async fn cancelling_still_removes_the_marker() {
+    async fn every_reported_file_shows_up_as_progress() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let url = "https://example.com/album";
-        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
-        run(bins.path(), &request(url, out.path()))
-            .await
-            .expect("downloads");
-        assert!(start_marker_path(out.path(), url).exists());
+        write_fake(bins.path(), "gallery-dl", &fake(&["two.jpg"], &["one.jpg"]));
 
-        cleanup_run_artifacts(out.path(), url);
-        assert!(!start_marker_path(out.path(), url).exists());
+        let (res, sink) = run_with_sink(bins.path(), &request(url, out.path())).await;
+        res.expect("downloads");
+
+        let stages: Vec<String> = sink
+            .progress
+            .lock()
+            .iter()
+            .map(|p| p.stage.clone())
+            .collect();
+        assert_eq!(
+            stages,
+            vec!["downloaded 1 file(s)", "downloaded 2 file(s)"],
+            "one tick per file, skipped ones included"
+        );
     }
 
-    /// ⚠️ The limitation, pinned in code rather than only in prose.
-    ///
-    /// `START_MARKER_MAX_AGE` is 7 days. A marker older than that is treated
-    /// as untrustworthy and re-initialised to now — so keeping the marker
-    /// fixes re-downloads within a week, and after that the same false
-    /// failure comes back. This is a real remaining gap, not a rounding
-    /// error, and a test is the only place it will not be forgotten.
+    /// A resumed album is reported whole: the files earlier attempts already
+    /// fetched come back as skips, and they are as much a part of the tally
+    /// as the one this attempt finished.
     #[tokio::test]
-    async fn the_fix_expires_after_the_marker_does() {
+    async fn a_resumed_album_tallies_what_earlier_attempts_fetched() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let url = "https://example.com/album";
         let req = request(url, out.path());
 
-        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        write_fake(bins.path(), "gallery-dl", &downloads("one.jpg"));
+        run(bins.path(), &req).await.expect("the first attempt");
+
+        // The resume: one file already there, one newly fetched.
+        write_fake(bins.path(), "gallery-dl", &fake(&["two.jpg"], &["one.jpg"]));
+        let resumed = run(bins.path(), &req).await.expect("the resume");
+        assert_eq!(resumed.file_count, 2, "the album, not just the new file");
+        assert_eq!(resumed.bytes, 2, "sized whole, one byte per fake file");
+    }
+
+    /// The tally reads no clock, so there is no window it stops working
+    /// outside of. An album whose files are old enough that any cutoff a
+    /// timestamp-based tally could pick would exclude them still re-runs.
+    #[tokio::test]
+    async fn re_downloading_works_however_old_the_album_is() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let url = "https://example.com/album";
+        let req = request(url, out.path());
+
+        write_fake(bins.path(), "gallery-dl", &downloads("photo.jpg"));
         run(bins.path(), &req)
             .await
             .expect("the first run downloads");
 
-        // Age the marker past the trust window, as eight days of real time
-        // would.
-        let marker = start_marker_path(out.path(), url);
-        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
-        let ms = stale
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        std::fs::write(&marker, ms.to_string()).unwrap();
+        // Age the album a month, as a month of real time would.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
+        let f = std::fs::File::options()
+            .write(true)
+            .open(out.path().join("photo.jpg"))
+            .unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(long_ago))
+            .unwrap();
 
-        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        write_fake(bins.path(), "gallery-dl", &skips("photo.jpg"));
         let second = run(bins.path(), &req).await;
 
-        assert!(
-            second.is_err(),
-            "documenting the limit, not endorsing it: past 7 days the marker \
-             is re-initialised to now and the false failure returns"
+        assert_eq!(
+            second.expect("a month-old album still re-runs").file_count,
+            1,
+            "the album's file is reported for this URL however old it is"
         );
     }
 }
