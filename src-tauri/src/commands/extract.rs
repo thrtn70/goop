@@ -6,6 +6,7 @@ use goop_extractor::classify::{classify_extractor, ExtractorChoice};
 use goop_extractor::debrid;
 use goop_extractor::gallery_dl::GalleryDl;
 use goop_extractor::ytdlp::{DebridProbeInfo, DirectFileInfo, ExtractRequest, UrlProbe, YtDlp};
+use goop_sidecar::BinaryResolver;
 use std::path::PathBuf;
 use tauri::State;
 
@@ -23,7 +24,7 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
     }
     let cookies = state.settings.read().cookies_from_browser.clone();
     let primary = classify_extractor(&url);
-    let err = match probe_with(primary, &state, &url, cookies.as_deref()).await {
+    let err = match probe_with(primary, &state.resolver, &url, cookies.as_deref()).await {
         Ok(probe) => return Ok(probe),
         Err(err) => err,
     };
@@ -34,7 +35,7 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
     if !warrants_other_extractor(&err) {
         return Err(err.into());
     }
-    let err2 = match probe_with(primary.other(), &state, &url, cookies.as_deref()).await {
+    let err2 = match probe_with(primary.other(), &state.resolver, &url, cookies.as_deref()).await {
         Ok(probe) => return Ok(probe),
         Err(err2) => err2,
     };
@@ -52,6 +53,13 @@ pub async fn extract_probe(url: String, state: State<'_, AppState>) -> Result<Ur
             }
             // Otherwise try a plain HTTP probe so the UI can still offer a
             // direct download.
+            // Deliberately NOT wrapped in `with_probe_retry`. This leg does a
+            // HEAD and then a fallback GET, each bounded by `PROBE_TIMEOUT`
+            // (30s), so a black-holed host already costs a minute — and the
+            // IPC call cannot be cancelled from the UI, so a second attempt
+            // would leave the user staring at a spinner for two. The
+            // extractor probes above return in seconds, which is what makes
+            // a retry cheap there.
             let info = goop_extractor::direct::probe(&url).await?;
             Ok(direct_url_probe(url, info))
         }
@@ -99,16 +107,27 @@ fn direct_url_probe(url: String, info: DirectFileInfo) -> UrlProbe {
     }
 }
 
+/// Takes the resolver rather than the whole `AppState`: it is the only field
+/// this needs, and the narrower signature is what lets the retry wiring below
+/// be tested against fake sidecars instead of only reasoned about.
 async fn probe_with(
     backend: ExtractorChoice,
-    state: &AppState,
+    resolver: &BinaryResolver,
     url: &str,
     cookies: Option<&str>,
 ) -> Result<UrlProbe, GoopError> {
-    match backend {
-        ExtractorChoice::YtDlp => YtDlp::probe(&state.resolver, url, cookies).await,
-        ExtractorChoice::GalleryDl => GalleryDl::probe(&state.resolver, url, cookies).await,
-    }
+    // One quiet retry on a transient failure. A probe is the first thing a
+    // URL does, so a single dropped connection currently shows a red card
+    // for a link that is perfectly fine — and the only recourse is the Try
+    // again button, which does exactly this. Permanent verdicts are not
+    // retried, so the worst case is ~1.5s before the same error appears.
+    goop_extractor::retry::with_probe_retry(goop_extractor::retry::PROBE_RETRY_DELAY, || async {
+        match backend {
+            ExtractorChoice::YtDlp => YtDlp::probe(resolver, url, cookies).await,
+            ExtractorChoice::GalleryDl => GalleryDl::probe(resolver, url, cookies).await,
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -189,5 +208,98 @@ mod tests {
             templates, EXPECTED,
             "ExtractNamingScheme::to_yt_dlp_template drifted from extractor's KNOWN_TEMPLATES"
         );
+    }
+}
+
+/// The retry wiring itself, not just the helper it calls.
+///
+/// `probe_with` takes a `BinaryResolver` rather than the whole `AppState`
+/// precisely so this can exist: the helper being correct and the call site
+/// actually using it are two different claims, and only the second one is
+/// what a user experiences.
+///
+/// Unix-only: the fakes are `/bin/sh` scripts.
+#[cfg(all(test, unix))]
+mod probe_retry_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "#!/bin/sh\n{body}").unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn runs(counter: &std::path::Path) -> usize {
+        std::fs::read_to_string(counter)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// A dropped connection on the first attempt must not reach the user.
+    #[tokio::test]
+    async fn probe_with_retries_a_transient_failure() {
+        let bins = tempfile::tempdir().unwrap();
+        let counter = bins.path().join("runs");
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "echo run >> '{c}'\n\
+                 if [ $(wc -l < '{c}') -eq 1 ]; then\n\
+                   echo 'ERROR: Unable to download webpage: HTTP Error 503: Service Unavailable' >&2\n\
+                   exit 1\n\
+                 fi\n\
+                 echo '{{\"title\":\"clip\",\"formats\":[]}}'\n\
+                 exit 0\n",
+                c = counter.display()
+            ),
+        );
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+
+        let probe = probe_with(
+            ExtractorChoice::YtDlp,
+            &resolver,
+            "https://example.com/x",
+            None,
+        )
+        .await
+        .expect("the second attempt succeeds");
+
+        assert_eq!(probe.title, "clip");
+        assert_eq!(runs(&counter), 2, "the call site must be using the retry");
+    }
+
+    /// And a permanent verdict must still surface on the first attempt, or
+    /// every dead link costs an extra spawn and a wait to say the same thing.
+    #[tokio::test]
+    async fn probe_with_does_not_retry_a_permanent_failure() {
+        let bins = tempfile::tempdir().unwrap();
+        let counter = bins.path().join("runs");
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "echo run >> '{c}'\n\
+                 echo 'ERROR: [youtube] abc: Private video' >&2\n\
+                 exit 1\n",
+                c = counter.display()
+            ),
+        );
+        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+
+        let res = probe_with(
+            ExtractorChoice::YtDlp,
+            &resolver,
+            "https://example.com/x",
+            None,
+        )
+        .await;
+
+        assert!(res.is_err());
+        assert_eq!(runs(&counter), 1);
     }
 }

@@ -70,6 +70,11 @@ impl GoopError {
                 let body = friendly_message(stderr).unwrap_or_else(|| stderr.clone());
                 format!("{binary}: {body}")
             }
+            // Already written for a person — these are Goop's own sentences
+            // about a request it can't satisfy, not a tool's output. The
+            // `invalid request:` in `Display` is for logs and `{e}` formatting;
+            // in a queue row it just prefixes a complete sentence with jargon.
+            Self::InvalidRequest(msg) => msg.clone(),
             other => other.to_string(),
         }
     }

@@ -3,7 +3,7 @@ pub mod classify;
 pub mod debrid;
 pub mod direct;
 pub mod gallery_dl;
-mod retry;
+pub mod retry;
 pub mod ytdlp;
 
 pub use backend::{
