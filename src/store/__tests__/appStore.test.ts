@@ -231,6 +231,24 @@ describe("app store queue and settings operations", () => {
     expect(useAppStore.getState().toasts.length).toBe(before + 2);
   });
 
+  it("warns when a format choice could not be honoured", () => {
+    // The download succeeded, so this must not read as a failure — but the
+    // user picked a quality and did not get it, and finding that out from
+    // the file size later is worse than being told now.
+    const before = useAppStore.getState().toasts.length;
+    useAppStore.getState().handleSidecarEvent({
+      kind: "warning",
+      code: "format_fallback",
+      message: "Saved in the original quality — the format choice applies only to video sites.",
+    });
+    const after = useAppStore.getState().toasts;
+    expect(after.length).toBe(before + 1);
+    const t = after[after.length - 1];
+    expect(t.variant).toBe("warning");
+    expect(t.variant).not.toBe("error");
+    expect(t.detail).toContain("original quality");
+  });
+
   it("force-refreshes the cached versions when yt-dlp reports an update", async () => {
     // A warm cache is the norm here: boot pre-loads versions so Settings →
     // About renders instantly. That makes `force` load-bearing — a plain

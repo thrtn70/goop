@@ -151,8 +151,8 @@ type AppStoreState = {
    * Routes a `SidecarEvent` to the right side effect. `yt_dlp_updated`
    * force-refreshes the version cache so Settings → About stops showing the
    * pre-update version; `warning` enqueues a one-shot toast per code —
-   * cookie auto-fallback as info, dropped subtitle cues as a warning.
-   * Unknown warning codes are ignored.
+   * cookie auto-fallback as info; dropped subtitle cues and an unhonoured
+   * format choice as warnings. Unknown warning codes are ignored.
    */
   handleSidecarEvent: (e: SidecarEvent) => void;
   incrementUnseen: () => void;
@@ -442,6 +442,18 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         get().enqueueToast({
           variant: "warning",
           title: "Some subtitle lines were skipped",
+          detail: e.message,
+        });
+        break;
+      case "format_fallback":
+        // gallery-dl has no format selection — it saves what the site
+        // holds. The download succeeded and the file is real, so this is a
+        // warning rather than an error; but the user picked a quality and
+        // did not get it, and finding that out from the file size later is
+        // worse than being told now.
+        get().enqueueToast({
+          variant: "warning",
+          title: "Saved in the original quality",
           detail: e.message,
         });
         break;

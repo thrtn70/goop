@@ -124,6 +124,7 @@ impl<'a> GalleryDl<'a> {
             formats: Vec::new(),
             direct: None,
             debrid: None,
+            extractor: Some(crate::classify::ExtractorChoice::GalleryDl),
         })
     }
 
@@ -857,6 +858,7 @@ exit 0
             debrid_item: None,
             resume_key: None,
             filename_hint: None,
+            extractor_hint: None,
         }
     }
 

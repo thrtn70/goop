@@ -347,8 +347,16 @@ async fn dispatch_once(
         tracing::info!(?job_id, route = "direct", "dispatch");
         return crate::direct::download(sink, job_id, req, signals).await;
     }
-    let primary = classify_extractor(&req.url);
-    tracing::info!(?job_id, extractor = ?primary, "dispatch");
+    // The probe already found out which extractor answers for this URL;
+    // `classify_extractor` only guesses from its shape. Using the verdict
+    // skips a doomed spawn on every URL the classifier gets wrong. The
+    // fallback below is untouched, so a stale or absent hint is exactly as
+    // expensive as today.
+    let hinted = req.extractor_hint.is_some();
+    let primary = req
+        .extractor_hint
+        .unwrap_or_else(|| classify_extractor(&req.url));
+    tracing::info!(?job_id, extractor = ?primary, hinted, "dispatch");
     let err = match run_one(
         resolver,
         sink.clone(),
@@ -460,8 +468,27 @@ async fn run_one(
             })
         }
         ExtractorChoice::GalleryDl => {
-            let gd = GalleryDl::new(resolver, sink);
+            let gd = GalleryDl::new(resolver, sink.clone());
             let res = gd.download(job_id, req, signals).await?;
+            // AFTER the download, not before it. "Saved in the original
+            // quality" is a claim about a file that exists: emitted on entry
+            // it also fires for an attempt that then fails (nothing was
+            // saved), and for one that gallery-dl disowns so yt-dlp carries
+            // the job — where the format choice WAS honoured and the warning
+            // is simply false.
+            //
+            // Warn, don't refuse: gallery-dl is what makes these URLs work at
+            // all, and the file is the one the user wanted — just not in the
+            // size they picked. `WarnOnceSink` collapses repeats within a
+            // dispatch.
+            if req.format.is_some() || req.audio_only {
+                sink.emit_sidecar(goop_core::SidecarEvent::Warning {
+                    code: goop_core::WarningCode::FormatFallback,
+                    message: "Saved in the original quality — the format choice \
+                              applies only to video sites."
+                        .into(),
+                });
+            }
             Ok(BackendOutcome {
                 output_path: res.output_path,
                 bytes: res.bytes,
@@ -564,6 +591,10 @@ exit 0
         max_delay: Duration::from_millis(1),
     };
 
+    fn resolver_at(bins: &std::path::Path) -> BinaryResolver {
+        BinaryResolver::new(bins.to_path_buf())
+    }
+
     fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
@@ -660,6 +691,7 @@ exit 0
             debrid_item: None,
             resume_key: None,
             filename_hint: None,
+            extractor_hint: None,
         }
     }
 
@@ -953,6 +985,341 @@ exit 0
             "yt-dlp's 'Unsupported URL' came after the undecodable line and \
              must still drive the fallback; got {err:?}"
         );
+    }
+
+    // ---- the probe's extractor verdict ----------------------------------
+
+    /// Writes a witness file so a test can prove a binary was NEVER run.
+    /// Asserting on the error text only proves which one failed last.
+    fn witness(path: &std::path::Path) -> String {
+        format!(
+            "printf 'x' > '{}'\necho 'ERROR: Unsupported URL' >&2\nexit 1\n",
+            path.display()
+        )
+    }
+
+    /// The point of the hint. `classify_extractor` sends anything it does
+    /// not recognise to yt-dlp, so a gallery-dl URL it has no rule for costs
+    /// a doomed yt-dlp spawn before the fallback rescues it. The probe
+    /// already found out which one answers.
+    #[tokio::test]
+    async fn a_hinted_request_does_not_spawn_the_other_extractor() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let seen = out.path().join("yt-dlp.ran");
+        write_fake(bins.path(), "yt-dlp", &witness(&seen));
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+
+        // A URL `classify_extractor` routes to yt-dlp by default.
+        let mut req = request("https://example.com/x", out.path());
+        req.cookies_from_browser = None;
+        assert_eq!(
+            classify_extractor(&req.url),
+            ExtractorChoice::YtDlp,
+            "the test is only meaningful if the classifier disagrees with the hint"
+        );
+        req.extractor_hint = Some(ExtractorChoice::GalleryDl);
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+
+        assert!(res.is_ok(), "gallery-dl should have carried it: {res:?}");
+        assert!(!seen.exists(), "the hint must skip the doomed yt-dlp spawn");
+    }
+
+    /// Without a hint nothing changes: the classifier still decides, and the
+    /// fallback still rescues its wrong guesses.
+    #[tokio::test]
+    async fn an_unhinted_request_still_classifies_and_falls_back() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let seen = out.path().join("yt-dlp.ran");
+        write_fake(bins.path(), "yt-dlp", &witness(&seen));
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+
+        let mut req = request("https://example.com/x", out.path());
+        req.cookies_from_browser = None;
+        assert!(req.extractor_hint.is_none());
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+
+        assert!(res.is_ok(), "the fallback still rescues it: {res:?}");
+        assert!(
+            seen.exists(),
+            "the classifier's guess must still be tried first"
+        );
+    }
+
+    /// A hint that has gone stale — the site changed hands, or the payload
+    /// predates a classifier fix — must cost nothing beyond one wrong spawn,
+    /// which is exactly what an unhinted misclassification costs today.
+    #[tokio::test]
+    async fn a_wrong_hint_degrades_to_the_normal_fallback() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Hinted at yt-dlp, but only gallery-dl can do the job.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+        req.extractor_hint = Some(ExtractorChoice::YtDlp);
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+        assert!(res.is_ok(), "a stale hint must not break the job: {res:?}");
+    }
+
+    /// The first link in the chain: a probe has to say which extractor
+    /// answered it, or there is no verdict for the UI to echo and the hint
+    /// is dead on arrival. Driven through the real `probe` entry points so
+    /// the reporting cannot be true of one extractor and not the other.
+    #[tokio::test]
+    async fn each_probe_names_the_extractor_that_answered() {
+        let bins = TempDir::new().unwrap();
+        // `-J` output: yt-dlp prints one JSON object on stdout.
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo '{\"title\":\"clip\",\"formats\":[]}'\nexit 0\n",
+        );
+        // `-j` output: gallery-dl prints an array of triples.
+        write_fake(bins.path(), "gallery-dl", "echo '[]'\nexit 0\n");
+        let resolver = resolver_at(bins.path());
+
+        let yt = YtDlp::probe(&resolver, "https://example.com/x", None)
+            .await
+            .expect("the fake yt-dlp answers");
+        assert_eq!(yt.extractor, Some(ExtractorChoice::YtDlp));
+
+        let gd =
+            crate::gallery_dl::GalleryDl::probe(&resolver, "https://imgur.com/gallery/a", None)
+                .await
+                .expect("the fake gallery-dl answers");
+        assert_eq!(gd.extractor, Some(ExtractorChoice::GalleryDl));
+    }
+
+    /// Legacy payloads. Every job queued before this field existed is still
+    /// in the store, and the worker deserializes straight from SQLite.
+    #[test]
+    fn a_payload_without_the_field_deserializes() {
+        let json = serde_json::json!({
+            "url": "https://example.com/x",
+            "output_dir": "/tmp",
+            "format": null,
+            "audio_only": false,
+        });
+        let req: ExtractRequest = serde_json::from_value(json).expect("legacy payload");
+        assert!(req.extractor_hint.is_none());
+    }
+
+    // ---- format choices that gallery-dl cannot honour --------------------
+
+    /// gallery-dl has no format selection: it saves what the site has. A
+    /// request carrying a format choice that lands there gets the file, but
+    /// not the quality the user picked — and said nothing about it.
+    #[tokio::test]
+    async fn a_format_choice_on_the_gallery_path_warns() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+        req.format = Some("137".into());
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(
+            warning_codes(&rec),
+            vec![WarningCode::FormatFallback],
+            "the download works; the format choice silently did not"
+        );
+    }
+
+    /// Audio-only is the same promise by another name.
+    #[tokio::test]
+    async fn audio_only_on_the_gallery_path_warns() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+        req.audio_only = true;
+
+        dispatch(
+            &resolver_at(bins.path()),
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await
+        .expect("downloads");
+        assert_eq!(warning_codes(&rec), vec![WarningCode::FormatFallback]);
+    }
+
+    /// "Saved in the original quality" is a claim about a file that exists.
+    /// A gallery-dl attempt that fails has saved nothing, and telling the
+    /// user how it was saved is worse than saying nothing at all.
+    #[tokio::test]
+    async fn a_failed_gallery_attempt_claims_nothing_about_quality() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Fails in a way that is neither a no-match nor transient, so
+        // nothing rescues it and nothing retries.
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: [site] Private album' >&2\nexit 1\n",
+        );
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+        req.format = Some("137".into());
+
+        dispatch(
+            &resolver_at(bins.path()),
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await
+        .expect_err("the fake gallery-dl always fails");
+
+        assert!(
+            warning_codes(&rec).is_empty(),
+            "nothing was saved, so nothing can be reported about how"
+        );
+    }
+
+    /// gallery-dl was only the first guess. When it disowns the URL and
+    /// yt-dlp carries the job, the format choice WAS honoured — warning
+    /// about it would tell the user their download is wrong when it isn't.
+    #[tokio::test]
+    async fn a_gallery_attempt_superseded_by_yt_dlp_does_not_warn() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        // Primary (by classification) disowns it...
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            "echo 'ERROR: No suitable extractor found' >&2\nexit 1\n",
+        );
+        // ...and yt-dlp, which honours formats, does the job.
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+        req.audio_only = true;
+        assert_eq!(
+            classify_extractor(&req.url),
+            ExtractorChoice::GalleryDl,
+            "the test needs gallery-dl to be tried first"
+        );
+
+        let res = dispatch(
+            &resolver_at(bins.path()),
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+
+        assert!(res.is_ok(), "yt-dlp should carry it: {res:?}");
+        assert!(
+            warning_codes(&rec).is_empty(),
+            "yt-dlp honoured the choice; warning would be simply false"
+        );
+    }
+
+    /// No format asked for, nothing to warn about. A gallery download is
+    /// the normal case and must stay quiet.
+    #[tokio::test]
+    async fn a_plain_gallery_download_does_not_warn() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(bins.path(), "gallery-dl", GALLERY_DL_WRITES_ONE_FILE);
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
+        );
+
+        let rec = Arc::new(RecordingSink::new());
+        let mut req = request("https://imgur.com/gallery/abc", out.path());
+        req.cookies_from_browser = None;
+
+        dispatch(
+            &resolver_at(bins.path()),
+            rec.clone(),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await
+        .expect("downloads");
+        assert!(warning_codes(&rec).is_empty());
     }
 
     // ---- update-and-retry-once ------------------------------------------

@@ -14,4 +14,4 @@
  * Regenerate the TS bindings (`scripts/generate-bindings.sh`) after any change
  * here.
  */
-export type WarningCode = "cookie_fallback" | "subtitle_cues_dropped";
+export type WarningCode = "cookie_fallback" | "subtitle_cues_dropped" | "format_fallback";

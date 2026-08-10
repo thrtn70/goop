@@ -78,6 +78,7 @@ fn debrid_url_probe(url: String, magnet: bool) -> UrlProbe {
         formats: Vec::new(),
         direct: None,
         debrid: Some(DebridProbeInfo { magnet }),
+        extractor: None,
     }
 }
 
@@ -94,6 +95,7 @@ fn direct_url_probe(url: String, info: DirectFileInfo) -> UrlProbe {
         formats: Vec::new(),
         direct: Some(info),
         debrid: None,
+        extractor: None,
     }
 }
 
