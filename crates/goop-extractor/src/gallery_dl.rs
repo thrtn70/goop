@@ -37,6 +37,7 @@ pub struct GalleryDl<'a> {
 /// Result of a gallery-dl `extract` call. `output_path` points at the
 /// folder gallery-dl wrote into; `file_count` is the number of files
 /// actually downloaded (parsed from gallery-dl's stderr).
+#[derive(Debug)]
 pub struct GalleryDlResult {
     pub output_path: String,
     pub bytes: u64,
@@ -390,7 +391,29 @@ impl<'a> GalleryDl<'a> {
                 stderr: "URL valid but no extractable content".into(),
             });
         }
-        let _ = std::fs::remove_file(&marker_path);
+        // The marker is KEPT on success, not deleted.
+        //
+        // It is the cutoff `scan_outputs` tallies from, and deleting it made
+        // the next run for this URL sample a fresh cutoff of `now`. gallery-dl
+        // skips what it already has, writes nothing, and exits 0 — correctly —
+        // and every file from the first download then sits behind the new
+        // cutoff, so the tally is zero and the branch above calls a complete
+        // album "no extractable content". Re-running a link to pick up new
+        // posts is the normal way to use these sites, and it failed every
+        // time there was nothing new.
+        //
+        // Keeping it makes a re-run tally from the FIRST attempt's start, so
+        // the album's own files still count and the run succeeds honestly.
+        // The zero-file branch above already keeps the marker for exactly
+        // this reason; the success path deleting it was the inconsistency.
+        //
+        // Cost: one hidden dotfile per URL stays in the output directory.
+        // `scan_outputs` already excludes it from the tally, and cancelling a
+        // run still removes it (`cleanup_run_artifacts`).
+        //
+        // Limit: `START_MARKER_MAX_AGE` is 7 days. Past that the marker is
+        // re-initialised to now and the false failure returns. Pinned by
+        // `the_fix_expires_after_the_marker_does`.
         Ok(GalleryDlResult {
             output_path: output_dir.to_string_lossy().into_owned(),
             bytes,
@@ -767,5 +790,269 @@ mod tests {
         cleanup_run_artifacts(dir.path(), url);
         assert!(!part.exists());
         assert!(!marker.exists());
+    }
+}
+
+/// Re-download behaviour, driven end-to-end through a fake `gallery-dl`.
+///
+/// The tally is a filesystem scan with a time cutoff, and the cutoff is
+/// persisted per URL. That interaction is only visible across TWO runs, so
+/// none of the unit tests above can see it — they exercise the marker and the
+/// scan separately, and both are individually correct.
+///
+/// Unix-only: the fakes are `/bin/sh` scripts. The logic under test is
+/// platform-independent.
+#[cfg(all(test, unix))]
+mod redownload_tests {
+    use super::*;
+    use goop_core::events::RecordingSink;
+    use goop_core::{JobId, JobSignals};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn write_fake(dir: &std::path::Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "#!/bin/sh\n{body}").unwrap();
+        drop(f);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Writes one file into `--directory`, the way a first download does.
+    ///
+    /// The sleep is load-bearing for the same reason as in `backend.rs`'s
+    /// fakes: `scan_outputs` counts files whose mtime is at or after a cutoff
+    /// sampled from a fine-grained clock, while Linux stamps mtimes from a
+    /// coarse one. A file written within a tick of the cutoff can carry an
+    /// mtime just behind it and go uncounted.
+    const WRITES_ONE_FILE: &str = r#"
+dir=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--directory" ]; then dir="$a"; fi
+  prev="$a"
+done
+sleep 0.05
+printf 'x' > "$dir/photo.jpg"
+exit 0
+"#;
+
+    /// The second run against an album already on disk: gallery-dl's
+    /// skip-existing behaviour. Exits 0 having written nothing, because
+    /// there was nothing new to fetch.
+    const SKIPS_EVERYTHING: &str = "sleep 0.05\nexit 0\n";
+
+    fn request(url: &str, output_dir: &std::path::Path) -> ExtractRequest {
+        ExtractRequest {
+            url: url.into(),
+            output_dir: output_dir.to_string_lossy().into_owned(),
+            format: None,
+            audio_only: false,
+            cookies_from_browser: None,
+            output_template: None,
+            direct: false,
+            debrid: false,
+            debrid_item: None,
+            resume_key: None,
+            filename_hint: None,
+        }
+    }
+
+    async fn run(
+        bins: &std::path::Path,
+        req: &ExtractRequest,
+    ) -> Result<GalleryDlResult, GoopError> {
+        let resolver = BinaryResolver::new(bins.to_path_buf());
+        let gd = GalleryDl::new(&resolver, Arc::new(RecordingSink::new()));
+        gd.download(JobId::new(), req, JobSignals::new()).await
+    }
+
+    /// The bug, as a test.
+    ///
+    /// Download an album, then ask for the same URL again. gallery-dl skips
+    /// everything (it is all on disk) and exits 0 — the correct outcome, and
+    /// what a user re-running a link to pick up new posts sees when there are
+    /// none. Goop reports it as a failure.
+    #[tokio::test]
+    async fn re_downloading_a_complete_album_is_not_a_failure() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let url = "https://example.com/album";
+        let req = request(url, out.path());
+
+        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        let first = run(bins.path(), &req)
+            .await
+            .expect("the first run downloads");
+        assert_eq!(first.file_count, 1);
+
+        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        let second = run(bins.path(), &req).await;
+
+        assert!(
+            second.is_ok(),
+            "nothing new to fetch is not the same as nothing there: {second:?}"
+        );
+        assert_eq!(
+            second.unwrap().file_count,
+            1,
+            "the album's files are still on disk and still belong to this URL"
+        );
+    }
+
+    /// The mechanism behind it: the success path used to delete the marker,
+    /// so a re-run sampled a fresh cutoff of `now` and every file already on
+    /// disk fell behind it.
+    #[tokio::test]
+    async fn a_successful_run_keeps_its_start_marker() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let url = "https://example.com/album";
+        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+
+        run(bins.path(), &request(url, out.path()))
+            .await
+            .expect("downloads");
+
+        assert!(
+            start_marker_path(out.path(), url).exists(),
+            "without the marker a re-run tallies from now and sees nothing"
+        );
+    }
+
+    /// ⚠️ The other limitation, also pinned rather than left to be found.
+    ///
+    /// `scan_outputs` walks the whole output directory and decides purely on
+    /// mtime — it has no idea which file belongs to which URL. Every extract
+    /// job shares one downloads folder by default, so a re-run of album A
+    /// tallies anything written since A's marker, album B included.
+    ///
+    /// The mechanism is not new: a *resumed* run has always counted whatever
+    /// a concurrent job wrote into the same folder since it started (the
+    /// default extract concurrency is 2). What this fix changes is the
+    /// window — from one run's duration to the marker's lifetime.
+    ///
+    /// Kept in the "known and measured" column rather than fixed here.
+    /// Fixing it properly means tallying by file identity instead of by
+    /// timestamp, which is a different change from deleting one line. The
+    /// alternative — leaving the marker deleted — fails EVERY re-run of a
+    /// complete album, which is both worse and unconditional.
+    #[tokio::test]
+    async fn a_shared_output_folder_over_counts_across_urls() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let a = "https://example.com/album-a";
+        let b = "https://example.com/album-b";
+
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            &WRITES_ONE_FILE.replace("photo.jpg", "a.jpg"),
+        );
+        run(bins.path(), &request(a, out.path())).await.expect("a");
+        write_fake(
+            bins.path(),
+            "gallery-dl",
+            &WRITES_ONE_FILE.replace("photo.jpg", "b.jpg"),
+        );
+        run(bins.path(), &request(b, out.path())).await.expect("b");
+
+        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        let again = run(bins.path(), &request(a, out.path()))
+            .await
+            .expect("succeeds");
+        assert_eq!(
+            again.file_count, 2,
+            "documenting, not endorsing: a re-run of A counts B's file too"
+        );
+
+        // The sharper edge of the same mechanism: with A's own file gone,
+        // A reports success on the strength of B's.
+        std::fs::remove_file(out.path().join("a.jpg")).unwrap();
+        let orphaned = run(bins.path(), &request(a, out.path())).await;
+        assert_eq!(
+            orphaned.expect("still 'succeeds'").file_count,
+            1,
+            "a tally by timestamp cannot tell whose file it found"
+        );
+    }
+
+    /// The marker is per URL, so one album's cutoff cannot silently become
+    /// another's.
+    #[tokio::test]
+    async fn two_urls_keep_separate_markers() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+
+        let a = "https://example.com/album-a";
+        let b = "https://example.com/album-b";
+        run(bins.path(), &request(a, out.path())).await.expect("a");
+        run(bins.path(), &request(b, out.path())).await.expect("b");
+
+        let (ma, mb) = (
+            start_marker_path(out.path(), a),
+            start_marker_path(out.path(), b),
+        );
+        assert!(ma.exists() && mb.exists());
+        assert_ne!(ma, mb, "one marker for both URLs would cross the tallies");
+    }
+
+    /// Cancelling still cleans the marker up, so the file kept on the success
+    /// path is not a leak with no owner.
+    #[tokio::test]
+    async fn cancelling_still_removes_the_marker() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let url = "https://example.com/album";
+        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        run(bins.path(), &request(url, out.path()))
+            .await
+            .expect("downloads");
+        assert!(start_marker_path(out.path(), url).exists());
+
+        cleanup_run_artifacts(out.path(), url);
+        assert!(!start_marker_path(out.path(), url).exists());
+    }
+
+    /// ⚠️ The limitation, pinned in code rather than only in prose.
+    ///
+    /// `START_MARKER_MAX_AGE` is 7 days. A marker older than that is treated
+    /// as untrustworthy and re-initialised to now — so keeping the marker
+    /// fixes re-downloads within a week, and after that the same false
+    /// failure comes back. This is a real remaining gap, not a rounding
+    /// error, and a test is the only place it will not be forgotten.
+    #[tokio::test]
+    async fn the_fix_expires_after_the_marker_does() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let url = "https://example.com/album";
+        let req = request(url, out.path());
+
+        write_fake(bins.path(), "gallery-dl", WRITES_ONE_FILE);
+        run(bins.path(), &req)
+            .await
+            .expect("the first run downloads");
+
+        // Age the marker past the trust window, as eight days of real time
+        // would.
+        let marker = start_marker_path(out.path(), url);
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        let ms = stale
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        std::fs::write(&marker, ms.to_string()).unwrap();
+
+        write_fake(bins.path(), "gallery-dl", SKIPS_EVERYTHING);
+        let second = run(bins.path(), &req).await;
+
+        assert!(
+            second.is_err(),
+            "documenting the limit, not endorsing it: past 7 days the marker \
+             is re-initialised to now and the false failure returns"
+        );
     }
 }
