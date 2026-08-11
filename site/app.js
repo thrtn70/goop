@@ -153,7 +153,14 @@
     clone.setAttribute('aria-hidden', 'true');
     clone.removeAttribute('data-ticker-list');
     list.dataset.tickerInit = '1';
-    const track = list.parentElement;
+    // Matched by attribute, not by parent position: this element is both the
+    // clone's container and the element the pause flag is written to, and the
+    // CSS pause rule keys off .ticker__track. Derived from list.parentElement,
+    // any wrapper introduced between the list and the track would silently
+    // move the flag onto an element that rule does not match — the button
+    // would keep flipping its own label while pausing nothing, and nothing
+    // would throw.
+    const track = document.querySelector('[data-ticker]');
     track?.appendChild(clone);
 
     // The marquee auto-starts and runs for 60s, which needs a stop under

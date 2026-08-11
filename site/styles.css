@@ -883,8 +883,10 @@ main {
    focusable, so keyboard and touch had no route to it at all. Set in the label
    register rather than as an icon button, because an icon here would be the
    only one on the page. `button` is reset by `all: unset`, so this rebuilds
-   what it needs; the element is inline, which is why padding alone buys the
-   44px hit area and no compensating margin is required. */
+   what it needs. `all: unset` would make it inline, but .ticker__aside is a
+   flex container, so it is blockified to a flex item and the padding does
+   enter layout — which is fine here, because the row is new and there is no
+   prior height for it to disturb. */
 .ticker__toggle {
   font-family: 'Bricolage Grotesque', system-ui;
   font-size: var(--type-body-xs);
@@ -1575,21 +1577,73 @@ main {
   vertical-align: middle;
 }
 
+/* These three stand in for text, and text occupies a line box taller than its
+   own font-size. Sizing each bar to the font-size alone left every skeleton
+   row short of the row it resolved into — the tag by 9.9px, the date by 6.9,
+   the title by 7.2 — stacking to a ~200px jump at 375px, where the meta and
+   body columns sit one above the other rather than side by side.
+
+   Rather than reproduce each line box as a multiplier, the element carries a
+   zero-width space at the real element's own font-size and line-height. That
+   hands it the true line box for free: height and, just as importantly,
+   baseline. Both .archive__meta and .archive__body are `align-self: baseline`
+   grid items, so a bar that merely matched on height but resolved its baseline
+   elsewhere still moved the row — which is what a first pass at this did,
+   overshooting by 0.85px per row at 1280px. The bar itself is painted over
+   that line box, so nothing about the skeleton's appearance changes. */
+.archive__skeleton-bar--tag,
+.archive__skeleton-bar--date,
+.archive__skeleton-bar--title {
+  position: relative;
+  background: none;
+}
+
+.archive__skeleton-bar--tag::after,
+.archive__skeleton-bar--date::after,
+.archive__skeleton-bar--title::after {
+  content: '\200B';
+}
+
+.archive__skeleton-bar--tag::before,
+.archive__skeleton-bar--date::before,
+.archive__skeleton-bar--title::before {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1em; /* 1em resolves to the font-size set below — the real glyph size */
+  transform: translateY(-50%);
+  background: var(--ink-2);
+  border-radius: 2px;
+}
+
+/* Each mirrors the font metrics of the rule it stands in for — not just the
+   size. Figtree is a variable font, so weight moves the baseline within an
+   otherwise identical line box: inheriting body's 380 where .archive__title
+   sets 400 left the title bar half a pixel out, which is 5px over ten rows.
+   .archive__tag and .archive__date inherit --line-normal from body;
+   .archive__title sets 1.45 itself. The 4px margin-top the date bar carried
+   had no counterpart in a resolved row — .archive__meta's 2px gap is the
+   whole of the real separation. */
 .archive__skeleton-bar--tag {
   width: 4rem;
-  height: 1.125rem;
+  font-family: 'Bricolage Grotesque', system-ui;
+  font-size: 1.125rem;
+  font-weight: 600;
 }
 
 .archive__skeleton-bar--date {
   width: 7rem;
-  height: 0.78rem;
-  margin-top: 4px;
-  background: var(--ink-1);
+  font-size: 0.78rem;
+  font-style: italic;
 }
+.archive__skeleton-bar--date::before { background: var(--ink-1); }
 
 .archive__skeleton-bar--title {
   width: min(22rem, 90%);
-  height: 1rem;
+  font-size: var(--type-body);
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .archive__skeleton-bar--shorter { width: min(18rem, 75%); }
