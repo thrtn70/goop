@@ -32,10 +32,10 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-/// DPI for the TIFF rasterization stage. 300 is the standard OCR
+/// DPI for the PNG rasterization stage. 300 is the standard OCR
 /// resolution — high enough that tesseract's accuracy doesn't suffer,
 /// low enough that 50-page PDFs don't fill the temp dir with GB of
-/// intermediate TIFFs.
+/// intermediate PNGs.
 const OCR_RASTER_DPI: u32 = 300;
 
 /// Run the OCR pipeline. Returns the path of the assembled searchable
@@ -216,7 +216,7 @@ pub async fn ocr(
     .await
     .map_err(|e| PdfError::Ocr(e.to_string()))??;
 
-    // work_dir drops here — temp TIFFs + per-page PDFs are cleaned up.
+    // work_dir drops here — temp PNGs + per-page PDFs are cleaned up.
     Ok(output_path.to_path_buf())
 }
 
