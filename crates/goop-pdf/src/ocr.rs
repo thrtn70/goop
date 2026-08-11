@@ -2,8 +2,7 @@
 //! (typically scanned) input PDF.
 //!
 //! The bundled mutool ships without `HAVE_TESSERACT`, so this is a
-//! two-stage pipeline rather than a single `mutool ocr` call (see
-//! `docs/mutool-ocr-support.md`):
+//! three-stage pipeline rather than a single `mutool ocr` call:
 //!
 //!   1. `mutool draw -F png -o <tmp>/page-%d.png -r <dpi> -- <in.pdf>`
 //!      rasterizes each page to a PNG at the chosen DPI. (mutool's
@@ -156,9 +155,11 @@ pub async fn ocr(
         // is set. The shorthand `pdf` configfile arg only works when a
         // `pdf` configfile exists in the tessdata dir; tessdata_fast
         // doesn't bundle one, so we set the param directly via `-c`.
-        // Pass --tessdata-dir and -l as separate argv tokens (Windows
-        // path-with-spaces safety; see Phase 0.5 notes in
-        // docs/mutool-ocr-support.md).
+        // Pass --tessdata-dir and -l as separate argv tokens. tesseract
+        // hand-rolls its argument parsing and never accepts the GNU
+        // `--flag=value` form: given `--tessdata-dir=<path>` it takes the
+        // whole token as the input filename and fails with "cannot read
+        // input file". That holds on every platform, spaces or not.
         let mut tess = Command::new(&tesseract_bin.path);
         tess.arg(raster)
             .arg(&out_stem)
