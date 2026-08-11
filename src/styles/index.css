@@ -273,6 +273,32 @@ body {
     animation: none;
   }
 
+  /* Tailwind's animation utilities.
+   *
+   * Everything above names classes we invented, and that vocabulary cannot by
+   * definition include Tailwind's. `animate-pulse` sat at six call sites —
+   * skeleton rows in Convert and Compress, the Extract probe, and the whole
+   * duration of a drag-over in DropTypeOverlay — animating at `2s … infinite`
+   * for anyone who had asked the OS to stop. The token collapse could not
+   * reach it either: tokens.css zeroes the four `--duration-*` variables and
+   * Tailwind's keyframes never read them.
+   *
+   * A substring selector covers the family and every utility added later,
+   * which an enumeration would not. Source order carries it: this sits after
+   * `@tailwind utilities`, and the selector ties `.animate-pulse` on
+   * specificity, so the later rule wins with no `!important`.
+   *
+   * Placed after the entrance rules on purpose. FileRow and CompressFileRow
+   * carry `enter-stagger animate-pulse` together, so this also strips the
+   * `enter-fade` those get above. That is correct: `opacity: 0` exists only
+   * inside `@keyframes enter-up`, never as a static declaration, so an element
+   * with no animation at all settles at opacity 1 with no transform — the
+   * finished state, arrived at instantly. Under this query the fade was
+   * already 0ms. */
+  [class*="animate-"] {
+    animation: none;
+  }
+
   .hover-lift:hover {
     transform: none;
   }
