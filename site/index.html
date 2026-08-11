@@ -91,10 +91,9 @@
           <div class="hero__lede">
             <p class="hero__lede-pull">Four jobs in one window: download, convert, compress, PDF.</p>
             <p>
-              Paste a link. Drop a folder. Goop pulls from more than two
+              Paste a link. Drop a file. Goop pulls from more than two
               thousand sites and does the work on your own machine. There's no
-              account to make and nothing phones home; the only call out is for
-              the file you asked for.
+              account to make and no telemetry of any kind.
             </p>
           </div>
 
@@ -540,8 +539,12 @@
               <div class="faq__answer">
                 <p>
                   No. Every job runs on your own machine, and there's nothing
-                  to log in to. The only outbound calls are the download you
-                  asked for and a periodic check with GitHub for new releases.
+                  to log in to. Besides the download you asked for, Goop makes
+                  two checks with GitHub: one for new versions of Goop on
+                  launch, and a daily one to keep yt-dlp current. Both are
+                  switches in <em>Settings › Updates</em>. Updating gallery-dl
+                  fetches from Codeberg, and only when you press the button.
+                  Nothing about you or your files is ever sent anywhere.
                 </p>
               </div>
             </details>
