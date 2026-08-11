@@ -162,7 +162,7 @@ export default function CompressPage() {
               {["1080p MP4 → 720p", "MP3 → smaller MP3", "PNG → web JPG", "PDF → smaller PDF"].map((label) => (
                 <span
                   key={label}
-                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-[10px] tracking-tight text-fg-muted"
+                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-xs tracking-tight text-fg-muted"
                 >
                   {label}
                 </span>

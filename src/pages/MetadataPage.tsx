@@ -89,7 +89,7 @@ export default function MetadataPage() {
           >
             Pick files…
           </button>
-          <p className="text-[11px] text-fg-muted">
+          <p className="text-xs text-fg-muted">
             MP3, FLAC, M4A, OGG, Opus, WAV · JPEG, HEIC, PNG · MP4, MOV · PDF
           </p>
         </div>

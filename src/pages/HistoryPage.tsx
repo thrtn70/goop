@@ -45,7 +45,11 @@ export default function HistoryPage() {
 
   return (
     <div className="flex h-full">
-      <div className="flex flex-1 flex-col">
+      {/* min-w-0: a flex item defaults to min-width:auto, so without this the
+          column refuses to shrink below the toolbar's intrinsic width and the
+          toolbar's own flex-wrap never engages — the filter chips and view
+          toggle just get clipped at narrow window sizes. */}
+      <div className="flex min-w-0 flex-1 flex-col">
         <HistoryToolbar />
         {viewMode === "list" ? (
           <HistoryList onPreview={openPreview} onQuickView={openQuickView} />

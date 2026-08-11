@@ -193,11 +193,11 @@ export default function PresetManager() {
                 {p.name}
               </button>
             )}
-            <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] uppercase tracking-wide text-fg-muted">
+            <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs uppercase tracking-wide text-fg-muted">
               {p.target}
             </span>
             {p.is_builtin && (
-              <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] uppercase tracking-wide text-fg-muted">
+              <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs uppercase tracking-wide text-fg-muted">
                 Built-in
               </span>
             )}

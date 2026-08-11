@@ -165,7 +165,7 @@ function Card({
         <div className="truncate text-xs text-fg" title={outputPath ?? undefined}>
           {basename(outputPath)}
         </div>
-        <div className="mt-0.5 flex justify-between text-[10px] text-fg-muted">
+        <div className="mt-0.5 flex justify-between text-xs text-fg-muted">
           <span>{formatBytes(job.result?.bytes)}</span>
           <span>
             {job.result?.result_kind === "folder" && job.result.file_count > 1
@@ -178,9 +178,9 @@ function Card({
          *  table row, and a traceback in one would crowd out the grid. */}
         {failed && (
           <div className="mt-1">
-            <span className="text-[10px] uppercase text-error">error</span>
+            <span className="text-xs uppercase text-error">error</span>
             {failure && (
-              <div className="truncate text-[10px] text-error/80" title={failure.message}>
+              <div className="truncate text-xs text-error/80" title={failure.message}>
                 {failure.message}
               </div>
             )}
@@ -199,7 +199,7 @@ function Card({
             toggleSelection(job.id);
           }
         }}
-        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-[10px] transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
+        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-xs transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
           selected
             ? "border-accent bg-accent text-accent-fg"
             : "border-subtle bg-surface-1/70 text-fg-muted opacity-0 group-hover:opacity-100"

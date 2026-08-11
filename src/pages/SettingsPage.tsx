@@ -577,7 +577,7 @@ export default function SettingsPage() {
         </div>
 
         <div className="mt-4 border-t border-subtle pt-3">
-          <h4 className="text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
             Built on
           </h4>
           <p className="mt-2 text-xs text-fg-secondary">

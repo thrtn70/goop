@@ -31,7 +31,7 @@ export default function UniversalMetadataView({ view, title }: UniversalMetadata
         <h3 className="font-display text-sm font-semibold text-fg">
           {title ?? basename(view.path)}
         </h3>
-        <span className="text-[11px] uppercase tracking-wide text-fg-muted">{view.domain}</span>
+        <span className="text-xs uppercase tracking-wide text-fg-muted">{view.domain}</span>
       </div>
 
       {groups.length === 0 ? (
@@ -40,7 +40,7 @@ export default function UniversalMetadataView({ view, title }: UniversalMetadata
         <div className="flex flex-col gap-3">
           {groups.map(([group, tags]) => (
             <div key={group} className="flex flex-col gap-1">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
+              <p className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
                 {group}
               </p>
               <dl className="grid grid-cols-[minmax(8rem,12rem)_1fr] gap-x-3 gap-y-0.5 text-xs">

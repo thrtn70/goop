@@ -132,7 +132,7 @@ export default function ImagePage() {
           >
             Pick images…
           </button>
-          <p className="text-[11px] text-fg-muted">
+          <p className="text-xs text-fg-muted">
             PNG, JPEG, WebP, BMP, GIF, TIFF, AVIF, JXL, HEIC/HEIF
           </p>
         </div>

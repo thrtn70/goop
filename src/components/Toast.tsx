@@ -111,7 +111,7 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
             {expanded && (
               <pre
                 tabIndex={0}
-                className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-[10px] text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-xs text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
               >
                 {toast.detail}
               </pre>

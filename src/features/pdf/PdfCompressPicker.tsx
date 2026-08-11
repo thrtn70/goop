@@ -37,7 +37,7 @@ export default function PdfCompressPicker({
             }`}
           >
             <span className="block text-sm font-medium text-fg">{opt.label}</span>
-            <span className="block text-[10px] text-fg-muted">{opt.hint}</span>
+            <span className="block text-xs text-fg-muted">{opt.hint}</span>
           </button>
         );
       })}

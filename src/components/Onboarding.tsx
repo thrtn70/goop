@@ -185,7 +185,7 @@ export default function Onboarding() {
                 You can change this anytime in Settings.
               </p>
               <div className="mt-5 rounded-lg border border-subtle bg-surface-2 p-3">
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+                <div className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
                   Current folder
                 </div>
                 {/* Path is keyed so a folder change re-mounts the line
@@ -223,7 +223,7 @@ export default function Onboarding() {
                   <>Paste any link in the bar at the top to download.</>,
                   <>Drop files on Convert or Compress to change formats and shrink size.</>,
                   <>
-                    Press <kbd className="rounded bg-surface-2 px-1 font-mono text-[10px]">⌘K</kbd>{" "}
+                    Press <kbd className="rounded bg-surface-2 px-1 font-mono text-xs">⌘K</kbd>{" "}
                     for the command palette anytime.
                   </>,
                 ].map((tip, i) => (
