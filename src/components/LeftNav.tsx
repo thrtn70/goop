@@ -1,20 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import clsx from "clsx";
+import { NAV_ITEMS, startsNewGroup } from "@/lib/navItems";
 import { modKeyLabel } from "@/lib/platform";
 
-const items = [
-  { to: "/extract", label: "Extract", shortcut: "1" },
-  { to: "/convert", label: "Convert", shortcut: "2" },
-  { to: "/image", label: "Image", shortcut: "3" },
-  // Recognize keeps shortcut 7 so the established 1–6 bindings don't
-  // shift; it sits beside the other content tools in the list.
-  { to: "/recognize", label: "Recognize", shortcut: "7" },
-  { to: "/metadata", label: "Metadata", shortcut: "8" },
-  { to: "/compress", label: "Compress", shortcut: "4" },
-  { to: "/history", label: "History", shortcut: "5" },
-  { to: "/settings", label: "Settings", shortcut: "6" },
-];
+const items = NAV_ITEMS;
 
 export default function LeftNav() {
   const location = useLocation();
@@ -53,7 +43,11 @@ export default function LeftNav() {
       {pill && (
         <div
           className={clsx(
-            "absolute left-3 right-3 rounded-md bg-accent-strong",
+            // top-0 is load-bearing: without it the pill's static position
+            // starts after the nav's py-3 padding, and the translateY below
+            // (measured from the nav's border box) adds that 12px a second
+            // time, leaving the pill one padding-step below its row.
+            "absolute left-3 right-3 top-0 rounded-md bg-accent-strong",
             ready ? "transition-transform duration-normal ease-out" : "",
           )}
           style={{ transform: `translateY(${pill.top}px)`, height: pill.height }}
@@ -62,14 +56,23 @@ export default function LeftNav() {
       )}
 
       {items.map((it, i) => (
+        <Fragment key={it.to}>
+          {/* One rule between the tools and the two places you go to look at
+              what they produced. Purely visual — the labels already
+              distinguish them for a screen reader. */}
+          {startsNewGroup(i) && (
+            <hr className="mx-5 my-2 border-t border-subtle" aria-hidden="true" />
+          )}
         <NavLink
-          key={it.to}
           to={it.to}
           ref={(el) => { itemRefs.current[i] = el; }}
           title={`${it.label} (${mod}${it.shortcut})`}
           className={({ isActive }) =>
             clsx(
-              "relative z-10 mx-2 flex items-center justify-between rounded-md px-3 py-2 font-display text-sm font-medium transition duration-fast ease-out",
+              // Body face, not --font-display: this is a UI label, and the
+              // product register keeps the display face for section headings
+              // and empty-state headlines.
+              "relative z-10 mx-2 flex items-center justify-between rounded-md px-3 py-2 text-sm font-medium transition duration-fast ease-out",
               isActive
                 ? "text-accent-fg"
                 : "text-fg-secondary hover:bg-surface-3 hover:text-fg"
@@ -81,10 +84,12 @@ export default function LeftNav() {
               <span>{it.label}</span>
               <kbd
                 className={clsx(
-                  "ml-2 rounded px-1 font-mono text-[10px]",
+                  "ml-2 rounded px-1 font-mono text-xs",
                   isActive
                     ? "bg-scrim/30 text-accent-fg"
-                    : "bg-surface-3 text-fg-muted",
+                    // --fg-muted cannot clear AA on --surface-3 (4.00:1), so
+                    // anything sitting on that surface steps up to secondary.
+                    : "bg-surface-3 text-fg-secondary",
                 )}
                 aria-hidden="true"
               >
@@ -94,6 +99,7 @@ export default function LeftNav() {
             </>
           )}
         </NavLink>
+        </Fragment>
       ))}
     </nav>
   );

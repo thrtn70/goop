@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { useHotkeys } from "@/hooks/useHotkeys";
+import { NAV_ITEMS } from "@/lib/navItems";
 import { useAppStore } from "@/store/appStore";
 
 const navigateMock = vi.hoisted(() => vi.fn());
@@ -71,20 +72,17 @@ describe("useHotkeys", () => {
     expect(useAppStore.getState().paletteOpen).toBe(false);
   });
 
-  it("Cmd+1..6 navigates to the matching route", () => {
+  it("binds every nav destination to its own shortcut", () => {
+    // Derived from NAV_ITEMS rather than restating the mapping, so the
+    // bindings and the nav can't drift apart again.
     mountHost();
-    pressMod("1");
-    pressMod("2");
-    pressMod("3");
-    pressMod("4");
-    pressMod("5");
-    pressMod("6");
-    expect(navigateMock).toHaveBeenNthCalledWith(1, "/extract");
-    expect(navigateMock).toHaveBeenNthCalledWith(2, "/convert");
-    expect(navigateMock).toHaveBeenNthCalledWith(3, "/image");
-    expect(navigateMock).toHaveBeenNthCalledWith(4, "/compress");
-    expect(navigateMock).toHaveBeenNthCalledWith(5, "/history");
-    expect(navigateMock).toHaveBeenNthCalledWith(6, "/settings");
+    for (const item of NAV_ITEMS) {
+      pressMod(item.shortcut);
+    }
+    NAV_ITEMS.forEach((item, idx) => {
+      expect(navigateMock).toHaveBeenNthCalledWith(idx + 1, item.to);
+    });
+    expect(navigateMock).toHaveBeenCalledTimes(NAV_ITEMS.length);
   });
 
   it("Cmd+, navigates to settings", () => {

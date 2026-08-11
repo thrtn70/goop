@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Command } from "cmdk";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
+import { NAV_ITEMS } from "@/lib/navItems";
 import { isFilePickerRoute, isMacPlatform, modKeyLabel } from "@/lib/platform";
 
 interface ActionItem {
@@ -40,64 +41,19 @@ export default function CommandPalette() {
   }
 
   const actions: ActionItem[] = [
-    {
-      id: "nav-extract",
-      label: "Go to Extract",
-      shortcut: `${mod}1`,
+    // Navigate entries come from NAV_ITEMS so the shortcut shown here is
+    // always the one the nav shows and the one the hotkey actually fires.
+    ...NAV_ITEMS.map<ActionItem>((item) => ({
+      // Keyed off `to`, not `label`: this id becomes a React key, and `to` is
+      // the field navItems.test.ts proves unique. Two items sharing a label
+      // would otherwise collide silently.
+      id: `nav-${item.to}`,
+      label: `Go to ${item.label}`,
+      ...(item.hint ? { hint: item.hint } : {}),
+      shortcut: `${mod}${item.shortcut}`,
       group: "Navigate",
-      run: () => nav("/extract"),
-    },
-    {
-      id: "nav-convert",
-      label: "Go to Convert",
-      shortcut: `${mod}2`,
-      group: "Navigate",
-      run: () => nav("/convert"),
-    },
-    {
-      id: "nav-image",
-      label: "Go to Image",
-      shortcut: `${mod}3`,
-      group: "Navigate",
-      run: () => nav("/image"),
-    },
-    {
-      id: "nav-recognize",
-      label: "Go to Recognize",
-      hint: "Pull text out of a PDF or image",
-      shortcut: `${mod}7`,
-      group: "Navigate",
-      run: () => nav("/recognize"),
-    },
-    {
-      id: "nav-metadata",
-      label: "Go to Metadata",
-      hint: "Edit audio tags & cover art, view EXIF/PDF info",
-      shortcut: `${mod}8`,
-      group: "Navigate",
-      run: () => nav("/metadata"),
-    },
-    {
-      id: "nav-compress",
-      label: "Go to Compress",
-      shortcut: `${mod}4`,
-      group: "Navigate",
-      run: () => nav("/compress"),
-    },
-    {
-      id: "nav-history",
-      label: "Go to History",
-      shortcut: `${mod}5`,
-      group: "Navigate",
-      run: () => nav("/history"),
-    },
-    {
-      id: "nav-settings",
-      label: "Go to Settings",
-      shortcut: `${mod}6`,
-      group: "Navigate",
-      run: () => nav("/settings"),
-    },
+      run: () => nav(item.to),
+    })),
     {
       id: "act-paste-url",
       label: "Paste URL and download",
@@ -200,7 +156,7 @@ export default function CommandPalette() {
               <Command.Group
                 key={group}
                 heading={group}
-                className="mb-1 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-muted"
+                className="mb-1 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-muted"
               >
                 {items.map((a) => (
                   <Command.Item
@@ -212,13 +168,13 @@ export default function CommandPalette() {
                     <span className="flex flex-col">
                       <span>{a.label}</span>
                       {a.hint && (
-                        <span className="text-[10px] text-fg-muted">
+                        <span className="text-xs text-fg-muted">
                           {a.hint}
                         </span>
                       )}
                     </span>
                     {a.shortcut && (
-                      <kbd className="ml-3 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-fg-muted">
+                      <kbd className="ml-3 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-fg-muted">
                         {a.shortcut}
                       </kbd>
                     )}
