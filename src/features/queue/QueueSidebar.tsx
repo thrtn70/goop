@@ -215,7 +215,7 @@ export default function QueueSidebar() {
         {activeCount > 0 && (
           <span
             aria-label={`${activeCount} active job${activeCount !== 1 ? "s" : ""}`}
-            className="flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-accent-fg"
+            className="flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-xs font-semibold text-accent-fg"
           >
             {activeCount > 99 ? "99+" : activeCount}
           </span>
@@ -247,7 +247,7 @@ export default function QueueSidebar() {
         <h3
           aria-live="polite"
           aria-atomic="true"
-          className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted"
+          className="text-xs font-semibold uppercase tracking-wide text-fg-muted"
         >
           Queue ({activeCount})
         </h3>
@@ -256,7 +256,7 @@ export default function QueueSidebar() {
             type="button"
             onClick={() => clearUnseen()}
             aria-label={`${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`}
-            className="btn-press inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+            className="btn-press inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-xs font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
           >
             {unseen > 99 ? "99+" : unseen}
           </button>
@@ -285,7 +285,7 @@ export default function QueueSidebar() {
       </div>
 
       {(activeCount > 0 || doneToday > 0) && (
-        <div className="mt-1 flex items-center justify-between text-[10px] tabular-nums text-fg-muted">
+        <div className="mt-1 flex items-center justify-between text-xs tabular-nums text-fg-muted">
           <span>
             {totalEtaSecs > 0 ? `~${formatEta(totalEtaSecs)} remaining` : ""}
           </span>
@@ -370,7 +370,7 @@ export default function QueueSidebar() {
       {done.length > 0 && (
         <>
           <div className="mt-6 flex items-center justify-between">
-            <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-fg-muted">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
               Done ({done.length})
             </h3>
             <button

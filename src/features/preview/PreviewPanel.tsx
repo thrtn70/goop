@@ -39,7 +39,7 @@ export default function PreviewPanel() {
       className="w-[380px] shrink-0 overflow-y-auto border-l border-subtle bg-surface-1 p-5"
     >
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-fg-muted">Preview</span>
+        <span className="text-xs uppercase tracking-wide text-fg-muted">Preview</span>
         <button
           type="button"
           aria-label="Close preview"

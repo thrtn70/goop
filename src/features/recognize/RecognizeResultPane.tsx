@@ -91,7 +91,7 @@ export default function RecognizeResultPane({
       )}
 
       {truncated && !isEmpty && (
-        <p className="text-[11px] text-fg-muted">
+        <p className="text-xs text-fg-muted">
           Preview truncated — open the saved file for the full text.
         </p>
       )}

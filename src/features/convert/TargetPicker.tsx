@@ -125,14 +125,14 @@ export default function TargetPicker({ probe, selected, onChange }: TargetPicker
                 >
                   {t.label}
                   {isRecommended && selected !== t.value && (
-                    <span aria-hidden="true" className="ml-1 text-[9px] font-normal text-accent">*</span>
+                    <span aria-hidden="true" className="ml-1 text-xs font-normal text-accent">*</span>
                   )}
                 </button>
               );
             })}
           </div>
           {TARGETS.some((t) => t.group === group && t.value === recommended) && (
-            <p className="mt-1 text-[10px] text-fg-muted/60">* recommended for this file</p>
+            <p className="mt-1 text-xs text-fg-muted/60">* recommended for this file</p>
           )}
         </div>
       ))}

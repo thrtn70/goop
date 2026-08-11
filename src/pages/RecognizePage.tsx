@@ -210,7 +210,7 @@ export default function RecognizePage() {
           >
             Pick a file…
           </button>
-          <p className="text-[11px] text-fg-muted">PDF, PNG, JPEG, WebP, BMP, TIFF</p>
+          <p className="text-xs text-fg-muted">PDF, PNG, JPEG, WebP, BMP, TIFF</p>
         </div>
       </DropZone>
 

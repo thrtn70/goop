@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { tinykeys } from "tinykeys";
+import { NAV_ITEMS } from "@/lib/navItems";
 import { isFilePickerRoute } from "@/lib/platform";
 import { useAppStore } from "@/store/appStore";
 
@@ -27,38 +28,18 @@ export function useHotkeys(): void {
         e.preventDefault();
         togglePalette();
       },
-      "$mod+1": (e) => {
-        e.preventDefault();
-        nav("/extract");
-      },
-      "$mod+2": (e) => {
-        e.preventDefault();
-        nav("/convert");
-      },
-      "$mod+3": (e) => {
-        e.preventDefault();
-        nav("/image");
-      },
-      "$mod+4": (e) => {
-        e.preventDefault();
-        nav("/compress");
-      },
-      "$mod+5": (e) => {
-        e.preventDefault();
-        nav("/history");
-      },
-      "$mod+6": (e) => {
-        e.preventDefault();
-        nav("/settings");
-      },
-      "$mod+7": (e) => {
-        e.preventDefault();
-        nav("/recognize");
-      },
-      "$mod+8": (e) => {
-        e.preventDefault();
-        nav("/metadata");
-      },
+      // One binding per nav destination, derived from the same array the nav
+      // and the palette render from. Hand-written entries here are what let
+      // the numbering drift out of step with the visible order before.
+      ...Object.fromEntries(
+        NAV_ITEMS.map((item) => [
+          `$mod+${item.shortcut}`,
+          (e: KeyboardEvent) => {
+            e.preventDefault();
+            nav(item.to);
+          },
+        ]),
+      ),
       "$mod+,": (e) => {
         e.preventDefault();
         nav("/settings");
