@@ -72,7 +72,9 @@ export default function PdfPageCard({ state, mode, onChange }: PdfPageCardProps)
             }
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center font-display text-lg text-fg-muted">
+          // A page number is data, not a heading: body face, and tabular so
+          // the digits line up across the grid of cards.
+          <div className="tabular-nums flex h-full w-full items-center justify-center text-lg text-fg-muted">
             {state.originalPage}
           </div>
         )}

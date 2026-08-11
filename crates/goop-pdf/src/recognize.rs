@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 /// 16 chars/page is deliberately low: even a sparse text layer (page
 /// numbers, running headers) clears it, while a genuinely scanned PDF —
 /// where `mutool convert -F text` extracts essentially nothing — falls
-/// well under. Tunable; see docs/mutool-ocr-support.md.
+/// well under. Tunable.
 const MIN_TEXT_LAYER_CHARS_PER_PAGE: usize = 16;
 
 /// Which path the orchestrator took for a given input. Internal: it is

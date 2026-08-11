@@ -168,7 +168,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
               {qualityValue}
             </span>
           </div>
-          <div className="mt-1 flex justify-between text-[10px] text-fg-muted">
+          <div className="mt-1 flex justify-between text-xs text-fg-muted">
             <span>Smaller</span>
             <span>Better quality</span>
           </div>

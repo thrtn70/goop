@@ -124,19 +124,19 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
     <div className="flex-1 overflow-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-[11px] text-fg-muted">
-            <th className="w-8 p-2 pl-6" />
-            <th className="p-2 text-left">Type</th>
-            <th className="p-2 text-left">
+          <tr className="text-xs text-fg-muted">
+            <th className="w-8 p-3 pl-6" />
+            <th className="p-3 text-left">Type</th>
+            <th className="p-3 text-left">
               <SortHeader label="Output" col="name" />
             </th>
-            <th className="p-2 text-right">
+            <th className="p-3 text-right">
               <SortHeader label="Size" col="size" className="justify-end" />
             </th>
-            <th className="p-2 text-right">
+            <th className="p-3 text-right">
               <SortHeader label="Date" col="date" className="justify-end" />
             </th>
-            <th className="w-20 p-2 pr-6" />
+            <th className="w-20 p-3 pr-6" />
           </tr>
         </thead>
         <tbody>
@@ -168,7 +168,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                   previewing ? "bg-accent-subtle" : ""
                 }`}
               >
-                <td className="p-2 pl-6">
+                <td className="p-3 pl-6">
                   <input
                     type="checkbox"
                     checked={selected}
@@ -177,16 +177,16 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                     aria-label={outputPath ? `Select ${basename(outputPath)}` : "Select row"}
                   />
                 </td>
-                <td className="p-2 text-xs text-fg-muted">{String(j.kind)}</td>
-                <td className="p-2 truncate text-fg">
+                <td className="p-3 text-xs text-fg-muted">{String(j.kind)}</td>
+                <td className="p-3 truncate text-fg">
                   {basename(j.result?.output_path ?? null)}
                   {j.result?.result_kind === "folder" && j.result.file_count > 1 && (
-                    <span className="ml-2 text-[10px] text-fg-muted">
+                    <span className="ml-2 text-xs text-fg-muted">
                       ({j.result.file_count} files)
                     </span>
                   )}
                   {typeof j.state !== "string" && "error" in j.state && (
-                    <span className="ml-2 text-[10px] uppercase text-error">{stateLabel(j.state)}</span>
+                    <span className="ml-2 text-xs uppercase text-error">{stateLabel(j.state)}</span>
                   )}
                   {/* The badge alone sent people back to a queue they had
                    *  already cleared to find out what went wrong. The raw
@@ -194,20 +194,20 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                    *  a traceback per row would drown it. */}
                   {failure && (
                     <div
-                      className="mt-0.5 max-w-[28rem] truncate text-[11px] text-error/80"
+                      className="mt-0.5 max-w-[28rem] truncate text-xs text-error/80"
                       title={failure.message}
                     >
                       {failure.message}
                     </div>
                   )}
                 </td>
-                <td className="p-2 text-right tabular-nums text-xs text-fg-muted">
+                <td className="p-3 text-right tabular-nums text-xs text-fg-muted">
                   {formatBytes(j.result?.bytes)}
                 </td>
-                <td className="p-2 text-right text-xs text-fg-muted">
+                <td className="p-3 text-right text-xs text-fg-muted">
                   {timeAgo(j.finished_at)}
                 </td>
-                <td className="p-2 pr-6 text-right">
+                <td className="p-3 pr-6 text-right">
                   <div className="flex items-center justify-end gap-2">
                     {canRetry && (
                       <button

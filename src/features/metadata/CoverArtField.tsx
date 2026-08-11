@@ -40,7 +40,7 @@ export default function CoverArtField({ current, op, onChange, batch }: CoverArt
 
   return (
     <div className="flex items-center gap-4 rounded-md border border-subtle bg-surface-1 p-3">
-      <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2 text-center text-[10px] text-fg-muted">
+      <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2 text-center text-xs text-fg-muted">
         {op.kind === "remove" ? (
           <span>removed</span>
         ) : op.kind === "replace" ? (

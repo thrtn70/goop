@@ -222,7 +222,7 @@ export default function ConvertPage() {
               {["MOV → MP4", "MP4 → MP3", "PNG → JPG", "MP4 → GIF"].map((label) => (
                 <span
                   key={label}
-                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-[10px] tracking-tight text-fg-muted"
+                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-xs tracking-tight text-fg-muted"
                 >
                   {label}
                 </span>

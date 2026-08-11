@@ -110,8 +110,10 @@ export default function ImageOperationPicker({
             <span>
               <span className="block text-sm font-medium text-fg">
                 {opt.label}
+                {/* Badge text is --fg-secondary, not --fg-muted: muted cannot
+                    clear AA against --surface-3 (4.00:1). */}
                 {opt.comingSoon && (
-                  <span className="ml-2 rounded bg-surface-3 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted">
+                  <span className="ml-2 rounded bg-surface-3 px-1.5 py-0.5 text-xs uppercase tracking-wider text-fg-secondary">
                     soon
                   </span>
                 )}

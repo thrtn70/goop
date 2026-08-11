@@ -359,7 +359,11 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             }}
             aria-label={isSelected ? `Deselect ${shortLabel(job)}` : `Select ${shortLabel(job)}`}
             className={clsx(
-              "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-[9px] transition duration-fast ease-out",
+              // leading-none: text-xs carries the 1.55 body line-height, which
+              // gives the ✓ an 18.6px line box inside a 14px content area and
+              // bleeds it past the border. Collapsing the line box lets the
+              // flex centering place the glyph properly.
+              "flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-xs leading-none transition duration-fast ease-out",
               isSelected
                 ? "border-accent bg-accent text-accent-fg"
                 : "border-subtle bg-surface-1/70 text-fg-muted opacity-0 group-hover:opacity-100 hover:opacity-100",
@@ -452,7 +456,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
            *  anything: "we already tried the obvious fix" is the part that
            *  changes what the user does next. */}
           {failure.note && (
-            <div className="rounded border border-subtle bg-surface-1 px-1.5 py-1 text-[10px] leading-snug text-fg-secondary">
+            <div className="rounded border border-subtle bg-surface-1 px-1.5 py-1 text-xs leading-snug text-fg-secondary">
               {failure.note}
             </div>
           )}
@@ -465,7 +469,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                   aria-controls={detailId}
                   aria-label={`${detailOpen ? "Hide" : "Show"} details for ${shortLabel(job)}`}
                   onClick={() => setDetailOpen((v) => !v)}
-                  className="text-[10px] text-accent transition duration-fast ease-out hover:text-accent-hover"
+                  className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
                 >
                   {detailOpen ? "Hide details" : "Show details"}
                 </button>
@@ -474,7 +478,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                     type="button"
                     onClick={() => void handleCopyDetail(copyText(failure))}
                     aria-label={`Copy error detail for ${shortLabel(job)}`}
-                    className="text-[10px] text-accent transition duration-fast ease-out hover:text-accent-hover"
+                    className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
                   >
                     {copied ? "Copied" : "Copy"}
                   </button>
@@ -488,7 +492,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                 <pre
                   id={detailId}
                   tabIndex={0}
-                  className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-1.5 text-[10px] leading-snug text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                  className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-1.5 text-xs leading-snug text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
                 >
                   {failure.detail}
                 </pre>
@@ -561,7 +565,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             </div>
             {name === "running" && isHardwareEncoder(progress?.encoder ?? null) && (
               <span
-                className="pulse-glow rounded-full bg-accent-subtle px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent"
+                className="pulse-glow rounded-full bg-accent-subtle px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-accent"
                 title={`Hardware-accelerated encoder: ${progress?.encoder}`}
               >
                 HW
