@@ -26,7 +26,7 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 
 *Think of it as **yt-dlp + gallery-dl + ffmpeg + Ghostscript with a UI that doesn't make you read a man page first**.*
 
-> **Screenshots and a tour:** the [Goop website](https://thrtn70.github.io/goop/) has the full visual walkthrough with annotated screens.
+> **The short version:** the [Goop website](https://thrtn70.github.io/goop/) covers what it does, how to install it, and every published release.
 
 * * *
 
@@ -34,7 +34,7 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 
 | Category | Details |
 |---|---|
-| **Extract** | yt-dlp + gallery-dl, ~600 supported sites between them. URL routed automatically; bidirectional fallback if the first extractor misses. |
+| **Extract** | yt-dlp + gallery-dl, 2,000+ supported sites between them. URL routed automatically; bidirectional fallback if the first extractor misses. |
 | **Convert** | ffmpeg-backed video/audio conversion with format probing, smart defaults, and a remux-vs-re-encode compatibility matrix. Image conversion runs in-process via the `image` crate — now including AVIF, JPEG-XL, HEIC, and TIFF in addition to the v0.2.4 set. EXIF + ICC profiles can be preserved or stripped per file. |
 | **Compress** | Quality-slider mode (1–100) or target-size mode (KB/MB). Works on video, audio, images, and PDFs. Source-vs-target preview before launch. |
 | **Image Workshop** | (v0.2.5) Rotate, resize (fit-within / fit-exact / scale %), interactive crop with aspect-ratio presets, text watermark with five anchor positions, batch recompress, and one-shot App Icon export to `.icns` + `.ico` + a favicon PNG set. |

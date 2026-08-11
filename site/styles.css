@@ -414,6 +414,25 @@ main {
   }
 }
 
+/* The right offset is a percentage, so the blob walks left as the viewport
+   narrows and ends up directly behind the headline — and its body fill is
+   byte-identical to --teal, the color of the second headline line. Measured at
+   375px: teal-on-blob 1.17:1, paper-on-blob 2.46:1, both under the 3:1 AA floor
+   for large text. Dropping the mark to 0.4 restores 4.01:1 and 8.47:1 without
+   touching its silhouette; the headline keeps the accent.
+
+   The breakpoint is 460 rather than the ~410 where glyph overlap starts,
+   because the painted shape is not the box: rotate(-8deg) swings the leading
+   corner out, feDisplacementMap jitters the silhouette, and hero-blob-drift
+   moves it 10px on X over its 22s cycle. Any single contrast reading of this
+   mark is only valid for the drift phase it was taken at, so the boundary
+   carries deliberate slack. */
+@media (max-width: 460px) {
+  .hero__blob {
+    opacity: 0.4;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero__blob {
     animation: none;
@@ -461,7 +480,14 @@ main {
 .hero__headline {
   font-family: 'Bricolage Grotesque', system-ui;
   font-weight: 700;
-  font-size: var(--type-display-xxxl);
+  /* The vw term is a safety net, not the design intent — at a default root it
+     never binds above 320px, so the clamp still drives the scale. It matters
+     because --type-display-xxxl bottoms out at a rem-only 3.5rem floor, which
+     governs every viewport under ~457px: a browser set to a large default font
+     size scales that floor straight past the hero's overflow:clip, and since
+     the line is nowrap under a fine pointer there is no wrap and no scrollbar
+     to recover it. 16vw equals 3.5rem at 320px on a 16px root. */
+  font-size: min(var(--type-display-xxxl), 16vw);
   font-variation-settings: 'opsz' 96;
   line-height: var(--line-tight);
   letter-spacing: var(--tracking-tight);
@@ -472,6 +498,20 @@ main {
 
 .hero__headline-line {
   display: block;
+}
+
+/* The copy uses &nbsp; between words to say "never break this line". That holds
+   for a plain text run, but the cursor-weight effect rewrites each character
+   into an inline-block, and every one of those is a fresh break opportunity —
+   at 320px the headline came apart as "Take c / ontrol" and "of you / r files.".
+   Scoped to the same query that gates the split in app.js, deliberately: nowrap
+   turns a wrap into a clip (the hero is overflow:clip), and a coarse-pointer
+   visitor never gets the split, so applying it there would buy nothing and cost
+   the wrap that keeps a raised default font size readable. */
+@media (hover: hover) and (pointer: fine) {
+  .hero__headline-line {
+    white-space: nowrap;
+  }
 }
 
 .hero__headline-line--indent {
@@ -846,6 +886,17 @@ main {
   font-variation-settings: 'opsz' 96;
 }
 
+/* The marquee is only correct when the clone exists — one list travelling its
+   own full width leaves the band empty for the tail of every cycle. Under
+   prefers-reduced-motion the JS never creates the clone (deliberate: the house
+   pattern is to not create an effect rather than animate it to zero), which
+   leaves a lone list here. Tying the animation to :only-child means re-enabling
+   motion mid-session cannot start a broken loop, instead of relying on the
+   media query that was evaluated once at load. */
+.ticker__list:only-child {
+  animation: none;
+}
+
 .ticker__list li:not(.ticker__sep):not(.ticker__more) {
   transition: color var(--dur-fast) var(--ease-quart);
 }
@@ -873,9 +924,22 @@ main {
   animation-play-state: paused;
 }
 
+/* The animation sits on .ticker__list, so the percentage resolves against one
+   list's own width — not the two-list track. A seamless hand-off needs each
+   list to travel its full width so the clone lands exactly where the original
+   started; -50% travelled half that and snapped ~1005px into view once a
+   minute. (-50% would only be right if the animated element wrapped both
+   copies, and .ticker__track is width:100%, so it cannot.)
+
+   INVARIANT, and it is tighter than it looks: with two copies travelling a
+   full width each, the band stays covered only while one list is at least as
+   wide as the track. Measured at the type cap the list is 3859px, so a 3840px
+   4K viewport clears it by 19px — 0.5%. Trimming names from the roll-call, or
+   tightening its gap/padding, spends that margin and opens a blank band at the
+   tail of every cycle. Shortening the list means adding a copy. */
 @keyframes ticker-scroll {
   from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
+  to { transform: translateX(-100%); }
 }
 
 @media (max-width: 720px) {
@@ -1017,7 +1081,9 @@ main {
 
 @media (max-width: 880px) {
   .entry {
-    grid-template-columns: 1fr;
+    /* Same min-content trap as .step — latent here (no unwrappable child
+       today), but a long URL or a code sample in an entry would spring it. */
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--s-4);
   }
   .entry__numeral { font-size: clamp(3.5rem, 14vw, 6rem); }
@@ -1199,7 +1265,13 @@ main {
 
 @media (max-width: 880px) {
   .step {
-    grid-template-columns: 1fr;
+    /* Bare 1fr is minmax(auto, 1fr), so the track floors at min-content — and
+       step 02 holds a white-space:pre <pre> whose min-content is 370.8px. The
+       track froze at that width on every viewport under 430px and dragged all
+       three step rows past the right gutter with it (71px off-screen at 320px,
+       taking the Gatekeeper command with it). minmax(0, ...) lets the track
+       shrink and hands the overflow to the <pre>'s own overflow-x. */
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--s-3);
   }
   .step__numeral { font-size: clamp(3.5rem, 14vw, 6rem); }

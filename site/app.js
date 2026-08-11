@@ -1,10 +1,23 @@
 (() => {
   'use strict';
 
+  /* Fallback used before the release fetch resolves, and permanently if it
+   * fails (api.github.com is 60 req/hr per IP unauthenticated).
+   *
+   * The download URLs deliberately point at the releases *page*, not at a
+   * pinned asset. `/releases/latest/download/<name>` resolves <name> against
+   * the newest release only, so any version-pinned asset name 404s the moment
+   * the next release ships — and since init() overwrites the markup's hrefs
+   * with these values immediately, a stale pin breaks the primary CTA even on
+   * the happy path, for anyone who clicks inside the fetch window. The page
+   * costs one extra click and never 404s.
+   *
+   * `version` is cosmetic — the eyebrow and colophon labels. When the fetch
+   * fails, [data-fetch-status] tells the visitor the check was unavailable. */
   const FALLBACK = Object.freeze({
-    version: 'v0.1.9',
-    mac: 'https://github.com/thrtn70/goop/releases/latest/download/Goop_0.1.9_aarch64.dmg',
-    windows: 'https://github.com/thrtn70/goop/releases/latest/download/Goop_0.1.9_x64_en-US.msi',
+    version: 'v0.2.9',
+    mac: 'https://github.com/thrtn70/goop/releases/latest',
+    windows: 'https://github.com/thrtn70/goop/releases/latest',
   });
 
   const REPO = 'thrtn70/goop';
@@ -162,7 +175,13 @@
     const tag = (release?.tag_name || '').toLowerCase();
     const name = (release?.name || '').toLowerCase();
     if (release?.prerelease === true || release?.draft === true) return true;
-    if (/broken|do not use|unstable|use\s+v/.test(name)) return true;
+    // Anchored on purpose. Scanning the whole title for these words brands
+    // ordinary releases: "Pause video downloads" contains "use v" (pa-USE
+    // Video), "Reuse verified…" does too, and "Fix broken thumbnails" contains
+    // "broken". A warning worth a public flag leads the title, or says
+    // "do not use" / "use v<number>" outright.
+    if (/^\s*\W*(broken|unstable)\b/.test(name)) return true;
+    if (/\bdo not use\b|\buse\s+v\d/.test(name)) return true;
     if (/-rc|-beta|-alpha|-pre/.test(tag)) return true;
     return false;
   }
@@ -281,7 +300,11 @@
     const list = document.querySelector('[data-archive-list]');
     if (!list) return;
     const releases = await fetchReleases();
-    if (!releases) {
+    // An empty array is truthy, so this has to test length too — otherwise a
+    // 200 with no releases falls through to renderArchive(), which returns
+    // without touching the DOM and leaves the skeleton rows up forever. The
+    // ghost bars carry no shimmer by design, so that reads as broken, not busy.
+    if (!releases || releases.length === 0) {
       archiveFallback();
       return;
     }
@@ -368,6 +391,19 @@
       const io = new IntersectionObserver(
         ([entry]) => {
           state.heroVisible = entry.isIntersecting;
+          // Settle the weights on the way out. The loop's keep-alive test
+          // below reads charWeights whether or not the hero is visible, so
+          // characters left mid-surge kept it rescheduling at 60fps for the
+          // rest of the visit — offscreen, nothing was ever going to move
+          // them back toward rest. Wiggle the headline, scroll down, and the
+          // loop ran forever doing nothing. Snapping to rest here also means
+          // scrolling back up finds the headline at its resting weight.
+          if (!entry.isIntersecting) {
+            for (const c of chars) {
+              state.charWeights.set(c, HERO_REST);
+              c.style.fontVariationSettings = `"wght" ${HERO_REST}`;
+            }
+          }
         },
         { threshold: 0 },
       );
