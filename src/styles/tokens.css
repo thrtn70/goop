@@ -5,6 +5,16 @@
  * without the oklch() wrapper, so Tailwind can inject alpha values.
  *
  * Theme: dark is the default. Add .light class to <html> for light mode.
+ *
+ * Neutrals carry a real chroma toward brand hue 160 rather than a token
+ * one. At 0.008 the tint was arithmetic, not perceptible, and the surface
+ * read as generic dark-grey; the ramp below is where "warmth over
+ * sterility" actually lands. Lightness is unchanged from the previous set,
+ * so nothing that passed contrast before regressed.
+ *
+ * Contrast is enforced, not assumed — src/styles/__tests__/tokens.test.ts
+ * parses this file and fails the build if any text token drops below WCAG
+ * AA against the surfaces it is allowed to sit on.
  */
 
 /* ------------------------------------------------------------------ */
@@ -12,21 +22,27 @@
 /* ------------------------------------------------------------------ */
 :root {
   /* Surfaces — warm-tinted toward brand green (hue 160) */
-  --surface-0: 14% 0.008 160;
-  --surface-1: 18% 0.01 160;
-  --surface-2: 23% 0.012 160;
-  --surface-3: 28% 0.015 160;
+  --surface-0: 14% 0.020 160;
+  --surface-1: 18% 0.024 160;
+  --surface-2: 23% 0.028 160;
+  --surface-3: 28% 0.032 160;
 
-  /* Text / foreground */
-  --fg: 93% 0.005 160;
-  --fg-secondary: 68% 0.01 160;
-  --fg-muted: 48% 0.01 160;
+  /* Text / foreground.
+     --fg-muted was 48%, which measured 3.06:1 on --surface-0 and 2.59:1 on
+     --surface-2 — under AA for body text, and it renders the URL
+     placeholder, queue-row ETAs and nav keycap labels. At 62% it clears AA
+     on surfaces 0-2 (5.52 / 5.20 / 4.65). It CANNOT clear AA on
+     --surface-3 without collapsing into --fg-secondary, so the rule is a
+     usage one: text on --surface-3 steps up to --fg-secondary. */
+  --fg: 93% 0.012 160;
+  --fg-secondary: 68% 0.018 160;
+  --fg-muted: 62% 0.024 160;
 
   /* Brand accent — warm teal-green */
   --accent: 68% 0.14 160;
   --accent-hover: 74% 0.15 160;
-  --accent-subtle: 24% 0.05 160;
-  --accent-fg: 98% 0.005 160;
+  --accent-subtle: 24% 0.06 160;
+  --accent-fg: 98% 0.008 160;
   /* Accent-strong: darker accent for AA-contrast pairings with --accent-fg.
      Same value in both themes — anchors the LeftNav active pill so the
      foreground white reads cleanly regardless of mode. */
@@ -34,13 +50,13 @@
 
   /* Modal scrim — warm-tinted near-black, hue 160 to match the rest of
      the neutral system. Use with Tailwind's /<alpha> modifier. */
-  --scrim: 8% 0.005 160;
+  --scrim: 8% 0.012 160;
 
   /* Borders */
-  --border: 28% 0.01 160;
-  --border-subtle: 22% 0.008 160;
+  --border: 28% 0.024 160;
+  --border-subtle: 22% 0.020 160;
 
-  /* Semantic */
+  /* Semantic — own hues, so they keep their own chroma */
   --success: 72% 0.14 145;
   --success-subtle: 22% 0.04 145;
   --error: 65% 0.18 20;
@@ -59,13 +75,16 @@
   --space-16: 64px;
   --space-24: 96px;
 
-  /* Typography scale (fixed rem for app UI) */
-  --text-xs: 0.6875rem;   /* 11px */
-  --text-sm: 0.8125rem;   /* 13px */
-  --text-base: 0.9375rem; /* 15px */
-  --text-lg: 1.125rem;    /* 18px */
+  /* Typography scale (fixed rem for app UI).
+     Stepped up one notch from 11/13/15/18/24/32. The old scale was tuned
+     like a settings panel and fought the "breathing room" principle; body
+     copy at 15px with 11px metadata was the densest part of the app. */
+  --text-xs: 0.75rem;     /* 12px */
+  --text-sm: 0.875rem;    /* 14px */
+  --text-base: 1rem;      /* 16px */
+  --text-lg: 1.1875rem;   /* 19px */
   --text-xl: 1.5rem;      /* 24px */
-  --text-2xl: 2rem;       /* 32px */
+  --text-2xl: 1.875rem;   /* 30px */
 
   /* Line heights — darker bg needs more breathing room */
   --leading-tight: 1.3;
@@ -92,40 +111,48 @@
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
 
-  /* Radii */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  /* Radii — opened alongside the type scale so corners don't read tighter
+     than the type they wrap. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
   --radius-full: 9999px;
 }
 
 /* ------------------------------------------------------------------ */
 /* Light theme                                                        */
 /* ------------------------------------------------------------------ */
+/* Chroma is lifted here too, but less than in dark: the same chroma reads
+   far stronger near white than near black, and hue 160 at 98% lightness
+   tips into mint quickly. */
 :root.light {
   /* Surfaces */
-  --surface-0: 98% 0.005 160;
-  --surface-1: 95% 0.008 160;
-  --surface-2: 91% 0.012 160;
-  --surface-3: 87% 0.018 160;
+  --surface-0: 98% 0.010 160;
+  --surface-1: 95% 0.014 160;
+  --surface-2: 91% 0.020 160;
+  --surface-3: 87% 0.026 160;
 
-  /* Text / foreground */
-  --fg: 17% 0.01 160;
-  --fg-secondary: 38% 0.015 160;
-  --fg-muted: 55% 0.01 160;
+  /* Text / foreground.
+     --fg-muted was 55%, which passed on --surface-0 (4.55:1) and failed on
+     everything below it — 4.17:1 on --surface-1, 3.70:1 on --surface-2. At
+     48% it clears all three (6.13 / 5.62 / 4.99). The --surface-3 rule
+     above applies to this theme too. */
+  --fg: 17% 0.016 160;
+  --fg-secondary: 38% 0.022 160;
+  --fg-muted: 48% 0.020 160;
 
   /* Accent — darker for contrast on light bg */
   --accent: 42% 0.14 160;
   --accent-hover: 36% 0.15 160;
-  --accent-subtle: 92% 0.04 160;
-  --accent-fg: 98% 0.005 160;
+  --accent-subtle: 92% 0.05 160;
+  --accent-fg: 98% 0.008 160;
   --accent-strong: 42% 0.14 160;
 
-  --scrim: 8% 0.005 160;
+  --scrim: 8% 0.012 160;
 
   /* Borders */
-  --border: 85% 0.012 160;
-  --border-subtle: 90% 0.008 160;
+  --border: 85% 0.020 160;
+  --border-subtle: 90% 0.016 160;
 
   /* Semantic */
   --success: 45% 0.14 145;
@@ -148,27 +175,29 @@
   /* Default dark — handled by :root above */
 }
 
+/* Kept byte-identical to :root.light above. The token test asserts the two
+   blocks match, because nothing else stops them drifting apart. */
 @media (prefers-color-scheme: light) {
   :root.system {
-    --surface-0: 98% 0.005 160;
-    --surface-1: 95% 0.008 160;
-    --surface-2: 91% 0.012 160;
-    --surface-3: 87% 0.018 160;
+    --surface-0: 98% 0.010 160;
+    --surface-1: 95% 0.014 160;
+    --surface-2: 91% 0.020 160;
+    --surface-3: 87% 0.026 160;
 
-    --fg: 17% 0.01 160;
-    --fg-secondary: 38% 0.015 160;
-    --fg-muted: 55% 0.01 160;
+    --fg: 17% 0.016 160;
+    --fg-secondary: 38% 0.022 160;
+    --fg-muted: 48% 0.020 160;
 
     --accent: 42% 0.14 160;
     --accent-hover: 36% 0.15 160;
-    --accent-subtle: 92% 0.04 160;
-    --accent-fg: 98% 0.005 160;
+    --accent-subtle: 92% 0.05 160;
+    --accent-fg: 98% 0.008 160;
     --accent-strong: 42% 0.14 160;
 
-    --scrim: 8% 0.005 160;
+    --scrim: 8% 0.012 160;
 
-    --border: 85% 0.012 160;
-    --border-subtle: 90% 0.008 160;
+    --border: 85% 0.020 160;
+    --border-subtle: 90% 0.016 160;
 
     --success: 45% 0.14 145;
     --success-subtle: 93% 0.03 145;
