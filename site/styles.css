@@ -40,7 +40,13 @@
   --paper: oklch(94% 0.005 160);    /* primary text */
   --paper-2: oklch(82% 0.012 160);  /* secondary text — AAA */
   --paper-3: oklch(72% 0.012 160);  /* muted, body-size — AA 4.5:1 */
-  --paper-4: oklch(56% 0.012 160);  /* dimmest, large-size only — AA 3:1 */
+  /* Dimmest step. Measured against every surface it lands on: 4.91:1 on ink-0,
+     4.80 on ink-1, 4.57 on ink-2, so it clears AA 4.5 for body-size text
+     everywhere. It was 56%, which measured 4.51/4.41/4.19 — passing on ink-0
+     by a hundredth and failing on the bands. 58% is the lowest step that
+     clears all three. Every one of its six uses is 11-16px, so the old
+     "large-text-only, AA 3:1" note described neither the token nor its use. */
+  --paper-4: oklch(58% 0.012 160);  /* dimmest, body-size — AA 4.5:1 */
 
   --teal: oklch(70% 0.13 160);      /* accent, used SPARINGLY */
   --teal-bright: oklch(76% 0.14 160);
@@ -198,7 +204,7 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
   position: absolute;
   top: var(--s-4);
   left: var(--s-4);
-  padding: var(--s-2) var(--s-4);
+  padding: 10px var(--s-4); /* 10px block clears the 44px hit area */
   background: var(--teal);
   color: var(--ink-0);
   font-weight: 600;
@@ -654,7 +660,7 @@ main {
   color: var(--paper);
   border-bottom: 1px solid var(--paper-3);
   padding-bottom: 1px;
-  padding-block: 0.4em;
+  padding-block: 14px;
   font-style: normal;
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
@@ -684,7 +690,7 @@ main {
   color: var(--paper-2);
   border-bottom: 1px solid var(--ink-3);
   padding-bottom: 1px;
-  padding-block: 0.5em;
+  padding-block: 15px;
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
 }
@@ -756,7 +762,7 @@ main {
 
 .colophon__row a {
   border-bottom: 1px solid var(--ink-3);
-  padding-block: 0.6em;
+  padding-block: 12px;
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
 }
@@ -809,15 +815,17 @@ main {
   .hero__alt {
     margin-top: 0;
   }
-  .hero__alt a {
-    padding-block: 0.25em;
-  }
   .hero__archive {
     margin-top: var(--s-1);
   }
-  .hero__archive a {
-    padding-block: 0.35em;
-  }
+  /* The padding-block on these two used to be clawed back here to hold both
+     links above the 812 fold. It bought nothing: both links are inline, and
+     vertical padding on an inline box never enters the line box, so the claw-
+     back moved no layout at all — it only shrank the hit area, on exactly the
+     viewports where touch accuracy matters most. Measured with and without:
+     the colophon starts at 693px either way, while the targets go from
+     24.3/24.7px to 45.5/46px. The margin-top rules above are what actually
+     recover the height. */
 }
 
 /* ============================================================
@@ -855,11 +863,55 @@ main {
   align-items: baseline;
 }
 
+.ticker__aside {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3) var(--s-6);
+}
+
 .ticker__sub {
   font-size: var(--type-body-s);
   color: var(--paper-3);
   font-style: italic;
   letter-spacing: var(--tracking-snug);
+}
+
+/* The marquee starts on its own and runs for a minute, so it needs a stop.
+   Hover and :focus-within already handled a mouse, but the track holds nothing
+   focusable, so keyboard and touch had no route to it at all. Set in the label
+   register rather than as an icon button, because an icon here would be the
+   only one on the page. `button` is reset by `all: unset`, so this rebuilds
+   what it needs; the element is inline, which is why padding alone buys the
+   44px hit area and no compensating margin is required. */
+.ticker__toggle {
+  font-family: 'Bricolage Grotesque', system-ui;
+  font-size: var(--type-body-xs);
+  font-weight: 500;
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+  color: var(--paper-3);
+  border-bottom: 1px solid var(--ink-3);
+  padding-block: 14px;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-quart),
+              border-color var(--dur-fast) var(--ease-quart);
+}
+
+.ticker__toggle:hover {
+  color: var(--paper);
+  border-color: var(--paper-3);
+}
+
+/* Under reduced motion the clone is never created and the animation never
+   runs, so the control would be a button that does nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .ticker__toggle { display: none; }
+}
+
+.ticker__track[data-ticker-paused='true'] .ticker__list {
+  animation-play-state: paused;
 }
 
 .ticker__track {
@@ -1240,6 +1292,7 @@ main {
 }
 
 .step__body .link {
+  padding-block: 11px; /* inline: expands the hit box, stays out of the line box */
   border-bottom: 1px solid var(--paper-3);
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
@@ -1542,6 +1595,21 @@ main {
 .archive__skeleton-bar--shorter { width: min(18rem, 75%); }
 .archive__skeleton-bar--shortest { width: min(14rem, 60%); }
 
+/* The stubs standing in for the macOS / Windows / Notes links. They carry
+   .archive__link's exact box — 44px min-height pulled back by an 11px negative
+   margin — so the skeleton row resolves to the same height as a real one and
+   the list does not jump when the fetch lands. Widths approximate the three
+   labels at their uppercase tracking. */
+.archive__skeleton-bar--link {
+  width: 3.5rem;
+  min-height: 44px;
+  margin-block: -11px;
+  background: var(--ink-1);
+}
+
+.archive__skeleton-bar--link-wide { width: 4.75rem; }
+.archive__skeleton-bar--link-narrow { width: 3rem; }
+
 .archive__row {
   display: grid;
   grid-template-columns:
@@ -1631,7 +1699,17 @@ main {
   gap: var(--s-2) var(--s-4);
 }
 
+/* Hit areas clear 44px through one of two mechanisms, depending on display.
+   A block or flex child needs padding plus a compensating negative margin,
+   because its padding moves everything around it. An inline element needs
+   padding alone: vertical padding expands its hit box without entering the
+   line box, and vertical margin on it is ignored outright. Mixing the two up
+   is why several of these were short in the first place. */
 .archive__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-block: -11px;
   font-family: 'Bricolage Grotesque', system-ui;
   font-size: 0.78rem;
   font-weight: 500;
@@ -1662,7 +1740,7 @@ main {
 .archive__more a {
   color: var(--paper);
   border-bottom: 1px solid var(--paper-3);
-  padding-block: 0.4em;
+  padding-block: 14px;
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
 }
@@ -1736,6 +1814,7 @@ main {
 }
 
 .colophon-footer__statement a {
+  padding-block: 11px;
   border-bottom: 1px solid var(--paper-3);
   transition: color var(--dur-fast) var(--ease-quart),
               border-color var(--dur-fast) var(--ease-quart);
@@ -1759,6 +1838,10 @@ main {
 }
 
 .colophon-footer__nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin-block: -4.5px;
   border-bottom: 1px solid transparent;
   padding-bottom: 1px;
   padding-block: 0.6em;
