@@ -12,8 +12,7 @@ import { withViewTransition } from "@/lib/viewTransition";
 
 /**
  * Terminal-state jobs with search / filter / sort / grid-or-list /
- * batch actions / slide-out preview / Quick View overlay. See
- * docs/superpowers/specs/2026-04-17-v0.1.8-design.md for the UX notes.
+ * batch actions / slide-out preview / Quick View overlay.
  */
 export default function HistoryPage() {
   const viewMode = useAppStore((s) => s.history.viewMode);

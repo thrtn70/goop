@@ -58,7 +58,7 @@ MUPDF_BASE="https://github.com/ArtifexSoftware/mupdf-downloads/releases/download
 # the resulting tesseract.exe is MSVC-built so it composes with our
 # other Windows sidecars without runtime mismatch. macOS uses Homebrew's
 # tesseract formula. mutool ships without HAVE_TESSERACT, so v0.2.4 OCR
-# runs through a separate tesseract subprocess (see docs/mutool-ocr-support.md).
+# runs through a separate tesseract subprocess.
 TESSERACT_VER="5.5.0"
 TESSERACT_BUILD="5.5.0.20241111"
 TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/releases/download/${TESSERACT_VER}/tesseract-ocr-w64-setup-${TESSERACT_BUILD}.exe"
