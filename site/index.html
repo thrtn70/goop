@@ -167,7 +167,20 @@
           <h2 id="ticker-heading" class="ticker__heading">
             Works with the sites you already use
           </h2>
-          <p class="ticker__sub">A partial roll-call. Two thousand more behind it.</p>
+          <div class="ticker__aside">
+            <p class="ticker__sub">A partial roll-call. Two thousand more behind it.</p>
+            <!-- Hidden until the clone exists: without it there is no
+                 animation, so there would be nothing to pause. -->
+            <button
+              class="ticker__toggle"
+              type="button"
+              data-ticker-toggle
+              aria-label="Pause the list of supported sites"
+              hidden
+            >
+              Pause
+            </button>
+          </div>
         </div>
         <div class="ticker__track" data-ticker>
           <ul class="ticker__list" data-ticker-list>
@@ -561,6 +574,9 @@
           </p>
         </header>
 
+        <!-- Ten rows, matching ARCHIVE_LIMIT, each carrying the same links row a
+             resolved row has. The count and the structure both have to match or
+             the list jumps when the fetch lands. -->
         <ol class="archive__list" data-archive-list>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
             <span class="archive__numeral">01</span>
@@ -570,6 +586,11 @@
             </div>
             <div class="archive__body">
               <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
             </div>
           </li>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
@@ -580,6 +601,11 @@
             </div>
             <div class="archive__body">
               <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
             </div>
           </li>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
@@ -590,6 +616,116 @@
             </div>
             <div class="archive__body">
               <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">04</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">05</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">06</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">07</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">08</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">09</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
+            </div>
+          </li>
+          <li class="archive__row archive__row--skeleton" aria-hidden="true">
+            <span class="archive__numeral">10</span>
+            <div class="archive__meta">
+              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
+              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
+            </div>
+            <div class="archive__body">
+              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
+              <div class="archive__links">
+                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
+                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
+              </div>
             </div>
           </li>
         </ol>

@@ -153,7 +153,34 @@
     clone.setAttribute('aria-hidden', 'true');
     clone.removeAttribute('data-ticker-list');
     list.dataset.tickerInit = '1';
-    list.parentElement?.appendChild(clone);
+    // Matched by attribute, not by parent position: this element is both the
+    // clone's container and the element the pause flag is written to, and the
+    // CSS pause rule keys off .ticker__track. Derived from list.parentElement,
+    // any wrapper introduced between the list and the track would silently
+    // move the flag onto an element that rule does not match — the button
+    // would keep flipping its own label while pausing nothing, and nothing
+    // would throw.
+    const track = document.querySelector('[data-ticker]');
+    track?.appendChild(clone);
+
+    // The marquee auto-starts and runs for 60s, which needs a stop under
+    // WCAG 2.2.2. Hover and :focus-within already paused it for a mouse, but
+    // .ticker__track contains nothing focusable, so that rule could never
+    // match and keyboard and touch had no way to stop it. The control stays
+    // hidden until the clone exists, because without a clone the animation
+    // never runs and the button would do nothing.
+    const toggle = document.querySelector('[data-ticker-toggle]');
+    if (!track || !toggle) return;
+    toggle.hidden = false;
+    toggle.addEventListener('click', () => {
+      const paused = track.dataset.tickerPaused === 'true';
+      track.dataset.tickerPaused = paused ? 'false' : 'true';
+      toggle.textContent = paused ? 'Pause' : 'Play';
+      toggle.setAttribute(
+        'aria-label',
+        paused ? 'Pause the list of supported sites' : 'Play the list of supported sites',
+      );
+    });
   }
 
   /* ----------------------------------------------------------------
