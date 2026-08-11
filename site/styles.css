@@ -3,7 +3,8 @@
  * Dark only. Editorial / magazine treatment.
  *
  * Brand hue: OKLCH 160 (warm teal-green), shared with the app's tokens.
- * No light-mode override by deliberate choice — see .impeccable.md.
+ * There is no light-mode override, and prefers-color-scheme: light is ignored
+ * on purpose: unlike the app, this surface is dark for every visitor.
  */
 
 @font-face {
