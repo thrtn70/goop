@@ -189,7 +189,11 @@ case "$TARGET" in
     # (both binaries end up pointing at the same @loader_path/<name> sibling).
     chmod +wx "$OUT_DIR/gs-$TARGET"
     bundle_macos_dylibs "$OUT_DIR/gs-$TARGET"
-    chmod -w "$OUT_DIR/gs-$TARGET"
+    # Stays writable. Homebrew installs 555 and the mode used to be restored
+    # here, but `cp` carries it into Contents/MacOS and Tauri's bundler clears
+    # extended attributes across the bundle before signing. A read-only
+    # sidecar makes that step fail with "failed to run xattr" and no mention
+    # of which file, killing the whole build after a full release compile.
     # Copy the full share tree (Resource/, lib/, iccprofiles/) — only once,
     # it's architecture-agnostic. Homebrew's layout varies: newer
     # ghostscript drops the version subdirectory and puts Resource/, lib/,
@@ -214,7 +218,10 @@ case "$TARGET" in
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
     rm -f "$OUT_DIR/mutool-$TARGET"
     cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
-    chmod +x "$OUT_DIR/mutool-$TARGET"
+    # `u+w` and not just `+x`: the Homebrew copy is already 555, so `+x` alone
+    # is a no-op and leaves it read-only — same bundler failure as gs above.
+    # mutool needs no dylib bundling, so nothing else here would have caught it.
+    chmod u+wx "$OUT_DIR/mutool-$TARGET"
     # tesseract — via Homebrew's tesseract formula. The brew binary loads
     # libtesseract / libleptonica / libarchive / libwebp / libtiff /
     # libopenjp2 / libgif / ... from /opt/homebrew — paths that don't
@@ -228,7 +235,7 @@ case "$TARGET" in
     cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
     chmod +wx "$OUT_DIR/tesseract-$TARGET"
     bundle_macos_dylibs "$OUT_DIR/tesseract-$TARGET"
-    chmod -w "$OUT_DIR/tesseract-$TARGET"
+    # Writable for the same reason as gs above.
 
     # Tauri's externalBin packaging copies ONLY the named binary into the
     # .app's Contents/MacOS — not the sibling dylibs we bundled for gs and
