@@ -53,6 +53,29 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace --all-features
+      # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
+      # sit on different major.minor versions. They drift on their own here:
+      # Cargo.lock is gitignored by design, so the crate re-resolves to the
+      # latest 2.x on every build, while package-lock.json is committed and
+      # holds the npm half wherever it was last refreshed.
+      #
+      # Nothing else catches it. No PR job runs the bundler — the rust job
+      # only `cargo check`s goop-tauri, and `tauri build` appears solely in
+      # release.yml, on a tag. So the drift stayed invisible until a release
+      # was cut, which is the worst possible moment to discover it. This
+      # compares the two in seconds and needs no npm install, since the
+      # resolved version is already recorded in the committed lockfile.
+      - name: Tauri crate / npm parity
+        run: |
+          crate=$(cargo tree -p tauri --depth 0 | head -1 \
+            | sed -E 's/^[^ ]+ v([0-9]+\.[0-9]+).*/\1/')
+          npmv=$(python3 -c "import json; print(json.load(open('package-lock.json'))['packages']['node_modules/@tauri-apps/api']['version'])" \
+            | cut -d. -f1,2)
+          echo "tauri crate=$crate  @tauri-apps/api=$npmv"
+          if [ "$crate" != "$npmv" ]; then
+            echo "::error::tauri crate $crate and @tauri-apps/api $npmv differ — the bundler will refuse to build. Fix with: npm update @tauri-apps/api @tauri-apps/cli"
+            exit 1
+          fi
       - name: Security audit
         run: |
           cargo install cargo-audit --locked --quiet
@@ -134,6 +157,27 @@ jobs:
           # in-.app variant on macOS only, and only on tags).
           "./src-tauri/bin/gs-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/tesseract-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+      # Every sidecar must stay owner-writable. Tauri's bundler clears extended
+      # attributes across Contents/ before signing, `cp` carries the mode in
+      # from src-tauri/bin, and a read-only binary fails that step with
+      # "failed to run xattr" naming no file — after a full release compile.
+      # gs, tesseract and mutool come from Homebrew at 555 and hit exactly
+      # that. No PR job runs the bundler (only release.yml, on a tag), so this
+      # mode check is the cheap stand-in for one.
+      - name: Sidecars are writable (bundler clears xattrs)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          bad=0
+          for f in src-tauri/bin/*-"$TARGET"; do
+            [ -f "$f" ] || continue
+            if [ ! -w "$f" ]; then
+              echo "::error::$f is not owner-writable ($(stat -f '%Sp' "$f")); the macOS bundler will fail on it"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ] && echo "all sidecars writable"
+          exit "$bad"
       # Subtitle support depends on optional ffmpeg build features, which
       # differ between the macOS and Windows sources: burn-in needs libass
       # (the `subtitles` filter) and the muxers need the text encoders.
