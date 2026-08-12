@@ -228,7 +228,17 @@ jobs:
           # The Cargo workspace root is the repo root, so `tauri build` writes
           # the bundle under ./target — not ./src-tauri/target. Search both so
           # the check is robust to the workspace layout.
-          APP=$(find target src-tauri/target -type d -path "*/${{ matrix.target }}/release/bundle/macos/*.app" 2>/dev/null | head -1)
+          #
+          # `|| true` is load-bearing, not sloppy. src-tauri is a workspace
+          # member, so src-tauri/target does not exist, and find exits 1 when
+          # one of its roots is missing. `shell: bash` runs -eo pipefail, which
+          # propagates that 1 through `head -1` and aborts the whole step at
+          # this assignment — after a full macOS release compile, and silently,
+          # because 2>/dev/null swallows find's complaint. This step postdates
+          # v0.2.9 and has never run in a release, so nothing caught it. The
+          # emptiness check on the next line is the real guard and still fails
+          # closed.
+          APP=$(find target src-tauri/target -type d -path "*/${{ matrix.target }}/release/bundle/macos/*.app" 2>/dev/null | head -1 || true)
           [ -n "$APP" ] || { echo "::error::no .app bundle found under (src-tauri/)target/${{ matrix.target }}/release/bundle/macos"; exit 1; }
           # gs and tesseract load their imaging/OCR dylibs (libtiff, libpng16,
           # libfreetype, libtesseract, libleptonica, libwebp, ...) via
@@ -242,11 +252,26 @@ jobs:
           # gallery-dl/yt-dlp exercise the Python.framework load path; gs and
           # tesseract --version exercise the @loader_path dylib graph (they
           # dlopen libtiff/libfreetype/libleptonica/... to print their versions).
-          for bin in gallery-dl yt-dlp tesseract gs; do
+          # ffmpeg, ffprobe and mutool carry no sibling dylibs (static builds
+          # against system frameworks only), so for them this is purely a
+          # "does the signed, hardened-runtime binary launch at all" check —
+          # which is the exact SIGKILL this whole step exists to catch. They
+          # were in no verification loop anywhere until now.
+          for bin in gallery-dl yt-dlp tesseract gs ffmpeg ffprobe mutool; do
             exe="$APP/Contents/MacOS/$bin"
             [ -x "$exe" ] || { echo "::error::$bin missing from Contents/MacOS"; exit 1; }
-            echo "== $bin --version (signed, in-bundle) =="
-            "$exe" --version
+            # ffmpeg's option parser strips one leading dash, so `--version`
+            # arrives as an unknown `-version` option: it prints the usage
+            # banner and exits 8 (ffmpeg) / 1 (ffprobe). mutool exits 1 the
+            # same way. Under -eo pipefail any of those aborts the release
+            # build, and the banner on stdout makes it look like it worked.
+            case "$bin" in
+              ffmpeg|ffprobe) flag="-version" ;;
+              mutool)         flag="-v" ;;
+              *)              flag="--version" ;;
+            esac
+            echo "== $bin $flag (signed, in-bundle) =="
+            "$exe" "$flag"
           done
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
