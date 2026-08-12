@@ -219,14 +219,11 @@ mod tests {
         let img = tmp.path().join("white.png");
         write_white_png(&img);
         let out = tmp.path().join("out.txt");
-        let bin_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("src-tauri/bin");
-        let tessdata_dir = bin_dir.join("tesseract-data");
-        let resolver = BinaryResolver::new(bin_dir);
+        let tessdata_dir = crate::test_fixture::bundled_tessdata_dir();
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        crate::test_fixture::require_bundled(&resolver, "tesseract");
         let result = ocr_image(
             &resolver,
             &[tessdata_dir.as_path()],

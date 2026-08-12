@@ -193,10 +193,18 @@ mod tests {
         doc.save(&source).unwrap();
 
         let output = tmp.path().join("out.pdf");
-        let resolver = BinaryResolver::new(std::env::current_dir().unwrap());
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        crate::test_fixture::require_bundled(&resolver, "gs");
+        // The resource dir is passed rather than left `None`. Only the packaged
+        // app supplies it in production, so `-sGenericResourceDir` — the whole
+        // reason `gs_generic_resource_dir_arg` exists — was built by a unit
+        // test and never once handed to a real gs.
+        let gs_resources = crate::test_fixture::bundled_gs_resource_dir();
         compress(
             &resolver,
-            None,
+            Some(gs_resources.as_path()),
             &source,
             &output,
             PdfQuality::Screen,
@@ -205,7 +213,7 @@ mod tests {
             None,
         )
         .await
-        .expect("gs must be on PATH for this ignored test");
+        .expect("the bundled gs must succeed for this ignored test");
         assert!(output.exists());
     }
 }

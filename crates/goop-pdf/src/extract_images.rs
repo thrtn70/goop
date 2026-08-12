@@ -153,20 +153,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires mutool on PATH or in src-tauri/bin"]
+    #[ignore = "requires the bundled mutool in src-tauri/bin"]
     async fn writes_one_png_per_page() {
         let tmp = tempfile::tempdir().unwrap();
         let pdf = tmp.path().join("three.pdf");
         write_blank_pdf(&pdf, 3);
         let out_dir = tmp.path().join("imgs");
-        let resolver = BinaryResolver::new(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("src-tauri/bin"),
-        );
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        crate::test_fixture::require_bundled(&resolver, "mutool");
         let outs = extract_images(
             &resolver,
             &pdf,

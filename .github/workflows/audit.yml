@@ -235,3 +235,21 @@ jobs:
       - name: Video conversions (real ffmpeg)
         shell: bash
         run: cargo test -p goop-converter --test video_ffmpeg -- --ignored
+      # The PDF surface, against the real mutool / gs / tesseract. Until now
+      # nothing ran these: the only `--ignored` jobs were goop-converter's, so
+      # every shipped PDF path — compress, OCR, page thumbnails, text and image
+      # extraction — had zero execution coverage anywhere.
+      #
+      # Running them locally proved nothing either. The tests pointed a
+      # resolver at src-tauri/bin, which stores `<name>-<triple>` while the
+      # resolver looks for a bare `<name>`, so every lookup missed and fell
+      # through to $PATH — Homebrew on a dev Mac. They now link the two layouts
+      # together and assert the binary did NOT come from $PATH, which is what
+      # makes this step meaningful on a runner that has neither on PATH.
+      #
+      # Both runners matter for the same reason the ffmpeg steps above give:
+      # gs and tesseract load co-located libraries by different mechanisms per
+      # platform, and the OCR pipeline shells out to two of them in sequence.
+      - name: PDF pipeline (real mutool / gs / tesseract)
+        shell: bash
+        run: cargo test -p goop-pdf --lib -- --ignored
