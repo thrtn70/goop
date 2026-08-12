@@ -15,7 +15,7 @@
    * `version` is cosmetic — the eyebrow and colophon labels. When the fetch
    * fails, [data-fetch-status] tells the visitor the check was unavailable. */
   const FALLBACK = Object.freeze({
-    version: 'v0.2.9',
+    version: 'v0.3.0',
     mac: 'https://github.com/thrtn70/goop/releases/latest',
     windows: 'https://github.com/thrtn70/goop/releases/latest',
   });
