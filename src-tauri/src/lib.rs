@@ -150,8 +150,53 @@ pub fn run() {
                 }
             };
 
-            let store = QueueStore::open(&data_dir.join("queue.db"))
-                .map_err(|e| -> Box<dyn std::error::Error> { format!("queue open: {e}").into() })?;
+            // The lock above already proved the data folder itself is usable —
+            // `try_acquire` create_dir_all's it and opens queue.lock
+            // read/write — so a failure here is about queue.db specifically: a
+            // damaged or truncated file, one this user can't read, or a
+            // migration that couldn't run. Handled like the lock failure
+            // rather than with `?`, because `?` here was the one early return
+            // in this closure and it lands in the `Err(error)` arm of `build`
+            // at the bottom of this file, which only prints to a stderr no
+            // packaged app has anyone attached to: the user got no window, no
+            // dialog, and no reason.
+            let db_path = data_dir.join("queue.db");
+            let store = match QueueStore::open(&db_path) {
+                Ok(store) => store,
+                Err(e) => {
+                    tracing::error!(error = %e, path = %db_path.display(),
+                        "could not open the queue database; exiting");
+                    // The path is in the message because the remedy needs it:
+                    // nothing in the app resets the queue, so moving the file
+                    // aside by hand is the only way out, and this folder is
+                    // not somewhere anyone goes unprompted. The raw error
+                    // stays in the log — it says "file is not a database",
+                    // which tells the user nothing they can act on.
+                    // Says what happened, not why. The same arm catches a
+                    // damaged file, one this user can't read, a disk-full
+                    // partway through an ALTER, and (on Windows) a backup or
+                    // AV tool holding a sharing lock — and "move it aside"
+                    // only fixes the first. Naming a cause we haven't
+                    // established would send someone to move data for nothing,
+                    // so the remedy is offered conditionally.
+                    app.dialog()
+                        .message(format!(
+                            "Goop couldn't start: it couldn't open its download queue file. \
+                             Your downloaded files are safe — that file only holds the list of \
+                             jobs. If it's damaged, move it somewhere else and open Goop again; \
+                             Goop will build a new one, and the queue and History will start \
+                             over empty.\n\n{}",
+                            db_path.display()
+                        ))
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    // Nonzero for the same reason as the lock failure above: a
+                    // genuine startup failure, distinct from the expected
+                    // exit(0) "another instance owns it" case.
+                    logging::flush();
+                    std::process::exit(1);
+                }
+            };
 
             let _interrupted = store.reconcile().ok();
             // Re-queue jobs left in `paused` state from a previous run —

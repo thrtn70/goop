@@ -17,6 +17,71 @@ jobs:
     outputs:
       release_id: ${{ steps.upsert.outputs.result }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # The tag is the only thing that says "0.3.0". The three manifest
+      # versions are bumped by hand and nothing reconciles them with it.
+      #
+      # The sharpest consequence is the in-app update check.
+      # app_update::check compares the GitHub latest-release tag against
+      # env!("CARGO_PKG_VERSION"), which Cargo.toml's [workspace.package]
+      # version supplies to every crate via version.workspace = true. Tag
+      # v0.3.0 with Cargo.toml still on 0.2.9 and the shipped build calls
+      # itself 0.2.9, sees latest 0.3.0, and offers the user an update to the
+      # binary they are already running — every launch, with no way out but
+      # cutting another release. tauri.conf.json's version stamps the bundle
+      # itself (CFBundleShortVersionString, the MSI ProductVersion Windows
+      # Installer uses to decide whether an upgrade even applies, and the
+      # version in the Goop_<version>_aarch64.dmg asset name); package.json's
+      # is what the repo reports about itself.
+      #
+      # This runs BEFORE the upsert step deliberately. A guard placed after it
+      # would abort having already created a draft release for the tag it just
+      # rejected, leaving an orphan draft to delete by hand before the retag.
+      #
+      # $GITHUB_REF_NAME rather than ${{ github.ref_name }}: git ref names may
+      # contain $, backtick, (, ), ; and | — everything needed to turn an
+      # interpolated tag name into a command in a job holding contents: write.
+      # The env var is inert.
+      - name: Tag matches the version in every manifest
+        run: |
+          # Same strip the app does — app_update.rs's strip_v_prefix is
+          # raw.strip_prefix('v').unwrap_or(raw).
+          want="${GITHUB_REF_NAME#v}"
+          pkg=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" || true)
+          tauri=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])" || true)
+          # Scoped to the [workspace.package] table. A bare /^version/ matches
+          # today only by luck — it would pick up a version key in any table
+          # added later, and every inline table under [workspace.dependencies]
+          # already carries one. Track the current table header, take the first
+          # quoted version inside [workspace.package], stop there. Matching the
+          # quoted run also drops a trailing # comment.
+          cargo=$(awk '
+            /^[[:space:]]*\[/ { wp = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*$/); next }
+            wp && /^[[:space:]]*version[[:space:]]*=/ {
+              if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+            }' Cargo.toml || true)
+          echo "tag=$GITHUB_REF_NAME  package.json=$pkg  tauri.conf.json=$tauri  Cargo.toml=$cargo"
+          # Parse first, compare second: a manifest that can't be read and a
+          # manifest that disagrees have different fixes, so they get different
+          # errors. Fail closed — awk exits 0 when it matches nothing, so a
+          # renamed or reformatted [workspace.package] yields an empty string,
+          # and an empty-vs-empty comparison would wave the release through.
+          bad=0
+          [ -n "$pkg" ]   || { echo "::error::could not read .version from package.json"; bad=1; }
+          [ -n "$tauri" ] || { echo "::error::could not read .version from src-tauri/tauri.conf.json"; bad=1; }
+          [ -n "$cargo" ] || { echo "::error::could not read version from Cargo.toml [workspace.package]"; bad=1; }
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::a manifest version could not be parsed, so tag $GITHUB_REF_NAME cannot be verified — refusing to create a release"
+            exit 1
+          fi
+          [ "$pkg"   = "$want" ] || { echo "::error::package.json version is '$pkg' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          [ "$tauri" = "$want" ] || { echo "::error::src-tauri/tauri.conf.json version is '$tauri' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          [ "$cargo" = "$want" ] || { echo "::error::Cargo.toml [workspace.package] version is '$cargo' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::tag/manifest version mismatch. Set all three to $want and commit, then retag: git tag -d $GITHUB_REF_NAME && git push origin :$GITHUB_REF_NAME && git tag $GITHUB_REF_NAME && git push origin $GITHUB_REF_NAME. No draft release was created."
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches version $want in package.json, src-tauri/tauri.conf.json and Cargo.toml"
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         id: upsert
         with:
@@ -163,7 +228,17 @@ jobs:
           # The Cargo workspace root is the repo root, so `tauri build` writes
           # the bundle under ./target — not ./src-tauri/target. Search both so
           # the check is robust to the workspace layout.
-          APP=$(find target src-tauri/target -type d -path "*/${{ matrix.target }}/release/bundle/macos/*.app" 2>/dev/null | head -1)
+          #
+          # `|| true` is load-bearing, not sloppy. src-tauri is a workspace
+          # member, so src-tauri/target does not exist, and find exits 1 when
+          # one of its roots is missing. `shell: bash` runs -eo pipefail, which
+          # propagates that 1 through `head -1` and aborts the whole step at
+          # this assignment — after a full macOS release compile, and silently,
+          # because 2>/dev/null swallows find's complaint. This step postdates
+          # v0.2.9 and has never run in a release, so nothing caught it. The
+          # emptiness check on the next line is the real guard and still fails
+          # closed.
+          APP=$(find target src-tauri/target -type d -path "*/${{ matrix.target }}/release/bundle/macos/*.app" 2>/dev/null | head -1 || true)
           [ -n "$APP" ] || { echo "::error::no .app bundle found under (src-tauri/)target/${{ matrix.target }}/release/bundle/macos"; exit 1; }
           # gs and tesseract load their imaging/OCR dylibs (libtiff, libpng16,
           # libfreetype, libtesseract, libleptonica, libwebp, ...) via
@@ -177,11 +252,26 @@ jobs:
           # gallery-dl/yt-dlp exercise the Python.framework load path; gs and
           # tesseract --version exercise the @loader_path dylib graph (they
           # dlopen libtiff/libfreetype/libleptonica/... to print their versions).
-          for bin in gallery-dl yt-dlp tesseract gs; do
+          # ffmpeg, ffprobe and mutool carry no sibling dylibs (static builds
+          # against system frameworks only), so for them this is purely a
+          # "does the signed, hardened-runtime binary launch at all" check —
+          # which is the exact SIGKILL this whole step exists to catch. They
+          # were in no verification loop anywhere until now.
+          for bin in gallery-dl yt-dlp tesseract gs ffmpeg ffprobe mutool; do
             exe="$APP/Contents/MacOS/$bin"
             [ -x "$exe" ] || { echo "::error::$bin missing from Contents/MacOS"; exit 1; }
-            echo "== $bin --version (signed, in-bundle) =="
-            "$exe" --version
+            # ffmpeg's option parser strips one leading dash, so `--version`
+            # arrives as an unknown `-version` option: it prints the usage
+            # banner and exits 8 (ffmpeg) / 1 (ffprobe). mutool exits 1 the
+            # same way. Under -eo pipefail any of those aborts the release
+            # build, and the banner on stdout makes it look like it worked.
+            case "$bin" in
+              ffmpeg|ffprobe) flag="-version" ;;
+              mutool)         flag="-v" ;;
+              *)              flag="--version" ;;
+            esac
+            echo "== $bin $flag (signed, in-bundle) =="
+            "$exe" "$flag"
           done
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
@@ -200,3 +290,162 @@ jobs:
           GS_LIB="$GSRES" "$APP/Contents/MacOS/gs" -q -dNOPAUSE -dBATCH -sDEVICE=pngalpha -r72 -o "$RUNNER_TEMP/gs-smoke.png" "$RUNNER_TEMP/gs-smoke.ps"
           [ -s "$RUNNER_TEMP/gs-smoke.png" ] || { echo "::error::gs produced no PNG — the bundled gs-resources / GS_LIB path is broken"; exit 1; }
           echo "gs rendered $(wc -c < "$RUNNER_TEMP/gs-smoke.png" | tr -d ' ') bytes from the bundled resource tree"
+
+      # SHA-256 for the installers this runner just handed to tauri-action.
+      # Neither platform is signed with a real identity — macOS is ad-hoc,
+      # Windows is unsigned — so a published digest is the only way a user can
+      # tell a truncated or proxy-mangled download from a good one, and
+      # README's "Windows Defender flags the installer" entry tells them to do
+      # exactly that.
+      #
+      # One <asset>.sha256 per installer, never a shared SHA256SUMS.txt: both
+      # matrix legs write to ONE draft release, so a combined file is a
+      # read-modify-write race with no lock. Uploading without deleting 422s;
+      # deleting first means the last writer silently drops the other
+      # platform's lines. Per-asset names are derived from artifacts only this
+      # runner produced, so they cannot collide.
+      #
+      # Placed last on purpose. If this ran right after tauri-action and
+      # failed, every later step would be skipped — including the signed
+      # sidecar smoke test, which is the guard standing between us and
+      # shipping binaries that SIGKILL on launch. Last position means a
+      # checksum problem can never mask a correctness one.
+      - name: SHA-256 the installers
+        shell: bash
+        run: |
+          mkdir -p checksums
+          # Same both-roots search, and the same `|| true`, as the sidecar step
+          # above: src-tauri/target does not exist, find exits 1 on a missing
+          # root, and -o pipefail would turn that into a silent step abort.
+          # The count guard below is the real check.
+          find target src-tauri/target -type f \
+            -path "*/${{ matrix.target }}/release/bundle/*" \
+            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*.msi' \) \
+            2>/dev/null | sort > checksums/.list || true
+          count=$(wc -l < checksums/.list | tr -d ' ')
+          [ "$count" -gt 0 ] || { echo "::error::no installers found under (src-tauri/)target/${{ matrix.target }}/release/bundle — the release would publish checksums for nothing; check --bundles and the target dir layout"; exit 1; }
+          # macos-14 has shasum (Perl) and no GNU coreutils; Git Bash on
+          # windows-latest has sha256sum. Both emit the same two-space
+          # `<hash>  <name>` form that `shasum -a 256 -c` and `sha256sum -c`
+          # parse, so pick whichever exists rather than branching on the OS.
+          if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
+          elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
+          else echo "::error::neither sha256sum nor shasum is on PATH on ${{ matrix.os }} — checksums cannot be computed"; exit 1
+          fi
+          arch="${{ matrix.target }}"; arch="${arch%%-*}"
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            base=$(basename "$f")
+            # tauri-action renames exactly one artifact on upload: its
+            # getAssetName turns Goop.app.tar.gz into Goop_<arch>.app.tar.gz.
+            # Everything else keeps its on-disk name. File the digest under the
+            # PUBLISHED name, or we ship a checksum for a filename that isn't
+            # on the release. The upload step re-checks every name against the
+            # real asset list.
+            case "$base" in
+              *.app.tar.gz) name="${base%.app.tar.gz}_${arch}.app.tar.gz" ;;
+              *)            name="$base" ;;
+            esac
+            # `|| true` for the same reason as the find above: -o pipefail
+            # would abort the step at this assignment and the guard on the
+            # next line would never run, so a hashing failure would surface as
+            # a bare red step with no annotation. The tool's own complaint
+            # still reaches the log on stderr.
+            hash=$($SHA "$f" | awk '{print $1}' || true)
+            [ -n "$hash" ] || { echo "::error::$SHA produced no digest for $f"; exit 1; }
+            printf '%s  %s\n' "$hash" "$name" > "checksums/${name}.sha256"
+            # Prove the line we publish is one the tool users are told to run
+            # can actually consume — same `-c -` form as
+            # scripts/build-static-heif-deps.sh.
+            printf '%s  %s\n' "$hash" "$f" | $SHA -c - > /dev/null \
+              || { echo "::error::the digest for $name does not verify with '$SHA -c' — the published .sha256 would be unusable"; exit 1; }
+            echo "  $hash  $name"
+          done < checksums/.list
+          rm -f checksums/.list
+          echo "wrote $count checksum file(s) for ${{ matrix.target }}"
+
+      # Attach the digests to the SAME draft release tauri-action just uploaded
+      # the installers to. github-script + release_id rather than
+      # `gh release upload`: gh resolves a release by TAG, and a draft is not
+      # reachable at /releases/tags/<tag> — it works only through gh's
+      # draft-listing fallback, which is one more untested moving part on a
+      # step whose first real execution is the cut. The id is already threaded
+      # into this job and this action is already pinned above.
+      # Delete-then-upload mirrors tauri-action, so re-running the workflow
+      # (create-release reuses the draft) doesn't 422.
+      - name: Upload checksums to the draft release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const release_id = Number(process.env.RELEASE_ID);
+            const files = fs.readdirSync('checksums').filter(f => f.endsWith('.sha256')).sort();
+            if (files.length === 0) {
+              core.setFailed('no .sha256 files in ./checksums — the hashing step produced nothing to upload');
+              return;
+            }
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner, repo, release_id, per_page: 100,
+            });
+            for (const file of files) {
+              // A digest names a release asset. If that asset is not on the
+              // release the digest is unusable, and the likely cause is
+              // tauri-action's getAssetName rewriting a name. Fail loud rather
+              // than publish a checksum for a file nobody can download.
+              const target = file.replace(/\.sha256$/, '');
+              if (!assets.some(a => a.name === target)) {
+                core.setFailed(`checksum ${file} names "${target}", which is not an asset on release ${release_id} — tauri-action's upload naming changed; fix the name mapping in the "SHA-256 the installers" step`);
+                return;
+              }
+              // Clear any asset already holding this name. Factored out
+              // because a retry has to repeat it: a client-side failure
+              // (timeout, dropped socket) can still leave the asset persisted
+              // server-side, and the next attempt would then 422 on the
+              // duplicate name — turning one recoverable upload into three
+              // reported failures.
+              const clearName = async (list) => {
+                const dupe = list.find(a => a.name === file);
+                if (dupe) {
+                  await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: dupe.id });
+                }
+              };
+              await clearName(assets);
+              const data = fs.readFileSync(`checksums/${file}`, 'utf8');
+              let err = null;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  await github.rest.repos.uploadReleaseAsset({
+                    owner, repo, release_id, name: file, data,
+                    headers: {
+                      'content-type': 'text/plain',
+                      'content-length': Buffer.byteLength(data),
+                    },
+                  });
+                  err = null;
+                  break;
+                } catch (e) {
+                  err = e;
+                  if (attempt === 3) break;
+                  await new Promise(r => setTimeout(r, 2000 * attempt));
+                  // Best effort: if this re-listing fails, the next upload
+                  // attempt surfaces the real error anyway.
+                  try {
+                    const { data: current } = await github.rest.repos.listReleaseAssets({
+                      owner, repo, release_id, per_page: 100,
+                    });
+                    await clearName(current);
+                  } catch (ignored) {
+                    core.info(`could not re-check assets before retrying ${file}: ${ignored.message}`);
+                  }
+                }
+              }
+              if (err) {
+                core.setFailed(`uploading ${file} failed after 3 attempts: ${err.message} — the installers are already on the DRAFT release and are unaffected; re-run this workflow (create-release reuses the existing draft) before publishing`);
+                return;
+              }
+              core.info(`uploaded ${file}`);
+            }
+            core.info(`attached ${files.length} checksum file(s) to release ${release_id}`);

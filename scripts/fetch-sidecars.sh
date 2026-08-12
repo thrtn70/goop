@@ -309,6 +309,57 @@ case "$TARGET" in
       done < <(otool -L "$f" | tail -n +2 | awk '{print $1}')
     done
     echo "load-command sweep clean — every bundled Mach-O resolves inside the .app"
+    # Arch sweep. Every macOS sidecar must carry an arm64 slice, and until now
+    # nothing proved it — the note above only claimed lipo -archs was checked
+    # by hand, once, when the ffmpeg vendor changed.
+    #
+    # Nothing downstream can catch it either. An x86_64 Mach-O runs fine on
+    # this Apple Silicon runner under Rosetta 2, so audit.yml's `ffmpeg
+    # -version` smoke test and release.yml's in-.app loop both pass on a binary
+    # that faults on a user Mac which has never installed Rosetta — and drags
+    # Apple's Intel-deprecation prompt in front of the ones that have.
+    # ffmpeg/ffprobe are the known offender (evermeet.cx's getrelease silently
+    # served x86_64, which is why the fetch above moved to osxexperts.net) and
+    # they appear in no verification loop anywhere. But they are not the only
+    # unpinned arch: yt-dlp_macos comes from releases/latest/download, and
+    # gallery-dl is PyInstaller-frozen against whatever python3 the runner
+    # resolves, so it inherits the INTERPRETER's arch, not the runner's.
+    # Assert on the artefacts rather than trusting any of that.
+    #
+    # yt-dlp_macos is universal2 (x86_64 + arm64) and that is fine — dyld picks
+    # the arm64 slice. So the test is "arm64 is AMONG the archs", not "archs ==
+    # arm64", which would reject a healthy yt-dlp. The spaces around arm64 in
+    # the pattern are load-bearing: without them arm64e and arm64_32 match.
+    #
+    # Named list rather than a "$OUT_DIR"/*-"$TARGET" glob: a glob with the
+    # customary `[ -f "$f" ] || continue` iterates the literal unexpanded
+    # pattern when nothing matches and then skips it, so the loop passes having
+    # inspected zero binaries. These are the same seven names as
+    # bundle.externalBin in tauri.conf.json; a missing one is an error here,
+    # not a silent skip. This runs last in the arm because gs, mutool and
+    # tesseract do not exist until the Homebrew installs above.
+    for name in ffmpeg ffprobe yt-dlp gallery-dl gs mutool tesseract; do
+      f="$OUT_DIR/$name-$TARGET"
+      [ -f "$f" ] || {
+        echo "::error::$name-$TARGET is missing from src-tauri/bin — the macOS sidecar set is incomplete" >&2
+        exit 1
+      }
+      # `|| true` so a non-Mach-O is reported here instead of letting errexit
+      # kill the script on lipo's bare "can't figure out the architecture type
+      # of", which names no sidecar and emits no annotation.
+      archs="$(lipo -archs "$f" 2>/dev/null || true)"
+      [ -n "$archs" ] || {
+        echo "::error::$name-$TARGET is not a readable Mach-O binary — lipo could not report its architecture" >&2
+        exit 1
+      }
+      case " $archs " in
+        *" arm64 "*) ;;
+        *)
+          echo "::error::$name-$TARGET is $archs, not arm64 — it would run under Rosetta 2 on this runner and fault on a user Mac without Rosetta" >&2
+          exit 1 ;;
+      esac
+    done
+    echo "arch sweep clean — every macOS sidecar carries an arm64 slice"
     ;;
   x86_64-unknown-linux-gnu)
     # Linux targets are not part of the v0.1 release matrix; kept for

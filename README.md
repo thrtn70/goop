@@ -250,7 +250,13 @@ Normal for large files — yt-dlp is muxing/finalising. Don't cancel.
 
 ### Windows Defender flags the installer
 
-The installer is not yet code-signed. Verify the SHA-256 of the `.msi` against the hash on the Releases page, then allow it through SmartScreen.
+The installer is not code-signed, so SmartScreen has no publisher to check. Every release publishes a `.sha256` file next to each installer — download it and compare:
+
+```powershell
+Get-FileHash .\Goop_<version>_x64_en-US.msi -Algorithm SHA256
+```
+
+`Get-FileHash` prints the hash in uppercase, so compare the characters rather than expecting the two strings to match exactly. That confirms the file arrived intact; it can't prove who built it, since anyone able to swap the installer could swap the hash alongside it. Then click **More info → Run anyway**.
 
 ### Where does Goop store files?
 

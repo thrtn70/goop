@@ -844,6 +844,45 @@ mod tests {
         );
     }
 
+    /// A file that isn't a database must be refused, not adopted. The startup
+    /// dialog tells the user their queue file is damaged or unreadable; this
+    /// pins the half of that claim that lives down here.
+    #[test]
+    fn a_file_that_is_not_a_database_is_refused() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("q.db");
+        std::fs::write(&path, b"this is not a database").unwrap();
+
+        // `.err().expect(..)` rather than `.expect_err(..)`: the latter needs
+        // `QueueStore: Debug`, and the struct derives only Clone.
+        let e = QueueStore::open(&path)
+            .err()
+            .expect("garbage must not be adopted as a queue");
+        assert!(matches!(e, GoopError::Queue(_)), "got {e:?}");
+    }
+
+    /// The startup dialog promises that moving the queue file aside gets the
+    /// user a working Goop back. That promise is the reason the dialog is
+    /// worth showing at all, so it is asserted here — the dialog itself can't
+    /// be, since it runs inside the Tauri setup closure and ends in
+    /// `process::exit`.
+    #[test]
+    fn moving_a_damaged_queue_file_aside_lets_the_next_open_rebuild_it() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("q.db");
+        std::fs::write(&path, b"this is not a database").unwrap();
+        assert!(QueueStore::open(&path).is_err());
+
+        // Exactly what the dialog asks the user to do.
+        std::fs::rename(&path, d.path().join("q.db.moved")).unwrap();
+
+        let s = QueueStore::open(&path).expect("a fresh queue must take its place");
+        assert!(
+            s.list().unwrap().is_empty(),
+            "the rebuilt queue starts empty"
+        );
+    }
+
     /// Opening the same file twice must not fail on the ALTER.
     #[test]
     fn migration_is_idempotent_across_reopens() {
