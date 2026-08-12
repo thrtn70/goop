@@ -17,6 +17,71 @@ jobs:
     outputs:
       release_id: ${{ steps.upsert.outputs.result }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # The tag is the only thing that says "0.3.0". The three manifest
+      # versions are bumped by hand and nothing reconciles them with it.
+      #
+      # The sharpest consequence is the in-app update check.
+      # app_update::check compares the GitHub latest-release tag against
+      # env!("CARGO_PKG_VERSION"), which Cargo.toml's [workspace.package]
+      # version supplies to every crate via version.workspace = true. Tag
+      # v0.3.0 with Cargo.toml still on 0.2.9 and the shipped build calls
+      # itself 0.2.9, sees latest 0.3.0, and offers the user an update to the
+      # binary they are already running — every launch, with no way out but
+      # cutting another release. tauri.conf.json's version stamps the bundle
+      # itself (CFBundleShortVersionString, the MSI ProductVersion Windows
+      # Installer uses to decide whether an upgrade even applies, and the
+      # version in the Goop_<version>_aarch64.dmg asset name); package.json's
+      # is what the repo reports about itself.
+      #
+      # This runs BEFORE the upsert step deliberately. A guard placed after it
+      # would abort having already created a draft release for the tag it just
+      # rejected, leaving an orphan draft to delete by hand before the retag.
+      #
+      # $GITHUB_REF_NAME rather than ${{ github.ref_name }}: git ref names may
+      # contain $, backtick, (, ), ; and | — everything needed to turn an
+      # interpolated tag name into a command in a job holding contents: write.
+      # The env var is inert.
+      - name: Tag matches the version in every manifest
+        run: |
+          # Same strip the app does — app_update.rs's strip_v_prefix is
+          # raw.strip_prefix('v').unwrap_or(raw).
+          want="${GITHUB_REF_NAME#v}"
+          pkg=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" || true)
+          tauri=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])" || true)
+          # Scoped to the [workspace.package] table. A bare /^version/ matches
+          # today only by luck — it would pick up a version key in any table
+          # added later, and every inline table under [workspace.dependencies]
+          # already carries one. Track the current table header, take the first
+          # quoted version inside [workspace.package], stop there. Matching the
+          # quoted run also drops a trailing # comment.
+          cargo=$(awk '
+            /^[[:space:]]*\[/ { wp = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*$/); next }
+            wp && /^[[:space:]]*version[[:space:]]*=/ {
+              if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+            }' Cargo.toml || true)
+          echo "tag=$GITHUB_REF_NAME  package.json=$pkg  tauri.conf.json=$tauri  Cargo.toml=$cargo"
+          # Parse first, compare second: a manifest that can't be read and a
+          # manifest that disagrees have different fixes, so they get different
+          # errors. Fail closed — awk exits 0 when it matches nothing, so a
+          # renamed or reformatted [workspace.package] yields an empty string,
+          # and an empty-vs-empty comparison would wave the release through.
+          bad=0
+          [ -n "$pkg" ]   || { echo "::error::could not read .version from package.json"; bad=1; }
+          [ -n "$tauri" ] || { echo "::error::could not read .version from src-tauri/tauri.conf.json"; bad=1; }
+          [ -n "$cargo" ] || { echo "::error::could not read version from Cargo.toml [workspace.package]"; bad=1; }
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::a manifest version could not be parsed, so tag $GITHUB_REF_NAME cannot be verified — refusing to create a release"
+            exit 1
+          fi
+          [ "$pkg"   = "$want" ] || { echo "::error::package.json version is '$pkg' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          [ "$tauri" = "$want" ] || { echo "::error::src-tauri/tauri.conf.json version is '$tauri' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          [ "$cargo" = "$want" ] || { echo "::error::Cargo.toml [workspace.package] version is '$cargo' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::tag/manifest version mismatch. Set all three to $want and commit, then retag: git tag -d $GITHUB_REF_NAME && git push origin :$GITHUB_REF_NAME && git tag $GITHUB_REF_NAME && git push origin $GITHUB_REF_NAME. No draft release was created."
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches version $want in package.json, src-tauri/tauri.conf.json and Cargo.toml"
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         id: upsert
         with:
