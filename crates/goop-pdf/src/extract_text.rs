@@ -119,20 +119,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires mutool on PATH or in src-tauri/bin"]
+    #[ignore = "requires the bundled mutool in src-tauri/bin"]
     async fn writes_text_file_for_blank_pdf() {
         let tmp = tempfile::tempdir().unwrap();
         let pdf = tmp.path().join("blank.pdf");
         write_blank_pdf(&pdf, 1);
         let out = tmp.path().join("blank.txt");
-        let resolver = BinaryResolver::new(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("src-tauri/bin"),
-        );
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        crate::test_fixture::require_bundled(&resolver, "mutool");
         let written = extract_text(&resolver, &pdf, &out, CancellationToken::new(), None, None)
             .await
             .expect("mutool must be available for this test");

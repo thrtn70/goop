@@ -263,14 +263,14 @@ mod tests {
         let pdf = tmp.path().join("blank.pdf");
         write_blank_pdf(&pdf, 1);
         let out = tmp.path().join("blank-ocr.pdf");
-        let bin_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("src-tauri/bin");
-        let tessdata_dir = bin_dir.join("tesseract-data");
-        let resolver = BinaryResolver::new(bin_dir);
+        let tessdata_dir = crate::test_fixture::bundled_tessdata_dir();
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        // Both stages, so a regression in either is attributed correctly
+        // rather than surfacing as a confusing mid-pipeline failure.
+        crate::test_fixture::require_bundled(&resolver, "mutool");
+        crate::test_fixture::require_bundled(&resolver, "tesseract");
         let result = ocr(
             &resolver,
             &[tessdata_dir.as_path()],

@@ -194,20 +194,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires mutool on PATH or in src-tauri/bin"]
+    #[ignore = "requires the bundled mutool in src-tauri/bin"]
     async fn generates_three_thumbnails_for_three_page_pdf() {
         let tmp = tempfile::tempdir().unwrap();
         let pdf = tmp.path().join("three.pdf");
         write_blank_pdf(&pdf, 3);
         let out = tmp.path().join("thumbs");
-        let resolver = BinaryResolver::new(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("src-tauri/bin"),
-        );
+        let links = tmp.path().join("bin");
+        std::fs::create_dir_all(&links).unwrap();
+        let resolver = crate::test_fixture::bundled_resolver(&links);
+        crate::test_fixture::require_bundled(&resolver, "mutool");
         let outputs = generate_page_thumbnails(
             &resolver,
             PageThumbnailRequest {
