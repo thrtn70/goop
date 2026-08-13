@@ -111,7 +111,7 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 | Action | macOS | Windows |
 |---|---|---|
 | Command palette | `⌘K` | `Ctrl+K` |
-| Jump to Extract / Convert / Compress / History / Settings | `⌘1`–`⌘5` | `Ctrl+1`–`Ctrl+5` |
+| Jump to a page — Extract, Convert, Image, Recognize, Metadata, Compress, History, Settings, in that order | `⌘1`–`⌘8` | `Ctrl+1`–`Ctrl+8` |
 | Focus URL input (Extract) | `⌘N` | `Ctrl+N` |
 | Open file picker (Convert / Compress) | `⌘O` | `Ctrl+O` |
 | Settings | `⌘,` | `Ctrl+,` |
