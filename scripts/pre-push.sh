@@ -38,6 +38,9 @@ run_step "cargo fmt --check" cargo fmt --all --check
 run_step "cargo clippy"      cargo clippy --workspace --all-targets -- -D warnings
 run_step "cargo test"        cargo test --workspace --quiet
 run_step "tsc typecheck"     npm run --silent typecheck
+# Covers src/ AND site/ — the landing page is otherwise deployed by
+# pages.yml without a single check running against it.
+run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
 
 if [[ "$fail" != "0" ]]; then
