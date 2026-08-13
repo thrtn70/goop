@@ -89,6 +89,9 @@ jobs:
         with: { node-version: "20", cache: "npm" }
       - run: npm ci
       - run: npm run typecheck
+      # Same order as scripts/pre-push.sh. The local gate is a git hook and
+      # can be bypassed; this is the only lint enforcement that always runs.
+      - run: npm run lint
       - run: npm run test
 
   legal:
