@@ -50,6 +50,8 @@ export default function ConvertPage() {
                 gifOptions: null,
                 metadataPolicy: "preserve",
                 subtitle: null,
+                qualityPreset: null,
+                resolutionCap: null,
               },
             ],
       );
@@ -79,6 +81,8 @@ export default function ConvertPage() {
             gifOptions: null,
             metadataPolicy: "preserve" as MetadataPolicy,
             subtitle: null,
+            qualityPreset: null,
+            resolutionCap: null,
           }));
         return [...prev, ...fresh];
       });
@@ -110,6 +114,11 @@ export default function ConvertPage() {
       prev.map((f) => ({
         ...f,
         target: preset.target,
+        // Both are Convert-register fields on the preset, and both used to
+        // be dropped here — so a chip named "YouTube Upload" changed the
+        // container and nothing else, leaving a 4K source 4K.
+        qualityPreset: preset.quality_preset,
+        resolutionCap: preset.resolution_cap,
       })),
     );
   }, []);
@@ -129,6 +138,8 @@ export default function ConvertPage() {
               target: head.target,
               gifOptions: head.gifOptions,
               metadataPolicy: head.metadataPolicy,
+              qualityPreset: head.qualityPreset,
+              resolutionCap: head.resolutionCap,
             },
       );
     });

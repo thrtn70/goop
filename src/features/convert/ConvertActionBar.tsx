@@ -5,7 +5,14 @@ import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import { subtitleForTarget } from "./FileRow";
 import { useAppStore } from "@/store/appStore";
-import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat } from "@/types";
+import type {
+  GifOptions,
+  MetadataPolicy,
+  QualityPreset,
+  ResolutionCap,
+  SubtitleOptions,
+  TargetFormat,
+} from "@/types";
 
 export interface FileEntry {
   path: string;
@@ -14,6 +21,10 @@ export interface FileEntry {
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
+  /** Set by an applied preset. `null` leaves the backend's own default in
+   *  place — these are only ever populated from a preset the user picked. */
+  qualityPreset: QualityPreset | null;
+  resolutionCap: ResolutionCap | null;
 }
 
 interface ConvertActionBarProps {
@@ -98,8 +109,8 @@ export default function ConvertActionBar({
           input_path: f.path,
           output_path: dest,
           target: f.target,
-          quality_preset: null,
-          resolution_cap: null,
+          quality_preset: f.qualityPreset,
+          resolution_cap: f.resolutionCap,
           gif_options: f.gifOptions,
           compress_mode: null,
           batch_id: null,
@@ -119,8 +130,8 @@ export default function ConvertActionBar({
               input_path: f.path,
               output_path: overrideDir ?? dirname(f.path),
               target: f.target,
-              quality_preset: null,
-              resolution_cap: null,
+              quality_preset: f.qualityPreset,
+              resolution_cap: f.resolutionCap,
               gif_options: f.gifOptions,
               compress_mode: null,
               batch_id: batchId,
@@ -182,7 +193,14 @@ export default function ConvertActionBar({
       <PresetSaveDialog
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
-        snapshot={{ target: files[0]?.target ?? "mp4" }}
+        snapshot={{
+          target: files[0]?.target ?? "mp4",
+          // The dialog documents these as the Convert-register fields to
+          // pass, and now that a preset actually applies them, omitting
+          // them here would save the fork with both cleared.
+          quality_preset: files[0]?.qualityPreset ?? null,
+          resolution_cap: files[0]?.resolutionCap ?? null,
+        }}
       />
     </div>
   );
