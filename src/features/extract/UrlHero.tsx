@@ -51,8 +51,7 @@ export default function UrlHero({ url }: { url?: string }) {
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
-    setStartError(null);
-    startEpochRef.current += 1;
+    retireStart();
     setProbe(null);
     setLastUrl(u);
     try {
@@ -97,7 +96,22 @@ export default function UrlHero({ url }: { url?: string }) {
     setLoading(false);
     setProbe(null);
     setError(null);
+    retireStart();
+  }
+
+  /**
+   * Retire the start that belonged to the card being replaced.
+   *
+   * Bumping the epoch only stops a stale attempt from *reporting*. The
+   * flags it set are cleared by that same attempt's own settle, which the
+   * bumped epoch then declines to run — so anything not cleared here stays
+   * set for good. That is how the next card arrived with its Start button
+   * already disabled and no way back.
+   */
+  function retireStart() {
     setStartError(null);
+    setStartInFlight(false);
+    setRetrying(false);
     startEpochRef.current += 1;
   }
 
@@ -175,8 +189,7 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
-      setStartError(null);
-      startEpochRef.current += 1;
+      retireStart();
       setProbe(null);
       setLastUrl(url);
       try {

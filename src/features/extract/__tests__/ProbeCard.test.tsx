@@ -184,6 +184,26 @@ describe("ProbeCard format picker", () => {
   });
 });
 
+describe("ProbeCard honours the card-wide busy signal", () => {
+  // The hero's failure banner can start an enqueue without going through
+  // any of these buttons, so `busy` is how they learn about it. Every
+  // variant has to take it — the two single-action cards are threaded
+  // separately from the media card and were the easy ones to miss.
+  it.each([
+    ["direct", { direct: { content_type: "application/zip", size_bytes: 1, filename: "a.zip" } }],
+    ["debrid", { debrid: { magnet: true } }],
+  ])("refuses a start on the %s card while one is already in flight", async (_name, extra) => {
+    const onStart = vi.fn();
+    render(
+      <ProbeCard probe={baseProbe(extra as Partial<UrlProbe>)} onStart={onStart} busy />,
+    );
+    const btn = screen.getByRole("button");
+    expect(btn).toHaveProperty("disabled", true);
+    fireEvent.click(btn);
+    expect(onStart).not.toHaveBeenCalled();
+  });
+});
+
 describe("ProbeCard start guard", () => {
   function fmt(format_id: string): FormatOption {
     return {

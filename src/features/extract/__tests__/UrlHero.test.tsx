@@ -240,6 +240,39 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
   });
 
+  it("does not hand the next card a Start button stuck on busy", async () => {
+    // The in-flight flag is cleared by the attempt that set it, and only
+    // when it is still the current one. Replacing the card mid-flight
+    // takes that clear away: the stale attempt settles, finds the epoch
+    // moved on, and declines — leaving the flag true forever and every
+    // later card's Start button disabled from the moment it mounts. The
+    // transitions that retire a card have to retire its in-flight state
+    // with it, the way they already retire its error.
+    apiMocks.extract.probe.mockImplementation((u: string) =>
+      Promise.resolve(probeResult({ url: u, title: u, formats: [videoFormat()] })),
+    );
+    const settleFirst = pendingStart();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/a" />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("combobox");
+    await user.click(screen.getByRole("button", { name: /^Start$/ }));
+
+    rerender(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/b" />
+      </MemoryRouter>,
+    );
+    await screen.findByText("https://example.com/b");
+    await act(async () => settleFirst({ reject: { code: "queue", message: "the queue is full" } }));
+
+    const start = await screen.findByRole("button", { name: /^Start$/ });
+    expect(start).toHaveProperty("disabled", false);
+  });
+
   /** The card's own Start button, whatever it currently reads. */
   function cardStartButton() {
     const b = screen
