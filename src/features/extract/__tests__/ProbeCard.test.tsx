@@ -183,3 +183,57 @@ describe("ProbeCard format picker", () => {
     expect(onStart).toHaveBeenCalledWith({ format: video, audioOnly: false });
   });
 });
+
+describe("ProbeCard start guard", () => {
+  function fmt(format_id: string): FormatOption {
+    return {
+      format_id,
+      ext: "mp4",
+      resolution: "640x360",
+      filesize: null,
+      is_audio_only: false,
+      selector: format_id,
+    };
+  }
+
+  it("does not carry one video's enqueue over to the next probe", async () => {
+    // The guard keys off what would be downloaded, and every freshly
+    // probed video starts on the same default selection. Keying off the
+    // selection alone made that default collide across videos, so the
+    // second video's Start button opened already reporting the first
+    // one's enqueue — for a job the user never started. It only looked
+    // fine because `UrlHero` happens to null its probe between lookups,
+    // unmounting this subtree; nothing stated that or pinned it.
+    const onStart = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ProbeCard
+        probe={baseProbe({ url: "https://example.com/a", formats: [fmt("18")] })}
+        onStart={onStart}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /added to queue/i })).toBeTruthy(),
+    );
+
+    rerender(
+      <ProbeCard
+        probe={baseProbe({ url: "https://example.com/b", formats: [fmt("18")] })}
+        onStart={onStart}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false);
+  });
+
+  it("announces a failed enqueue, not only a successful one", async () => {
+    // The live region existed because a disabled control's label change
+    // is not reliably announced. Announcing only success left the screen
+    // reader silent on exactly the outcome that needs saying.
+    const onStart = vi.fn().mockRejectedValue(new Error("queue is closed"));
+    render(<ProbeCard probe={baseProbe({ formats: [fmt("18")] })} onStart={onStart} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/couldn't start/i));
+    expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false);
+  });
+});

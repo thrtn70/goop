@@ -6,9 +6,12 @@ export interface StartOptions {
   audioOnly: boolean;
 }
 
-/** Returning the promise is load-bearing: `StartButton` awaits it to know
- *  when the enqueue actually settled. A `void`-typed variant would let a
- *  caller discard it and silently reopen the double-enqueue hole. */
+/** `StartButton` awaits what this returns to know when the enqueue
+ *  settled, so a call site has to forward its promise rather than drop
+ *  it. TypeScript will not enforce that — under return-type bivariance a
+ *  promise-returning function is assignable to a `void` slot and back —
+ *  so the union states the requirement and the three call sites below
+ *  honour it by returning `onStart(...)` directly. */
 type StartHandler = (opts: StartOptions) => void | Promise<void>;
 
 type Props = { probe: UrlProbe; onStart: StartHandler };
@@ -22,8 +25,12 @@ type Props = { probe: UrlProbe; onStart: StartHandler };
  * flight, and disabled afterwards while it reports what happened, since
  * the absence of feedback is what prompted the second click.
  *
- * `resetKey` returns it to idle when the user changes what would be
- * downloaded, so picking a different format can still be started.
+ * `resetKey` returns it to idle when what would be downloaded changes,
+ * so picking a different format can still be started. It carries the
+ * probe's URL as well as the selection: every freshly probed video opens
+ * on the same default selection, so a selection-only key collides across
+ * videos and hands the next one a button already reporting this one's
+ * enqueue.
  */
 function StartButton({
   label,
@@ -36,6 +43,7 @@ function StartButton({
 }) {
   const [phase, setPhase] = useState<"idle" | "starting" | "started">("idle");
   const [startedKey, setStartedKey] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
 
   // Derived, not an effect keyed on `resetKey`. Neither the format select
   // nor the audio-only checkbox is disabled mid-flight, so an effect would
@@ -50,13 +58,18 @@ function StartButton({
     if (effective !== "idle") return;
     const key = resetKey;
     setPhase("starting");
+    setAnnouncement("");
     try {
       await onStart();
       setStartedKey(key);
       setPhase("started");
+      setAnnouncement("Added to queue");
     } catch {
-      // The hero renders the error; return the button so it can be retried.
+      // The hero renders the error; return the button so it can be
+      // retried, and say so here too. Announcing only the success left a
+      // screen reader silent on the outcome that most needs saying.
       setPhase("idle");
+      setAnnouncement("Couldn't start that download. Try again.");
     }
   }
 
@@ -76,7 +89,7 @@ function StartButton({
           without this the enqueue has no non-visual signal at all: a
           disabled control's label change is not reliably announced. */}
       <span role="status" aria-live="polite" className="sr-only">
-        {effective === "started" ? "Added to queue" : ""}
+        {rearmed ? "" : announcement}
       </span>
     </>
   );
@@ -84,10 +97,12 @@ function StartButton({
 
 export default function ProbeCard({ probe, onStart }: Props) {
   if (probe.direct) {
-    return <DirectCard info={probe.direct} onStart={onStart} />;
+    return <DirectCard info={probe.direct} url={probe.url} onStart={onStart} />;
   }
   if (probe.debrid) {
-    return <DebridCard title={probe.title} info={probe.debrid} onStart={onStart} />;
+    return (
+      <DebridCard title={probe.title} info={probe.debrid} url={probe.url} onStart={onStart} />
+    );
   }
   return <MediaCard probe={probe} onStart={onStart} />;
 }
@@ -139,7 +154,7 @@ function MediaCard({ probe, onStart }: Props) {
         </label>
         <StartButton
           label="Start"
-          resetKey={`${selected ?? ""}|${audioOnly}`}
+          resetKey={`${probe.url}|${selected ?? ""}|${audioOnly}`}
           onStart={() => onStart({ format: fmt, audioOnly })}
         />
       </div>
@@ -147,7 +162,15 @@ function MediaCard({ probe, onStart }: Props) {
   );
 }
 
-function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: StartHandler }) {
+function DirectCard({
+  info,
+  url,
+  onStart,
+}: {
+  info: DirectFileInfo;
+  url: string;
+  onStart: StartHandler;
+}) {
   const meta = [
     "Direct download",
     info.content_type,
@@ -176,6 +199,7 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: StartHan
       <div className="mt-4 flex">
         <StartButton
           label="Download"
+          resetKey={url}
           onStart={() => onStart({ format: null, audioOnly: false })}
         />
       </div>
@@ -186,10 +210,12 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: StartHan
 function DebridCard({
   title,
   info,
+  url,
   onStart,
 }: {
   title: string;
   info: DebridProbeInfo;
+  url: string;
   onStart: StartHandler;
 }) {
   const meta = [info.magnet ? "Magnet" : null, "via TorBox"]
@@ -219,6 +245,7 @@ function DebridCard({
       <div className="mt-4 flex">
         <StartButton
           label="Download"
+          resetKey={url}
           onStart={() => onStart({ format: null, audioOnly: false })}
         />
       </div>
