@@ -73,7 +73,9 @@ describe("UrlHero carries the probe's extractor verdict", () => {
   });
 });
 
-/** A format the picker offers, so a selection is there to be preserved. */
+/** A format the picker offers, so a selection is there to be preserved.
+ *  Muxed, so its selector is the bare id and the assertions below can go
+ *  on naming `299` — a video-only format would send `299+bestaudio/299`. */
 function videoFormat() {
   return {
     format_id: "299",
@@ -81,6 +83,7 @@ function videoFormat() {
     resolution: "1920x1080",
     filesize: null,
     is_audio_only: false,
+    selector: "299",
   };
 }
 
@@ -136,6 +139,34 @@ describe("UrlHero tells an enqueue failure apart from a probe failure", () => {
     await waitFor(() =>
       expect(screen.queryByText(/couldn't start that download/i)).toBeNull(),
     );
+  });
+
+  it("announces the failure, since the card's own button no longer does", async () => {
+    // `StartButton` used to carry the failure in an sr-only live region.
+    // It defers to this banner instead — one announcement, on the element
+    // that also carries the retry — so the banner has to be a live region
+    // or the failure goes unannounced entirely.
+    await probeThenFailStart();
+    const banner = screen.getByRole("alert");
+    expect(banner.textContent).toMatch(/couldn't start that download/i);
+    expect(banner.textContent).toMatch(/the queue is full/i);
+  });
+
+  it("comes back from a retry that fails too", async () => {
+    // `handleStart` rethrows so the card's Start button can settle, and
+    // the retry button does not await it. If that rejection escapes, the
+    // button never leaves "Trying…" and the banner can never be retried
+    // again. Nothing else in this suite can see an unhandled rejection —
+    // removing the handler leaves every other test green — so this is the
+    // guard for it.
+    const user = await probeThenFailStart();
+    apiMocks.extract.fromUrl.mockRejectedValue({ code: "queue", message: "still full" });
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+
+    const retry = await screen.findByRole("button", { name: /^Try again$/ });
+    expect(retry).toHaveProperty("disabled", false);
+    expect(screen.getByRole("alert").textContent).toMatch(/still full/i);
   });
 
   it("dismisses the failure without disturbing the card", async () => {
@@ -209,24 +240,86 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
   });
 
-  it("drops a slow failure once a later attempt has already queued the job", async () => {
-    // Two overlapping enqueues resolving out of order: the stale rejection
-    // would otherwise claim a job that is sitting in the queue right now.
-    apiMocks.extract.probe.mockResolvedValue(probeResult({ formats: [videoFormat()] }));
-    const settleFirst = pendingStart();
+  // A second scenario used to sit here: two enqueues from one card
+  // overlapping and resolving out of order. It is unreachable now — the
+  // Start button refuses a second click while the first is in flight, so
+  // one card cannot have two enqueues going at once. The guard still
+  // earns its place for the case above, where the card itself is
+  // replaced while a start is still in the air.
+});
+
+describe("UrlHero guards against a double enqueue", () => {
+  it("only enqueues once when Start is clicked twice", async () => {
+    // There is no dedupe anywhere in the queue, and both jobs would run
+    // the same output template with --continue against the same .part.
+    // With the queue sidebar collapsed the only feedback is a count in a
+    // 40px rail, so a second click is the natural reaction.
+    apiMocks.extract.probe.mockResolvedValue(probeResult({}));
+    let release!: () => void;
+    apiMocks.extract.fromUrl.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve("job-1");
+        }),
+    );
     const user = userEvent.setup();
     render(
       <MemoryRouter>
         <UrlHero url="https://example.com/x" />
       </MemoryRouter>,
     );
+    await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalled());
     const start = await screen.findByRole("button", { name: /^Start$/ });
     await user.click(start);
-    apiMocks.extract.fromUrl.mockResolvedValue("job-2");
     await user.click(start);
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1);
+    release();
+  });
 
-    await act(async () => settleFirst({ reject: { code: "queue", message: "the queue is full" } }));
-    expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
+  it("stays disabled after the enqueue succeeds", async () => {
+    // Re-clicking a second later is the same collision as a double-click,
+    // so the button reports what happened instead of inviting a repeat.
+    await probeThenStart(probeResult({}));
+    const start = await screen.findByRole("button", { name: /added to queue/i });
+    expect(start).toHaveProperty("disabled", true);
+  });
+});
+
+describe("UrlHero sends the format's download selector", () => {
+  function videoOnly1080p() {
+    return {
+      format_id: "299",
+      ext: "mp4",
+      resolution: "1920x1080",
+      filesize: null,
+      is_audio_only: false,
+      // The backend composed this because 299 carries no audio track.
+      selector: "299+bestaudio/299",
+    };
+  }
+
+  it("sends the selector, not the bare format id", async () => {
+    // Sending the bare id is how the picker used to hand back silent
+    // files: yt-dlp downloads exactly that stream and never merges audio.
+    apiMocks.extract.probe.mockResolvedValue(probeResult({ formats: [videoOnly1080p()] }));
+    apiMocks.extract.fromUrl.mockResolvedValue("job-1");
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/x" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalled());
+    await user.selectOptions(await screen.findByRole("combobox"), "299");
+    await user.click(await screen.findByRole("button", { name: /^Start$/ }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalled());
+    expect(sentRequest()?.format).toBe("299+bestaudio/299");
+  });
+
+  it("sends no format at all when the user leaves it on Best (auto)", async () => {
+    // yt-dlp's own default already merges, so the absent case must stay
+    // absent rather than being coerced into a selector.
+    await probeThenStart(probeResult({ formats: [videoOnly1080p()] }));
+    expect(sentRequest()?.format).toBeNull();
   });
 });

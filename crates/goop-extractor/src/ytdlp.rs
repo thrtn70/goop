@@ -186,6 +186,13 @@ pub struct FormatOption {
     pub resolution: Option<String>,
     pub filesize: Option<u64>,
     pub is_audio_only: bool,
+    /// The yt-dlp `-f` expression that actually downloads this format,
+    /// which is not always the bare id. Video-only formats (every YouTube
+    /// stream above 720p is one) need `+bestaudio` or the file arrives
+    /// silent, so the selector is composed here rather than in the UI:
+    /// yt-dlp's format-selector grammar belongs with the rest of the
+    /// yt-dlp knowledge, and callers can pass it straight through.
+    pub selector: String,
 }
 
 pub struct YtDlp<'a> {
@@ -237,7 +244,13 @@ impl<'a> YtDlp<'a> {
         cookies: Option<&str>,
     ) -> Result<UrlProbe, GoopError> {
         let mut cmd = Command::new(bin_path);
-        cmd.args(["-J", "--no-warnings"]);
+        // `--no-playlist` resolves `watch?v=X&list=Y` to the single video
+        // it names. Without it yt-dlp answers with the playlist: the card
+        // shows the playlist's title and an empty format picker, and the
+        // probe pays for a full extraction of every entry first. A bare
+        // `playlist?list=Y` has no video to prefer, so it is unaffected
+        // and still probes as a playlist.
+        cmd.args(["-J", "--no-warnings", "--no-playlist"]);
         if let Some(browser) = validated_browser(cookies) {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
@@ -284,10 +297,7 @@ impl<'a> YtDlp<'a> {
             uploader: v["uploader"].as_str().map(String::from),
             duration_secs: v["duration"].as_u64(),
             thumbnail_url: v["thumbnail"].as_str().map(String::from),
-            formats: v["formats"]
-                .as_array()
-                .map(|fs| fs.iter().filter_map(parse_format).collect())
-                .unwrap_or_default(),
+            formats: parse_formats(&v["formats"]),
             direct: None,
             debrid: None,
             extractor: Some(crate::classify::ExtractorChoice::YtDlp),
@@ -445,6 +455,11 @@ impl<'a> YtDlp<'a> {
             // so ours is the one that lands.
             .arg("--encoding")
             .arg("utf-8");
+        // Matches the probe (see `probe_once`). The probe showed the user
+        // one video; without this the download would fetch the whole
+        // playlist behind that one job's progress bar, and `output_path`
+        // would record only the last file.
+        cmd.arg("--no-playlist");
         if req.audio_only {
             cmd.arg("-x").arg("--audio-format").arg("mp3");
         }
@@ -681,16 +696,65 @@ fn is_generic_direct(v: &serde_json::Value) -> bool {
     generic && direct && plain_protocol && !is_playlist
 }
 
+/// Build the picker's format list from a `-J` response.
+///
+/// Two things happen here that the raw array can't express:
+///
+/// - **Non-media rows are dropped.** yt-dlp lists storyboards (`sb0`,
+///   `sb1`, ... — mhtml contact sheets) alongside real formats, and they
+///   carry neither codec. Offering one downloads a grid of thumbnails.
+/// - **The order is flipped to best-first.** yt-dlp emits ascending by its
+///   own quality ranking. Reversing keeps that ranking (which weighs codec
+///   and bitrate, not just height) while putting the formats a user
+///   actually wants at the head of the list.
+fn parse_formats(v: &serde_json::Value) -> Vec<FormatOption> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut out: Vec<FormatOption> = arr.iter().filter_map(parse_format).collect();
+    out.reverse();
+    out
+}
+
 fn parse_format(v: &serde_json::Value) -> Option<FormatOption> {
     let id = v["format_id"].as_str()?.to_string();
     let ext = v["ext"].as_str()?.to_string();
-    let vcodec = v["vcodec"].as_str().unwrap_or("none");
+    // Three states, not two. yt-dlp writes the literal string "none" to
+    // say a stream is absent; a key that is null or missing means the
+    // extractor never populated codec metadata, which is a different
+    // claim. archive.org returns null/null for its real, playable
+    // derivatives, so treating unknown as absent would empty the picker
+    // for that whole site.
+    let vcodec = v["vcodec"].as_str();
+    let acodec = v["acodec"].as_str();
+    let no_video = vcodec == Some("none");
+    let no_audio = acodec == Some("none");
+    // Both streams *explicitly* absent: a storyboard contact sheet, not
+    // media. Unknown codecs never reach this branch.
+    if no_video && no_audio {
+        return None;
+    }
+    // Merge only when we positively know there is video and positively
+    // know there is no audio. Adding `+bestaudio` to a muxed or
+    // audio-only format would give the output a second audio track, and
+    // guessing on an unknown row would do the same. The `/id` fallback
+    // keeps the download working if no separate audio stream exists.
+    let has_known_video = matches!(vcodec, Some(c) if c != "none");
+    let selector = if has_known_video && no_audio {
+        format!("{id}+bestaudio/{id}")
+    } else {
+        id.clone()
+    };
     Some(FormatOption {
         format_id: id,
         ext,
         resolution: v["resolution"].as_str().map(String::from),
         filesize: v["filesize"].as_u64().or(v["filesize_approx"].as_u64()),
-        is_audio_only: vcodec == "none",
+        // Only an explicit "none" makes this true. An unknown codec must
+        // not be labelled "audio only" on a guess — the picker shows that
+        // marker to the user.
+        is_audio_only: no_video,
+        selector,
     })
 }
 
@@ -829,6 +893,144 @@ mod tests {
     #[test]
     fn rejects_non_download_lines() {
         assert!(parse_progress(JobId::new(), "[info] Something").is_none());
+    }
+
+    /// Shapes taken verbatim from a real `-J` response, which is the only
+    /// way to keep these honest: the storyboard rows in particular look
+    /// like ordinary formats until you notice both codecs are "none".
+    fn formats_json() -> serde_json::Value {
+        serde_json::json!([
+            // Storyboards: yt-dlp lists them first and they are not media.
+            {"format_id": "sb1", "ext": "mhtml", "resolution": "160x90",
+             "vcodec": "none", "acodec": "none"},
+            // Audio-only.
+            {"format_id": "140", "ext": "m4a", "resolution": "audio only",
+             "vcodec": "none", "acodec": "mp4a.40.2", "filesize": 100},
+            // Muxed (carries both streams).
+            {"format_id": "18", "ext": "mp4", "resolution": "640x360",
+             "vcodec": "avc1.42001E", "acodec": "mp4a.40.2"},
+            // Video-only — the silent-file case.
+            {"format_id": "299", "ext": "mp4", "resolution": "1920x1080",
+             "vcodec": "avc1.640028", "acodec": "none"},
+        ])
+    }
+
+    #[test]
+    fn parse_formats_drops_storyboards() {
+        let out = parse_formats(&formats_json());
+        assert!(
+            !out.iter().any(|f| f.format_id == "sb1"),
+            "storyboards are not downloadable media and must never be offered"
+        );
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn parse_formats_merges_audio_into_video_only_selector() {
+        let out = parse_formats(&formats_json());
+        let video_only = out.iter().find(|f| f.format_id == "299").expect("299");
+        // Without the +bestaudio fallback yt-dlp hands back a silent file.
+        assert_eq!(video_only.selector, "299+bestaudio/299");
+        assert!(!video_only.is_audio_only);
+    }
+
+    #[test]
+    fn parse_formats_leaves_muxed_and_audio_only_selectors_bare() {
+        let out = parse_formats(&formats_json());
+        let muxed = out.iter().find(|f| f.format_id == "18").expect("18");
+        assert_eq!(muxed.selector, "18", "muxed already carries audio");
+        let audio = out.iter().find(|f| f.format_id == "140").expect("140");
+        assert_eq!(
+            audio.selector, "140",
+            "adding bestaudio would give the file two audio tracks"
+        );
+        assert!(audio.is_audio_only);
+    }
+
+    #[test]
+    fn parse_formats_returns_best_first() {
+        let out = parse_formats(&formats_json());
+        // yt-dlp emits ascending by quality. The picker renders this order
+        // directly, so the best entries have to survive at the front.
+        assert_eq!(out[0].format_id, "299");
+        assert_eq!(out.last().expect("non-empty").format_id, "140");
+    }
+
+    #[test]
+    fn parse_formats_keeps_rows_whose_codecs_are_unknown() {
+        // Not every extractor populates codec metadata. archive.org
+        // returns exactly this for its three real, playable derivatives:
+        // `vcodec: null, acodec: null`. That is "I don't know", not "this
+        // stream is absent" — conflating the two empties the picker for
+        // the whole site. Both the JSON-null and absent-key spellings.
+        let v = serde_json::json!([
+            {"format_id": "0", "ext": "mp4", "vcodec": null, "acodec": null},
+            {"format_id": "1", "ext": "avi"},
+        ]);
+        let out = parse_formats(&v);
+        assert_eq!(
+            out.len(),
+            2,
+            "unknown codecs must not be mistaken for a storyboard"
+        );
+        for f in &out {
+            // No merge: we can't claim the stream lacks audio, so the
+            // bare id keeps yt-dlp's own behaviour.
+            assert_eq!(f.selector, f.format_id);
+            // And it must not be labelled "audio only" on a guess.
+            assert!(!f.is_audio_only);
+        }
+    }
+
+    // Unix-only: `write_fake` writes `/bin/sh` scripts, and `test_fakes`
+    // is itself `#[cfg(all(test, unix))]` — without this gate the whole
+    // crate's test target fails to COMPILE on Windows, which no CI job
+    // would catch (only the ubuntu leg runs `cargo test --workspace`).
+    // Same convention as `backend.rs`'s `fake_sidecar_tests`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_pins_no_playlist_on_the_command_line() {
+        // Without the flag, `watch?v=X&list=Y` — the shape you get by
+        // copying a link off a playlist page — probes as `_type: playlist`.
+        // The card then shows the PLAYLIST's title with zero formats, and
+        // yt-dlp fully extracts every entry first, so the user watches
+        // "Looking up that link..." for minutes.
+        let bins = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let argv = out.path().join("argv");
+        crate::test_fakes::write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "for a in \"$@\"; do echo \"$a\" >> '{}'; done\n\
+                 echo '{{\"title\":\"t\",\"formats\":[]}}'\nexit 0\n",
+                argv.display()
+            ),
+        );
+        let _ = YtDlp::probe_once(
+            &bins.path().join("yt-dlp"),
+            "https://www.youtube.com/watch?v=x&list=y",
+            None,
+        )
+        .await;
+        let sent = std::fs::read_to_string(&argv).unwrap_or_default();
+        assert!(
+            sent.contains("--no-playlist"),
+            "probe argv must pin --no-playlist; got:\n{sent}"
+        );
+    }
+
+    #[test]
+    fn parse_formats_drops_only_explicitly_streamless_rows() {
+        // The storyboard discriminator is the literal string "none" on
+        // both, which is what yt-dlp actually emits for them.
+        let v = serde_json::json!([
+            {"format_id": "sb0", "ext": "mhtml", "vcodec": "none", "acodec": "none"},
+            {"format_id": "real", "ext": "mp4", "vcodec": "avc1.64", "acodec": "none"},
+        ]);
+        let out = parse_formats(&v);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].format_id, "real");
     }
 
     #[test]

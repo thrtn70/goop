@@ -32,6 +32,11 @@ export default function UrlHero({ url }: { url?: string }) {
   // probe resets it — so an enqueue that rejects after the epoch has moved
   // on is reporting on something the user already left behind.
   const startEpochRef = useRef(0);
+  // Drives the retry button's busy label, and the reason the retry is a
+  // named function rather than a `.catch` on the click handler: an
+  // unhandled rejection is invisible to this suite (measured — removing
+  // the handler changed nothing), so the guard needs a visible trace.
+  const [retrying, setRetrying] = useState(false);
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
@@ -61,6 +66,27 @@ export default function UrlHero({ url }: { url?: string }) {
     }
   }
 
+  /**
+   * The retry the failure banner offers.
+   *
+   * `handleStart` rethrows so the card's Start button can return itself to
+   * idle, and nothing awaits this call — so the rejection stops here or it
+   * escapes as an unhandled rejection on every failed retry. The busy flag
+   * is cleared after the await rather than in a `finally` on purpose: a
+   * `finally` clears it even when the rejection escaped, and a button
+   * stuck on "Trying…" is the only trace this guard leaves for a test.
+   */
+  async function retryStart(opts: StartOptions) {
+    setRetrying(true);
+    try {
+      await handleStart(opts);
+    } catch {
+      // `handleStart` has already refreshed the banner with the new
+      // reason; there is nothing left to report here.
+    }
+    setRetrying(false);
+  }
+
   function handleCancel() {
     cancelledRef.current = true;
     setLoading(false);
@@ -79,7 +105,11 @@ export default function UrlHero({ url }: { url?: string }) {
         url: probe.url,
         output_dir: outputDir,
         audio_only: opts.audioOnly,
-        format: opts.format ? opts.format.format_id : null,
+        // The selector, not the bare id: a video-only format needs
+        // `+bestaudio` appended or yt-dlp downloads that stream alone and
+        // the file arrives silent. The backend composes it during the
+        // probe; passing `format_id` here is what made 1080p+ picks mute.
+        format: opts.format ? opts.format.selector : null,
         // Backend overrides these from current Settings, so the URL hero
         // doesn't need to surface the cookie picker or naming-scheme picker
         // alongside every extract.
@@ -111,9 +141,17 @@ export default function UrlHero({ url }: { url?: string }) {
           /* transient IPC failure — the next queue event refreshes */
         });
     } catch (e) {
-      // A later start, or a different link, has since taken over the view.
-      if (startEpochRef.current !== epoch) return;
-      setStartError({ message: formatError(e), opts });
+      // Only the attempt the user is still waiting on gets to report: a
+      // later start, or a different link, has since taken over the view.
+      if (startEpochRef.current === epoch) {
+        setStartError({ message: formatError(e), opts });
+      }
+      // Rethrow either way. `StartButton` awaits this to know the enqueue
+      // settled, and swallowing it would leave the button reporting
+      // "Added to queue" for a job that was never enqueued. Every caller
+      // that does not await therefore owns a rejection handler — see the
+      // retry button below.
+      throw e;
     }
   }
 
@@ -198,16 +236,17 @@ export default function UrlHero({ url }: { url?: string }) {
       )}
       {probe && <ProbeCard probe={probe} onStart={handleStart} />}
       {startError && (
-        <div className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
+        <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
           <p className="text-sm font-medium text-error">Couldn't start that download</p>
           <p className="mt-1 text-xs text-error/80">{startError.message}</p>
           <div className="mt-3 flex gap-2">
             <button
               type="button"
-              onClick={() => void handleStart(startError.opts)}
+              disabled={retrying}
+              onClick={() => void retryStart(startError.opts)}
               className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
             >
-              Try again
+              {retrying ? "Trying…" : "Try again"}
             </button>
             <button
               type="button"
