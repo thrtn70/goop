@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import UrlHero from "@/features/extract/UrlHero";
@@ -240,12 +240,50 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
   });
 
-  // A second scenario used to sit here: two enqueues from one card
-  // overlapping and resolving out of order. It is unreachable now — the
-  // Start button refuses a second click while the first is in flight, so
-  // one card cannot have two enqueues going at once. The guard still
-  // earns its place for the case above, where the card itself is
-  // replaced while a start is still in the air.
+  /** The card's own Start button, whatever it currently reads. */
+  function cardStartButton() {
+    const b = screen
+      .getAllByRole("button")
+      .find((el) => /^(Start|Starting…|Added to queue)$/.test(el.textContent ?? ""));
+    if (!b) throw new Error("card Start button not found");
+    return b;
+  }
+
+  it("will not enqueue again from the card while a retry is in flight", async () => {
+    // The banner's retry calls `handleStart` directly, so `StartButton`'s
+    // own in-flight guard cannot see it: the card sits there looking idle
+    // while a retry is in the air. Clicking Start then queues a second job
+    // running the same output template with --continue against the same
+    // .part file. Both controls have to answer to one in-flight signal.
+    const user = await probeThenFailStart();
+    const settleRetry = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+
+    // fireEvent, not userEvent: a disabled button still receives the event
+    // in jsdom, so this exercises the guard rather than the attribute.
+    fireEvent.click(cardStartButton());
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2);
+
+    await act(async () => settleRetry({ resolve: "job-1" }));
+  });
+
+  it("keeps the failure on screen while its retry is in flight", async () => {
+    // Clearing the banner the moment a retry starts takes the only sign of
+    // activity off the screen — which is what invites the second click
+    // above. The banner stays, and says it is working.
+    const user = await probeThenFailStart();
+    const settleRetry = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+
+    const retry = await screen.findByRole("button", { name: /trying/i });
+    expect(retry).toHaveProperty("disabled", true);
+    expect(screen.getByRole("alert")).toBeTruthy();
+
+    await act(async () => settleRetry({ resolve: "job-1" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
 });
 
 describe("UrlHero guards against a double enqueue", () => {

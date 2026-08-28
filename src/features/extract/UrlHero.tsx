@@ -37,6 +37,11 @@ export default function UrlHero({ url }: { url?: string }) {
   // unhandled rejection is invisible to this suite (measured — removing
   // the handler changed nothing), so the guard needs a visible trace.
   const [retrying, setRetrying] = useState(false);
+  // One in-flight signal for the whole card. The banner's retry calls
+  // `handleStart` directly, so `StartButton`'s own guard cannot see it —
+  // without this the card sits looking idle through a retry and a click
+  // on Start queues a second job against the same `.part`.
+  const [startInFlight, setStartInFlight] = useState(false);
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
@@ -98,8 +103,8 @@ export default function UrlHero({ url }: { url?: string }) {
 
   async function handleStart(opts: StartOptions) {
     if (!probe) return;
-    setStartError(null);
     const epoch = (startEpochRef.current += 1);
+    setStartInFlight(true);
     try {
       await api.extract.fromUrl({
         url: probe.url,
@@ -130,6 +135,10 @@ export default function UrlHero({ url }: { url?: string }) {
         resume_key: null,
         filename_hint: null,
       });
+      // Cleared here rather than on the way in: dropping the banner the
+      // moment a retry starts takes the only sign of activity off screen,
+      // which is precisely what invites a second click on the card.
+      if (startEpochRef.current === epoch) setStartError(null);
       // Enqueue emits no queue event until the scheduler claims the job,
       // so refresh explicitly — otherwise a job queued behind a full
       // concurrency limit is invisible in the sidebar until something
@@ -152,6 +161,10 @@ export default function UrlHero({ url }: { url?: string }) {
       // that does not await therefore owns a rejection handler — see the
       // retry button below.
       throw e;
+    } finally {
+      // A superseded attempt must not clear the flag out from under the
+      // one that replaced it.
+      if (startEpochRef.current === epoch) setStartInFlight(false);
     }
   }
 
@@ -234,7 +247,7 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
-      {probe && <ProbeCard probe={probe} onStart={handleStart} />}
+      {probe && <ProbeCard probe={probe} onStart={handleStart} busy={startInFlight} />}
       {startError && (
         <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
           <p className="text-sm font-medium text-error">Couldn't start that download</p>

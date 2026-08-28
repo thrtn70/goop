@@ -14,7 +14,7 @@ export interface StartOptions {
  *  honour it by returning `onStart(...)` directly. */
 type StartHandler = (opts: StartOptions) => void | Promise<void>;
 
-type Props = { probe: UrlProbe; onStart: StartHandler };
+type Props = { probe: UrlProbe; onStart: StartHandler; busy?: boolean };
 
 /**
  * The one control that enqueues, shared by all three card variants.
@@ -36,10 +36,12 @@ function StartButton({
   label,
   onStart,
   resetKey = "",
+  busy = false,
 }: {
   label: string;
   onStart: () => void | Promise<void>;
   resetKey?: string;
+  busy?: boolean;
 }) {
   const [phase, setPhase] = useState<"idle" | "starting" | "started">("idle");
   const [startedKey, setStartedKey] = useState<string | null>(null);
@@ -52,7 +54,11 @@ function StartButton({
   // the same duplicate this guard exists to prevent. Comparing against the
   // key that was actually enqueued only ever re-arms a settled button.
   const rearmed = phase === "started" && startedKey !== resetKey;
-  const effective = rearmed ? "idle" : phase;
+  // `busy` is the card-wide signal: an enqueue can also be started from
+  // the hero's failure banner, which never touches this button's own
+  // phase. Folding it in here rather than only into `disabled` is what
+  // makes the click guard below refuse it too.
+  const effective = busy ? "starting" : rearmed ? "idle" : phase;
 
   async function handleClick() {
     if (effective !== "idle") return;
@@ -97,19 +103,25 @@ function StartButton({
   );
 }
 
-export default function ProbeCard({ probe, onStart }: Props) {
+export default function ProbeCard({ probe, onStart, busy }: Props) {
   if (probe.direct) {
-    return <DirectCard info={probe.direct} url={probe.url} onStart={onStart} />;
+    return <DirectCard info={probe.direct} url={probe.url} onStart={onStart} busy={busy} />;
   }
   if (probe.debrid) {
     return (
-      <DebridCard title={probe.title} info={probe.debrid} url={probe.url} onStart={onStart} />
+      <DebridCard
+        title={probe.title}
+        info={probe.debrid}
+        url={probe.url}
+        onStart={onStart}
+        busy={busy}
+      />
     );
   }
-  return <MediaCard probe={probe} onStart={onStart} />;
+  return <MediaCard probe={probe} onStart={onStart} busy={busy} />;
 }
 
-function MediaCard({ probe, onStart }: Props) {
+function MediaCard({ probe, onStart, busy }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [audioOnly, setAudioOnly] = useState(false);
   const fmt = probe.formats.find((f) => f.format_id === selected) ?? null;
@@ -157,6 +169,7 @@ function MediaCard({ probe, onStart }: Props) {
         <StartButton
           label="Start"
           resetKey={`${probe.url}|${selected ?? ""}|${audioOnly}`}
+          busy={busy}
           onStart={() => onStart({ format: fmt, audioOnly })}
         />
       </div>
@@ -168,10 +181,12 @@ function DirectCard({
   info,
   url,
   onStart,
+  busy,
 }: {
   info: DirectFileInfo;
   url: string;
   onStart: StartHandler;
+  busy?: boolean;
 }) {
   const meta = [
     "Direct download",
@@ -202,6 +217,7 @@ function DirectCard({
         <StartButton
           label="Download"
           resetKey={url}
+          busy={busy}
           onStart={() => onStart({ format: null, audioOnly: false })}
         />
       </div>
@@ -214,11 +230,13 @@ function DebridCard({
   info,
   url,
   onStart,
+  busy,
 }: {
   title: string;
   info: DebridProbeInfo;
   url: string;
   onStart: StartHandler;
+  busy?: boolean;
 }) {
   const meta = [info.magnet ? "Magnet" : null, "via TorBox"]
     .filter((s): s is string => s != null)
@@ -248,6 +266,7 @@ function DebridCard({
         <StartButton
           label="Download"
           resetKey={url}
+          busy={busy}
           onStart={() => onStart({ format: null, audioOnly: false })}
         />
       </div>
