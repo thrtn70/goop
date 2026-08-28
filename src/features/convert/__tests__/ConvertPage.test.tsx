@@ -3,6 +3,7 @@ import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
+import { useAppStore } from "@/store/appStore";
 import type { ProbeResult } from "@/types";
 
 // --- Mocks ---
@@ -447,5 +448,98 @@ describe("ConvertPage", () => {
     // Resolution cap buttons should also be gone.
     expect(screen.queryByRole("button", { name: "1080p" })).toBeNull();
     expect(screen.queryByRole("button", { name: "720p" })).toBeNull();
+  });
+});
+
+describe("ConvertPage applies what a preset chip promises", () => {
+  afterEach(() => {
+    cleanup();
+    useAppStore.setState({ presets: [] });
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]);
+    mockSave.mockResolvedValue("/tmp/out.mp4");
+    mockProbe.mockResolvedValue(mp4Probe);
+    // The shape `builtin_defaults()` seeds on first launch: "YouTube
+    // Upload" really does carry a 1080p cap.
+    useAppStore.setState({
+      presets: [
+        {
+          id: "p1",
+          name: "YouTube Upload",
+          target: "mp4",
+          quality_preset: "balanced",
+          resolution_cap: "r1080p",
+          compress_mode: null,
+          is_builtin: true,
+          created_at: 0n,
+        },
+      ],
+    });
+  });
+
+  async function stageFileAndApplyPreset() {
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
+  }
+
+  it("sends the preset's quality and resolution cap on a single file", async () => {
+    // The chip used to change only `target`, so a 4K source came out 4K
+    // while the button said 1080p.
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    const req = mockFromFile.mock.calls[0]?.[0];
+    expect(req.quality_preset).toBe("balanced");
+    expect(req.resolution_cap).toBe("r1080p");
+  });
+
+  it("sends nothing extra when no preset was applied", async () => {
+    // The default path must stay untouched: absent means absent, not a
+    // silently-invented default.
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    const req = mockFromFile.mock.calls[0]?.[0];
+    expect(req.quality_preset).toBeNull();
+    expect(req.resolution_cap).toBeNull();
+  });
+
+  it("round-trips: saving the applied settings back out keeps them", async () => {
+    // Otherwise the fix leaks straight back out the other side — apply
+    // "YouTube Upload", click "Save as preset", and the new preset is
+    // born with null quality and resolution, recreating the same lie.
+    const savePreset = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ savePreset });
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: /save as preset/i }));
+    await userEvent.type(screen.getByRole("textbox"), "My Preset");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(savePreset).toHaveBeenCalled());
+    const saved = savePreset.mock.calls[0]?.[0];
+    expect(saved.quality_preset).toBe("balanced");
+    expect(saved.resolution_cap).toBe("r1080p");
+  });
+
+  it("carries the preset through a multi-file batch too", async () => {
+    // The batch branch builds its own request object, so it can drop the
+    // fields independently of the single-file branch.
+    mockOpen.mockResolvedValue(["/tmp/a.mp4", "/tmp/b.mp4"]);
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("a.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
+    await userEvent.click(screen.getByRole("button", { name: /convert 2 files/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(2));
+    for (const call of mockFromFile.mock.calls) {
+      expect(call[0].quality_preset).toBe("balanced");
+      expect(call[0].resolution_cap).toBe("r1080p");
+    }
   });
 });
