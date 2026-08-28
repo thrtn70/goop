@@ -15,7 +15,23 @@ export default function UrlHero({ url }: { url?: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUrl, setLastUrl] = useState<string | null>(null);
+  // A download that won't start is not a link that won't load: the card is
+  // already built, so the only thing worth retrying is the enqueue itself.
+  // The options ride along with the message so that retry can re-send the
+  // same request. Re-probing instead would null the probe, unmount the
+  // card, and throw away the format the user picked.
+  const [startError, setStartError] = useState<{
+    message: string;
+    opts: StartOptions;
+  } | null>(null);
   const cancelledRef = useRef(false);
+  // Bumped whenever the card a start belongs to is replaced, and again on
+  // every new start attempt. `handleStart` is the one async path here that
+  // can outlive its own card — `UrlHero` is re-rendered with a new `url`
+  // rather than remounted, and `cancelledRef` is no help because the next
+  // probe resets it — so an enqueue that rejects after the epoch has moved
+  // on is reporting on something the user already left behind.
+  const startEpochRef = useRef(0);
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
@@ -25,6 +41,8 @@ export default function UrlHero({ url }: { url?: string }) {
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
+    setStartError(null);
+    startEpochRef.current += 1;
     setProbe(null);
     setLastUrl(u);
     try {
@@ -48,16 +66,20 @@ export default function UrlHero({ url }: { url?: string }) {
     setLoading(false);
     setProbe(null);
     setError(null);
+    setStartError(null);
+    startEpochRef.current += 1;
   }
 
-  async function handleStart({ format, audioOnly }: StartOptions) {
+  async function handleStart(opts: StartOptions) {
     if (!probe) return;
+    setStartError(null);
+    const epoch = (startEpochRef.current += 1);
     try {
       await api.extract.fromUrl({
         url: probe.url,
         output_dir: outputDir,
-        audio_only: audioOnly,
-        format: format ? format.format_id : null,
+        audio_only: opts.audioOnly,
+        format: opts.format ? opts.format.format_id : null,
         // Backend overrides these from current Settings, so the URL hero
         // doesn't need to surface the cookie picker or naming-scheme picker
         // alongside every extract.
@@ -89,7 +111,9 @@ export default function UrlHero({ url }: { url?: string }) {
           /* transient IPC failure — the next queue event refreshes */
         });
     } catch (e) {
-      setError(formatError(e));
+      // A later start, or a different link, has since taken over the view.
+      if (startEpochRef.current !== epoch) return;
+      setStartError({ message: formatError(e), opts });
     }
   }
 
@@ -100,6 +124,8 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
+      setStartError(null);
+      startEpochRef.current += 1;
       setProbe(null);
       setLastUrl(url);
       try {
@@ -171,6 +197,28 @@ export default function UrlHero({ url }: { url?: string }) {
         </div>
       )}
       {probe && <ProbeCard probe={probe} onStart={handleStart} />}
+      {startError && (
+        <div className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
+          <p className="text-sm font-medium text-error">Couldn't start that download</p>
+          <p className="mt-1 text-xs text-error/80">{startError.message}</p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => void handleStart(startError.opts)}
+              className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={() => setStartError(null)}
+              className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
       {!loading && !probe && !error && (
         <div className="enter-up flex h-full flex-col items-center justify-center text-center">
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">
