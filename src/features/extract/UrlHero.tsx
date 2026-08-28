@@ -57,7 +57,11 @@ export default function UrlHero({ url }: { url?: string }) {
         url: probe.url,
         output_dir: outputDir,
         audio_only: audioOnly,
-        format: format ? format.format_id : null,
+        // The selector, not the bare id: a video-only format needs
+        // `+bestaudio` appended or yt-dlp downloads that stream alone and
+        // the file arrives silent. The backend composes it during the
+        // probe; passing `format_id` here is what made 1080p+ picks mute.
+        format: format ? format.selector : null,
         // Backend overrides these from current Settings, so the URL hero
         // doesn't need to surface the cookie picker or naming-scheme picker
         // alongside every extract.
@@ -90,6 +94,10 @@ export default function UrlHero({ url }: { url?: string }) {
         });
     } catch (e) {
       setError(formatError(e));
+      // Rethrow so the Start button drops back to idle and the user can
+      // retry. Swallowing it here would leave the button reporting
+      // "Added to queue" for a job that was never enqueued.
+      throw e;
     }
   }
 

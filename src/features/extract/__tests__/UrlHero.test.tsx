@@ -72,3 +72,79 @@ describe("UrlHero carries the probe's extractor verdict", () => {
     expect(sentRequest()?.extractor_hint).toBeNull();
   });
 });
+
+describe("UrlHero guards against a double enqueue", () => {
+  it("only enqueues once when Start is clicked twice", async () => {
+    // There is no dedupe anywhere in the queue, and both jobs would run
+    // the same output template with --continue against the same .part.
+    // With the queue sidebar collapsed the only feedback is a count in a
+    // 40px rail, so a second click is the natural reaction.
+    apiMocks.extract.probe.mockResolvedValue(probeResult({}));
+    let release!: () => void;
+    apiMocks.extract.fromUrl.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve("job-1");
+        }),
+    );
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/x" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalled());
+    const start = await screen.findByRole("button", { name: /^Start$/ });
+    await user.click(start);
+    await user.click(start);
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1);
+    release();
+  });
+
+  it("stays disabled after the enqueue succeeds", async () => {
+    // Re-clicking a second later is the same collision as a double-click,
+    // so the button reports what happened instead of inviting a repeat.
+    await probeThenStart(probeResult({}));
+    const start = await screen.findByRole("button", { name: /added to queue/i });
+    expect(start).toHaveProperty("disabled", true);
+  });
+});
+
+describe("UrlHero sends the format's download selector", () => {
+  function videoOnly1080p() {
+    return {
+      format_id: "299",
+      ext: "mp4",
+      resolution: "1920x1080",
+      filesize: null,
+      is_audio_only: false,
+      // The backend composed this because 299 carries no audio track.
+      selector: "299+bestaudio/299",
+    };
+  }
+
+  it("sends the selector, not the bare format id", async () => {
+    // Sending the bare id is how the picker used to hand back silent
+    // files: yt-dlp downloads exactly that stream and never merges audio.
+    apiMocks.extract.probe.mockResolvedValue(probeResult({ formats: [videoOnly1080p()] }));
+    apiMocks.extract.fromUrl.mockResolvedValue("job-1");
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/x" />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalled());
+    await user.selectOptions(await screen.findByRole("combobox"), "299");
+    await user.click(await screen.findByRole("button", { name: /^Start$/ }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalled());
+    expect(sentRequest()?.format).toBe("299+bestaudio/299");
+  });
+
+  it("sends no format at all when the user leaves it on Best (auto)", async () => {
+    // yt-dlp's own default already merges, so the absent case must stay
+    // absent rather than being coerced into a selector.
+    await probeThenStart(probeResult({ formats: [videoOnly1080p()] }));
+    expect(sentRequest()?.format).toBeNull();
+  });
+});

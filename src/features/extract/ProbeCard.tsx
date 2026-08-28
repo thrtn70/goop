@@ -6,7 +6,81 @@ export interface StartOptions {
   audioOnly: boolean;
 }
 
-type Props = { probe: UrlProbe; onStart: (opts: StartOptions) => void };
+/** Returning the promise is load-bearing: `StartButton` awaits it to know
+ *  when the enqueue actually settled. A `void`-typed variant would let a
+ *  caller discard it and silently reopen the double-enqueue hole. */
+type StartHandler = (opts: StartOptions) => void | Promise<void>;
+
+type Props = { probe: UrlProbe; onStart: StartHandler };
+
+/**
+ * The one control that enqueues, shared by all three card variants.
+ *
+ * Nothing in the queue dedupes an enqueue, and two jobs for the same URL
+ * run the same output template with `--continue` against the same `.part`.
+ * The button therefore owns the guard: disabled while the IPC call is in
+ * flight, and disabled afterwards while it reports what happened, since
+ * the absence of feedback is what prompted the second click.
+ *
+ * `resetKey` returns it to idle when the user changes what would be
+ * downloaded, so picking a different format can still be started.
+ */
+function StartButton({
+  label,
+  onStart,
+  resetKey = "",
+}: {
+  label: string;
+  onStart: () => void | Promise<void>;
+  resetKey?: string;
+}) {
+  const [phase, setPhase] = useState<"idle" | "starting" | "started">("idle");
+  const [startedKey, setStartedKey] = useState<string | null>(null);
+
+  // Derived, not an effect keyed on `resetKey`. Neither the format select
+  // nor the audio-only checkbox is disabled mid-flight, so an effect would
+  // reset a *starting* button the moment the user nudged either one —
+  // re-arming Start while the first enqueue was still in the air, which is
+  // the same duplicate this guard exists to prevent. Comparing against the
+  // key that was actually enqueued only ever re-arms a settled button.
+  const rearmed = phase === "started" && startedKey !== resetKey;
+  const effective = rearmed ? "idle" : phase;
+
+  async function handleClick() {
+    if (effective !== "idle") return;
+    const key = resetKey;
+    setPhase("starting");
+    try {
+      await onStart();
+      setStartedKey(key);
+      setPhase("started");
+    } catch {
+      // The hero renders the error; return the button so it can be retried.
+      setPhase("idle");
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={effective !== "idle"}
+        className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover disabled:cursor-default disabled:bg-surface-2 disabled:text-fg-secondary disabled:hover:bg-surface-2"
+        onClick={() => void handleClick()}
+      >
+        {effective === "idle" && label}
+        {effective === "starting" && "Starting…"}
+        {effective === "started" && "Added to queue"}
+      </button>
+      {/* JobStateAnnouncer deliberately skips a job's first-seen state, so
+          without this the enqueue has no non-visual signal at all: a
+          disabled control's label change is not reliably announced. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {effective === "started" ? "Added to queue" : ""}
+      </span>
+    </>
+  );
+}
 
 export default function ProbeCard({ probe, onStart }: Props) {
   if (probe.direct) {
@@ -44,11 +118,13 @@ function MediaCard({ probe, onStart }: Props) {
           onChange={(e) => setSelected(e.target.value || null)}
         >
           <option value="">Best (auto)</option>
-          {probe.formats.slice(0, 20).map((f) => (
+          {/* Rendered whole and in the order the backend gave them, which
+              is best-first. This list used to be capped at 20 entries,
+              which cut from the wrong end and put 1080p and above out of
+              reach entirely. */}
+          {probe.formats.map((f) => (
             <option key={f.format_id} value={f.format_id}>
-              {f.ext}
-              {f.resolution ? ` ${f.resolution}` : ""}
-              {f.filesize != null ? ` (${humanMB(Number(f.filesize))})` : ""}
+              {formatLabel(f)}
             </option>
           ))}
         </select>
@@ -61,19 +137,17 @@ function MediaCard({ probe, onStart }: Props) {
           />
           audio only
         </label>
-        <button
-          type="button"
-          className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart({ format: fmt, audioOnly })}
-        >
-          Start
-        </button>
+        <StartButton
+          label="Start"
+          resetKey={`${selected ?? ""}|${audioOnly}`}
+          onStart={() => onStart({ format: fmt, audioOnly })}
+        />
       </div>
     </div>
   );
 }
 
-function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: StartOptions) => void }) {
+function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: StartHandler }) {
   const meta = [
     "Direct download",
     info.content_type,
@@ -100,13 +174,10 @@ function DirectCard({ info, onStart }: { info: DirectFileInfo; onStart: (opts: S
       </div>
 
       <div className="mt-4 flex">
-        <button
-          type="button"
-          className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart({ format: null, audioOnly: false })}
-        >
-          Download
-        </button>
+        <StartButton
+          label="Download"
+          onStart={() => onStart({ format: null, audioOnly: false })}
+        />
       </div>
     </div>
   );
@@ -119,7 +190,7 @@ function DebridCard({
 }: {
   title: string;
   info: DebridProbeInfo;
-  onStart: (opts: StartOptions) => void;
+  onStart: StartHandler;
 }) {
   const meta = [info.magnet ? "Magnet" : null, "via TorBox"]
     .filter((s): s is string => s != null)
@@ -146,13 +217,10 @@ function DebridCard({
       </div>
 
       <div className="mt-4 flex">
-        <button
-          type="button"
-          className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          onClick={() => onStart({ format: null, audioOnly: false })}
-        >
-          Download
-        </button>
+        <StartButton
+          label="Download"
+          onStart={() => onStart({ format: null, audioOnly: false })}
+        />
       </div>
     </div>
   );
@@ -166,6 +234,20 @@ function formatSecs(s: number): string {
 
 function humanMB(b: number): string {
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * One picker entry, e.g. `mp4 1920x1080 (52.3 MB)` or `m4a — audio only`.
+ *
+ * The audio-only marker comes from the backend's `is_audio_only` rather
+ * than from yt-dlp's `resolution` string: without it a stream with no
+ * video reads exactly like a video one, which is how the flag came to be
+ * computed, shipped, and never used.
+ */
+function formatLabel(f: FormatOption): string {
+  const quality = f.is_audio_only ? "— audio only" : (f.resolution ?? "");
+  const size = f.filesize != null ? `(${humanMB(Number(f.filesize))})` : "";
+  return [f.ext, quality, size].filter(Boolean).join(" ");
 }
 
 // `size_bytes` is `u64` in Rust → typed `bigint` by ts-rs, but Tauri serializes

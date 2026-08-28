@@ -1869,4 +1869,45 @@ done
         assert_eq!(runs(&counter), 1);
         assert!(!err.detail().unwrap_or_default().contains("[goop]"));
     }
+
+    /// A `&list=` URL is what you get by copying a link off a playlist
+    /// page, and it is the normal way the URL arrives. Without the pin one
+    /// click downloads every video in the playlist behind a single
+    /// progress bar, and `output_path` records only the last file.
+    #[tokio::test]
+    async fn a_download_never_expands_a_playlist() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let argv = out.path().join("argv");
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                "for a in \"$@\"; do echo \"$a\" >> '{}'; done\nexit 1\n",
+                argv.display()
+            ),
+        );
+
+        let req = request("https://www.youtube.com/watch?v=x&list=y", out.path());
+        assert_eq!(
+            classify_extractor(&req.url),
+            ExtractorChoice::YtDlp,
+            "the test only pins yt-dlp's argv if yt-dlp is the one spawned"
+        );
+        let _ = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::new()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+
+        let sent = std::fs::read_to_string(&argv).unwrap_or_default();
+        assert!(
+            sent.contains("--no-playlist"),
+            "download argv must pin --no-playlist; got:\n{sent}"
+        );
+    }
 }
