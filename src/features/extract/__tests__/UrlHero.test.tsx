@@ -282,6 +282,66 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     expect(start).toHaveProperty("disabled", false);
   });
 
+  it("a Start click on the card disables the banner's retry", async () => {
+    // Both controls start an enqueue and each only knows its own. The card
+    // learned about the banner's retry; the banner never learned about the
+    // card. So a start from the card leaves "Try again" live, and clicking
+    // it queues a second job running the same output template with
+    // --continue against the same .part.
+    await probeThenFailStart();
+    pendingStart();
+    fireEvent.click(cardStartButton());
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByRole("button", { name: /trying|try again/i })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
+  it("a retry that lands after the card was replaced does not re-arm a live one", async () => {
+    // Every other piece of start state is cleared behind an epoch check.
+    // The retry's busy flag is cleared unconditionally once its own start
+    // settles, so a stale retry re-arms the retry button of whatever card
+    // is on screen now, mid-flight.
+    apiMocks.extract.probe.mockImplementation((u: string) =>
+      Promise.resolve(probeResult({ url: u, title: u, formats: [videoFormat()] })),
+    );
+    const user = userEvent.setup();
+
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "a is full" });
+    const { rerender } = render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/a" />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("combobox");
+    await user.click(screen.getByRole("button", { name: /^Start$/ }));
+    await screen.findByText(/couldn't start that download/i);
+    const settleA = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await screen.findByRole("button", { name: /trying/i });
+
+    rerender(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/b" />
+      </MemoryRouter>,
+    );
+    await screen.findByText("https://example.com/b");
+
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "b is full" });
+    await user.click(screen.getByRole("button", { name: /^Start$/ }));
+    await screen.findByText(/couldn't start that download/i);
+    const settleB = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await screen.findByRole("button", { name: /trying/i });
+
+    await act(async () => settleA({ reject: { code: "queue", message: "a is full" } }));
+    expect(screen.getByRole("button", { name: /trying/i })).toHaveProperty("disabled", true);
+
+    await act(async () => settleB({ resolve: "job-b" }));
+  });
+
   it("will not enqueue again from the card while a retry is in flight", async () => {
     // The banner's retry calls `handleStart` directly, so `StartButton`'s
     // own in-flight guard cannot see it: the card sits there looking idle
@@ -404,7 +464,12 @@ describe("UrlHero keeps one enqueue per card", () => {
     // and have been missed once already.
     apiMocks.extract.probe.mockResolvedValue(
       probeResult({
-        direct: { content_type: "application/zip", size_bytes: 10, filename: "a.zip" },
+        direct: {
+          content_type: "application/zip",
+          size_bytes: 10n,
+          filename: "a.zip",
+          resumable: true,
+        },
       }),
     );
     apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "full" });

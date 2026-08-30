@@ -5,7 +5,14 @@ import { formatError } from "@/ipc/error";
 import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import ProbeCard from "./ProbeCard";
-import type { StartOptions } from "./startState";
+import {
+  IDLE_START,
+  nextStartState,
+  startBanner,
+  type StartEvent,
+  type StartOptions,
+  type StartState,
+} from "./startState";
 
 function looksLikeCookieError(message: string | null): boolean {
   return message != null && message.toLowerCase().includes("cookie");
@@ -16,33 +23,20 @@ export default function UrlHero({ url }: { url?: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUrl, setLastUrl] = useState<string | null>(null);
-  // A download that won't start is not a link that won't load: the card is
-  // already built, so the only thing worth retrying is the enqueue itself.
-  // The options ride along with the message so that retry can re-send the
-  // same request. Re-probing instead would null the probe, unmount the
-  // card, and throw away the format the user picked.
-  const [startError, setStartError] = useState<{
-    message: string;
-    opts: StartOptions;
-  } | null>(null);
   const cancelledRef = useRef(false);
-  // Bumped whenever the card a start belongs to is replaced, and again on
-  // every new start attempt. `handleStart` is the one async path here that
-  // can outlive its own card — `UrlHero` is re-rendered with a new `url`
-  // rather than remounted, and `cancelledRef` is no help because the next
-  // probe resets it — so an enqueue that rejects after the epoch has moved
-  // on is reporting on something the user already left behind.
-  const startEpochRef = useRef(0);
-  // Drives the retry button's busy label, and the reason the retry is a
-  // named function rather than a `.catch` on the click handler: an
-  // unhandled rejection is invisible to this suite (measured — removing
-  // the handler changed nothing), so the guard needs a visible trace.
-  const [retrying, setRetrying] = useState(false);
-  // One in-flight signal for the whole card. The banner's retry calls
-  // `handleStart` directly, so `StartButton`'s own guard cannot see it —
-  // without this the card sits looking idle through a retry and a click
-  // on Start queues a second job against the same `.part`.
-  const [startInFlight, setStartInFlight] = useState(false);
+  // Everything about starting a download, in one place. This was five
+  // separate pieces — an epoch ref, two booleans and an error object — and
+  // every defect here was two of them disagreeing.
+  const [start, setStart] = useState<StartState>(IDLE_START);
+  // An id source, not a sixth owner: it is never read to decide anything.
+  // Only `start` decides, and only `nextStartState` reads the id.
+  const nextStartId = useRef(0);
+  function send(ev: StartEvent) {
+    // The functional form is the staleness guard: `prev` comes from the
+    // queue, not from the closure this callback was created in.
+    setStart((prev) => nextStartState(prev, ev));
+  }
+
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
@@ -52,7 +46,7 @@ export default function UrlHero({ url }: { url?: string }) {
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
-    retireStart();
+    send({ type: "retire" });
     setProbe(null);
     setLastUrl(u);
     try {
@@ -71,55 +65,28 @@ export default function UrlHero({ url }: { url?: string }) {
     }
   }
 
-  /**
-   * The retry the failure banner offers.
-   *
-   * `handleStart` rethrows so the card's Start button can return itself to
-   * idle, and nothing awaits this call — so the rejection stops here or it
-   * escapes as an unhandled rejection on every failed retry. The busy flag
-   * is cleared after the await rather than in a `finally` on purpose: a
-   * `finally` clears it even when the rejection escaped, and a button
-   * stuck on "Trying…" is the only trace this guard leaves for a test.
-   */
-  async function retryStart(opts: StartOptions) {
-    setRetrying(true);
-    try {
-      await handleStart(opts);
-    } catch {
-      // `handleStart` has already refreshed the banner with the new
-      // reason; there is nothing left to report here.
-    }
-    setRetrying(false);
-  }
-
   function handleCancel() {
     cancelledRef.current = true;
     setLoading(false);
     setProbe(null);
     setError(null);
-    retireStart();
+    send({ type: "retire" });
   }
 
-  /**
-   * Retire the start that belonged to the card being replaced.
-   *
-   * Bumping the epoch only stops a stale attempt from *reporting*. The
-   * flags it set are cleared by that same attempt's own settle, which the
-   * bumped epoch then declines to run — so anything not cleared here stays
-   * set for good. That is how the next card arrived with its Start button
-   * already disabled and no way back.
-   */
-  function retireStart() {
-    setStartError(null);
-    setStartInFlight(false);
-    setRetrying(false);
-    startEpochRef.current += 1;
+  /** The one way an enqueue begins. Both the card's Start button and the
+   *  failure banner's retry come through here, so there is no second path
+   *  to keep in step with this one. */
+  function startAttempt(opts: StartOptions) {
+    void handleStart(opts).catch(() => {
+      // Way-station: `handleStart` still rethrows so the card's button can
+      // settle. That contract, and this handler, go away with it.
+    });
   }
 
   async function handleStart(opts: StartOptions) {
     if (!probe) return;
-    const epoch = (startEpochRef.current += 1);
-    setStartInFlight(true);
+    const id = (nextStartId.current += 1);
+    send({ type: "attempt", id, url: probe.url, opts });
     try {
       await api.extract.fromUrl({
         url: probe.url,
@@ -150,10 +117,7 @@ export default function UrlHero({ url }: { url?: string }) {
         resume_key: null,
         filename_hint: null,
       });
-      // Cleared here rather than on the way in: dropping the banner the
-      // moment a retry starts takes the only sign of activity off screen,
-      // which is precisely what invites a second click on the card.
-      if (startEpochRef.current === epoch) setStartError(null);
+      send({ type: "succeeded", id });
       // Enqueue emits no queue event until the scheduler claims the job,
       // so refresh explicitly — otherwise a job queued behind a full
       // concurrency limit is invisible in the sidebar until something
@@ -165,21 +129,10 @@ export default function UrlHero({ url }: { url?: string }) {
           /* transient IPC failure — the next queue event refreshes */
         });
     } catch (e) {
-      // Only the attempt the user is still waiting on gets to report: a
-      // later start, or a different link, has since taken over the view.
-      if (startEpochRef.current === epoch) {
-        setStartError({ message: formatError(e), opts });
-      }
-      // Rethrow either way. `StartButton` awaits this to know the enqueue
-      // settled, and swallowing it would leave the button reporting
-      // "Added to queue" for a job that was never enqueued. Every caller
-      // that does not await therefore owns a rejection handler — see the
-      // retry button below.
+      // Whether this reports at all is decided by the id, in one place.
+      send({ type: "failed", id, message: formatError(e) });
+      // Way-station: still rethrown so the card's button can settle.
       throw e;
-    } finally {
-      // A superseded attempt must not clear the flag out from under the
-      // one that replaced it.
-      if (startEpochRef.current === epoch) setStartInFlight(false);
     }
   }
 
@@ -190,7 +143,7 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
-      retireStart();
+      send({ type: "retire" });
       setProbe(null);
       setLastUrl(url);
       try {
@@ -207,6 +160,9 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = true;
     };
   }, [url]);
+
+  // Either a failure to report, or the message a retry is carrying.
+  const banner = startBanner(start);
 
   return (
     <div className="p-6">
@@ -261,23 +217,25 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
-      {probe && <ProbeCard probe={probe} onStart={handleStart} busy={startInFlight} />}
-      {startError && (
+      {probe && (
+        <ProbeCard probe={probe} onStart={handleStart} busy={start.kind === "starting"} />
+      )}
+      {banner && (
         <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
           <p className="text-sm font-medium text-error">Couldn't start that download</p>
-          <p className="mt-1 text-xs text-error/80">{startError.message}</p>
+          <p className="mt-1 text-xs text-error/80">{banner.message}</p>
           <div className="mt-3 flex gap-2">
             <button
               type="button"
-              disabled={retrying}
-              onClick={() => void retryStart(startError.opts)}
+              disabled={banner.retrying}
+              onClick={() => startAttempt(banner.opts)}
               className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
             >
-              {retrying ? "Trying…" : "Try again"}
+              {banner.retrying ? "Trying…" : "Try again"}
             </button>
             <button
               type="button"
-              onClick={() => setStartError(null)}
+              onClick={() => send({ type: "dismiss" })}
               className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
             >
               Dismiss
