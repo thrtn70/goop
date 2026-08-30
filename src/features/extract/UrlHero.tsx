@@ -4,7 +4,8 @@ import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
-import ProbeCard, { type StartOptions } from "./ProbeCard";
+import ProbeCard from "./ProbeCard";
+import type { StartOptions } from "./startState";
 
 function looksLikeCookieError(message: string | null): boolean {
   return message != null && message.toLowerCase().includes("cookie");

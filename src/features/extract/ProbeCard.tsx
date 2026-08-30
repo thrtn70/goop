@@ -1,10 +1,6 @@
 import { useState } from "react";
 import type { DebridProbeInfo, DirectFileInfo, FormatOption, UrlProbe } from "@/types";
-
-export interface StartOptions {
-  format: FormatOption | null;
-  audioOnly: boolean;
-}
+import type { StartOptions } from "./startState";
 
 /** `StartButton` awaits what this returns to know when the enqueue
  *  settled, so a call site has to forward its promise rather than drop
