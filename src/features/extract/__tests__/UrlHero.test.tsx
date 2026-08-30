@@ -56,6 +56,26 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+/** A `fromUrl` call that hangs until the test settles it by hand. */
+function pendingStart() {
+  let settle!: (outcome: { reject: unknown } | { resolve: string }) => void;
+  apiMocks.extract.fromUrl.mockReturnValueOnce(
+    new Promise<string>((resolve, reject) => {
+      settle = (o) => ("reject" in o ? reject(o.reject) : resolve(o.resolve));
+    }),
+  );
+  return (outcome: { reject: unknown } | { resolve: string }) => settle(outcome);
+}
+
+/** The card's own Start button, whatever it currently reads. */
+function cardStartButton() {
+  const b = screen
+    .getAllByRole("button")
+    .find((el) => /^(Start|Starting…|Added to queue)$/.test(el.textContent ?? ""));
+  if (!b) throw new Error("card Start button not found");
+  return b;
+}
+
 describe("UrlHero carries the probe's extractor verdict", () => {
   it("passes the extractor that answered the probe into the download", async () => {
     // The whole chain is pointless if the UI drops the verdict on the
@@ -196,17 +216,6 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
 });
 
 describe("UrlHero only reports the enqueue the user is still waiting on", () => {
-  /** A `fromUrl` call that hangs until the test settles it by hand. */
-  function pendingStart() {
-    let settle!: (outcome: { reject: unknown } | { resolve: string }) => void;
-    apiMocks.extract.fromUrl.mockReturnValueOnce(
-      new Promise<string>((resolve, reject) => {
-        settle = (o) => ("reject" in o ? reject(o.reject) : resolve(o.resolve));
-      }),
-    );
-    return (outcome: { reject: unknown } | { resolve: string }) => settle(outcome);
-  }
-
   it("drops a failure that lands after the user moved on to another link", async () => {
     // `UrlHero` is re-rendered with a new `url`, never remounted, so an
     // enqueue still in flight outlives the card it belongs to. Reporting it
@@ -272,15 +281,6 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     const start = await screen.findByRole("button", { name: /^Start$/ });
     expect(start).toHaveProperty("disabled", false);
   });
-
-  /** The card's own Start button, whatever it currently reads. */
-  function cardStartButton() {
-    const b = screen
-      .getAllByRole("button")
-      .find((el) => /^(Start|Starting…|Added to queue)$/.test(el.textContent ?? ""));
-    if (!b) throw new Error("card Start button not found");
-    return b;
-  }
 
   it("will not enqueue again from the card while a retry is in flight", async () => {
     // The banner's retry calls `handleStart` directly, so `StartButton`'s
@@ -353,6 +353,78 @@ describe("UrlHero guards against a double enqueue", () => {
     await probeThenStart(probeResult({}));
     const start = await screen.findByRole("button", { name: /added to queue/i });
     expect(start).toHaveProperty("disabled", true);
+  });
+});
+
+describe("UrlHero keeps one enqueue per card", () => {
+  // Both propositions are pinned inside ProbeCard's own tests, which reach
+  // into the button's internal phase. They are restated here through the
+  // rendered pair so they keep holding whatever ProbeCard's shape becomes.
+  //
+  // Each drives the start from the *banner's* retry, not from the card.
+  // That is deliberate: a start begun on the card is already guarded by
+  // that button's own phase, so a test that clicks the card twice proves
+  // nothing about whether the card can see an enqueue begun elsewhere —
+  // which is the thing that has broken here repeatedly.
+
+  it("changing the format mid-flight does not re-arm the card", async () => {
+    // The format select is not disabled during a start, so nudging it is
+    // the easy way to ask the card for a second job on the same .part.
+    apiMocks.extract.probe.mockResolvedValue(
+      probeResult({
+        formats: [
+          { ...videoFormat(), format_id: "299" },
+          { ...videoFormat(), format_id: "18", resolution: "640x360" },
+        ],
+      }),
+    );
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "full" });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/x" />
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: /^Start$/ }));
+    await screen.findByText(/couldn't start that download/i);
+
+    const settle = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+
+    await user.selectOptions(screen.getByRole("combobox"), "299");
+    fireEvent.click(cardStartButton());
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2);
+
+    await act(async () => settle({ resolve: "job-1" }));
+  });
+
+  it("a direct-file card refuses a second start while one is in flight", async () => {
+    // The single-action cards are threaded separately from the media card
+    // and have been missed once already.
+    apiMocks.extract.probe.mockResolvedValue(
+      probeResult({
+        direct: { content_type: "application/zip", size_bytes: 10, filename: "a.zip" },
+      }),
+    );
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "full" });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/a.zip" />
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: /^Download$/ }));
+    await screen.findByText(/couldn't start that download/i);
+
+    const settle = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Download$|^Starting…$/ }));
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2);
+
+    await act(async () => settle({ resolve: "job-1" }));
   });
 });
 
