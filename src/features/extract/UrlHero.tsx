@@ -188,8 +188,16 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
+      {/* `alert`, not `status`, for the same reason the toasts split that
+          way: an error pre-empts, everything else queues politely. It also
+          keeps this banner and the start banner below reading alike, which
+          is the whole point — a user who has heard one failure announced
+          should not have to guess that the other one is silent. Nothing
+          renders both at once (a probe retires the start state before it
+          can fail, and nulls the card any start belonged to), so there is
+          still exactly one alert in this subtree at any moment. */}
       {error && (
-        <div className="enter-up rounded-lg bg-error-subtle p-4">
+        <div role="alert" className="enter-up rounded-lg bg-error-subtle p-4">
           <p className="text-sm font-medium text-error">Couldn't load that link</p>
           <p className="mt-1 text-xs text-error/80">{error}</p>
           <div className="mt-3 flex gap-2">
