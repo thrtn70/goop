@@ -173,12 +173,10 @@ describe("UrlHero tells an enqueue failure apart from a probe failure", () => {
   });
 
   it("comes back from a retry that fails too", async () => {
-    // `handleStart` rethrows so the card's Start button can settle, and
-    // the retry button does not await it. If that rejection escapes, the
-    // button never leaves "Trying…" and the banner can never be retried
-    // again. Nothing else in this suite can see an unhandled rejection —
-    // removing the handler leaves every other test green — so this is the
-    // guard for it.
+    // A retry that fails has to leave the banner retryable, carrying the
+    // new reason. Nothing here rethrows any more, so this is no longer
+    // standing in for an unhandled rejection — it pins the plain rule
+    // that a second failure is reported like the first.
     const user = await probeThenFailStart();
     apiMocks.extract.fromUrl.mockRejectedValue({ code: "queue", message: "still full" });
     await user.click(screen.getByRole("button", { name: /try again/i }));
@@ -353,8 +351,10 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     await user.click(screen.getByRole("button", { name: /try again/i }));
     await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
 
-    // fireEvent, not userEvent: a disabled button still receives the event
-    // in jsdom, so this exercises the guard rather than the attribute.
+    // fireEvent, not userEvent: userEvent refuses to click a disabled
+    // control, which would make this pass without proving anything.
+    // React declines to deliver the click, so `disabled` IS the guard
+    // here — removing that attribute fails nine tests in this suite.
     fireEvent.click(cardStartButton());
     expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2);
 
