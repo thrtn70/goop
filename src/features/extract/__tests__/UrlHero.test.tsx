@@ -280,6 +280,42 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     expect(start).toHaveProperty("disabled", false);
   });
 
+  it("a dismissed retry still reports when it fails", async () => {
+    // Dismiss takes the message; it must not take the attempt with it.
+    // The two are separate events precisely so that a Dismiss landing
+    // mid-retry cannot orphan a live enqueue — if it did, the card would
+    // re-arm and the next click would queue a duplicate.
+    const user = await probeThenFailStart();
+    const settle = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await screen.findByRole("button", { name: /trying/i });
+
+    await user.click(screen.getByRole("button", { name: /dismiss/i }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    // The attempt is still running: the card has not been handed back.
+    expect(cardStartButton()).toHaveProperty("disabled", true);
+
+    await act(async () => settle({ reject: { code: "queue", message: "still full" } }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText(/still full/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Try again$/ })).toHaveProperty("disabled", false);
+  });
+
+  it("a dismissed retry that succeeds leaves no banner behind", async () => {
+    const user = await probeThenFailStart();
+    const settle = pendingStart();
+    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await screen.findByRole("button", { name: /trying/i });
+    await user.click(screen.getByRole("button", { name: /dismiss/i }));
+
+    await act(async () => settle({ resolve: "job-1" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(await screen.findByRole("button", { name: /added to queue/i })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
   it("a Start click on the card disables the banner's retry", async () => {
     // Both controls start an enqueue and each only knows its own. The card
     // learned about the banner's retry; the banner never learned about the
