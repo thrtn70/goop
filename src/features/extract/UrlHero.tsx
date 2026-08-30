@@ -4,7 +4,15 @@ import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
-import ProbeCard, { type StartOptions } from "./ProbeCard";
+import ProbeCard from "./ProbeCard";
+import {
+  IDLE_START,
+  nextStartState,
+  startBanner,
+  type StartEvent,
+  type StartOptions,
+  type StartState,
+} from "./startState";
 
 function looksLikeCookieError(message: string | null): boolean {
   return message != null && message.toLowerCase().includes("cookie");
@@ -16,6 +24,19 @@ export default function UrlHero({ url }: { url?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [lastUrl, setLastUrl] = useState<string | null>(null);
   const cancelledRef = useRef(false);
+  // Everything about starting a download, in one place. This was five
+  // separate pieces — an epoch ref, two booleans and an error object — and
+  // every defect here was two of them disagreeing.
+  const [start, setStart] = useState<StartState>(IDLE_START);
+  // An id source, not a sixth owner: it is never read to decide anything.
+  // Only `start` decides, and only `nextStartState` reads the id.
+  const nextStartId = useRef(0);
+  function send(ev: StartEvent) {
+    // The functional form is the staleness guard: `prev` comes from the
+    // queue, not from the closure this callback was created in.
+    setStart((prev) => nextStartState(prev, ev));
+  }
+
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
@@ -25,6 +46,7 @@ export default function UrlHero({ url }: { url?: string }) {
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
+    send({ type: "retire" });
     setProbe(null);
     setLastUrl(u);
     try {
@@ -48,20 +70,39 @@ export default function UrlHero({ url }: { url?: string }) {
     setLoading(false);
     setProbe(null);
     setError(null);
+    send({ type: "retire" });
   }
 
-  async function handleStart({ format, audioOnly }: StartOptions) {
+  /**
+   * The one way an enqueue begins. Both the card's Start button and the
+   * failure banner's retry come through here, so there is no second path
+   * to keep in step with this one.
+   *
+   * Returns nothing, and `runStart` never rejects, so no caller has to
+   * remember to await or to catch. Nothing throws across the boundary to
+   * the card at all — which is the point, because an unhandled rejection
+   * on this path is invisible to the suite.
+   */
+  function startAttempt(opts: StartOptions) {
     if (!probe) return;
+    const id = (nextStartId.current += 1);
+    send({ type: "attempt", id, url: probe.url, opts });
+    void runStart(id, probe, opts);
+  }
+
+  // Takes the probe it was started for, so the URL recorded in the state
+  // and the URL sent in the request are provably the same one.
+  async function runStart(id: number, started: UrlProbe, opts: StartOptions) {
     try {
       await api.extract.fromUrl({
-        url: probe.url,
+        url: started.url,
         output_dir: outputDir,
-        audio_only: audioOnly,
+        audio_only: opts.audioOnly,
         // The selector, not the bare id: a video-only format needs
         // `+bestaudio` appended or yt-dlp downloads that stream alone and
         // the file arrives silent. The backend composes it during the
         // probe; passing `format_id` here is what made 1080p+ picks mute.
-        format: format ? format.selector : null,
+        format: opts.format ? opts.format.selector : null,
         // Backend overrides these from current Settings, so the URL hero
         // doesn't need to surface the cookie picker or naming-scheme picker
         // alongside every extract.
@@ -69,19 +110,20 @@ export default function UrlHero({ url }: { url?: string }) {
         output_template: null,
         // Set for plain-file links the extractors don't handle: skip the
         // doomed extractor spawns and stream the file directly.
-        direct: probe.direct != null,
+        direct: started.direct != null,
         // Set for magnet/hoster links that route through TorBox. The
         // remaining fields are owned by the backend debrid resolver and
         // cleared at the IPC boundary regardless.
-        debrid: probe.debrid != null,
+        debrid: started.debrid != null,
         // Which extractor actually answered the probe. The download would
         // otherwise re-guess from the URL's shape and spawn the wrong one
         // first on anything the classifier gets wrong.
-        extractor_hint: probe.extractor,
+        extractor_hint: started.extractor,
         debrid_item: null,
         resume_key: null,
         filename_hint: null,
       });
+      send({ type: "succeeded", id });
       // Enqueue emits no queue event until the scheduler claims the job,
       // so refresh explicitly — otherwise a job queued behind a full
       // concurrency limit is invisible in the sidebar until something
@@ -93,11 +135,8 @@ export default function UrlHero({ url }: { url?: string }) {
           /* transient IPC failure — the next queue event refreshes */
         });
     } catch (e) {
-      setError(formatError(e));
-      // Rethrow so the Start button drops back to idle and the user can
-      // retry. Swallowing it here would leave the button reporting
-      // "Added to queue" for a job that was never enqueued.
-      throw e;
+      // Whether this reports at all is decided by the id, in one place.
+      send({ type: "failed", id, message: formatError(e) });
     }
   }
 
@@ -108,6 +147,7 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
+      send({ type: "retire" });
       setProbe(null);
       setLastUrl(url);
       try {
@@ -124,6 +164,9 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelledRef.current = true;
     };
   }, [url]);
+
+  // Either a failure to report, or the message a retry is carrying.
+  const banner = startBanner(start);
 
   return (
     <div className="p-6">
@@ -178,7 +221,30 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
-      {probe && <ProbeCard probe={probe} onStart={handleStart} />}
+      {probe && <ProbeCard probe={probe} start={start} onStart={startAttempt} />}
+      {banner && (
+        <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
+          <p className="text-sm font-medium text-error">Couldn't start that download</p>
+          <p className="mt-1 text-xs text-error/80">{banner.message}</p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              disabled={banner.retrying}
+              onClick={() => startAttempt(banner.opts)}
+              className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+            >
+              {banner.retrying ? "Trying…" : "Try again"}
+            </button>
+            <button
+              type="button"
+              onClick={() => send({ type: "dismiss" })}
+              className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
       {!loading && !probe && !error && (
         <div className="enter-up flex h-full flex-col items-center justify-center text-center">
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">

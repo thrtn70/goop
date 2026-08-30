@@ -1,116 +1,86 @@
 import { useState } from "react";
 import type { DebridProbeInfo, DirectFileInfo, FormatOption, UrlProbe } from "@/types";
+import { startPhaseFor, type StartOptions, type StartPhase, type StartState } from "./startState";
 
-export interface StartOptions {
-  format: FormatOption | null;
-  audioOnly: boolean;
-}
-
-/** `StartButton` awaits what this returns to know when the enqueue
- *  settled, so a call site has to forward its promise rather than drop
- *  it. TypeScript will not enforce that — under return-type bivariance a
- *  promise-returning function is assignable to a `void` slot and back —
- *  so the union states the requirement and the three call sites below
- *  honour it by returning `onStart(...)` directly. */
-type StartHandler = (opts: StartOptions) => void | Promise<void>;
-
-type Props = { probe: UrlProbe; onStart: StartHandler };
+type Props = { probe: UrlProbe; start: StartState; onStart: (opts: StartOptions) => void };
 
 /**
  * The one control that enqueues, shared by all three card variants.
  *
- * Nothing in the queue dedupes an enqueue, and two jobs for the same URL
- * run the same output template with `--continue` against the same `.part`.
- * The button therefore owns the guard: disabled while the IPC call is in
- * flight, and disabled afterwards while it reports what happened, since
- * the absence of feedback is what prompted the second click.
- *
- * `resetKey` returns it to idle when what would be downloaded changes,
- * so picking a different format can still be started. It carries the
- * probe's URL as well as the selection: every freshly probed video opens
- * on the same default selection, so a selection-only key collides across
- * videos and hands the next one a button already reporting this one's
- * enqueue.
+ * It holds no state. An enqueue can be started from here or from the
+ * hero's failure banner, and when the button owned a phase of its own it
+ * could not see the other one — which is how the same URL twice ran the
+ * same output template with `--continue` against the same `.part`. The
+ * hero owns the fact; this renders it.
  */
+/** Direct and debrid downloads take no options — the same value is used
+ *  to look up the phase and to start, so the two cannot drift. */
+const SINGLE_ACTION_OPTS: StartOptions = { format: null, audioOnly: false };
+
 function StartButton({
   label,
+  phase,
   onStart,
-  resetKey = "",
 }: {
   label: string;
-  onStart: () => void | Promise<void>;
-  resetKey?: string;
+  phase: StartPhase;
+  onStart: () => void;
 }) {
-  const [phase, setPhase] = useState<"idle" | "starting" | "started">("idle");
-  const [startedKey, setStartedKey] = useState<string | null>(null);
-  const [announcement, setAnnouncement] = useState("");
-
-  // Derived, not an effect keyed on `resetKey`. Neither the format select
-  // nor the audio-only checkbox is disabled mid-flight, so an effect would
-  // reset a *starting* button the moment the user nudged either one —
-  // re-arming Start while the first enqueue was still in the air, which is
-  // the same duplicate this guard exists to prevent. Comparing against the
-  // key that was actually enqueued only ever re-arms a settled button.
-  const rearmed = phase === "started" && startedKey !== resetKey;
-  const effective = rearmed ? "idle" : phase;
-
-  async function handleClick() {
-    if (effective !== "idle") return;
-    const key = resetKey;
-    setPhase("starting");
-    setAnnouncement("");
-    try {
-      await onStart();
-      setStartedKey(key);
-      setPhase("started");
-      setAnnouncement("Added to queue");
-    } catch {
-      // The hero renders the error; return the button so it can be
-      // retried, and say so here too. Announcing only the success left a
-      // screen reader silent on the outcome that most needs saying.
-      setPhase("idle");
-      setAnnouncement("Couldn't start that download. Try again.");
-    }
-  }
-
   return (
     <>
       <button
         type="button"
-        disabled={effective !== "idle"}
+        // Not `phase === "starting"`: a settled button keeps reporting
+        // what it did until the selection changes, and re-enabling it
+        // there is the duplicate enqueue all over again. React declines to
+        // deliver a click to a disabled button, so this is the guard, not
+        // a hint about one.
+        disabled={phase !== "idle"}
         className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover disabled:cursor-default disabled:bg-surface-2 disabled:text-fg-secondary disabled:hover:bg-surface-2"
-        onClick={() => void handleClick()}
+        onClick={onStart}
       >
-        {effective === "idle" && label}
-        {effective === "starting" && "Starting…"}
-        {effective === "started" && "Added to queue"}
+        {phase === "idle" && label}
+        {phase === "starting" && "Starting…"}
+        {phase === "started" && "Added to queue"}
       </button>
       {/* JobStateAnnouncer deliberately skips a job's first-seen state, so
           without this the enqueue has no non-visual signal at all: a
-          disabled control's label change is not reliably announced. */}
+          disabled control's label change is not reliably announced. It
+          renders even when empty — a live region that is removed and
+          re-added does not announce. A failed start is announced by the
+          hero's alert banner instead, which also carries the retry. */}
       <span role="status" aria-live="polite" className="sr-only">
-        {rearmed ? "" : announcement}
+        {phase === "started" ? "Added to queue" : ""}
       </span>
     </>
   );
 }
 
-export default function ProbeCard({ probe, onStart }: Props) {
+export default function ProbeCard({ probe, start, onStart }: Props) {
   if (probe.direct) {
-    return <DirectCard info={probe.direct} url={probe.url} onStart={onStart} />;
+    return <DirectCard info={probe.direct} url={probe.url} start={start} onStart={onStart} />;
   }
   if (probe.debrid) {
     return (
-      <DebridCard title={probe.title} info={probe.debrid} url={probe.url} onStart={onStart} />
+      <DebridCard
+        title={probe.title}
+        info={probe.debrid}
+        url={probe.url}
+        start={start}
+        onStart={onStart}
+      />
     );
   }
-  return <MediaCard probe={probe} onStart={onStart} />;
+  return <MediaCard probe={probe} start={start} onStart={onStart} />;
 }
 
-function MediaCard({ probe, onStart }: Props) {
+function MediaCard({ probe, start, onStart }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [audioOnly, setAudioOnly] = useState(false);
   const fmt = probe.formats.find((f) => f.format_id === selected) ?? null;
+  // One object for both the phase and the call, so what the button reports
+  // can never describe a different selection from the one it would send.
+  const opts: StartOptions = { format: fmt, audioOnly };
   return (
     <div className="rounded-lg bg-surface-1 p-4">
       <div className="flex gap-4">
@@ -154,8 +124,8 @@ function MediaCard({ probe, onStart }: Props) {
         </label>
         <StartButton
           label="Start"
-          resetKey={`${probe.url}|${selected ?? ""}|${audioOnly}`}
-          onStart={() => onStart({ format: fmt, audioOnly })}
+          phase={startPhaseFor(start, probe.url, opts)}
+          onStart={() => onStart(opts)}
         />
       </div>
     </div>
@@ -165,11 +135,13 @@ function MediaCard({ probe, onStart }: Props) {
 function DirectCard({
   info,
   url,
+  start,
   onStart,
 }: {
   info: DirectFileInfo;
   url: string;
-  onStart: StartHandler;
+  start: StartState;
+  onStart: (opts: StartOptions) => void;
 }) {
   const meta = [
     "Direct download",
@@ -199,8 +171,8 @@ function DirectCard({
       <div className="mt-4 flex">
         <StartButton
           label="Download"
-          resetKey={url}
-          onStart={() => onStart({ format: null, audioOnly: false })}
+          phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
+          onStart={() => onStart(SINGLE_ACTION_OPTS)}
         />
       </div>
     </div>
@@ -211,12 +183,14 @@ function DebridCard({
   title,
   info,
   url,
+  start,
   onStart,
 }: {
   title: string;
   info: DebridProbeInfo;
   url: string;
-  onStart: StartHandler;
+  start: StartState;
+  onStart: (opts: StartOptions) => void;
 }) {
   const meta = [info.magnet ? "Magnet" : null, "via TorBox"]
     .filter((s): s is string => s != null)
@@ -245,8 +219,8 @@ function DebridCard({
       <div className="mt-4 flex">
         <StartButton
           label="Download"
-          resetKey={url}
-          onStart={() => onStart({ format: null, audioOnly: false })}
+          phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
+          onStart={() => onStart(SINGLE_ACTION_OPTS)}
         />
       </div>
     </div>
