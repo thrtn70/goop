@@ -73,23 +73,29 @@ export default function UrlHero({ url }: { url?: string }) {
     send({ type: "retire" });
   }
 
-  /** The one way an enqueue begins. Both the card's Start button and the
-   *  failure banner's retry come through here, so there is no second path
-   *  to keep in step with this one. */
+  /**
+   * The one way an enqueue begins. Both the card's Start button and the
+   * failure banner's retry come through here, so there is no second path
+   * to keep in step with this one.
+   *
+   * Returns nothing, and `runStart` never rejects, so no caller has to
+   * remember to await or to catch. Nothing throws across the boundary to
+   * the card at all — which is the point, because an unhandled rejection
+   * on this path is invisible to the suite.
+   */
   function startAttempt(opts: StartOptions) {
-    void handleStart(opts).catch(() => {
-      // Way-station: `handleStart` still rethrows so the card's button can
-      // settle. That contract, and this handler, go away with it.
-    });
-  }
-
-  async function handleStart(opts: StartOptions) {
     if (!probe) return;
     const id = (nextStartId.current += 1);
     send({ type: "attempt", id, url: probe.url, opts });
+    void runStart(id, probe, opts);
+  }
+
+  // Takes the probe it was started for, so the URL recorded in the state
+  // and the URL sent in the request are provably the same one.
+  async function runStart(id: number, started: UrlProbe, opts: StartOptions) {
     try {
       await api.extract.fromUrl({
-        url: probe.url,
+        url: started.url,
         output_dir: outputDir,
         audio_only: opts.audioOnly,
         // The selector, not the bare id: a video-only format needs
@@ -104,15 +110,15 @@ export default function UrlHero({ url }: { url?: string }) {
         output_template: null,
         // Set for plain-file links the extractors don't handle: skip the
         // doomed extractor spawns and stream the file directly.
-        direct: probe.direct != null,
+        direct: started.direct != null,
         // Set for magnet/hoster links that route through TorBox. The
         // remaining fields are owned by the backend debrid resolver and
         // cleared at the IPC boundary regardless.
-        debrid: probe.debrid != null,
+        debrid: started.debrid != null,
         // Which extractor actually answered the probe. The download would
         // otherwise re-guess from the URL's shape and spawn the wrong one
         // first on anything the classifier gets wrong.
-        extractor_hint: probe.extractor,
+        extractor_hint: started.extractor,
         debrid_item: null,
         resume_key: null,
         filename_hint: null,
@@ -131,8 +137,6 @@ export default function UrlHero({ url }: { url?: string }) {
     } catch (e) {
       // Whether this reports at all is decided by the id, in one place.
       send({ type: "failed", id, message: formatError(e) });
-      // Way-station: still rethrown so the card's button can settle.
-      throw e;
     }
   }
 
@@ -217,9 +221,7 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
-      {probe && (
-        <ProbeCard probe={probe} onStart={handleStart} busy={start.kind === "starting"} />
-      )}
+      {probe && <ProbeCard probe={probe} start={start} onStart={startAttempt} />}
       {banner && (
         <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
           <p className="text-sm font-medium text-error">Couldn't start that download</p>

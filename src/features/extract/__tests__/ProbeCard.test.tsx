@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import ProbeCard from "@/features/extract/ProbeCard";
+import { IDLE_START, type StartOptions, type StartState } from "@/features/extract/startState";
 import type { FormatOption, UrlProbe } from "@/types";
 
 afterEach(() => {
@@ -22,6 +23,18 @@ function baseProbe(overrides: Partial<UrlProbe>): UrlProbe {
   };
 }
 
+const NO_OPTS: StartOptions = { format: null, audioOnly: false };
+
+/** A start in flight for `url`, whatever was selected. */
+function startingFor(url: string): StartState {
+  return { kind: "starting", id: 1, url, opts: NO_OPTS, retryingAfter: null };
+}
+
+/** A start that settled for `url` and exactly these options. */
+function startedFor(url: string, opts: StartOptions = NO_OPTS): StartState {
+  return { kind: "started", id: 1, url, opts };
+}
+
 describe("ProbeCard debrid rendering", () => {
   it("renders the TorBox card for a magnet probe and starts on click", () => {
     const onStart = vi.fn();
@@ -32,6 +45,7 @@ describe("ProbeCard debrid rendering", () => {
           title: "My Torrent",
           debrid: { magnet: true },
         })}
+        start={IDLE_START}
         onStart={onStart}
       />,
     );
@@ -50,6 +64,7 @@ describe("ProbeCard debrid rendering", () => {
           title: "https://rapidgator.net/file/abc",
           debrid: { magnet: false },
         })}
+        start={IDLE_START}
         onStart={vi.fn()}
       />,
     );
@@ -69,6 +84,7 @@ describe("ProbeCard debrid rendering", () => {
             resumable: true,
           },
         })}
+        start={IDLE_START}
         onStart={vi.fn()}
       />,
     );
@@ -95,7 +111,7 @@ describe("ProbeCard format picker", () => {
     const formats = Array.from({ length: 25 }, (_, i) =>
       fmt({ format_id: `f${i}`, resolution: `${i}p` }),
     );
-    render(<ProbeCard probe={baseProbe({ formats })} onStart={vi.fn()} />);
+    render(<ProbeCard probe={baseProbe({ formats })} start={IDLE_START} onStart={vi.fn()} />);
     // 25 formats + the "Best (auto)" entry.
     expect(screen.getAllByRole("option")).toHaveLength(26);
     expect(screen.getByRole("option", { name: /24p/ })).toBeTruthy();
@@ -110,6 +126,7 @@ describe("ProbeCard format picker", () => {
             fmt({ format_id: "worst", resolution: "256x144" }),
           ],
         })}
+        start={IDLE_START}
         onStart={vi.fn()}
       />,
     );
@@ -127,6 +144,7 @@ describe("ProbeCard format picker", () => {
         probe={baseProbe({
           formats: [fmt({ format_id: "140", ext: "m4a", is_audio_only: true })],
         })}
+        start={IDLE_START}
         onStart={vi.fn()}
       />,
     );
@@ -134,16 +152,11 @@ describe("ProbeCard format picker", () => {
   });
 
   it("stays disabled when the format changes while the enqueue is in flight", async () => {
-    // The select is not disabled during the call, so nudging it used to
-    // fire the reset and re-arm Start while the first request was still
-    // pending — the same double enqueue, reached a different way.
-    let release!: () => void;
-    const onStart = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-    );
+    // The select is not disabled during the call, so nudging it is the
+    // easy way to ask for a second job on the same .part. The card is busy
+    // for the whole URL, not for one selection, which is why the phase
+    // lookup deliberately ignores the options while a start is running.
+    const onStart = vi.fn();
     render(
       <ProbeCard
         probe={baseProbe({
@@ -152,22 +165,28 @@ describe("ProbeCard format picker", () => {
             fmt({ format_id: "18", resolution: "640x360" }),
           ],
         })}
+        start={startingFor("https://example.com/x")}
         onStart={onStart}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "299" } });
-
     const btn = screen.getByRole("button", { name: /starting/i });
     expect(btn).toHaveProperty("disabled", true);
-    fireEvent.click(btn);
-    expect(onStart).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "299" } });
+    fireEvent.click(screen.getByRole("button", { name: /starting/i }));
+    expect(onStart).not.toHaveBeenCalled();
 
     // Once it settles, the now-different selection re-arms the button.
-    release();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false),
+    cleanup();
+    render(
+      <ProbeCard
+        probe={baseProbe({ formats: [fmt({ format_id: "299" })] })}
+        start={startedFor("https://example.com/x", { format: null, audioOnly: false })}
+        onStart={onStart}
+      />,
     );
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "299" } });
+    expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false);
   });
 
   it("hands the whole format back on start, so the caller gets its selector", () => {
@@ -177,7 +196,9 @@ describe("ProbeCard format picker", () => {
       resolution: "1920x1080",
       selector: "299+bestaudio/299",
     });
-    render(<ProbeCard probe={baseProbe({ formats: [video] })} onStart={onStart} />);
+    render(
+      <ProbeCard probe={baseProbe({ formats: [video] })} start={IDLE_START} onStart={onStart} />,
+    );
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "299" } });
     fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
     expect(onStart).toHaveBeenCalledWith({ format: video, audioOnly: false });
@@ -195,7 +216,11 @@ describe("ProbeCard honours the card-wide busy signal", () => {
   ])("refuses a start on the %s card while one is already in flight", async (_name, extra) => {
     const onStart = vi.fn();
     render(
-      <ProbeCard probe={baseProbe(extra as Partial<UrlProbe>)} onStart={onStart} busy />,
+      <ProbeCard
+        probe={baseProbe(extra as Partial<UrlProbe>)}
+        start={startingFor("https://example.com/x")}
+        onStart={onStart}
+      />,
     );
     const btn = screen.getByRole("button");
     expect(btn).toHaveProperty("disabled", true);
@@ -217,29 +242,28 @@ describe("ProbeCard start guard", () => {
   }
 
   it("does not carry one video's enqueue over to the next probe", async () => {
-    // The guard keys off what would be downloaded, and every freshly
-    // probed video starts on the same default selection. Keying off the
-    // selection alone made that default collide across videos, so the
-    // second video's Start button opened already reporting the first
-    // one's enqueue — for a job the user never started. It only looked
-    // fine because `UrlHero` happens to null its probe between lookups,
-    // unmounting this subtree; nothing stated that or pinned it.
-    const onStart = vi.fn().mockResolvedValue(undefined);
+    // Every freshly probed video opens on the same default selection, so a
+    // key made of the selection alone collides across videos and hands the
+    // next one a button already reporting this one's enqueue. The URL is
+    // part of what was started, so it is part of what re-arms.
+    const started = startedFor("https://example.com/a");
     const { rerender } = render(
       <ProbeCard
         probe={baseProbe({ url: "https://example.com/a", formats: [fmt("18")] })}
-        onStart={onStart}
+        start={started}
+        onStart={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /added to queue/i })).toBeTruthy(),
+    expect(screen.getByRole("button", { name: /added to queue/i })).toHaveProperty(
+      "disabled",
+      true,
     );
 
     rerender(
       <ProbeCard
         probe={baseProbe({ url: "https://example.com/b", formats: [fmt("18")] })}
-        onStart={onStart}
+        start={started}
+        onStart={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false);
@@ -251,13 +275,20 @@ describe("ProbeCard start guard", () => {
     // would announce the same failure twice and put one string on two
     // elements. What this component still owes is the retry: the button
     // has to come back, or a failed start strands the card.
-    const onStart = vi.fn().mockRejectedValue(new Error("queue is closed"));
-    render(<ProbeCard probe={baseProbe({ formats: [fmt("18")] })} onStart={onStart} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /^Start$/ }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false),
+    render(
+      <ProbeCard
+        probe={baseProbe({ formats: [fmt("18")] })}
+        start={{
+          kind: "failed",
+          id: 1,
+          url: "https://example.com/x",
+          opts: { format: null, audioOnly: false },
+          message: "the queue is full",
+        }}
+        onStart={vi.fn()}
+      />,
     );
+    expect(screen.getByRole("button", { name: /^Start$/ })).toHaveProperty("disabled", false);
     expect(screen.getByRole("status").textContent).toBe("");
   });
 });
