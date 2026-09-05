@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { ProbeResult } from "@/types";
+import type { ProbeResult, ConversionCapabilities } from "@/types";
 
 /**
  * Probe lifecycle for a dropped / browsed file.
@@ -14,7 +14,7 @@ import type { ProbeResult } from "@/types";
  */
 export type ProbeState =
   | { phase: "probing" }
-  | { phase: "ready"; probe: ProbeResult }
+  | { phase: "ready"; probe: ProbeResult; capabilities: ConversionCapabilities }
   | { phase: "error"; message: string };
 
 export interface UseProbeResult {
@@ -31,11 +31,10 @@ export function useProbe(path: string): UseProbeResult {
     let cancelled = false;
     setState({ phase: "probing" });
 
-    void api.convert
-      .probe(path)
-      .then((probe) => {
+    void api.convert.inspect(path)
+      .then(({ probe, capabilities }) => {
         if (cancelled) return;
-        setState({ phase: "ready", probe });
+        setState({ phase: "ready", probe, capabilities });
       })
       .catch((e: unknown) => {
         if (cancelled) return;

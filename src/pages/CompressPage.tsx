@@ -88,7 +88,7 @@ export default function CompressPage() {
   const handleOptionsChange = useCallback(
     (path: string, opts: CompressRowOptions) => {
       setFiles((prev) =>
-        prev.map((f) => (f.path === path ? { ...f, mode: opts.mode } : f)),
+        prev.map((f) => (f.path === path ? { ...f, mode: opts.mode, optionsReady: true } : f)),
       );
     },
     [],
@@ -101,14 +101,14 @@ export default function CompressPage() {
   const applyPreset = useCallback((preset: Preset) => {
     if (!preset.compress_mode) return;
     const mode = preset.compress_mode;
-    setFiles((prev) => prev.map((f) => ({ ...f, mode })));
+    setFiles((prev) => prev.map((f) => ({ ...f, mode, optionsReady: true })));
   }, []);
 
   const applyFirstToAll = useCallback(() => {
     setFiles((prev) => {
       if (prev.length < 2) return prev;
       const headMode = prev[0].mode;
-      return prev.map((f, i) => (i === 0 ? f : { ...f, mode: headMode }));
+      return prev.map((f, i) => (i === 0 ? f : { ...f, mode: headMode, optionsReady: true }));
     });
   }, []);
 
@@ -212,6 +212,7 @@ export default function CompressPage() {
               key={f.path}
               path={f.path}
               index={i}
+              selectedMode={f.optionsReady ? f.mode : null}
               onOptionsChange={handleOptionsChange}
               onRemove={handleRemove}
             />

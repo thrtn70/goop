@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import type { TargetFormat, ProbeResult } from "@/types";
+import type { TargetFormat, ProbeResult, ConversionCapabilities } from "@/types";
 
 type TargetGroup = "video" | "audio" | "image" | "subtitle";
 
@@ -30,7 +30,7 @@ const TARGETS: TargetOption[] = [
   // Image
   { value: "png", label: "PNG", hint: "Lossless, supports transparency", group: "image" },
   { value: "jpeg", label: "JPEG", hint: "Small files, good for photos", group: "image" },
-  { value: "webp", label: "WebP", hint: "Modern format, smallest files", group: "image" },
+  { value: "webp", label: "WebP", hint: "Lossless web image, supports transparency", group: "image" },
   { value: "avif", label: "AVIF", hint: "Modern format, smaller than JPEG", group: "image" },
   { value: "jpeg_xl", label: "JXL", hint: "Modern format, great quality at small sizes", group: "image" },
   { value: "tiff", label: "TIFF", hint: "Lossless, great for editing", group: "image" },
@@ -47,34 +47,8 @@ const GROUP_LABELS: Record<TargetGroup, string> = {
   subtitle: "Subtitle",
 };
 
-function visibleGroups(probe: ProbeResult): TargetGroup[] {
-  if (probe.source_kind === "image") return ["image"];
-  if (probe.source_kind === "subtitle") return ["subtitle"];
-  const groups: TargetGroup[] = [];
-  if (probe.has_video) groups.push("video");
-  if (probe.has_audio) groups.push("audio");
-  if (groups.length === 0) groups.push("video", "audio");
-  return groups;
-}
-
-function isAvailable(t: TargetOption, probe: ProbeResult): { ok: boolean; reason?: string } {
-  if (t.group === "video" && !probe.has_video) {
-    return { ok: false, reason: "No video stream" };
-  }
-  if (t.group === "audio" && !probe.has_audio) {
-    return { ok: false, reason: "No audio stream" };
-  }
-  if (t.value === "extract_audio_keep_codec" && !probe.has_audio) {
-    return { ok: false, reason: "No audio to extract" };
-  }
-  if (t.group === "subtitle" && !probe.has_subtitles) {
-    return { ok: false, reason: "No subtitle stream" };
-  }
-  return { ok: true };
-}
-
 export function smartDefault(probe: ProbeResult): TargetFormat {
-  if (probe.source_kind === "image") return "png";
+  if (probe.source_kind === "image") return ["raw", "dng"].includes((probe.image_format ?? "").toLowerCase()) ? "jpeg" : "png";
   // Offer the other subtitle format, since converting to the one it
   // already is would be a no-op.
   if (probe.source_kind === "subtitle") return probe.subtitle_codecs[0] === "webvtt" ? "srt" : "vtt";
@@ -90,11 +64,14 @@ export function smartDefault(probe: ProbeResult): TargetFormat {
 interface TargetPickerProps {
   probe: ProbeResult;
   selected: TargetFormat;
+  capabilities: ConversionCapabilities;
   onChange: (t: TargetFormat) => void;
 }
 
-export default function TargetPicker({ probe, selected, onChange }: TargetPickerProps) {
-  const groups = visibleGroups(probe);
+export default function TargetPicker({ probe, selected, onChange, capabilities }: TargetPickerProps) {
+  const groups = (["video", "audio", "image", "subtitle"] as TargetGroup[]).filter(group =>
+    TARGETS.some(t => t.group === group && capabilities.targets.some(c => c.target === t.value)),
+  );
   const recommended = smartDefault(probe);
 
   return (
@@ -105,8 +82,10 @@ export default function TargetPicker({ probe, selected, onChange }: TargetPicker
             {GROUP_LABELS[group]}
           </span>
           <div className="flex flex-wrap gap-1.5">
-            {TARGETS.filter((t) => t.group === group).map((t) => {
-              const { ok, reason } = isAvailable(t, probe);
+            {TARGETS.filter((t) => t.group === group && capabilities.targets.some(c => c.target === t.value)).map((t) => {
+              const capability = capabilities.targets.find(c => c.target === t.value);
+              const ok = capability?.available ?? false;
+              const reason = capability?.reason ?? "Unavailable for this source";
               const isRecommended = ok && t.value === recommended;
               return (
                 <button

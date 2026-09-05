@@ -1,20 +1,16 @@
-import { useEffect, useState } from "react";
-import type { CompressMode, ProbeResult } from "@/types";
+import { useEffect } from "react";
+import type { CompressMode, CompressionCapabilities } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
 import CompressControls from "./CompressControls";
 
 /**
  * Default compression mode for a given source file.
  *
- * - Video / audio / JPEG / WebP → Quality(75)
- * - PNG → LosslessReoptimize
- * - BMP → Quality(75) but the row will show a hint and the submit will no-op.
+ * Lossless image formats start with reoptimization. Unsupported source
+ * formats retain an editable draft and show an explicit unavailable warning.
  */
-function defaultMode(probe: ProbeResult): CompressMode {
-  if (probe.source_kind === "image") {
-    const fmt = (probe.image_format ?? "").toLowerCase();
-    if (fmt === "png") return { kind: "lossless_reoptimize" };
-  }
+function defaultMode(capabilities: CompressionCapabilities): CompressMode {
+  if (capabilities.lossless && !capabilities.quality) return { kind: "lossless_reoptimize" };
   return { kind: "quality", value: 75 };
 }
 
@@ -25,6 +21,7 @@ export interface CompressRowOptions {
 interface CompressFileRowProps {
   path: string;
   index?: number;
+  selectedMode: CompressMode | null;
   onOptionsChange: (path: string, opts: CompressRowOptions) => void;
   onRemove: (path: string) => void;
 }
@@ -53,16 +50,16 @@ function formatSize(bytes: number): string {
 export default function CompressFileRow({
   path,
   index = 0,
+  selectedMode,
   onOptionsChange,
   onRemove,
 }: CompressFileRowProps) {
   const { state, retry } = useProbe(path);
-  const [mode, setMode] = useState<CompressMode | null>(null);
+  const mode = selectedMode;
 
   useEffect(() => {
     if (state.phase === "ready" && mode === null) {
-      const m = defaultMode(state.probe);
-      setMode(m);
+      const m = defaultMode(state.capabilities.compression);
       onOptionsChange(path, { mode: m });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see FileRow comment
@@ -121,7 +118,6 @@ export default function CompressFileRow({
 
   const p = state.probe;
   const updateMode = (next: CompressMode) => {
-    setMode(next);
     onOptionsChange(path, { mode: next });
   };
 
@@ -149,7 +145,7 @@ export default function CompressFileRow({
         </button>
       </div>
       <p className="mt-1 text-xs tabular-nums text-fg-muted">{meta.join(" · ")}</p>
-      <CompressControls probe={p} mode={mode} onChange={updateMode} />
+      <CompressControls capabilities={state.capabilities.compression} probe={p} mode={mode} onChange={updateMode} />
     </div>
   );
 }

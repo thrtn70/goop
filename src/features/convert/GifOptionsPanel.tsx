@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 import type { GifOptions, GifSizePreset } from "@/types";
 
@@ -34,6 +35,15 @@ export default function GifOptionsPanel({
   onChange,
   maxDurationMs,
 }: GifOptionsPanelProps) {
+  const startValue = gifOptions.trim_start_ms == null ? "" : msToMmSs(Number(gifOptions.trim_start_ms));
+  const endValue = gifOptions.trim_end_ms == null ? "" : msToMmSs(Number(gifOptions.trim_end_ms));
+  const [startDraft, setStartDraft] = useState(startValue);
+  const [endDraft, setEndDraft] = useState(endValue);
+  // Preserve partial typing across unrelated row updates, while batch-applied
+  // trim changes replace the corresponding visible draft.
+  useEffect(() => setStartDraft(startValue), [startValue]);
+  useEffect(() => setEndDraft(endValue), [endValue]);
+
   return (
     <div className="mt-3 space-y-2 rounded-md bg-surface-0 p-3">
       <div>
@@ -67,11 +77,8 @@ export default function GifOptionsPanel({
               type="text"
               placeholder="00:00"
               className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-              defaultValue={
-                gifOptions.trim_start_ms != null
-                  ? msToMmSs(Number(gifOptions.trim_start_ms))
-                  : ""
-              }
+              value={startDraft}
+              onChange={(e) => setStartDraft(e.target.value)}
               onBlur={(e) => {
                 const ms = mmSsToMs(e.target.value);
                 onChange({ ...gifOptions, trim_start_ms: ms != null ? BigInt(ms) : null });
@@ -84,11 +91,8 @@ export default function GifOptionsPanel({
               type="text"
               placeholder={msToMmSs(maxDurationMs)}
               className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-              defaultValue={
-                gifOptions.trim_end_ms != null
-                  ? msToMmSs(Number(gifOptions.trim_end_ms))
-                  : ""
-              }
+              value={endDraft}
+              onChange={(e) => setEndDraft(e.target.value)}
               onBlur={(e) => {
                 const ms = mmSsToMs(e.target.value);
                 onChange({ ...gifOptions, trim_end_ms: ms != null ? BigInt(ms) : null });

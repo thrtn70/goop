@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
-import FileRow from "@/features/convert/FileRow";
+import FileRow, { defaultGifOptions } from "@/features/convert/FileRow";
 import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
@@ -95,10 +95,13 @@ export default function ConvertPage() {
         f.path === path
           ? {
               ...f,
+              optionsReady: true,
               target: opts.target,
               gifOptions: opts.gifOptions,
               metadataPolicy: opts.metadataPolicy,
               subtitle: opts.subtitle,
+              qualityPreset: opts.qualityPreset ?? null,
+              resolutionCap: opts.resolutionCap ?? null,
             }
           : f,
       ),
@@ -113,7 +116,9 @@ export default function ConvertPage() {
     setFiles((prev) =>
       prev.map((f) => ({
         ...f,
+        optionsReady: true,
         target: preset.target,
+        gifOptions: preset.target === "gif" ? (f.gifOptions ?? defaultGifOptions()) : null,
         // Both are Convert-register fields on the preset, and both used to
         // be dropped here — so a chip named "YouTube Upload" changed the
         // container and nothing else, leaving a 4K source 4K.
@@ -135,6 +140,7 @@ export default function ConvertPage() {
               // specific file's subtitle track, which is almost never the
               // right one for the rest of the batch.
               ...f,
+              optionsReady: true,
               target: head.target,
               gifOptions: head.gifOptions,
               metadataPolicy: head.metadataPolicy,
@@ -272,6 +278,7 @@ export default function ConvertPage() {
               key={f.path}
               path={f.path}
               index={i}
+              options={f.optionsReady ? f : null}
               onOptionsChange={handleOptionsChange}
               onRemove={handleRemove}
             />

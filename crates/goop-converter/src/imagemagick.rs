@@ -63,50 +63,19 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         let started = std::time::Instant::now();
-        let out = output_path.clone();
         let target = req.target;
         let compress_mode = req.compress_mode;
         let metadata_policy = req.metadata_policy.unwrap_or_default();
-        let input_for_meta = input.clone();
-        let out_for_meta = output_path.clone();
-
-        let convert_task =
-            tokio::task::spawn_blocking(move || process_image(&input, &out, target, compress_mode));
-        tokio::pin!(convert_task);
-
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                convert_task.abort();
-                let _ = std::fs::remove_file(&output_path);
-                return Err(GoopError::Cancelled);
-            }
-            result = &mut convert_task => {
-                result.map_err(|e| GoopError::SubprocessFailed {
-                    binary: "image".into(),
-                    stderr: format!("convert task panicked: {e}"),
-                })??;
-            }
-        }
-
-        // Apply the metadata policy after the encode lands. For
-        // Preserve on JPEG↔JPEG and PNG↔PNG this copies EXIF + ICC
-        // chunks from the source; for StripAll this is a no-op (the
-        // encode already dropped them). Other paths emit Ok(false)
-        // and the metadata silently drops, which matches the v0.2.5
-        // documented preserve matrix.
-        let metadata_task = tokio::task::spawn_blocking(move || {
-            metadata::apply(&input_for_meta, &out_for_meta, metadata_policy)
-        });
-        let _propagated = metadata_task
-            .await
-            .map_err(|e| GoopError::SubprocessFailed {
-                binary: "image".into(),
-                stderr: format!("metadata task panicked: {e}"),
-            })??;
-
-        let bytes = std::fs::metadata(&output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let target_bytes = match compress_mode {
+            Some(CompressMode::TargetSizeBytes(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let bytes = staged_image_output(output_path.clone(), target_bytes, cancel, move |out| {
+            process_image(&input, out, target, compress_mode)?;
+            metadata::apply(&input, out, metadata_policy)?;
+            Ok(())
+        })
+        .await?;
 
         self.sink.emit_progress(ProgressEvent {
             job_id,
@@ -124,6 +93,193 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             reencoded: true,
         })
     }
+}
+
+fn image_error(message: impl Into<String>) -> GoopError {
+    GoopError::SubprocessFailed {
+        binary: "image".into(),
+        stderr: message.into(),
+    }
+}
+
+/// Private same-filesystem workspace. Dropping a cancelled worker's result
+/// removes staging; the blocking worker never publishes the destination.
+struct StagedImage {
+    directory: PathBuf,
+    path: PathBuf,
+    bytes: u64,
+}
+
+impl StagedImage {
+    fn new(destination: &Path) -> Result<Self, GoopError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let filename = destination
+            .file_name()
+            .ok_or_else(|| image_error("output must have a filename"))?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for _ in 0..100 {
+            let directory = parent.join(format!(
+                ".goop-image-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            let builder = {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
+                builder.mode(0o700);
+                builder
+            };
+            match builder.create(&directory) {
+                Ok(()) => {
+                    let path = directory.join(filename);
+                    return Ok(Self {
+                        directory,
+                        path,
+                        bytes: 0,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(image_error(format!(
+                        "cannot create image staging directory: {e}"
+                    )))
+                }
+            }
+        }
+        Err(image_error("cannot allocate image staging directory"))
+    }
+}
+
+impl Drop for StagedImage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+}
+
+fn prepare_image_output<F>(
+    destination: &Path,
+    target_bytes: Option<u64>,
+    cancel: &CancellationToken,
+    work: F,
+) -> Result<StagedImage, GoopError>
+where
+    F: FnOnce(&Path) -> Result<(), GoopError>,
+{
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let mut staged = StagedImage::new(destination)?;
+    work(&staged.path)?;
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    staged.bytes = std::fs::metadata(&staged.path)?.len();
+    if staged.bytes == 0 {
+        return Err(image_error("image encoder produced an empty output"));
+    }
+    if let Some(target) = target_bytes {
+        if staged.bytes > target {
+            return Err(image_error(format!("target size requested {target} bytes, but final output is {} bytes after metadata; strip metadata or increase the target", staged.bytes)));
+        }
+    }
+    Ok(staged)
+}
+
+/// Move completed staging without replacing any destination entry. Native
+/// no-replace moves work on removable filesystems that do not support hard links.
+#[cfg(target_os = "macos")]
+fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: both pointers are valid NUL-terminated path buffers for this call.
+    // RENAME_EXCL fails if any destination directory entry already exists.
+    if unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+    let source = wide_path(source)?;
+    let destination = wide_path(destination)?;
+    // SAFETY: both paths are valid NUL-terminated UTF-16 buffers. Zero flags
+    // prohibit both replacement and a non-atomic cross-volume copy fallback.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(source, destination)
+}
+
+async fn finish_image_output(
+    mut worker: tokio::task::JoinHandle<Result<StagedImage, GoopError>>,
+    destination: PathBuf,
+    cancel: CancellationToken,
+) -> Result<u64, GoopError> {
+    let staged = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(GoopError::Cancelled),
+        result = &mut worker => result.map_err(|e| image_error(format!("convert task panicked: {e}")))??,
+    };
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    // This synchronous no-clobber commit is the completion boundary. A late
+    // cancellation after it succeeds belongs to an already completed operation.
+    publish_image(&staged.path, &destination).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Unsupported {
+            image_error(format!("destination filesystem does not support atomic publishing; choose another destination: {e}"))
+        } else {
+            image_error(format!("cannot publish image output without replacing an existing file: {e}"))
+        }
+    })?;
+    Ok(staged.bytes)
+}
+
+async fn staged_image_output<F>(
+    destination: PathBuf,
+    target_bytes: Option<u64>,
+    cancel: CancellationToken,
+    work: F,
+) -> Result<u64, GoopError>
+where
+    F: FnOnce(&Path) -> Result<(), GoopError> + Send + 'static,
+{
+    let worker_path = destination.clone();
+    let worker_cancel = cancel.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        prepare_image_output(&worker_path, target_bytes, &worker_cancel, work)
+    });
+    finish_image_output(worker, destination, cancel).await
 }
 
 /// Top-level router for image processing. Routes to `convert_image` (default
@@ -195,6 +351,10 @@ pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError>
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
+
+    if crate::raw::is_raw_extension(&ext) {
+        return crate::raw::decode_raw(input);
+    }
 
     match ext.as_str() {
         "jxl" => decode_jxl(input),
@@ -439,20 +599,17 @@ fn compress_image(
             _ => Err(GoopError::SubprocessFailed {
                 binary: "image".into(),
                 stderr:
-                    "PNG compression only supports Lossless Re-optimize. Convert to JPEG or WebP for lossy compression."
+                    "PNG compression only supports Lossless Re-optimize. Convert to JPEG for lossy compression."
                         .into(),
             }),
         },
         TargetFormat::Tiff => match mode {
-            // TIFF compression in v0.2.5: re-save losslessly via the
-            // image crate's default encoder. Quality / target-size are
-            // accepted but treated as no-ops; the codec is fundamentally
-            // lossless for the image-crate code path.
+            // The compiled-in TIFF encoder supports lossless re-saving only.
             CompressMode::LosslessReoptimize => convert_image(input, output, TargetFormat::Tiff),
             _ => Err(GoopError::SubprocessFailed {
                 binary: "image".into(),
                 stderr: "TIFF compression only supports Lossless Re-optimize. \
-                         Convert to JPEG, WebP, or AVIF for lossy compression."
+                         Convert to JPEG for lossy compression."
                     .into(),
             }),
         },
@@ -502,18 +659,8 @@ fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, GoopEr
     Ok(buf)
 }
 
-/// Encode a DynamicImage as lossy WebP at a given quality (via the `image`
-/// crate's default lossless encoder; we switch to lossy by specifying quality).
-///
-/// The `image` crate's built-in WebP encoder is lossless-only for direct API
-/// access, so we use the `webp` crate? — NO, the `image` crate is all we
-/// have. Fall back to JPEG-style quality mapping by re-using the default
-/// lossless encode and documenting the limitation.
-///
-/// For now we implement WebP as "re-save as WebP" (honors the default image
-/// crate encoder). Quality parameter is accepted but currently only affects
-/// whether we pick WebP output vs bail.
-fn encode_webp(img: &image::DynamicImage, _quality: u8) -> Result<Vec<u8>, GoopError> {
+/// Encode WebP using the compiled-in lossless encoder.
+fn encode_webp(img: &image::DynamicImage) -> Result<Vec<u8>, GoopError> {
     let mut buf: Vec<u8> = Vec::new();
     img.write_to(
         &mut std::io::Cursor::new(&mut buf),
@@ -526,9 +673,7 @@ fn encode_webp(img: &image::DynamicImage, _quality: u8) -> Result<Vec<u8>, GoopE
     Ok(buf)
 }
 
-/// Iterative binary search over quality 1..=100 to hit a target byte size.
-/// Returns the best encode whose size ≤ target_bytes (or the smallest if
-/// even quality=1 exceeds the target).
+/// Search quality 1..=100, returning only an encode within the requested size.
 fn target_size_search<F>(
     img: &image::DynamicImage,
     target_bytes: u64,
@@ -537,43 +682,29 @@ fn target_size_search<F>(
 where
     F: FnMut(&image::DynamicImage, u8) -> Result<Vec<u8>, GoopError>,
 {
-    let max_iters = 6;
-    let mut low: u8 = 1;
-    let mut high: u8 = 100;
-    let mut best: Option<Vec<u8>> = None;
-
-    for _ in 0..max_iters {
-        let q = (low + high) / 2;
+    let mut best = encode(img, 1)?;
+    if best.len() as u64 > target_bytes {
+        return Err(image_error(format!("target size requested {target_bytes} bytes; minimum encoded size at quality 1 is {} bytes before metadata", best.len())));
+    }
+    let mut low = 2u8;
+    let mut high = 100u8;
+    while low <= high {
+        let q = low + (high - low) / 2;
         let buf = encode(img, q)?;
-        let size = buf.len() as u64;
-        if size <= target_bytes {
-            // Fits — try higher quality next iteration.
-            best = Some(buf);
+        if buf.len() as u64 <= target_bytes {
+            best = buf;
             low = q + 1;
-            if low > high {
-                break;
-            }
         } else {
-            // Too large — try lower quality.
-            if q == 1 {
-                // Smallest possible already; return the current too-large
-                // buffer as a best-effort result.
-                return Ok(buf);
-            }
             high = q - 1;
-            if high < low {
-                break;
-            }
         }
     }
-
-    best.ok_or_else(|| GoopError::SubprocessFailed {
-        binary: "image".into(),
-        stderr: "binary search failed to produce any encode".into(),
-    })
+    Ok(best)
 }
 
 fn compress_jpeg(input: &Path, output: &Path, mode: CompressMode) -> Result<(), GoopError> {
+    if matches!(mode, CompressMode::LosslessReoptimize) {
+        return Err(image_error("JPEG lossless reoptimization is unavailable; choose Quality or Target Size for lossy recompression"));
+    }
     // Route through decode_any so HEIC + JXL inputs reach the dedicated
     // decoders. image::open would fail on those formats with a generic
     // "unsupported format" error.
@@ -582,11 +713,7 @@ fn compress_jpeg(input: &Path, output: &Path, mode: CompressMode) -> Result<(), 
     let buf = match mode {
         CompressMode::Quality(q) => encode_jpeg(&img, q.clamp(1, 100))?,
         CompressMode::TargetSizeBytes(bytes) => target_size_search(&img, bytes, encode_jpeg)?,
-        CompressMode::LosslessReoptimize => {
-            // JPEG is inherently lossy — re-save at quality=95 as a gentle
-            // recompression (removes editor metadata, re-packs DCT).
-            encode_jpeg(&img, 95)?
-        }
+        CompressMode::LosslessReoptimize => unreachable!("rejected before decoding"),
     };
 
     std::fs::write(output, &buf).map_err(|e| GoopError::SubprocessFailed {
@@ -596,14 +723,11 @@ fn compress_jpeg(input: &Path, output: &Path, mode: CompressMode) -> Result<(), 
 }
 
 fn compress_webp(input: &Path, output: &Path, mode: CompressMode) -> Result<(), GoopError> {
-    // Route through decode_any — same reasoning as compress_jpeg.
+    if !matches!(mode, CompressMode::LosslessReoptimize) {
+        return Err(image_error("WebP supports only Lossless Re-optimize; Quality and Target Size require a lossy encoder"));
+    }
     let img = decode_any(input)?;
-
-    let buf = match mode {
-        CompressMode::Quality(q) => encode_webp(&img, q.clamp(1, 100))?,
-        CompressMode::TargetSizeBytes(bytes) => target_size_search(&img, bytes, encode_webp)?,
-        CompressMode::LosslessReoptimize => encode_webp(&img, 100)?,
-    };
+    let buf = encode_webp(&img)?;
 
     std::fs::write(output, &buf).map_err(|e| GoopError::SubprocessFailed {
         binary: "image".into(),
@@ -664,6 +788,222 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn publish_moves_staging_instead_of_requiring_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("staged");
+        let destination = dir.path().join("final");
+        std::fs::write(&source, b"complete").unwrap();
+        publish_image(&source, &destination).unwrap();
+        assert!(
+            !source.exists(),
+            "publishing must move the staging pathname"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+    }
+
+    #[test]
+    fn publish_collision_preserves_both_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("staged");
+        let destination = dir.path().join("final");
+        std::fs::write(&source, b"complete").unwrap();
+        std::fs::write(&destination, b"original").unwrap();
+        assert!(publish_image(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"complete");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn publish_does_not_replace_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("staged");
+        let destination = dir.path().join("final");
+        let missing = dir.path().join("missing");
+        std::fs::write(&source, b"complete").unwrap();
+        std::os::unix::fs::symlink(&missing, &destination).unwrap();
+        assert!(publish_image(&source, &destination).is_err());
+        assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
+        assert_eq!(std::fs::read(&source).unwrap(), b"complete");
+    }
+
+    #[tokio::test]
+    async fn backend_reports_published_bytes_and_preserves_original_on_collision() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<f32>>);
+        impl EventSink for Sink {
+            fn emit_progress(&self, event: ProgressEvent) {
+                self.0.lock().unwrap().push(event.percent);
+            }
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.png");
+        let output = dir.path().join("out.webp");
+        write_test_png(&input, 16, 16);
+        let original = std::fs::read(&input).unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let sink = Arc::new(Sink::default());
+        let backend = ImageMagickBackend::new(&resolver, sink.clone());
+        let mut req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input, "output_path": output, "target": TargetFormat::Webp,
+            "compress_mode": CompressMode::LosslessReoptimize,
+        }))
+        .unwrap();
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.bytes, std::fs::metadata(&output).unwrap().len());
+        assert_eq!(
+            image::open(&output).unwrap().to_rgba8(),
+            image::open(&input).unwrap().to_rgba8()
+        );
+        assert_eq!(sink.0.lock().unwrap().last(), Some(&100.0));
+        sink.0.lock().unwrap().clear();
+        req.output_path = input.to_string_lossy().into_owned();
+        req.target = TargetFormat::Png;
+        let error = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot publish"));
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert!(!sink.0.lock().unwrap().contains(&100.0));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn invalid_destination_leaves_no_staging_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(StagedImage::new(&dir.path().join("..")).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_worker_never_publishes_and_cleans_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.png");
+        let cancel = CancellationToken::new();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let worker_output = output.clone();
+        let worker_cancel = cancel.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let result = prepare_image_output(&worker_output, None, &worker_cancel, |path| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                std::fs::write(path, b"late encode")?;
+                Ok(())
+            });
+            // Cancellation makes prepare return Err after dropping staging.
+            assert!(matches!(result, Err(GoopError::Cancelled)));
+            done_tx.send(()).unwrap();
+            result
+        });
+        let task = tokio::spawn(finish_image_output(worker, output.clone(), cancel.clone()));
+        entered_rx.await.unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(GoopError::Cancelled)));
+        assert!(!output.exists());
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn staging_preserves_existing_output_on_error_and_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.jpg");
+        std::fs::write(&output, b"original").unwrap();
+        let result = staged_image_output(output.clone(), None, CancellationToken::new(), |path| {
+            std::fs::write(path, b"partial")?;
+            Err(GoopError::Cancelled)
+        })
+        .await;
+        assert!(result.is_err());
+        let result = staged_image_output(output.clone(), None, CancellationToken::new(), |path| {
+            std::fs::write(path, b"new")?;
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn staging_checks_final_postprocess_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        write_test_jpeg(&input);
+        use img_parts::ImageICC;
+        let bytes = std::fs::read(&input).unwrap();
+        let mut jpeg = img_parts::jpeg::Jpeg::from_bytes(bytes.into()).unwrap();
+        jpeg.set_icc_profile(Some(vec![42; 4000].into()));
+        std::fs::write(&input, jpeg.encoder().bytes()).unwrap();
+        let output = dir.path().join("out.jpg");
+        let result = staged_image_output(
+            output.clone(),
+            Some(2000),
+            CancellationToken::new(),
+            move |path| {
+                compress_jpeg(&input, path, CompressMode::TargetSizeBytes(2000))?;
+                assert!(std::fs::metadata(path)?.len() <= 2000);
+                metadata::apply(&input, path, goop_core::MetadataPolicy::Preserve)?;
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("2000"));
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unsupported_compression_modes_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.png");
+        write_test_png(&input, 16, 16);
+        for (target, mode) in [
+            (TargetFormat::Jpeg, CompressMode::LosslessReoptimize),
+            (TargetFormat::Webp, CompressMode::Quality(50)),
+            (TargetFormat::Webp, CompressMode::TargetSizeBytes(100_000)),
+        ] {
+            let output = dir.path().join("out");
+            assert!(compress_image(&input, &output, target, mode).is_err());
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn target_search_rejects_impossible_and_checks_quality_one() {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let err = target_size_search(&img, 1, |_, q| Ok(vec![0; q as usize + 10])).unwrap_err();
+        assert!(err.to_string().contains("11"));
+        let bytes = target_size_search(&img, 11, |_, q| Ok(vec![0; q as usize + 10])).unwrap();
+        assert_eq!(bytes.len(), 11);
+    }
+
+    #[test]
+    fn decode_rejects_raster_disguised_as_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("test.png");
+        let raw = dir.path().join("test.dng");
+        image::RgbImage::new(8, 8).save(&png).unwrap();
+        std::fs::rename(png, &raw).unwrap();
+        assert!(decode_any(&raw).is_err());
+    }
+
+    #[test]
     fn jpeg_quality_encodes_at_lower_size() {
         let dir = tmp_dir("jpeg-q");
         let in_path = dir.join("in.jpg");
@@ -709,9 +1049,7 @@ mod tests {
         .unwrap();
 
         let size = std::fs::metadata(&out_path).unwrap().len();
-        // Allow generous tolerance — binary search caps at 6 iterations on
-        // quality 1..=100 so we may overshoot for small synthetic images.
-        assert!(size > 0);
+        assert!(size > 0 && size <= target);
         std::fs::remove_dir_all(&dir).ok();
     }
 

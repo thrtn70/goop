@@ -1,30 +1,42 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
 use std::path::Path;
 
-/// Probe an image file using the `image` crate. Returns dimensions, format,
-/// and file size without needing an external binary.
+/// Probe supported images with the same format dispatch as conversion.
+/// Common rasters and HEIC only read headers; JXL currently decodes pixels.
 pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
-    let reader = image::ImageReader::open(path)
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to open image: {e}"),
-        })?
-        .with_guessed_format()
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to detect image format: {e}"),
-        })?;
-
-    let format = reader.format();
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to read image dimensions: {e}"),
-        })?;
-
-    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let image_format = format.map(|f| format!("{f:?}"));
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(crate::raw::is_raw_extension)
+    {
+        return crate::raw::probe_raw(path);
+    }
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (width, height, image_format) = match ext.as_str() {
+        "heic" | "heif" => {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| probe_error("HEIC path is not valid UTF-8"))?;
+            let context = libheif_rs::HeifContext::read_from_file(path_str)
+                .map_err(|e| probe_error(format!("failed to read HEIC header: {e}")))?;
+            let handle = context
+                .primary_image_handle()
+                .map_err(|e| probe_error(format!("failed to get primary HEIC dimensions: {e}")))?;
+            (handle.width(), handle.height(), Some("HEIC".into()))
+        }
+        "jxl" => {
+            // jpegxl-rs currently has no header-only API. Reuse the existing
+            // decoder for consistent orientation and supported channel behavior.
+            let image = crate::imagemagick::decode_any(path)?;
+            (image.width(), image.height(), Some("JXL".into()))
+        }
+        _ => raster_dimensions(path)?,
+    };
+    let file_size = std::fs::metadata(path)?.len();
 
     Ok(ProbeResult {
         duration_ms: 0,
@@ -43,6 +55,36 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         subtitle_codecs: vec![],
         audio_codecs: vec![],
     })
+}
+
+fn probe_error(message: impl Into<String>) -> GoopError {
+    GoopError::SubprocessFailed {
+        binary: "image".into(),
+        stderr: message.into(),
+    }
+}
+
+fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>), GoopError> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to open image: {e}"),
+        })?
+        .with_guessed_format()
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to detect image format: {e}"),
+        })?;
+
+    let format = reader.format().map(|f| format!("{f:?}"));
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| GoopError::SubprocessFailed {
+            binary: "image".into(),
+            stderr: format!("failed to read image dimensions: {e}"),
+        })?;
+
+    Ok((width, height, format))
 }
 
 #[cfg(test)]
@@ -100,6 +142,16 @@ mod tests {
         assert_eq!(result.height, Some(16));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_raster_disguised_as_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("test.png");
+        let raw = dir.path().join("test.dng");
+        write_test_png(&png);
+        fs::rename(png, &raw).unwrap();
+        assert!(probe_image(&raw).is_err());
     }
 
     #[test]

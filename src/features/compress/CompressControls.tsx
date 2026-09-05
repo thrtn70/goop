@@ -1,48 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import type { CompressMode, ProbeResult } from "@/types";
+import type { CompressMode, ProbeResult, CompressionCapabilities } from "@/types";
 import { adviseTargetSize, bytesFromInput, formatBytes, type SizeUnit } from "./sizeMath";
-
-/**
- * Which controls the current source type + target format allow.
- *
- * The backend rejects invalid combinations (e.g., target-size on PNG), but
- * the UI disables them up-front to make the affordance obvious.
- */
-interface Availability {
-  quality: boolean;
-  targetSize: boolean;
-  lossless: boolean;
-  hint: string | null;
-}
-
-function availabilityFor(probe: ProbeResult): Availability {
-  if (probe.source_kind === "image") {
-    const fmt = (probe.image_format ?? "").toLowerCase();
-    if (fmt === "jpeg" || fmt === "webp") {
-      return { quality: true, targetSize: true, lossless: false, hint: null };
-    }
-    if (fmt === "png") {
-      return {
-        quality: false,
-        targetSize: false,
-        lossless: true,
-        hint: "PNG is lossless. Re-optimize shrinks without quality loss. For target-size compression, convert to JPEG or WebP first.",
-      };
-    }
-    if (fmt === "bmp") {
-      return {
-        quality: false,
-        targetSize: false,
-        lossless: false,
-        hint: "BMP has no compression. Convert to PNG first.",
-      };
-    }
-    return { quality: true, targetSize: true, lossless: false, hint: null };
-  }
-  // Video / audio: both modes available
-  return { quality: true, targetSize: true, lossless: false, hint: null };
-}
 
 function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf" {
   // A subtitle file has no size worth compressing and the Compress tab
@@ -53,12 +12,13 @@ function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf
 
 interface CompressControlsProps {
   probe: ProbeResult;
+  capabilities: CompressionCapabilities;
   mode: CompressMode;
   onChange: (mode: CompressMode) => void;
 }
 
-export default function CompressControls({ probe, mode, onChange }: CompressControlsProps) {
-  const avail = useMemo(() => availabilityFor(probe), [probe]);
+export default function CompressControls({ probe, mode, onChange, capabilities }: CompressControlsProps) {
+  const avail = useMemo(() => ({ quality: capabilities.quality, targetSize: capabilities.target_size, lossless: capabilities.lossless, hint: capabilities.reason }), [capabilities]);
   const sourceBytes = Number(probe.file_size);
   const durationMs = Number(probe.duration_ms);
 
@@ -77,6 +37,15 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
     return "mb";
   });
 
+  useEffect(() => {
+    if (mode.kind !== "target_size_bytes") return;
+    const bytes = Number(mode.value);
+    const unit: SizeUnit = bytes < 1024 * 1024 ? "kb" : "mb";
+    setSizeUnit(unit);
+    setSizeInput(String(bytes / (unit === "kb" ? 1024 : 1024 * 1024)));
+  }, [mode]);
+
+  const modeAllowed = mode.kind === "quality" ? avail.quality : mode.kind === "target_size_bytes" ? avail.targetSize : avail.lossless;
   const currentTab: "quality" | "target_size" =
     mode.kind === "target_size_bytes" ? "target_size" : "quality";
 
@@ -112,6 +81,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
 
   return (
     <div className="mt-3 rounded-lg bg-surface-2 p-3">
+      {!modeAllowed && <p className="mb-3 text-xs text-warning" role="alert">The selected compression mode is unavailable. Choose a supported mode before starting.</p>}
       {/* Hint banner for formats with restrictions */}
       {avail.hint && (
         <p className="mb-3 text-xs text-fg-secondary">{avail.hint}</p>
@@ -190,7 +160,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
         </button>
       )}
 
-      {currentTab === "target_size" && (
+      {currentTab === "target_size" && avail.targetSize && (
         <div>
           <div className="flex items-center gap-2">
             <input

@@ -15,6 +15,7 @@ import type {
 } from "@/types";
 
 export interface FileEntry {
+  optionsReady?: boolean;
   path: string;
   target: TargetFormat;
   sourceDir: string;

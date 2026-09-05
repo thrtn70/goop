@@ -271,6 +271,12 @@ jobs:
           cargo test -p goop-converter heic
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      - name: Image conversion correctness
+        shell: bash
+        run: |
+          cargo test -p goop-converter --lib imagemagick::tests
+          cargo test -p goop-converter --lib raw
+          cargo test -p goop-converter --test capabilities --test image_probe
       # The capability check earlier proves the ffmpeg features exist; this
       # runs the conversion pipeline against them, and is the only place the
       # `#[ignore]`d tests act as a standing gate rather than a manual one.

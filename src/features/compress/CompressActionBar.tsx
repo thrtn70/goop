@@ -6,6 +6,7 @@ import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import type { CompressMode, TargetFormat } from "@/types";
 
 export interface CompressFileEntry {
+  optionsReady?: boolean;
   path: string;
   /** Target format = source format (Compress keeps the container). */
   target: TargetFormat;

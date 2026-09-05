@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat } from "@/types";
+import { useEffect } from "react";
+import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat, QualityPreset, ResolutionCap } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
 import { useAppStore } from "@/store/appStore";
 import TargetPicker, { smartDefault } from "./TargetPicker";
@@ -11,6 +11,8 @@ interface RowOptionsState {
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
+  qualityPreset?: QualityPreset | null;
+  resolutionCap?: ResolutionCap | null;
 }
 
 export interface FileRowOptions {
@@ -18,6 +20,8 @@ export interface FileRowOptions {
   gifOptions: GifOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
+  qualityPreset?: QualityPreset | null;
+  resolutionCap?: ResolutionCap | null;
 }
 
 /** Reconcile a picked subtitle with a target format.
@@ -42,6 +46,7 @@ export function subtitleForTarget(
 interface FileRowProps {
   path: string;
   index?: number;
+  options: FileRowOptions | null;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onRemove: (path: string) => void;
 }
@@ -67,13 +72,13 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function defaultGifOptions(): GifOptions {
+export function defaultGifOptions(): GifOptions {
   return { size_preset: "medium", trim_start_ms: null, trim_end_ms: null };
 }
 
-export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: FileRowProps) {
+export default function FileRow({ path, index = 0, onOptionsChange, onRemove, options }: FileRowProps) {
   const { state, retry } = useProbe(path);
-  const [opts, setOpts] = useState<RowOptionsState | null>(null);
+  const opts = options;
   // Read the global default once at seed time so a later Settings
   // change doesn't unexpectedly mutate an active row's choice.
   const defaultPolicy: MetadataPolicy =
@@ -89,7 +94,6 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
         metadataPolicy: defaultPolicy,
         subtitle: null,
       };
-      setOpts(seeded);
       onOptionsChange(path, seeded);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- onOptionsChange is stable via parent useCallback; depending on it would re-seed on every parent render
@@ -143,12 +147,19 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
       gifOptions: partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
       metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
       subtitle: partial.subtitle !== undefined ? partial.subtitle : subtitle,
+      qualityPreset: partial.qualityPreset !== undefined ? partial.qualityPreset : opts.qualityPreset,
+      resolutionCap: partial.resolutionCap !== undefined ? partial.resolutionCap : opts.resolutionCap,
     };
-    setOpts(next);
     onOptionsChange(path, next);
   };
 
   const showGifOpts = target === "gif" && p.source_kind === "video";
+  // These selectors configure video encoding. GIF has its own size control,
+  // and AVI uses a fixed encoder quality rather than these preset levels.
+  const showVideoQuality = p.source_kind === "video" && ["mp4", "mkv", "webm", "mov"].includes(target);
+  const showVideoResolution = showVideoQuality || (p.source_kind === "video" && target === "avi");
+  const ignoredQuality = !showVideoQuality && opts.qualityPreset != null && opts.qualityPreset !== "original";
+  const ignoredResolution = !showVideoResolution && opts.resolutionCap != null && opts.resolutionCap !== "original";
   const showMetadataPolicy = p.source_kind === "image";
   const subSupport = subtitleSupport(target);
   const showSubtitle = p.source_kind === "video" && (subSupport.soft || subSupport.burn);
@@ -177,6 +188,7 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
       <div className="mt-2">
         <TargetPicker
           probe={p}
+          capabilities={state.capabilities}
           selected={target}
           onChange={(t) =>
             update({
@@ -190,6 +202,29 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
           }
         />
       </div>
+      {state.capabilities && !state.capabilities.targets.some(c => c.target === target && c.available) && (
+        <p className="mt-2 text-xs text-warning" role="alert">Selected output {target.toUpperCase()} is unavailable for this file. Choose an available format above.</p>
+      )}
+      {(ignoredQuality || ignoredResolution) && (
+        <p className="mt-2 text-xs text-warning" role="alert">
+          Selected video settings do not apply to this output.
+          {showGifOpts && " Use GIF size below to set the image dimensions."}{" "}
+          <button type="button" className="underline" onClick={() => update({
+            qualityPreset: ignoredQuality ? null : opts.qualityPreset,
+            resolutionCap: ignoredResolution ? null : opts.resolutionCap,
+          })}>Clear video settings</button>
+        </p>
+      )}
+      {(showVideoQuality || showVideoResolution) && (
+        <div className="mt-3 flex flex-wrap gap-3 text-xs">
+          {showVideoQuality && <label>Quality <select aria-label="Video quality" className="rounded bg-surface-2 p-1" value={opts.qualityPreset ?? ""} onChange={e => update({ qualityPreset: (e.target.value || null) as QualityPreset | null })}>
+            <option value="">Default</option><option value="original">Original</option><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="small">Small</option>
+          </select></label>}
+          {showVideoResolution && <label>Resolution <select aria-label="Video resolution" className="rounded bg-surface-2 p-1" value={opts.resolutionCap ?? ""} onChange={e => update({ resolutionCap: (e.target.value || null) as ResolutionCap | null })}>
+            <option value="">Default</option><option value="original">Original</option><option value="r1080p">1080p</option><option value="r720p">720p</option><option value="r480p">480p</option>
+          </select></label>}
+        </div>
+      )}
       {showSubtitle && (
         <SubtitleField
           subtitle={subtitle}
@@ -203,6 +238,9 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove }: 
           onChange={(o) => update({ gifOptions: o })}
           maxDurationMs={Number(p.duration_ms)}
         />
+      )}
+      {showMetadataPolicy && state.capabilities?.targets.find(c => c.target === target)?.metadata_warning && (
+        <p className="mt-2 text-xs text-warning" role="status">{state.capabilities.targets.find(c => c.target === target)?.metadata_warning}</p>
       )}
       {showMetadataPolicy && (
         <div className="mt-2 flex items-center gap-2 text-xs">

@@ -19,6 +19,11 @@ vi.mock("@/ipc/commands", () => ({
   api: {
     convert: {
       probe: (path: string) => mockProbe(path),
+      inspect: async (path: string) => {
+        const p = await mockProbe(path);
+        const targets = p.source_kind === "image" ? ["png","jpeg","webp","bmp","avif","jpeg_xl","tiff"] : p.source_kind === "subtitle" ? ["srt","vtt"] : [...(p.has_video ? ["mp4","mkv","webm","gif","avi","mov"] : []), ...(p.has_audio ? ["mp3","m4a","opus","wav","flac","ogg","aac","extract_audio_keep_codec"] : [])];
+        return { probe: p, capabilities: { targets: targets.map(target => ({target,available:true,reason:null,preserves_metadata:false,metadata_warning:null})), compression:{quality:true,target_size:true,lossless:false,reason:null} } };
+      },
       fromFile: (req: unknown) => mockFromFile(req),
     },
     queue: { list: vi.fn().mockResolvedValue([]) },
@@ -486,6 +491,41 @@ describe("ConvertPage applies what a preset chip promises", () => {
     await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
     await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
   }
+
+  it("hides ignored video controls for audio outputs and clears inherited settings explicitly", async () => {
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: "MP3" }));
+    expect(screen.queryByRole("combobox", { name: "Video quality" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Video resolution" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("do not apply");
+    await userEvent.click(screen.getByRole("button", { name: "Clear video settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({ target: "mp3", quality_preset: null, resolution_cap: null });
+  });
+
+  it("clears unsupported AVI quality without discarding its supported resolution cap", async () => {
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: "AVI" }));
+    expect(screen.queryByRole("combobox", { name: "Video quality" })).toBeNull();
+    expect((screen.getByRole("combobox", { name: "Video resolution" }) as HTMLSelectElement).value).toBe("r1080p");
+    await userEvent.click(screen.getByRole("button", { name: "Clear video settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({ target: "avi", quality_preset: null, resolution_cap: "r1080p" });
+  });
+
+  it("GIF presets expose editable GIF settings without duplicate video controls", async () => {
+    useAppStore.setState({ presets: [{ ...useAppStore.getState().presets[0], target: "gif", quality_preset: null, resolution_cap: null }] });
+    await stageFileAndApplyPreset();
+    expect(screen.getByText("GIF size")).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "Video quality" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Video resolution" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Small (320px)" }));
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0].gif_options).toMatchObject({ size_preset: "small", trim_start_ms: null, trim_end_ms: null });
+  });
 
   it("sends the preset's quality and resolution cap on a single file", async () => {
     // The chip used to change only `target`, so a 4K source came out 4K
