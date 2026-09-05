@@ -4,13 +4,21 @@ import { create } from "zustand";
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number> };
-const useDraftStore = create<DraftState>(() => ({ entries: {}, epochs: {} }));
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; resetEpoch: number };
+const useDraftStore = create<DraftState>(() => ({ entries: {}, epochs: {}, scopeEpochs: {}, resetEpoch: 0 }));
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [] });
 const matches = (key: string, prefix: readonly string[]) => {
   const parts = JSON.parse(key) as string[];
   return prefix.every((part, i) => parts[i] === part);
 };
+
+function scopeLifetime(state: DraftState, path: readonly string[]) {
+  let epoch = 0;
+  for (let length = 1; length <= path.length; length++) {
+    epoch += state.scopeEpochs[JSON.stringify(path.slice(0, length))] ?? 0;
+  }
+  return `${state.resetEpoch}:${epoch}`;
+}
 
 /** Session only: source bytes, probes, previews and platform handles never belong here. */
 export function WorkspaceDraftProvider({ tool, scope = [], children }: { tool?: WorkspaceTool; scope?: readonly string[]; children?: ReactNode }) {
@@ -28,8 +36,16 @@ export function withWorkspaceDrafts<P extends object>(Component: ComponentType<P
     const path = source?.(props) ?? [];
     const namespace = tool ?? parent.tool;
     const fullPath = tool ? path : [...parent.path, ...path];
+    const lifetimePath = [namespace, ...fullPath];
+    const lifetime = useDraftStore(state => scopeLifetime(state, lifetimePath));
     const onDone = "onDone" in props && typeof props.onDone === "function" ? props.onDone as () => void : null;
-    const scopedProps = onDone ? { ...props, onDone: () => { clearWorkspaceDrafts(namespace, fullPath); onDone(); } } : props;
+    const scopedProps = onDone ? { ...props, onDone: () => {
+      // Removal/reset retires both cleanup and the parent callback, which may
+      // itself remove sources. A route remount alone preserves this authority.
+      if (scopeLifetime(useDraftStore.getState(), lifetimePath) !== lifetime) return;
+      clearWorkspaceDrafts(namespace, fullPath);
+      onDone();
+    } } : props;
     return createElement(WorkspaceDraftProvider, { tool, scope: path }, createElement(Component, scopedProps));
   };
 }
@@ -60,7 +76,9 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
 }
 
 export function clearWorkspaceDrafts(tool: WorkspaceTool, scope: readonly string[] = []) {
+  const scopeKey = JSON.stringify([tool, ...scope]);
   useDraftStore.setState(s => ({
+    scopeEpochs: { ...s.scopeEpochs, [scopeKey]: (s.scopeEpochs[scopeKey] ?? 0) + 1 },
     entries: Object.fromEntries(Object.entries(s.entries).filter(([key]) => !matches(key, [tool, ...scope]))),
     // Only setters belonging to cleared slots are retired.
     epochs: Object.fromEntries([...new Set([...Object.keys(s.epochs), ...Object.keys(s.entries)])].map(key => [key, (s.epochs[key] ?? 0) + (matches(key, [tool, ...scope]) ? 1 : 0)])),
@@ -81,7 +99,7 @@ export function claimWorkspaceFilePicker(token: number) {
 
 export function resetWorkspaceDrafts() {
   consumedPickerToken = 0;
-  useDraftStore.setState({ entries: {}, epochs: {} });
+  useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, resetEpoch: state.resetEpoch + 1 }));
 }
 
 /** Explicit source removal retires its forms, including source-set batch scopes. */

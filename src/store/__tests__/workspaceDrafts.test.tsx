@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
-import { WorkspaceDraftProvider, clearWorkspaceDrafts, resetWorkspaceDrafts, useWorkspaceDraftState } from "../workspaceDrafts";
+import { WorkspaceDraftProvider, clearWorkspaceDrafts, resetWorkspaceDrafts, useWorkspaceDraftState, withWorkspaceDrafts } from "../workspaceDrafts";
 afterEach(() => { cleanup(); resetWorkspaceDrafts(); });
 const scope = (tool: "convert" | "compress", source = "pdf") => ({ children }: { children: ReactNode }) => createElement(WorkspaceDraftProvider, { tool, scope: [source] }, children);
 it("retains editable values across route unmount without running work", () => {
@@ -32,4 +32,51 @@ it("consumes each picker command only once across tool remounts", async () => {
  expect(claimWorkspaceFilePicker(1)).toBe(true);
  expect(claimWorkspaceFilePicker(1)).toBe(false);
  expect(claimWorkspaceFilePicker(2)).toBe(true);
+});
+
+
+it("retires completion authority when a source scope is recreated", () => {
+  const parentDone = vi.fn();
+  let complete: () => void = () => {};
+  function Form({ onDone }: { onDone: () => void }) {
+    const [value, setValue] = useWorkspaceDraftState("test.form", "");
+    complete = onDone;
+    return <input aria-label="draft" value={value} onChange={event => setValue(event.target.value)} />;
+  }
+  const ScopedForm = withWorkspaceDrafts(Form, "image", () => ["source", "/a.png"]);
+  const sibling = renderHook(() => useWorkspaceDraftState("test.value", "sibling"), { wrapper: scope("convert", "other.pdf") });
+  const first = render(<ScopedForm onDone={parentDone} />);
+  const stale = complete;
+  first.unmount();
+  act(() => clearWorkspaceDrafts("image", ["source", "/a.png"]));
+  render(<ScopedForm onDone={parentDone} />);
+  fireEvent.change(screen.getByLabelText("draft"), { target: { value: "new edit" } });
+  act(() => stale());
+  expect((screen.getByLabelText("draft") as HTMLInputElement).value).toBe("new edit");
+  expect(parentDone).not.toHaveBeenCalled();
+  expect(sibling.result.current[0]).toBe("sibling");
+  act(() => complete());
+  expect((screen.getByLabelText("draft") as HTMLInputElement).value).toBe("");
+  expect(parentDone).toHaveBeenCalledTimes(1);
+  expect(sibling.result.current[0]).toBe("sibling");
+});
+
+it("preserves completion authority across route unmount and sibling clearing", () => {
+  let complete: () => void = () => {};
+  const parentDone = vi.fn();
+  function Form({ onDone }: { onDone: () => void }) {
+    useWorkspaceDraftState("test.form", "draft");
+    complete = onDone;
+    return null;
+  }
+  const ScopedForm = withWorkspaceDrafts(Form, "image", () => ["source", "/a.png"]);
+  const first = render(<ScopedForm onDone={parentDone} />);
+  const pendingCompletion = complete;
+  first.unmount();
+  act(() => clearWorkspaceDrafts("image", ["source", "/b.png"]));
+  render(<ScopedForm onDone={parentDone} />);
+  act(() => pendingCompletion());
+  expect(parentDone).toHaveBeenCalledTimes(1);
+  act(() => pendingCompletion());
+  expect(parentDone).toHaveBeenCalledTimes(1);
 });
