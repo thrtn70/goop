@@ -128,12 +128,14 @@ async fn update_with(
     };
     let dest = update_dir.join(exe_name);
     let url = format!("{dl_base}/{tag}/{asset}");
+    let checksum_url = format!("{dl_base}/{tag}/SHA256SUMS");
+    let expected = fetch::fetch_checksum(&client, &checksum_url, asset, LABEL).await?;
     // A refused rename collapses into the same error as any other download
     // failure here, which is exactly the behaviour this module already had.
     // yt-dlp distinguishes the busy case because its update can fire from a
     // background check while a job is running; gallery-dl's only runs from the
     // Settings button.
-    fetch::download_binary(&client, &url, &dest, LABEL).await?;
+    fetch::download_binary(&client, &url, &expected, &dest, LABEL).await?;
 
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
     // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
@@ -262,6 +264,13 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/latest"))
             .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"v9.99.0"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/v9.99.0/SHA256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "c24fc0875a10bc40f65c57887a92af4ba77c4011863311dbaf7d79f07f6ad0a4  gallery-dl.bin\n",
+            ))
             .mount(&server)
             .await;
         Mock::given(method("GET"))

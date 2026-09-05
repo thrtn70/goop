@@ -4,24 +4,31 @@
 //! 1. `check` fetches `releases/latest` from GitHub, parses the tag, compares
 //!    via semver, and returns `Some(UpdateInfo)` when a strictly newer release
 //!    exists with an asset matching the current platform.
-//! 2. `download` streams the matched asset to a temp file while invoking a
-//!    progress callback; the command layer wires that callback to a Tauri
-//!    event for the UI's progress bar.
+//! 2. `download_latest` re-fetches that fixed repository release, then streams
+//!    its matched asset to a private temp directory while invoking a progress
+//!    callback; the command layer wires that callback to a Tauri event for the
+//!    UI's progress bar.
 //! 3. The command layer then calls `tauri-plugin-opener` with the temp path
 //!    so the user can install/mount directly from inside Goop.
 //!
-//! Signing / silent install / rollback are explicitly out of scope for v0.1.7.
+//! Silent install and rollback are out of scope. Release-provided SHA-256
+//! sidecars protect against corruption and payload-only replacement; the
+//! repository's release account remains the trust root for both artifacts.
 
 use futures_util::StreamExt;
 use goop_core::UpdateInfo;
 use reqwest::{Client, Url};
 use serde::Deserialize;
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
 const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/thrtn70/goop/releases/latest";
 const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/thrtn70/goop/releases/latest";
+const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "/thrtn70/goop/releases/download/";
+const MAX_CHECKSUM_MANIFEST_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct GhRelease {
@@ -75,36 +82,130 @@ pub async fn check(current_version: &str) -> anyhow::Result<Option<UpdateInfo>> 
     }))
 }
 
-/// Stream a URL to a temp file, invoking `on_progress(downloaded, total)` as
-/// bytes arrive. Returns the path to the downloaded file on success. The
-/// filename preserves the URL's suffix (`.dmg` / `.msi` / `.exe`) so the
-/// opener plugin can dispatch to the right system handler.
-pub async fn download<F>(
-    url: &str,
-    current_version: &str,
-    on_progress: F,
-) -> anyhow::Result<PathBuf>
+/// Re-fetch the latest release from Goop's fixed repository, choose the asset
+/// server-side, and stream it to a private temporary directory. The renderer
+/// never supplies an executable URL. The retained path preserves the asset's
+/// suffix (`.dmg` / `.msi` / `.exe`) for the opener plugin.
+pub async fn download_latest<F>(current_version: &str, on_progress: F) -> anyhow::Result<PathBuf>
 where
     F: Fn(u64, u64) + Send + Sync,
 {
-    validate_download_url(url)?;
+    let update = check(current_version)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no newer Goop release is available"))?;
+    let url = update.download_url;
+    validate_download_url(&url)?;
     let client = build_download_client(current_version)?;
-    let resp = client.get(url).send().await?.error_for_status()?;
-    let total = resp.content_length().unwrap_or(0);
+    let filename = filename_from_url(&url);
+    let checksum_url = format!("{url}.sha256");
+    validate_download_url(&checksum_url)?;
+    let (temp_dir, out_path) = unique_download_destination(&filename)?;
+    download_verified(
+        &client,
+        &url,
+        &checksum_url,
+        &filename,
+        &out_path,
+        &on_progress,
+    )
+    .await?;
+    let retained_dir = temp_dir.keep();
+    Ok(retained_dir.join(filename))
+}
 
-    let filename = filename_from_url(url);
-    let out_path = std::env::temp_dir().join(filename);
-    let mut file = tokio::fs::File::create(&out_path).await?;
-    let mut downloaded: u64 = 0;
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        file.write_all(&bytes).await?;
-        downloaded = downloaded.saturating_add(bytes.len() as u64);
-        on_progress(downloaded, total);
+fn unique_download_destination(filename: &str) -> anyhow::Result<(TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new().prefix("goop-update-").tempdir()?;
+    let path = dir.path().join(filename);
+    Ok((dir, path))
+}
+
+fn checksum_for_asset(manifest: &str, asset: &str) -> Option<String> {
+    let mut found = None;
+    for line in manifest.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(digest) = fields.next() else {
+            continue;
+        };
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_some() || name.trim_start_matches('*') != asset {
+            continue;
+        }
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(digest.to_ascii_lowercase());
     }
-    file.flush().await?;
-    Ok(out_path)
+    found
+}
+
+async fn download_verified<F>(
+    client: &Client,
+    url: &str,
+    checksum_url: &str,
+    filename: &str,
+    out_path: &Path,
+    on_progress: &F,
+) -> anyhow::Result<()>
+where
+    F: Fn(u64, u64) + Send + Sync,
+{
+    let response = client.get(checksum_url).send().await?.error_for_status()?;
+    let mut manifest = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if manifest.len().saturating_add(chunk.len()) > MAX_CHECKSUM_MANIFEST_BYTES {
+            anyhow::bail!("release checksum manifest is too large");
+        }
+        manifest.extend_from_slice(&chunk);
+    }
+    let manifest = String::from_utf8(manifest)?;
+    let expected = checksum_for_asset(&manifest, filename)
+        .ok_or_else(|| anyhow::anyhow!("release checksum is missing or invalid for {filename}"))?;
+
+    let tmp_path = out_path.with_file_name(format!("{filename}.tmp-download"));
+    let result = async {
+        let resp = client.get(url).send().await?.error_for_status()?;
+        let total = resp.content_length().unwrap_or(0);
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        let mut downloaded: u64 = 0;
+        let mut hasher = Sha256::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            file.write_all(&bytes).await?;
+            hasher.update(&bytes);
+            downloaded = downloaded.saturating_add(bytes.len() as u64);
+            on_progress(downloaded, total);
+        }
+        file.flush().await?;
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            anyhow::bail!(
+                "downloaded installer failed SHA-256 verification: expected {expected}, got {actual}"
+            );
+        }
+        tokio::fs::rename(&tmp_path, out_path).await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    if result.is_err() {
+        match tokio::fs::remove_file(&tmp_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                "app update: failed to remove partial installer {}: {e}",
+                tmp_path.display()
+            ),
+        }
+    }
+    result
 }
 
 pub fn releases_page_url() -> &'static str {
@@ -130,6 +231,16 @@ fn build_download_client(current_version: &str) -> anyhow::Result<Client> {
         .user_agent(format!("goop-updater/{current_version}"))
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many update download redirects");
+            }
+            if is_trusted_redirect(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("update download redirected to an untrusted host")
+            }
+        }))
         .build()?)
 }
 
@@ -151,12 +262,25 @@ fn filename_from_url(url: &str) -> String {
 
 fn validate_download_url(raw: &str) -> anyhow::Result<()> {
     let url = Url::parse(raw)?;
-    if url.scheme() != "https" {
-        anyhow::bail!("update download URL must use https");
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.path().starts_with(GITHUB_RELEASE_DOWNLOAD_PREFIX)
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        anyhow::bail!("update download URL is not a Goop release asset");
+    }
+    Ok(())
+}
+
+fn is_trusted_redirect(url: &Url) -> bool {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
     }
     match url.host_str() {
-        Some("github.com" | "objects.githubusercontent.com") => Ok(()),
-        _ => anyhow::bail!("update download URL host is not trusted"),
+        Some("github.com") => url.path().starts_with(GITHUB_RELEASE_DOWNLOAD_PREFIX),
+        Some("objects.githubusercontent.com" | "release-assets.githubusercontent.com") => true,
+        _ => false,
     }
 }
 
@@ -218,6 +342,9 @@ fn asset_matches(name: &str, platform: Platform) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn asset(name: &str) -> GhAsset {
         GhAsset {
@@ -309,18 +436,145 @@ mod tests {
     }
 
     #[test]
+    fn release_checksum_requires_the_selected_installer_name() {
+        let manifest = "c7f546d996f75c87ce5f1a308357f2192ba1642b5502b6f616c22bafaefdfb7a  Goop_0.3.1_aarch64.dmg\n";
+        assert_eq!(
+            checksum_for_asset(manifest, "Goop_0.3.1_aarch64.dmg").as_deref(),
+            Some("c7f546d996f75c87ce5f1a308357f2192ba1642b5502b6f616c22bafaefdfb7a")
+        );
+        assert_eq!(checksum_for_asset(manifest, "Goop_0.3.1_x64.msi"), None);
+        assert_eq!(checksum_for_asset("bogus  Goop.dmg\n", "Goop.dmg"), None);
+    }
+
+    #[tokio::test]
+    async fn installer_download_rejects_mismatched_bytes_and_cleans_temp() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/Goop.dmg.sha256"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  Goop.dmg\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Goop.dmg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"installer".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("Goop.dmg");
+
+        download_verified(
+            &reqwest::Client::new(),
+            &format!("{}/Goop.dmg", server.uri()),
+            &format!("{}/Goop.dmg.sha256", server.uri()),
+            "Goop.dmg",
+            &out,
+            &|_, _| {},
+        )
+        .await
+        .expect_err("mismatched installer must fail");
+
+        assert!(!out.exists());
+        assert!(!dir.path().join("Goop.dmg.tmp-download").exists());
+    }
+
+    #[tokio::test]
+    async fn installer_download_installs_only_after_checksum_matches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/Goop.dmg.sha256"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "9c0d294c05fc1d88d698034609bb81c0c69196327594e4c69d2915c80fd9850c  Goop.dmg\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Goop.dmg"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"installer".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("Goop.dmg");
+
+        download_verified(
+            &reqwest::Client::new(),
+            &format!("{}/Goop.dmg", server.uri()),
+            &format!("{}/Goop.dmg.sha256", server.uri()),
+            "Goop.dmg",
+            &out,
+            &|_, _| {},
+        )
+        .await
+        .expect("matching installer should install");
+
+        assert_eq!(std::fs::read(&out).unwrap(), b"installer");
+        assert!(!dir.path().join("Goop.dmg.tmp-download").exists());
+    }
+
+    #[tokio::test]
+    async fn installer_download_rejects_an_oversized_checksum_manifest() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/Goop.dmg.sha256"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
+                b'a';
+                MAX_CHECKSUM_MANIFEST_BYTES
+                    + 1
+            ]))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("Goop.dmg");
+
+        let err = download_verified(
+            &reqwest::Client::new(),
+            &format!("{}/Goop.dmg", server.uri()),
+            &format!("{}/Goop.dmg.sha256", server.uri()),
+            "Goop.dmg",
+            &out,
+            &|_, _| {},
+        )
+        .await
+        .expect_err("oversized checksum manifest must fail");
+
+        assert!(err.to_string().contains("too large"));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn concurrent_downloads_get_distinct_private_directories() {
+        let (first_dir, first_path) = unique_download_destination("Goop.dmg").unwrap();
+        let (second_dir, second_path) = unique_download_destination("Goop.dmg").unwrap();
+
+        assert_ne!(first_dir.path(), second_dir.path());
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.file_name().unwrap(), "Goop.dmg");
+        assert_eq!(second_path.file_name().unwrap(), "Goop.dmg");
+    }
+
+    #[test]
     fn validates_update_download_hosts() {
         assert!(validate_download_url(
             "https://github.com/thrtn70/goop/releases/download/v0.1.8/Goop.msi"
         )
         .is_ok());
-        assert!(validate_download_url(
-            "https://objects.githubusercontent.com/github-production-release-asset"
-        )
-        .is_ok());
         assert!(
             validate_download_url("http://github.com/thrtn70/goop/releases/download/x").is_err()
         );
+        assert!(validate_download_url(
+            "https://github.com/another/repo/releases/download/v1/Goop.msi"
+        )
+        .is_err());
         assert!(validate_download_url("https://example.com/Goop.msi").is_err());
+        assert!(is_trusted_redirect(
+            &Url::parse(
+                "https://release-assets.githubusercontent.com/github-production-release-asset/x"
+            )
+            .unwrap()
+        ));
+        assert!(!is_trusted_redirect(
+            &Url::parse("https://example.com/Goop.msi").unwrap()
+        ));
     }
 }

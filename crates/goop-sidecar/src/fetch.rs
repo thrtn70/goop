@@ -13,6 +13,7 @@
 use futures_util::StreamExt;
 use goop_core::GoopError;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -21,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 /// hang the IPC handler forever.
 pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const API_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CHECKSUM_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// Serializes every sidecar update in the process.
 ///
@@ -137,16 +139,85 @@ pub(crate) async fn fetch_latest_tag(
     Ok(release.tag_name)
 }
 
+/// Return the SHA-256 bound to one exact filename in an upstream checksum
+/// manifest. Both yt-dlp and gallery-dl publish the conventional
+/// `<hex><whitespace><filename>` form. Ambiguous duplicates fail closed.
+pub(crate) fn checksum_for_asset(manifest: &str, asset: &str) -> Option<String> {
+    let mut found = None;
+    for line in manifest.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(digest) = fields.next() else {
+            continue;
+        };
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_some() || name.trim_start_matches('*') != asset {
+            continue;
+        }
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(digest.to_ascii_lowercase());
+    }
+    found
+}
+
+/// Fetch and parse the vendor's release checksum manifest before downloading
+/// an executable. Missing, malformed, or ambiguous entries are errors.
+pub(crate) async fn fetch_checksum(
+    client: &reqwest::Client,
+    checksum_url: &str,
+    asset: &str,
+    label: &str,
+) -> Result<String, GoopError> {
+    let resp = client
+        .get(checksum_url)
+        .timeout(API_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| GoopError::Queue(format!("{label}: fetch checksum manifest: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(GoopError::Queue(format!(
+            "{label}: HTTP {} from {checksum_url}",
+            resp.status()
+        )));
+    }
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| GoopError::Queue(format!("{label}: read checksum manifest: {e}")))?;
+        if body.len().saturating_add(chunk.len()) > MAX_CHECKSUM_MANIFEST_BYTES {
+            return Err(GoopError::Queue(format!(
+                "{label}: checksum manifest is too large"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8(body)
+        .map_err(|e| GoopError::Queue(format!("{label}: checksum manifest is not UTF-8: {e}")))?;
+    checksum_for_asset(&body, asset).ok_or_else(|| {
+        GoopError::Queue(format!(
+            "{label}: checksum manifest has no valid SHA-256 for {asset}"
+        ))
+    })
+}
+
 /// Stream `url` to `dest`, writing to a sibling temp file first and renaming
 /// into place so a partial download never replaces a good binary. Sets the
 /// executable bit on unix. Creates the parent dir if missing.
 ///
-/// No checksum/signature is verified here: the integrity barrier is HTTPS to a
-/// pinned host plus the post-download "does it run?" check each updater
-/// performs, which reverts a binary that won't execute.
+/// The payload is SHA-256 checked before the atomic rename. Callers obtain the
+/// expected digest from the vendor's release manifest; the post-download
+/// "does it run?" check remains a second, independent compatibility barrier.
 pub(crate) async fn download_binary(
     client: &reqwest::Client,
     url: &str,
+    expected_sha256: &str,
     dest: &Path,
     label: &str,
 ) -> Result<(), FetchError> {
@@ -177,11 +248,19 @@ pub(crate) async fn download_binary(
         }
         let mut file = tokio::fs::File::create(&tmp).await.map_err(GoopError::Io)?;
         let mut stream = resp.bytes_stream();
+        let mut hasher = Sha256::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| GoopError::Queue(format!("{label}: stream: {e}")))?;
             file.write_all(&chunk).await.map_err(GoopError::Io)?;
+            hasher.update(&chunk);
         }
         file.flush().await.map_err(GoopError::Io)?;
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected_sha256.to_ascii_lowercase() {
+            return Err(GoopError::Queue(format!(
+                "{label}: SHA-256 mismatch for {url}: expected {expected_sha256}, got {actual}"
+            )));
+        }
         Ok::<_, GoopError>(())
     })
     .await
@@ -504,6 +583,18 @@ mod tests {
         assert!(matches!(err, GoopError::Queue(_)));
     }
 
+    #[test]
+    fn checksum_manifest_requires_an_exact_asset_name() {
+        let manifest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other\n\
+                        bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b  asset\n";
+        assert_eq!(
+            checksum_for_asset(manifest, "asset").as_deref(),
+            Some("bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b")
+        );
+        assert_eq!(checksum_for_asset(manifest, "missing"), None);
+        assert_eq!(checksum_for_asset("not-a-hash  asset\n", "asset"), None);
+    }
+
     #[tokio::test]
     async fn download_binary_writes_file_and_cleans_temp() {
         let server = MockServer::start().await;
@@ -518,6 +609,7 @@ mod tests {
         download_binary(
             &reqwest::Client::new(),
             &format!("{}/dl/v1.0.0/asset", server.uri()),
+            "bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b",
             &dest,
             "test update",
         )
@@ -551,6 +643,7 @@ mod tests {
         let err = download_binary(
             &reqwest::Client::new(),
             &format!("{}/dl/v1.0.0/asset", server.uri()),
+            "bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b",
             &dest,
             "test update",
         )
@@ -583,6 +676,7 @@ mod tests {
         let err = download_binary(
             &reqwest::Client::new(),
             &format!("{}/dl/v1.0.0/asset", server.uri()),
+            "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
             &dest,
             "test update",
         )
@@ -602,5 +696,57 @@ mod tests {
             !dir.path().join("tool.tmp-download").exists(),
             "temp file must be cleaned up when the rename is refused"
         );
+    }
+
+    #[tokio::test]
+    async fn download_binary_rejects_a_checksum_mismatch_before_rename() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/asset"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"payload".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("tool");
+        std::fs::write(&dest, b"known-good").unwrap();
+
+        let err = download_binary(
+            &reqwest::Client::new(),
+            &format!("{}/asset", server.uri()),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &dest,
+            "test update",
+        )
+        .await
+        .expect_err("mismatched payload must fail");
+
+        assert!(matches!(err, FetchError::Failed(_)));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"known-good");
+        assert!(!dir.path().join("tool.tmp-download").exists());
+    }
+
+    #[tokio::test]
+    async fn checksum_manifest_rejects_an_oversized_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/SHA256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
+                b'a';
+                MAX_CHECKSUM_MANIFEST_BYTES
+                    + 1
+            ]))
+            .mount(&server)
+            .await;
+
+        let err = fetch_checksum(
+            &reqwest::Client::new(),
+            &format!("{}/SHA256SUMS", server.uri()),
+            "asset",
+            "test update",
+        )
+        .await
+        .expect_err("oversized checksum manifest must fail");
+
+        assert!(err.to_string().contains("too large"));
     }
 }

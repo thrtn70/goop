@@ -146,6 +146,9 @@ jobs:
       # rather than leaning on the runner image happening to preinstall Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with: { node-version: "22" }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        if: matrix.os == 'macos-14'
+        with: { python-version: "3.14.6" }
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
