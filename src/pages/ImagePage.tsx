@@ -1,4 +1,4 @@
-import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
+import { forgetWorkspaceSource, retireWorkspaceCompletion } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect } from "react";
@@ -109,7 +109,7 @@ function ImagePage() {
 
   const handleDone = useCallback(() => {
     files.forEach(path => forgetWorkspaceSource("image", path));
-    setFiles([]);
+    setFiles(current => current.filter(path => !files.includes(path)));
   }, [files, setFiles]);
 
   return (
@@ -173,7 +173,7 @@ function ImagePage() {
 
           <ImageOperationPicker
             selected={op}
-            onSelect={setOp}
+            onSelect={next => { if (next !== op) retireWorkspaceCompletion("image"); setOp(next); }}
             multiFile={multiFile}
           />
 

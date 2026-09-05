@@ -71,7 +71,7 @@ function MetadataPage() {
 
   const handleDone = useCallback(() => {
     files.forEach(path => forgetWorkspaceSource("metadata", path));
-    setFiles([]);
+    setFiles(current => current.filter(path => !files.includes(path)));
   }, [files, setFiles]);
 
   return (

@@ -192,3 +192,63 @@ fn avi_accepts_resolution_but_rejects_ignored_quality_levels() {
     req.resolution_cap = Some(goop_core::ResolutionCap::R1080p);
     assert!(validate_request(&req, &p).is_ok());
 }
+
+#[test]
+fn compression_does_not_silently_discard_video_settings() {
+    let mut p = probe("");
+    p.source_kind = goop_core::SourceKind::Video;
+    p.has_video = true;
+    for target in [
+        TargetFormat::Mp4,
+        TargetFormat::Mkv,
+        TargetFormat::Webm,
+        TargetFormat::Mov,
+        TargetFormat::Avi,
+    ] {
+        for mode in [
+            CompressMode::Quality(75),
+            CompressMode::TargetSizeBytes(1_000_000),
+        ] {
+            let mut req = request(target, Some(mode));
+            assert!(validate_request(&req, &p).is_ok());
+            req.quality_preset = Some(goop_core::QualityPreset::Original);
+            req.resolution_cap = Some(goop_core::ResolutionCap::Original);
+            assert!(validate_request(&req, &p).is_ok());
+            req.quality_preset = Some(goop_core::QualityPreset::Small);
+            assert!(
+                validate_request(&req, &p).is_err(),
+                "{target:?}: compression ignores quality preset"
+            );
+            req.quality_preset = None;
+            req.resolution_cap = Some(goop_core::ResolutionCap::R720p);
+            assert!(
+                validate_request(&req, &p).is_err(),
+                "{target:?}: compression ignores resolution"
+            );
+            req.compress_mode = None;
+            assert!(validate_request(&req, &p).is_ok());
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_expands_home_relative_source_paths() {
+    use goop_converter::capabilities::validate_request_source;
+    let home = goop_core::path::expand("~");
+    assert!(home.is_absolute(), "test requires the current-user home");
+    let dir = tempfile::Builder::new()
+        .prefix(".goop-admission-test-")
+        .tempdir_in(&home)
+        .unwrap();
+    let source = dir.path().join("source.png");
+    image::RgbImage::new(2, 2).save(&source).unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let mut req = request(TargetFormat::Png, None);
+    req.input_path = source.to_string_lossy().into_owned();
+    assert!(validate_request_source(&resolver, &req).await.is_ok());
+    req.input_path = format!(
+        "~/{}",
+        source.strip_prefix(&home).unwrap().to_string_lossy()
+    );
+    assert!(validate_request_source(&resolver, &req).await.is_ok());
+}

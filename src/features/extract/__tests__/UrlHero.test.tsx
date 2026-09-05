@@ -789,3 +789,30 @@ it("composes one source summary and one settings inspector without an extra prob
   expect(screen.getAllByRole("button", { name: /^Start$/ })).toHaveLength(1);
   expect(apiMocks.extract.probe).toHaveBeenCalledTimes(1);
 });
+
+describe("retry probe ownership", () => {
+  it.each(["resolve", "reject"] as const)("ignores a stale retry %s after a new URL", async (outcome) => {
+    let resolveRetry!: (probe: UrlProbe) => void;
+    let rejectRetry!: (reason: Error) => void;
+    const retry = new Promise<UrlProbe>((resolve, reject) => {
+      resolveRetry = resolve;
+      rejectRetry = reject;
+    });
+    apiMocks.extract.probe
+      .mockRejectedValueOnce(new Error("Initial failure"))
+      .mockReturnValueOnce(retry)
+      .mockResolvedValueOnce(probeResult({ url: "https://example.com/b", title: "Current B" }));
+    const view = render(<MemoryRouter><UrlHero url="https://example.com/a" /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    view.rerender(<MemoryRouter><UrlHero url="https://example.com/b" /></MemoryRouter>);
+    await screen.findByText("Current B");
+    await act(async () => {
+      if (outcome === "resolve") resolveRetry(probeResult({ title: "Stale A" }));
+      else rejectRetry(new Error("Stale retry failure"));
+    });
+    expect(screen.getByText("Current B")).toBeTruthy();
+    expect(screen.queryByText("Stale A")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(apiMocks.extract.fromUrl).not.toHaveBeenCalled();
+  });
+});

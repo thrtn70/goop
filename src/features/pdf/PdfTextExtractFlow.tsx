@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfExtractText } from "@/ipc/commands";
@@ -26,12 +27,13 @@ function stemOf(p: string): string {
  */
 export default function PdfTextExtractFlow({ file, onDone }: PdfTextExtractFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   async function handleApply() {
     if (busy) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -48,7 +50,7 @@ export default function PdfTextExtractFlow({ file, onDone }: PdfTextExtractFlowP
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

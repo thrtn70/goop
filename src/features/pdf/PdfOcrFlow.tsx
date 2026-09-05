@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -37,7 +38,7 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [lang, setLang] = useWorkspaceDraftState<string>("PdfOcrFlow.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
-  const [busy, setBusy] = useState<boolean>(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -66,7 +67,8 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
 
   async function handleApply() {
     if (busy) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -83,7 +85,7 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

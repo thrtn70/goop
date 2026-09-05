@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -56,6 +57,7 @@ function RecognizePage() {
   const [lang, setLang] = useWorkspaceDraftState<string>("RecognizePage.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const [phase, setPhase] = useState<Phase>("idle");
+  const { busy: submitting, begin } = useWorkspaceOperation();
   const [jobId, setJobId] = useState<JobId | null>(null);
   const [result, setResult] = useState<RecognizeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +161,8 @@ function RecognizePage() {
 
   async function handleRecognize() {
     if (!input || phase === "running") return;
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     const isText = outputKind === "text";
     const stem = basename(input).replace(/\.[^.]+$/, "");
@@ -181,11 +185,13 @@ function RecognizePage() {
     } catch (e) {
       setError(formatError(e));
       setPhase("error");
+    } finally {
+      finish();
     }
   }
 
   const canRecognize =
-    !!input && phase !== "running" && installed.length > 0 && !!lang;
+    !!input && !submitting && phase !== "running" && installed.length > 0 && !!lang;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -303,7 +309,7 @@ function RecognizePage() {
               onClick={() => void handleRecognize()}
               className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {phase === "running" ? "Recognizing…" : "Recognize text"}
+              {submitting ? "Starting…" : phase === "running" ? "Recognizing…" : "Recognize text"}
             </button>
             {error && <span className="text-xs text-error">{error}</span>}
           </div>

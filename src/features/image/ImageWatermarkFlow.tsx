@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -56,14 +57,15 @@ function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
   const [text, setText] = useWorkspaceDraftState("ImageWatermarkFlow.text", DEFAULT_TEXT);
   const [position, setPosition] = useWorkspaceDraftState<WatermarkPosition>("ImageWatermarkFlow.position", DEFAULT_POSITION);
   const [opacity, setOpacity] = useWorkspaceDraftState<number>("ImageWatermarkFlow.opacity", DEFAULT_OPACITY);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const canApply = !busy && text.trim().length > 0;
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -72,7 +74,6 @@ function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
         title: "Save watermarked image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.image.run(
@@ -87,7 +88,7 @@ function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

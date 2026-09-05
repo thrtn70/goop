@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -38,12 +39,13 @@ function extOf(p: string): string {
 function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [degrees, setDegrees] = useWorkspaceDraftState<RotationDegrees>("ImageRotateFlow.degrees", "cw90");
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   async function handleApply() {
     if (busy) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -52,7 +54,6 @@ function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
         title: "Save rotated image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.image.run(imageRotate(file, degrees, dest));
@@ -61,7 +62,7 @@ function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

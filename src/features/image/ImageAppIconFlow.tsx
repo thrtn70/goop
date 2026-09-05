@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -53,7 +54,7 @@ function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
   const [selected, setSelected] = useWorkspaceDraftState<Set<IconPlatform>>("ImageAppIconFlow.selected",
     () => new Set<IconPlatform>(["macos", "windows", "web"]),
   );
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   function toggle(p: IconPlatform) {
@@ -72,7 +73,8 @@ function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dir = await open({
@@ -81,7 +83,6 @@ function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
       });
       const outDir = typeof dir === "string" ? dir : null;
       if (!outDir) {
-        setBusy(false);
         return;
       }
       const platforms: IconPlatform[] = PLATFORMS.map((p) => p.value).filter(
@@ -93,7 +94,7 @@ function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

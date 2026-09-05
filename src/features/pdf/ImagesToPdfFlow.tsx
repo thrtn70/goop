@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -29,7 +30,7 @@ function basename(p: string): string {
 export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [images, setImages] = useWorkspaceDraftState<string[]>("ImagesToPdfFlow.images", []);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   async function handlePick() {
@@ -99,7 +100,8 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
 
   async function handleApply() {
     if (busy || images.length === 0) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -116,7 +118,7 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

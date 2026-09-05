@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -21,14 +22,15 @@ const DEFAULT_QUALITY = 75;
 function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [quality, setQuality] = useWorkspaceDraftState<number>("ImageRecompressFlow.quality", DEFAULT_QUALITY);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const canApply = !busy && files.length > 0;
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dir = await open({
@@ -37,7 +39,6 @@ function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
       });
       const outDir = typeof dir === "string" ? dir : null;
       if (!outDir) {
-        setBusy(false);
         return;
       }
       await api.image.run(imageRecompress(files, outDir, quality));
@@ -46,7 +47,7 @@ function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -89,4 +90,4 @@ function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
   );
 }
 
-export default withWorkspaceDrafts(ImageRecompressFlow, undefined, () => ["ImageRecompressFlow"]);
+export default withWorkspaceDrafts(ImageRecompressFlow, undefined, props => ["ImageRecompressFlow", ...props.files.slice().sort()]);

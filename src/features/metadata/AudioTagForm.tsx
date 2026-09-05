@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useMemo, useState } from "react";
@@ -45,7 +46,7 @@ function AudioTagForm({ view, onDone }: AudioTagFormProps) {
   const [comment, setComment] = useWorkspaceDraftState("AudioTagForm.comment", orig.comment ?? "");
   const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioTagForm.cover", { kind: "keep" });
   const [backup, setBackup] = useWorkspaceDraftState("AudioTagForm.backup", false);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const audio = useMemo<AudioTags>(
@@ -69,7 +70,8 @@ function AudioTagForm({ view, onDone }: AudioTagFormProps) {
 
   async function handleApply() {
     if (!dirty || busy) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const item: MetadataWriteItem = { path: view.path, audio, cover_art: cover };
@@ -79,7 +81,7 @@ function AudioTagForm({ view, onDone }: AudioTagFormProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

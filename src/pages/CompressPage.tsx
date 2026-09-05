@@ -379,7 +379,7 @@ function CompressPage() {
                 .forEach((path) => forgetWorkspaceSource("compress", path));
               setPdfs(next);
             }}
-            onDone={() => setPdfs([])}
+            onDone={() => setPdfs(current => current.filter(path => !pdfs.includes(path)))}
             defaultOp="compress"
           />
         </section>

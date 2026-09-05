@@ -126,13 +126,16 @@ fn refused(reason: impl Into<String>) -> GoopError {
 
 /// The probe must be obtained from the engine's source read, never from client input.
 pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(), GoopError> {
-    let quality_supported = probe.source_kind == SourceKind::Video
+    // Compression uses a separate plan that cannot apply these video settings.
+    let video_settings_supported =
+        probe.source_kind == SourceKind::Video && req.compress_mode.is_none();
+    let quality_supported = video_settings_supported
         && matches!(
             req.target,
             TargetFormat::Mp4 | TargetFormat::Mkv | TargetFormat::Webm | TargetFormat::Mov
         );
-    let resolution_supported = quality_supported
-        || (probe.source_kind == SourceKind::Video && req.target == TargetFormat::Avi);
+    let resolution_supported =
+        quality_supported || (video_settings_supported && req.target == TargetFormat::Avi);
     if (req
         .quality_preset
         .is_some_and(|q| q != goop_core::QualityPreset::Original)
@@ -142,7 +145,7 @@ pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(),
             .is_some_and(|r| r != goop_core::ResolutionCap::Original)
             && !resolution_supported)
     {
-        return Err(refused("The selected output does not support these video quality or resolution settings. Clear unsupported video settings; GIF uses its own size controls."));
+        return Err(refused("The selected output or compression mode does not support these video quality or resolution settings. Clear unsupported video settings; GIF uses its own size controls."));
     }
     let caps = capabilities_for(probe);
     let target = caps
@@ -191,7 +194,7 @@ pub async fn validate_request_source(
 ) -> Result<(), GoopError> {
     validate_request(
         req,
-        &probe_source(resolver, Path::new(&req.input_path)).await?,
+        &probe_source(resolver, &goop_core::path::expand(&req.input_path)).await?,
     )
 }
 

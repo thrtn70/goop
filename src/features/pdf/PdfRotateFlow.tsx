@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -27,7 +28,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const { pages, setPages, loadPages } = usePdfPageDrafts("PdfRotateFlow.pages");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -71,7 +72,8 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -79,7 +81,6 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
         title: "Save rotated PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfRotate(file, rotations, dest));
@@ -88,7 +89,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

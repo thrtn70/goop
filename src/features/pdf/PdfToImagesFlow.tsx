@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -25,12 +26,13 @@ export default function PdfToImagesFlow({ file, onDone }: PdfToImagesFlowProps) 
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [format, setFormat] = useWorkspaceDraftState<PdfImageFormat>("PdfToImagesFlow.format", "png");
   const [dpi, setDpi] = useWorkspaceDraftState<number>("PdfToImagesFlow.dpi", DPI_DEFAULT);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   async function handleApply() {
     if (busy) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dir = await open({
@@ -47,7 +49,7 @@ export default function PdfToImagesFlow({ file, onDone }: PdfToImagesFlowProps) 
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -27,7 +28,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
   const { pages, setPages, loadPages } = usePdfPageDrafts("PdfReorderFlow.pages");
   const [initial, setInitial] = useState<PageState[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -62,7 +63,8 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
 
   async function handleApply() {
     if (!dirty || pages.length === 0) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -70,7 +72,6 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
         title: "Save reordered PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       const order = pages.map((p) => p.originalPage);
@@ -80,7 +81,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

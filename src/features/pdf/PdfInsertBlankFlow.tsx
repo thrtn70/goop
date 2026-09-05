@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -26,7 +27,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
   const [totalPages, setTotalPages] = useState<number>(0);
   const [positions, setPositions] = useWorkspaceDraftState<number[]>("PdfInsertBlankFlow.positions", []);
   const [draft, setDraft] = useWorkspaceDraftState<string>("PdfInsertBlankFlow.draft", "");
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -63,7 +64,8 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -71,7 +73,6 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
         title: "Save PDF with blank pages",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfInsertBlank(file, positions, dest));
@@ -80,7 +81,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

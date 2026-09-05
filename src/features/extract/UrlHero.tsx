@@ -26,6 +26,7 @@ export default function UrlHero({ url }: { url?: string }) {
     null,
   );
   const cancelledRef = useRef(false);
+  const probeGeneration = useRef(0);
   // Everything about starting a download, in one place. This was five
   // separate pieces — an epoch ref, two booleans and an error object — and
   // every defect here was two of them disagreeing.
@@ -39,6 +40,7 @@ export default function UrlHero({ url }: { url?: string }) {
   const navigate = useNavigate();
 
   async function handleProbe(u: string) {
+    const generation = ++probeGeneration.current;
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
@@ -47,21 +49,22 @@ export default function UrlHero({ url }: { url?: string }) {
     setLastUrl(u);
     try {
       const result = await api.extract.probe(u);
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setProbe(result);
       }
     } catch (e) {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setError(formatError(e));
       }
     } finally {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setLoading(false);
       }
     }
   }
 
   function handleCancel() {
+    probeGeneration.current += 1;
     cancelledRef.current = true;
     setLastUrl(null);
     setLoading(false);
@@ -141,6 +144,7 @@ export default function UrlHero({ url }: { url?: string }) {
     const requestedUrl = url ?? lastUrl;
     if (!requestedUrl) return;
     let cancelled = false;
+    const generation = ++probeGeneration.current;
     (async () => {
       cancelledRef.current = false;
       setLoading(true);
@@ -150,15 +154,16 @@ export default function UrlHero({ url }: { url?: string }) {
       setLastUrl(requestedUrl);
       try {
         const result = await api.extract.probe(requestedUrl);
-        if (!cancelled && !cancelledRef.current) setProbe(result);
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setProbe(result);
       } catch (e) {
-        if (!cancelled && !cancelledRef.current) setError(formatError(e));
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setError(formatError(e));
       } finally {
-        if (!cancelled && !cancelledRef.current) setLoading(false);
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
+      probeGeneration.current += 1;
       cancelledRef.current = true;
     };
     // Re-entering the route re-probes saved input but never retires or repeats its enqueue.

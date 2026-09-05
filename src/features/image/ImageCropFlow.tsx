@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -37,14 +38,15 @@ function extOf(p: string): string {
 function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [rect, setRect] = useWorkspaceDraftState<EditorRect | null>("ImageCropFlow.rect", null);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const canApply = rect !== null && !busy;
 
   async function handleApply() {
     if (!canApply || rect === null) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -53,7 +55,6 @@ function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
         title: "Save cropped image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.image.run(imageCrop(file, rect, dest));
@@ -62,7 +63,7 @@ function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

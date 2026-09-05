@@ -70,7 +70,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             Some(CompressMode::TargetSizeBytes(bytes)) => Some(bytes),
             _ => None,
         };
-        let bytes = staged_image_output(output_path.clone(), target_bytes, cancel, move |out| {
+        let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
             process_image(&input, out, target, compress_mode)?;
             metadata::apply(&input, out, metadata_policy)?;
             Ok(())
@@ -87,8 +87,8 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
-            output_path: output_path.to_string_lossy().into_owned(),
-            bytes,
+            output_path: published.path.to_string_lossy().into_owned(),
+            bytes: published.bytes,
             duration_ms: started.elapsed().as_millis() as u64,
             reencoded: true,
         })
@@ -100,6 +100,26 @@ fn image_error(message: impl Into<String>) -> GoopError {
         binary: "image".into(),
         stderr: message.into(),
     }
+}
+
+struct ImageDestination {
+    path: PathBuf,
+    automatic_name: Option<(String, &'static str)>,
+}
+
+impl From<PathBuf> for ImageDestination {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            automatic_name: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublishedImage {
+    path: PathBuf,
+    bytes: u64,
 }
 
 /// Private same-filesystem workspace. Dropping a cancelled worker's result
@@ -242,39 +262,63 @@ fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
 
 async fn finish_image_output(
     mut worker: tokio::task::JoinHandle<Result<StagedImage, GoopError>>,
-    destination: PathBuf,
+    destination: ImageDestination,
     cancel: CancellationToken,
-) -> Result<u64, GoopError> {
+) -> Result<PublishedImage, GoopError> {
     let staged = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(GoopError::Cancelled),
         result = &mut worker => result.map_err(|e| image_error(format!("convert task panicked: {e}")))??,
     };
-    if cancel.is_cancelled() {
-        return Err(GoopError::Cancelled);
-    }
     // This synchronous no-clobber commit is the completion boundary. A late
     // cancellation after it succeeds belongs to an already completed operation.
-    publish_image(&staged.path, &destination).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::Unsupported {
-            image_error(format!("destination filesystem does not support atomic publishing; choose another destination: {e}"))
-        } else {
-            image_error(format!("cannot publish image output without replacing an existing file: {e}"))
+    let mut path = destination.path.clone();
+    for suffix in 1..=10_000 {
+        if cancel.is_cancelled() {
+            return Err(GoopError::Cancelled);
         }
-    })?;
-    Ok(staged.bytes)
+        match publish_image(&staged.path, &path) {
+            Ok(()) => {
+                return Ok(PublishedImage {
+                    path,
+                    bytes: staged.bytes,
+                })
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    && destination.automatic_name.is_some() =>
+            {
+                if let Some((stem, ext)) = &destination.automatic_name {
+                    path = destination
+                        .path
+                        .with_file_name(format!("{stem} ({suffix}).{ext}"));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                return Err(image_error(format!("destination filesystem does not support atomic publishing; choose another destination: {e}")));
+            }
+            Err(e) => {
+                return Err(image_error(format!(
+                    "cannot publish image output without replacing an existing file: {e}"
+                )))
+            }
+        }
+    }
+    Err(image_error(
+        "cannot allocate an unused image output name after 10000 publication attempts",
+    ))
 }
 
 async fn staged_image_output<F>(
-    destination: PathBuf,
+    destination: ImageDestination,
     target_bytes: Option<u64>,
     cancel: CancellationToken,
     work: F,
-) -> Result<u64, GoopError>
+) -> Result<PublishedImage, GoopError>
 where
     F: FnOnce(&Path) -> Result<(), GoopError> + Send + 'static,
 {
-    let worker_path = destination.clone();
+    let worker_path = destination.path.clone();
     let worker_cancel = cancel.clone();
     let worker = tokio::task::spawn_blocking(move || {
         prepare_image_output(&worker_path, target_bytes, &worker_cancel, work)
@@ -739,19 +783,22 @@ fn resolve_output_path(
     input_path: &str,
     requested: &str,
     req: &ConvertRequest,
-) -> Result<PathBuf, GoopError> {
+) -> Result<ImageDestination, GoopError> {
     let requested_buf = PathBuf::from(requested);
     if requested_buf.is_dir() {
         let stem = stem_of(input_path);
         let ext = req.target.extension();
-        Ok(allocate_output_path(&requested_buf, &stem, ext))
+        Ok(ImageDestination {
+            path: allocate_output_path(&requested_buf, &stem, ext),
+            automatic_name: Some((stem, ext)),
+        })
     } else {
         if let Some(parent) = requested_buf.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        Ok(requested_buf)
+        Ok(requested_buf.into())
     }
 }
 
@@ -882,6 +929,101 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_automatic_names_publish_both_results() {
+        struct Sink(std::sync::Barrier);
+        impl EventSink for Sink {
+            fn emit_progress(&self, event: ProgressEvent) {
+                if event.percent == 0.0 {
+                    self.0.wait();
+                }
+            }
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let sink = Arc::new(Sink(std::sync::Barrier::new(2)));
+        let mut tasks = Vec::new();
+        for (name, color) in [("a", [255, 0, 0]), ("b", [0, 255, 0])] {
+            let source_dir = dir.path().join(name);
+            std::fs::create_dir(&source_dir).unwrap();
+            let input = source_dir.join("photo.png");
+            let expected = image::RgbImage::from_pixel(8, 8, image::Rgb(color));
+            expected.save(&input).unwrap();
+            let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+                "input_path": input, "output_path": output, "target": TargetFormat::Webp,
+            }))
+            .unwrap();
+            let sink = sink.clone();
+            let resolver = BinaryResolver::new(dir.path().to_owned());
+            tasks.push(tokio::spawn(async move {
+                let backend = ImageMagickBackend::new(&resolver, sink);
+                let result = backend
+                    .convert(JobId::new(), &req, CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.bytes,
+                    std::fs::metadata(&result.output_path).unwrap().len()
+                );
+                assert_eq!(
+                    image::open(&result.output_path).unwrap().to_rgb8(),
+                    expected
+                );
+                result.output_path
+            }));
+        }
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            (
+                tasks.remove(0).await.unwrap(),
+                tasks.remove(0).await.unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_dir(output).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn automatic_name_skips_and_preserves_dangling_symlink() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("photo.png");
+        write_test_png(&input, 8, 8);
+        let destination = dir.path().join("photo.webp");
+        let missing = dir.path().join("missing");
+        std::os::unix::fs::symlink(&missing, &destination).unwrap();
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input, "output_path": dir.path(), "target": TargetFormat::Webp,
+        }))
+        .unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            Path::new(&result.output_path),
+            dir.path().join("photo (1).webp")
+        );
+        assert_eq!(std::fs::read_link(destination).unwrap(), missing);
+        assert_eq!(
+            result.bytes,
+            std::fs::metadata(&result.output_path).unwrap().len()
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
     #[tokio::test]
     async fn cancelled_blocking_worker_never_publishes_and_cleans_staging() {
         let dir = tempfile::tempdir().unwrap();
@@ -904,7 +1046,11 @@ mod tests {
             done_tx.send(()).unwrap();
             result
         });
-        let task = tokio::spawn(finish_image_output(worker, output.clone(), cancel.clone()));
+        let task = tokio::spawn(finish_image_output(
+            worker,
+            output.clone().into(),
+            cancel.clone(),
+        ));
         entered_rx.await.unwrap();
         cancel.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
@@ -924,16 +1070,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.jpg");
         std::fs::write(&output, b"original").unwrap();
-        let result = staged_image_output(output.clone(), None, CancellationToken::new(), |path| {
-            std::fs::write(path, b"partial")?;
-            Err(GoopError::Cancelled)
-        })
+        let result = staged_image_output(
+            output.clone().into(),
+            None,
+            CancellationToken::new(),
+            |path| {
+                std::fs::write(path, b"partial")?;
+                Err(GoopError::Cancelled)
+            },
+        )
         .await;
         assert!(result.is_err());
-        let result = staged_image_output(output.clone(), None, CancellationToken::new(), |path| {
-            std::fs::write(path, b"new")?;
-            Ok(())
-        })
+        let result = staged_image_output(
+            output.clone().into(),
+            None,
+            CancellationToken::new(),
+            |path| {
+                std::fs::write(path, b"new")?;
+                Ok(())
+            },
+        )
         .await;
         assert!(result.is_err());
         assert_eq!(std::fs::read(&output).unwrap(), b"original");
@@ -952,7 +1108,7 @@ mod tests {
         std::fs::write(&input, jpeg.encoder().bytes()).unwrap();
         let output = dir.path().join("out.jpg");
         let result = staged_image_output(
-            output.clone(),
+            output.clone().into(),
             Some(2000),
             CancellationToken::new(),
             move |path| {

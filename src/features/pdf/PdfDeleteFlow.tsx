@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -25,7 +26,7 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const { pages, setPages, loadPages } = usePdfPageDrafts("PdfDeleteFlow.pages");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -62,7 +63,8 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -70,7 +72,6 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
         title: "Save trimmed PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfDeletePages(file, toDelete, dest));
@@ -79,7 +80,7 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

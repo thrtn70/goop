@@ -83,6 +83,22 @@ describe("preset I/O — parse", () => {
     expect(entries[0].name).toBe("Roundtrip");
   });
 
+  it.each(["srt", "vtt"] as const)("round-trips a %s subtitle preset", (target) => {
+    const original = makePreset({
+      name: "Subtitle",
+      target,
+      quality_preset: null,
+      resolution_cap: null,
+    });
+    expect(parsePresetBundle(serializePresets([original]))).toEqual([{
+      name: "Subtitle",
+      target,
+      quality_preset: null,
+      resolution_cap: null,
+      compress_mode: null,
+    }]);
+  });
+
   it("rejects malformed JSON", () => {
     expect(() => parsePresetBundle("not json {")).toThrow(PresetParseError);
   });

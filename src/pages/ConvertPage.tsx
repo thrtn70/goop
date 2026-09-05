@@ -412,7 +412,7 @@ function ConvertPage() {
                 .forEach((path) => forgetWorkspaceSource("convert", path));
               setPdfs(next);
             }}
-            onDone={() => setPdfs([])}
+            onDone={() => setPdfs(current => current.filter(path => !pdfs.includes(path)))}
           />
         </section>
       )}

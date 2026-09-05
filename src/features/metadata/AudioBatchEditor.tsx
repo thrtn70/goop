@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -53,7 +54,7 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
 
   const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioBatchEditor.cover", { kind: "keep" });
   const [backup, setBackup] = useWorkspaceDraftState("AudioBatchEditor.backup", false);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const shared = (s: string): string | null => (s.trim() === "" ? null : s);
@@ -73,7 +74,8 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
 
   async function handleApply() {
     if (busy || !dirty) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const items: MetadataWriteItem[] = views.map((v) => {
@@ -101,7 +103,7 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

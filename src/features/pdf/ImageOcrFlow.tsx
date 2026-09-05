@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -30,7 +31,7 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [lang, setLang] = useWorkspaceDraftState<string>("ImageOcrFlow.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
-  const [busy, setBusy] = useState<boolean>(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -78,7 +79,8 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
 
   async function handleApply() {
     if (busy || images.length === 0) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const isText = outputKind === "text";
@@ -100,7 +102,7 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

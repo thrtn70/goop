@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
@@ -70,7 +71,7 @@ function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
   const [width, setWidth] = useWorkspaceDraftState<number>("ImageResizeFlow.width", DEFAULT_BOX);
   const [height, setHeight] = useWorkspaceDraftState<number>("ImageResizeFlow.height", DEFAULT_BOX);
   const [scale, setScale] = useWorkspaceDraftState<number>("ImageResizeFlow.scale", DEFAULT_SCALE);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const isScale = mode === "scale";
@@ -78,7 +79,8 @@ function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -87,7 +89,6 @@ function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
         title: "Save resized image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       // Scale mode encodes the percentage in `width`; height is ignored
@@ -102,7 +103,7 @@ function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

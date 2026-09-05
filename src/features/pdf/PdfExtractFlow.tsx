@@ -1,3 +1,4 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
@@ -27,7 +28,7 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfExtractFlow.ranges", []);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -49,7 +50,8 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -57,7 +59,6 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
         title: "Save extracted PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfExtractPages(file, ranges, dest));
@@ -66,7 +67,7 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
