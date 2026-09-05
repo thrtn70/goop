@@ -4,6 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 interface DropZoneProps {
   onFiles: (paths: string[]) => void;
   children: React.ReactNode;
+  /** An add-more target below populated sources; other consumers keep the roomy default. */
+  compact?: boolean;
 }
 
 /**
@@ -20,7 +22,7 @@ interface DropZoneProps {
  * faking cursor follow. That sidesteps a subtle UX lie ("the gradient
  * follows my cursor!") and stays honest with what the platform reports.
  */
-export default function DropZone({ onFiles, children }: DropZoneProps) {
+export default function DropZone({ onFiles, children, compact = false }: DropZoneProps) {
   const [hovering, setHovering] = useState(false);
   const [ripples, setRipples] = useState<number[]>([]);
   // Track pending ripple-eviction timers so we can clear them in the
@@ -77,7 +79,7 @@ export default function DropZone({ onFiles, children }: DropZoneProps) {
 
   return (
     <div
-      className={`relative min-h-[120px] rounded-lg transition-colors duration-fast ease-out ${
+      className={`relative ${compact ? "min-h-[44px]" : "min-h-[120px]"} rounded-lg transition-colors duration-fast ease-out ${
         hovering ? "bg-accent-subtle/60" : "bg-surface-1/50"
       }`}
     >

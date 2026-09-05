@@ -127,3 +127,46 @@ it("keeps every compatible engine output visible and explains unavailability", a
   expect(screen.getByRole("button", { name: "AVIF" })).toBeTruthy();
   expect(smartDefault(probe)).toBe("jpeg");
 });
+
+it("keeps the selected recommendation visible and exposes target selection", async () => {
+  const { default: TargetPicker } = await import("../TargetPicker");
+  const probe = {
+    source_kind: "image",
+    image_format: "RAW",
+  } as import("@/types").ProbeResult;
+  const props = { probe, capabilities: state.capabilities, onChange: vi.fn() };
+  const view = render(<TargetPicker {...props} selected="jpeg" />);
+  const recommended = screen.getByRole("button", { name: "JPEG" });
+  expect(recommended.textContent).toContain("*");
+  expect(recommended.getAttribute("aria-pressed")).toBe("true");
+  view.rerender(<TargetPicker {...props} selected="png" />);
+  expect(
+    screen.getByRole("button", { name: "JPEG" }).getAttribute("aria-pressed"),
+  ).toBe("false");
+  expect(
+    screen.getByRole("button", { name: "PNG" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+});
+it("omits the recommendation legend when that output is unavailable", async () => {
+  const { default: TargetPicker } = await import("../TargetPicker");
+  const probe = {
+    source_kind: "image",
+    image_format: "RAW",
+  } as import("@/types").ProbeResult;
+  const capabilities = {
+    ...state.capabilities,
+    targets: state.capabilities.targets.map((target) => ({
+      ...target,
+      available: target.target !== "jpeg",
+    })),
+  };
+  render(
+    <TargetPicker
+      probe={probe}
+      capabilities={capabilities}
+      selected="jpeg"
+      onChange={vi.fn()}
+    />,
+  );
+  expect(screen.queryByText(/recommended for this file/)).toBeNull();
+});

@@ -466,3 +466,34 @@ it("keeps newer unblurred target-size text and unit after an earlier enqueue suc
     value: 10485760,
   });
 });
+
+for (const tool of ["convert", "compress"] as const) {
+  for (const inputs of [
+    ["/a.mp4"],
+    ["/document.pdf"],
+    ["/a.mp4", "/document.pdf"],
+  ]) {
+    it(
+      tool +
+        " shows populated sources/operations before the add-more drop target: " +
+        inputs.join(","),
+      async () => {
+        mocks.open.mockResolvedValue(inputs);
+        render(page(tool));
+        fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+        const region = await screen.findByRole("region", {
+          name: inputs.includes("/document.pdf") ? "PDF operations" : "Sources",
+        });
+        const hint = await screen.findByText(/Drop more files/);
+        expect(
+          region.compareDocumentPosition(hint) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ).not.toBe(0);
+        if (inputs.includes("/a.mp4"))
+          expect(
+            screen.getByRole("button", { name: "Select a.mp4" }),
+          ).toBeTruthy();
+      },
+    );
+  }
+}

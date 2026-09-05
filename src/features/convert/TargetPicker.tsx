@@ -92,6 +92,7 @@ export default function TargetPicker({ probe, selected, onChange, capabilities }
                   key={t.value}
                   type="button"
                   disabled={!ok}
+                  aria-pressed={selected === t.value}
                   title={!ok ? reason : isRecommended ? `${t.hint} (recommended)` : t.hint}
                   aria-label={!ok ? `${t.label}, unavailable: ${reason}` : undefined}
                   onClick={() => onChange(t.value)}
@@ -103,15 +104,15 @@ export default function TargetPicker({ probe, selected, onChange, capabilities }
                   )}
                 >
                   {t.label}
-                  {isRecommended && selected !== t.value && (
-                    <span aria-hidden="true" className="ml-1 text-xs font-normal text-accent">*</span>
+                  {isRecommended && (
+                    <span aria-hidden="true" className="ml-1 text-xs font-normal">*</span>
                   )}
                 </button>
               );
             })}
           </div>
-          {TARGETS.some((t) => t.group === group && t.value === recommended) && (
-            <p className="mt-1 text-xs text-fg-muted/60">* recommended for this file</p>
+          {TARGETS.some((t) => t.group === group && t.value === recommended && capabilities.targets.some(c => c.target === t.value && c.available)) && (
+            <p className="mt-1 text-xs text-fg-secondary">* recommended for this file</p>
           )}
         </div>
       ))}

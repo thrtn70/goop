@@ -336,24 +336,21 @@ function CompressPage() {
         </WorkspaceInspector>
       }
     >
-      <DropZone onFiles={addPaths}>
-        <div className="px-4 py-5 text-sm text-fg-secondary">
-          {files.length || pdfs.length
-            ? "Drop more files here."
-            : "Drop video, audio, images, or PDFs here."}{" "}
-          <button
-            type="button"
-            onClick={() => void handleBrowse()}
-            className="text-accent underline"
-          >
-            Pick from your computer
-          </button>
-        </div>
-      </DropZone>
-      {files.length > 0 && (
-        <div className="py-4">
-          <PresetChips kind="compress" onApply={applyPreset} />
-        </div>
+      {files.length === 0 && pdfs.length === 0 && (
+        <DropZone onFiles={addPaths}>
+          <div className="px-4 py-5 text-sm text-fg-secondary">
+            {files.length || pdfs.length
+              ? "Drop more files here."
+              : "Drop video, audio, images, or PDFs here."}{" "}
+            <button
+              type="button"
+              onClick={() => void handleBrowse()}
+              className="text-accent underline"
+            >
+              Pick from your computer
+            </button>
+          </div>
+        </DropZone>
       )}
       <WorkspaceList label="Sources">
         <ul>
@@ -386,6 +383,25 @@ function CompressPage() {
             defaultOp="compress"
           />
         </section>
+      )}
+      {files.length > 0 && (
+        <div className="py-4">
+          <PresetChips kind="compress" onApply={applyPreset} />
+        </div>
+      )}
+      {(files.length > 0 || pdfs.length > 0) && (
+        <DropZone compact onFiles={addPaths}>
+          <div className="px-3 py-2 text-sm text-fg-secondary">
+            Drop more files here.{" "}
+            <button
+              type="button"
+              onClick={() => void handleBrowse()}
+              className="text-accent underline"
+            >
+              Pick from your computer
+            </button>
+          </div>
+        </DropZone>
       )}
     </WorkspaceFrame>
   );

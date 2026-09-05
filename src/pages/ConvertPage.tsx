@@ -368,24 +368,21 @@ function ConvertPage() {
         </WorkspaceInspector>
       }
     >
-      <DropZone onFiles={addPaths}>
-        <div className="px-4 py-5 text-sm text-fg-secondary">
-          {files.length || pdfs.length
-            ? "Drop more files here."
-            : "Drop something here. Video, audio, images, and PDFs."}{" "}
-          <button
-            type="button"
-            onClick={() => void handleBrowse()}
-            className="text-accent underline"
-          >
-            Pick from your computer
-          </button>
-        </div>
-      </DropZone>
-      {files.length > 0 && (
-        <div className="py-4">
-          <PresetChips kind="convert" onApply={applyPreset} />
-        </div>
+      {files.length === 0 && pdfs.length === 0 && (
+        <DropZone onFiles={addPaths}>
+          <div className="px-4 py-5 text-sm text-fg-secondary">
+            {files.length || pdfs.length
+              ? "Drop more files here."
+              : "Drop something here. Video, audio, images, and PDFs."}{" "}
+            <button
+              type="button"
+              onClick={() => void handleBrowse()}
+              className="text-accent underline"
+            >
+              Pick from your computer
+            </button>
+          </div>
+        </DropZone>
       )}
       <WorkspaceList label="Sources">
         <ul>
@@ -418,6 +415,25 @@ function ConvertPage() {
             onDone={() => setPdfs([])}
           />
         </section>
+      )}
+      {files.length > 0 && (
+        <div className="py-4">
+          <PresetChips kind="convert" onApply={applyPreset} />
+        </div>
+      )}
+      {(files.length > 0 || pdfs.length > 0) && (
+        <DropZone compact onFiles={addPaths}>
+          <div className="px-3 py-2 text-sm text-fg-secondary">
+            Drop more files here.{" "}
+            <button
+              type="button"
+              onClick={() => void handleBrowse()}
+              className="text-accent underline"
+            >
+              Pick from your computer
+            </button>
+          </div>
+        </DropZone>
       )}
     </WorkspaceFrame>
   );
