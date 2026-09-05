@@ -2,6 +2,7 @@ pub mod app_update;
 pub mod commands;
 pub mod events;
 pub mod logging;
+mod startup_cleanup;
 pub mod state;
 pub mod thumbnail;
 pub mod ytdlp_auto_update;
@@ -18,6 +19,7 @@ use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult,
     MetadataOperation, PdfOperation, PidRegistry, ProgressEvent, ResultKind,
 };
+use goop_extractor::debrid::PARTIAL_ARTIFACTS_PAYLOAD_KEY;
 use goop_extractor::ytdlp::ExtractRequest;
 use goop_pdf::{
     compress as pdf_compress, delete_pages as pdf_delete_pages,
@@ -29,6 +31,7 @@ use goop_pdf::{
 };
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
+use startup_cleanup::{cleanup_orphaned_downloads, persist_job_payload_field};
 use state::AppState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -198,7 +201,33 @@ pub fn run() {
                 }
             };
 
-            let _interrupted = store.reconcile().ok();
+            let interrupted = match store.reconcile() {
+                Ok(interrupted) => interrupted,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to reconcile interrupted jobs; exiting");
+                    app.dialog()
+                        .message("Goop couldn't start: it couldn't reconcile the download queue after the previous shutdown. Your downloaded files were not changed. Check the application data folder's permissions and available disk space, then try again.")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    logging::flush();
+                    std::process::exit(1);
+                }
+            };
+            for (id, kind) in &interrupted {
+                tracing::warn!(
+                    ?id,
+                    ?kind,
+                    message = "interrupted",
+                    detail = "",
+                    "job failed"
+                );
+            }
+            if !interrupted.is_empty() {
+                tracing::info!(
+                    count = interrupted.len(),
+                    "reconciled jobs interrupted by the previous shutdown"
+                );
+            }
             // Re-queue jobs left in `paused` state from a previous run —
             // except downloads. A paused download's partial files survive on
             // disk, so its Paused row survives the restart too and resumes
@@ -210,6 +239,12 @@ pub fn run() {
                 Ok(n) => tracing::info!(count = n, "re-queued paused jobs after restart"),
                 Err(e) => tracing::error!(error = %e, "failed to recover paused jobs on boot"),
             }
+            // Sweep only Goop-owned partial names. Retryable rows protect
+            // their exact `.part`/`.meta` pair, and generic `.part` files are
+            // never considered. Legacy marker files are obsolete and safe to
+            // remove immediately; unclaimed current artifacts get a seven-day
+            // grace period before cleanup.
+            cleanup_orphaned_downloads(&store, &settings);
             let app_handle = app.handle().clone();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app_handle.clone()));
 
@@ -255,24 +290,34 @@ pub fn run() {
                     // back into the stored payload so waiting-poll cycles
                     // and app restarts don't re-submit the link.
                     let debrid = settings.read().torbox_api_key.clone().map(|api_key| {
-                        let req_for_persist = req.clone();
+                        let item_store = store.clone();
+                        let partial_store = store.clone();
                         goop_extractor::debrid::DebridCtx {
                             api_base: goop_extractor::debrid::TORBOX_API_BASE.to_string(),
                             api_key,
                             session_item: goop_extractor::debrid::DebridCtx::session(),
                             persist_item: Arc::new(move |item: &str| {
-                                let mut r = req_for_persist.clone();
-                                r.debrid_item = Some(item.to_string());
-                                match serde_json::to_value(&r) {
-                                    Ok(v) => {
-                                        if let Err(e) = store.update_payload(id, &v) {
-                                            tracing::warn!(?id, error = %e, "failed to persist debrid item handle");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(?id, error = %e, "failed to serialize debrid payload")
-                                    }
+                                if let Err(e) = persist_job_payload_field(
+                                    &item_store,
+                                    id,
+                                    "debrid_item",
+                                    serde_json::Value::String(item.to_string()),
+                                ) {
+                                    tracing::warn!(?id, error = %e, "failed to persist debrid item handle");
                                 }
+                            }),
+                            persist_partials: Arc::new(move |artifacts| {
+                                let value = serde_json::to_value(artifacts).map_err(|e| {
+                                    GoopError::Queue(format!(
+                                        "failed to serialize debrid partial locations: {e}"
+                                    ))
+                                })?;
+                                persist_job_payload_field(
+                                    &partial_store,
+                                    id,
+                                    PARTIAL_ARTIFACTS_PAYLOAD_KEY,
+                                    value,
+                                )
                             }),
                         }
                     });

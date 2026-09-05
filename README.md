@@ -22,7 +22,7 @@
 
 ## What is Goop?
 
-Goop is a desktop app for grabbing media off the internet and shaping it on disk. Paste a URL — video, audio, image gallery, or full image-host album — and Goop figures out the right tool, downloads the result locally, and shows it in a queue you can pause, reorder, or cancel. Drop a file onto Convert and pick a target format; drop a PDF and Merge / Split / Compress it. No accounts, no telemetry, no remote config. The bundled binaries (yt-dlp, gallery-dl, ffmpeg, Ghostscript) only reach out for what you asked them to.
+Goop is a desktop app for grabbing media off the internet and shaping it on disk. Paste a URL — video, audio, direct file, image gallery, or full image-host album — and Goop figures out the right tool, downloads the result locally, and shows it in a queue you can pause, reorder, or cancel. Drop a file onto Convert and pick a target format; drop a PDF and Merge / Split / Compress it. No Goop account, no telemetry, no remote config. TorBox is an optional third-party, account-backed integration; the bundled command-line tools only reach out for work you requested or an enabled update check.
 
 *Think of it as **yt-dlp + gallery-dl + ffmpeg + Ghostscript with a UI that doesn't make you read a man page first**.*
 
@@ -76,8 +76,8 @@ Grab the build for your OS from the [Releases page](https://github.com/thrtn70/g
 
 - **macOS 13+** on Apple Silicon (M-series). Intel Macs are not a release target.
 - **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
-- ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript).
-- A network connection only when downloading.
+- ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, and Tesseract).
+- A network connection for requested downloads and any enabled app or tool update checks.
 
 ### Auto-Update
 
@@ -89,7 +89,7 @@ Grab the build for your OS from the [Releases page](https://github.com/thrtn70/g
 
 ## Supported Sites
 
-URL routing is automatic. The classifier sends image-host domains to gallery-dl (Bunkr, Gofile, Pixeldrain, Kemono, Coomer, Cyberdrop, Imgur, Twitter/X, RedGifs, ImageBam, ImgBox, Saint) and everything else to yt-dlp. If the chosen extractor returns *"unsupported URL"*, Goop retries with the other one before surfacing the failure.
+URL routing is automatic. Magnet links go directly to TorBox when it is configured. For HTTP URLs, the classifier sends image-host domains to gallery-dl (Bunkr, Gofile, Pixeldrain, Kemono, Coomer, Cyberdrop, Imgur, Twitter/X, RedGifs, ImageBam, ImgBox, Saint) and everything else to yt-dlp. If the chosen extractor cannot handle the URL, Goop tries the other one. When neither recognises it, a supported host can fall back to TorBox; otherwise Goop probes it as a direct file before surfacing the failure.
 
 - **yt-dlp** — see [`yt-dlp/yt-dlp/supportedsites.md`](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) for the full list (~1700 sites including YouTube, SoundCloud, TikTok, Instagram, Vimeo, Reddit).
 - **gallery-dl** — see [`mikf/gallery-dl/supportedsites.md`](https://github.com/mikf/gallery-dl/blob/master/docs/supportedsites.md) for the full list (~300 sites including the image-host shortlist above plus Patreon-via-Kemono, Pixiv, DeviantArt, Tumblr, etc.).
@@ -126,14 +126,11 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 
 ### Prerequisites
 
-- **Rust** 1.75+ (`rustup install stable`)
+- **Rust:** the stable toolchain selected by `rust-toolchain.toml` (`rustup toolchain install stable`)
 - **Node** 22.12+ (`nvm install 22`)
 - **npm** 10+ (ships with Node 22)
-- **cmake** 3.23+ (`brew install cmake` / preinstalled on most Linux distros) — builds the vendored image codecs (libjxl, libheif)
-- macOS / Linux: run `./scripts/build-static-heif-deps.sh` once before the first build — it compiles the static HEIC decode stack (libde265 + libheif) into `.heif-deps/` and prints the two `export` lines the cargo build needs
-- Windows: `vcpkg install "libheif[core]:x64-windows-static"` and set `VCPKGRS_TRIPLET=x64-windows-static`
-- macOS: Xcode Command Line Tools (`xcode-select --install`)
-- Windows: Microsoft Visual Studio Build Tools 2022 with the "Desktop development with C++" workload
+- **macOS arm64:** Xcode Command Line Tools, Homebrew at `/opt/homebrew`, CMake 3.23+, pkgconf, and Python 3.14.6. The exact Python version matches the reviewed, hash-locked gallery-dl build inputs (`brew install cmake pkgconf`).
+- **Windows x64:** Git Bash, 7-Zip at `C:\Program Files\7-Zip`, vcpkg at `C:\vcpkg`, WebView2, and Visual Studio Build Tools 2022 with the "Desktop development with C++" workload.
 
 ### Build steps
 
@@ -142,20 +139,27 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 git clone https://github.com/thrtn70/goop.git
 cd goop
 
-# 2. Fetch sidecar binaries for your host triple
-scripts/fetch-sidecars.sh "$(rustc -vV | awk '/host/ {print $2}')"
-
-# 3. Install JS deps
+# 2. Install JS deps
 npm ci
 
-# 4. Generate ts-rs bindings (one-time, after Rust struct edits)
+# 3a. macOS arm64: build HEIC support, then fetch/build sidecars
+./scripts/build-static-heif-deps.sh
+PYTHON=/path/to/python3.14 ./scripts/fetch-sidecars.sh aarch64-apple-darwin
+
+# 3b. Windows x64, from Git Bash: install HEIC support, then fetch sidecars
+/c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+export VCPKG_ROOT=C:/vcpkg
+export VCPKGRS_TRIPLET=x64-windows-static
+./scripts/fetch-sidecars.sh x86_64-pc-windows-msvc
+
+# 4. Regenerate bindings after Rust type edits (sidecars must exist first)
 scripts/generate-bindings.sh
 
 # 5. Run the dev loop
 npm run tauri dev
 ```
 
-The pre-push gate (`scripts/pre-push.sh`) runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-features`, `tsc --noEmit`, and `vitest run`. It runs automatically on `git push`; never bypass with `--no-verify`.
+Run `./scripts/pre-push.sh` before every push. It checks Rust formatting, workspace Clippy with warnings denied, the Rust workspace tests, both TypeScript projects with `--noEmit`, ESLint across the app and landing page, and Vitest. A fresh clone does not install Git hooks automatically.
 
 </details>
 
@@ -165,9 +169,9 @@ The pre-push gate (`scripts/pre-push.sh`) runs `cargo fmt --check`, `cargo clipp
 
 ```
 .
-├── crates/         # 8 Rust crates (core, queue, extractor, converter, pdf, sidecar, config, tauri)
-├── src/            # React + TypeScript frontend
-├── src-tauri/      # Tauri shell + IPC commands
+├── crates/         # 8 engine crates (core, queue, extractor, converter, PDF, metadata, sidecar, config)
+├── src/            # React + TypeScript desktop client
+├── src-tauri/      # Tauri desktop shell + IPC commands (the ninth workspace member)
 ├── shared/types/   # ts-rs-generated TypeScript bindings
 ├── scripts/        # Build helpers (sidecars, bindings, pre-push, icon rasterizer)
 └── assets/         # README artwork and brand icon source
@@ -180,10 +184,10 @@ The pre-push gate (`scripts/pre-push.sh`) runs `cargo fmt --check`, `cargo clipp
 | Layer | Tech |
 |---|---|
 | Desktop shell | Tauri 2 (`tauri = { version = "2", features = ["protocol-asset"] }`) |
-| Backend | Rust 2021 edition, 8-crate workspace |
+| Backend | Rust 2021 edition, eight Tauri-independent engine crates + the desktop shell |
 | Frontend | React 18 + TypeScript 5 + Tailwind 3 + Vite 8 + Zustand 4 |
 | Type bridge | `ts-rs` Rust → TypeScript bindings |
-| Sidecars | ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript |
+| Sidecars | ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, Tesseract |
 | Drag/drop | `@dnd-kit/core` + `@dnd-kit/sortable` |
 | Command palette | `cmdk` |
 | Hotkeys | `tinykeys` |
@@ -196,10 +200,10 @@ The pre-push gate (`scripts/pre-push.sh`) runs `cargo fmt --check`, `cargo clipp
 <summary><strong>Running Tests</strong></summary>
 
 ```bash
-# Rust workspace (~270 tests across 8 crates)
-cargo test --workspace --all-features
+# Rust workspace
+cargo test --workspace
 
-# Frontend (~140 tests)
+# Frontend
 npx vitest run
 
 # Watch mode while editing

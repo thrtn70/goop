@@ -1,6 +1,6 @@
 # Contributing to Goop
 
-Thanks for your interest. Goop is early — v0.1 MVP is still landing. Read this once before submitting a change.
+Thanks for your interest. Goop is a focused desktop utility with shipped macOS arm64 and Windows x64 releases. Read this once before submitting a change.
 
 ## Project Layout
 
@@ -11,43 +11,55 @@ Goop is a Cargo workspace with a Tauri 2 shell. The Rust backend lives in `crate
 | `goop-core` | Shared types (`Job`, `JobState`, `JobKind`, `ConvertRequest`, `Preset`, …), `EventSink` / `PidRegistry` traits, errors, `ts-rs` exports to `shared/types/`. |
 | `goop-config` | `Settings`, `SettingsPatch`, `apply_patch`. JSON file in your OS config dir. |
 | `goop-queue` | SQLite job store, `Scheduler`, `process_control` (cross-platform pause / resume primitives). |
-| `goop-extractor` | `yt-dlp` wrapper — URL probe + download, `--cookies-from-browser` support, friendly error mapping. |
-| `goop-converter` | `ConversionBackend` trait, `FfmpegBackend` (with hardware-encoder detection + software fallback) and `ImageMagickBackend` (in-process via the `image` crate). |
-| `goop-pdf` | Merge / split / compress via `lopdf` and a bundled Ghostscript sidecar. |
-| `goop-sidecar` | `BinaryResolver` — sidecar dir → `$PATH` fallback. |
+| `goop-extractor` | URL probe and download routing across yt-dlp, gallery-dl, direct HTTP, and optional TorBox debrid. |
+| `goop-converter` | Media conversion, hardware-encoder detection/fallback, and in-process image conversion/editing. |
+| `goop-pdf` | PDF inspection and operations via `lopdf`, Ghostscript, mutool, and Tesseract. |
+| `goop-metadata` | Typed metadata read/write operations and policy enforcement. |
+| `goop-sidecar` | `BinaryResolver`, status reporting, and verified runtime updates for supported tools. |
 | `src-tauri` | Tauri shell, `AppState`, IPC commands (`commands/*.rs`), `ThumbnailService` (video first frame, image decode, PDF page 1, audio waveform). |
 
 Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + React Router 7 + Vite 8. State lives in `src/store/appStore.ts`. IPC commands are wrapped in `src/ipc/commands.ts` (`api.queue.*`, `api.preset.*`, …). Rust types reach TS via `ts-rs` — when a struct on the Rust side changes, run `scripts/generate-bindings.sh` to refresh `shared/types/`.
 
 ## Build Prerequisites
 
-- **Rust:** stable 1.80+. Use `rustup` and the pinned toolchain in `rust-toolchain.toml`.
+- **Rust:** the stable toolchain selected by `rust-toolchain.toml`, including rustfmt and Clippy.
 - **Node.js:** 22.12+ with `npm`. Tauri 2's CLI and the Vite dev server need it.
 - **Git:** recent.
-- **Platform system libraries for Tauri 2:**
-  - **Windows:** MSVC Build Tools 2022 and WebView2 Runtime (usually pre-installed on Windows 11).
-  - **macOS:** Xcode Command Line Tools (`xcode-select --install`).
+- **macOS arm64:** Xcode Command Line Tools, Homebrew at `/opt/homebrew`, CMake 3.23+, pkgconf, and Python 3.14.6 (the version used to lock the gallery-dl build inputs; `brew install cmake pkgconf`).
+- **Windows x64:** Git Bash, 7-Zip at `C:\Program Files\7-Zip`, vcpkg at `C:\vcpkg`, WebView2, and MSVC Build Tools 2022 with the "Desktop development with C++" workload.
 
 ## Dev Loop
 
 From the repo root:
 
 ```bash
-npm install
-./scripts/fetch-sidecars.sh   # one-time, pulls yt-dlp + ffmpeg for your OS into src-tauri/bin/
+npm ci
+```
+
+On macOS arm64, make sure `/path/to/python3.14 --version` reports 3.14.6, then run:
+
+```bash
+./scripts/build-static-heif-deps.sh
+PYTHON=/path/to/python3.14 ./scripts/fetch-sidecars.sh aarch64-apple-darwin
+npm run tauri dev
+```
+
+On Windows x64, use Git Bash:
+
+```bash
+/c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+export VCPKG_ROOT=C:/vcpkg
+export VCPKGRS_TRIPLET=x64-windows-static
+./scripts/fetch-sidecars.sh x86_64-pc-windows-msvc
 npm run tauri dev
 ```
 
 `npm run tauri dev` launches the Rust backend with hot-reload and the Vite frontend together. Rust changes trigger a recompile; React changes hot-reload in place.
 
-Before every commit:
+Before every push:
 
 ```bash
-cargo fmt
-cargo clippy -- -D warnings
-cargo test
-npm run typecheck
-npm run test
+./scripts/pre-push.sh
 ```
 
 If you changed any `#[derive(TS)]` struct or enum on the Rust side, regenerate the TypeScript bindings:
@@ -60,17 +72,18 @@ This rewrites `shared/types/*.ts` from the Rust definitions. Commit the regenera
 
 ## Sidecar Binary Sources & Provenance
 
-Goop does not bundle third-party binaries in the repo. `scripts/fetch-sidecars.sh` downloads them at setup time and places them under `src-tauri/bin/`. The script pins upstream URLs from reputable primary sources:
+Goop does not commit third-party binaries. `scripts/fetch-sidecars.sh` places reviewed artifacts under `src-tauri/bin/` from these upstream trust roots:
 
-- **Windows `ffmpeg`:** `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` (Gyan.dev — the ffmpeg project's own recommended Windows build host).
-- **macOS `ffmpeg`:** `https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip` (evermeet.cx — signed static builds maintained by Helmut K. C. Tessarek).
-- **`yt-dlp` (per OS):** `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos` (macOS), `yt-dlp.exe` (Windows) — selected per platform by the script.
+- Gyan.dev for Windows ffmpeg/ffprobe and osxexperts.net for macOS arm64 ffmpeg/ffprobe.
+- GitHub releases for yt-dlp, Ghostscript, MuPDF tools, and Windows Tesseract; Codeberg releases for gallery-dl binaries.
+- Homebrew/core for the macOS Ghostscript, MuPDF tools, Tesseract, and their dynamic-library closures.
+- A hash-locked PyPI dependency set for the macOS gallery-dl PyInstaller build.
 
-Do not commit sidecar binaries. Do not point the script at mirrors or personal forks. Any change to these URLs requires a PR that includes the upstream rationale.
+Every direct download is pinned to reviewed SHA-256 bytes. Runtime updater payloads are checked against the checksum manifest published with the same upstream release. That detects corruption or payload-only replacement; the upstream release account remains the trust root. Do not commit sidecar binaries or switch sources casually. Any source, version, or digest change requires a PR with the upstream rationale and passing sidecar smoke jobs on both release platforms.
 
 ## Pre-Push Quality Gate (Mandatory)
 
-Goop's pre-push hook (`scripts/pre-push.sh`, symlinked into `.git/hooks/pre-push`) runs formatter, lints, tests, and typecheck. Any failure blocks the push. Fix locally, re-run, re-push. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full gate contract.
+Run `./scripts/pre-push.sh` before every push. It runs formatting, lints, tests, and typechecks; any failure blocks the change from being mergeable. A fresh clone does not install Git hooks automatically. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full gate contract.
 
 ## Dependencies and Licensing
 
@@ -87,12 +100,12 @@ A PR is mergeable when:
 
 - [ ] Commit messages follow `feat|fix|refactor|docs|test|chore|perf|ci|security: <desc>` (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 - [ ] `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` pass.
-- [ ] `npm run typecheck` and `npm run test` pass.
+- [ ] `npm run typecheck`, `npm run lint`, and `npm run test` pass.
 - [ ] Tests accompany new behavior (Rust unit/integration tests and, for UI flows, a React test).
 - [ ] The pre-push quality gate ran clean.
 - [ ] No new `unwrap()`/`expect()` on user input, sidecar output, or IO; no `any` in TypeScript.
 - [ ] No secrets, tokens, or user URLs committed or logged.
-- [ ] If the change touches sidecars, release workflows, or shared types (`ts-rs`), a maintainer review is requested.
+- [ ] If the change touches sidecars, release workflows, network input, or shared types (`ts-rs`), the appropriate maintainer/security review is requested.
 
 ## Reporting Issues
 
