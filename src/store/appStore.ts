@@ -328,7 +328,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   history: emptyHistory,
   thumbnailsById: {},
   versions: null,
-  ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
+  ui: { queueCollapsed: true, queueSelectedIds: new Set(), doneToday: 0 },
   paletteOpen: false,
   pendingFocusUrlInput: 0,
   pendingFilePicker: 0,

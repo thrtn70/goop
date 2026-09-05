@@ -1,3 +1,5 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfRotate } from "@/ipc/commands";
@@ -24,9 +26,9 @@ function stemOf(p: string): string {
 
 export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [pages, setPages] = useState<PageState[]>([]);
+  const { pages, setPages, loadPages } = usePdfPageDrafts("PdfRotateFlow.pages");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -37,7 +39,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
       .then(([probe, thumbs]) => {
         if (cancelled) return;
         const total = Number(probe.pages);
-        setPages(
+        loadPages(
           Array.from({ length: total }, (_, i) => ({
             originalPage: i + 1,
             thumbPath: thumbs[i] ?? null,
@@ -55,7 +57,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, loadPages]);
 
   function rotateAll(deg: RotationDegrees) {
     setPages((prev) =>
@@ -70,7 +72,8 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -78,7 +81,6 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
         title: "Save rotated PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfRotate(file, rotations, dest));
@@ -87,7 +89,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

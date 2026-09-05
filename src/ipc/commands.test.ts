@@ -353,3 +353,12 @@ describe("convert subtitle wire canary", () => {
     expect(invokeMock).toHaveBeenCalledWith("convert_from_file", { req });
   });
 });
+
+describe("conversion inspection", () => {
+  it("requests one engine inspection for the probe and capability pair", async () => {
+    invokeMock.mockClear();
+    await api.convert.inspect("/tmp/photo.dng");
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("convert_inspect", { path: "/tmp/photo.dng" });
+  });
+});

@@ -41,7 +41,7 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 
 pub fn backend_for_extension(ext: &str) -> BackendKind {
     let lower = ext.to_ascii_lowercase();
-    if IMAGE_EXTENSIONS.contains(&lower.as_str()) {
+    if IMAGE_EXTENSIONS.contains(&lower.as_str()) || crate::raw::is_raw_extension(ext) {
         BackendKind::ImageMagick
     } else {
         BackendKind::Ffmpeg
@@ -65,6 +65,19 @@ mod tests {
         // ffmpeg produce an opaque demuxer failure.
         assert_eq!(backend_for_extension("heic"), BackendKind::ImageMagick);
         assert_eq!(backend_for_extension("HEIF"), BackendKind::ImageMagick);
+    }
+
+    #[test]
+    fn routes_raw_to_image_backend() {
+        for ext in [
+            "dng", "DNG", "nef", "arw", "cr2", "cr3", "raf", "orf", "rw2",
+        ] {
+            assert_eq!(
+                backend_for_extension(ext),
+                BackendKind::ImageMagick,
+                "{ext}"
+            );
+        }
     }
 
     #[test]

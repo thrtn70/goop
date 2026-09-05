@@ -1,15 +1,7 @@
 /**
- * The app's primary destinations, in the order they appear in the left nav.
- *
- * This is the single source of truth for three consumers that used to each
- * hold their own copy: the nav itself, the global hotkey map, and the command
- * palette. They drifted — the nav rendered ⌘1,⌘2,⌘3,⌘7,⌘8,⌘4,⌘5,⌘6 down the
- * list because two routes were appended later and parked on 7 and 8 to avoid
- * disturbing the existing bindings. Deriving all three from this array means
- * that class of drift can't come back: the shortcut is a property of the
- * destination, not something each consumer restates.
- *
- * Shortcuts are the array index + 1, which `navItems.test.ts` enforces.
+ * Stable destination registry shared by keyboard bindings and the palette.
+ * Shortcuts preserve their established mapping; NAV_SECTIONS controls the
+ * workspace's visual grouping without changing those bindings.
  */
 
 /** Which band of the nav an item belongs to. Tools do work; manage looks at
@@ -28,7 +20,7 @@ export type NavShortcut = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 export interface NavItem {
   readonly to: string;
   readonly label: string;
-  /** Digit pressed with the platform mod key. Matches display position. */
+  /** Established digit pressed with the platform modifier key. */
   readonly shortcut: NavShortcut;
   readonly group: NavGroup;
   /** Extra context, shown in the command palette only. */
@@ -63,3 +55,13 @@ export function startsNewGroup(index: number): boolean {
   if (index === 0) return false;
   return NAV_ITEMS[index].group !== NAV_ITEMS[index - 1].group;
 }
+
+/** Presentation order references registry entries so labels and shortcuts stay shared. */
+export const NAV_SECTIONS = [
+  { label: "Main tools", routes: ["/extract", "/convert", "/compress"] },
+  { label: "Tools", routes: ["/image", "/metadata", "/recognize"] },
+  { label: "Manage", routes: ["/history", "/settings"] },
+].map(section => ({
+  label: section.label,
+  items: section.routes.flatMap(route => NAV_ITEMS.filter(item => item.to === route)),
+}));

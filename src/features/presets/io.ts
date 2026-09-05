@@ -11,33 +11,33 @@ import type { CompressMode, Preset, QualityPreset, ResolutionCap, TargetFormat }
 /** Current bundle schema version. Bump when the shape changes. */
 export const PRESET_BUNDLE_VERSION = 1 as const;
 
-// `satisfies readonly T[]` makes TypeScript fail compilation if the
-// generated ts-rs union (in shared/types/) ever gains a new variant
-// that isn't listed here — preventing silent "unrecognised value"
-// rejections of freshly-exported bundles.
-const ALL_TARGETS = [
-  "mp4",
-  "mkv",
-  "webm",
-  "gif",
-  "avi",
-  "mov",
-  "mp3",
-  "m4a",
-  "opus",
-  "wav",
-  "flac",
-  "ogg",
-  "aac",
-  "extract_audio_keep_codec",
-  "png",
-  "jpeg",
-  "webp",
-  "bmp",
-  "tiff",
-  "avif",
-  "jpeg_xl",
-] as const satisfies readonly TargetFormat[];
+// An exhaustive record makes new generated target variants a type error
+// until imports support them, so exports cannot silently outgrow imports.
+const ALL_TARGETS = {
+  mp4: true,
+  mkv: true,
+  webm: true,
+  gif: true,
+  avi: true,
+  mov: true,
+  mp3: true,
+  m4a: true,
+  opus: true,
+  wav: true,
+  flac: true,
+  ogg: true,
+  aac: true,
+  extract_audio_keep_codec: true,
+  srt: true,
+  vtt: true,
+  png: true,
+  jpeg: true,
+  webp: true,
+  bmp: true,
+  tiff: true,
+  avif: true,
+  jpeg_xl: true,
+} satisfies Record<TargetFormat, true>;
 
 const ALL_QUALITY = [
   "original",
@@ -53,7 +53,7 @@ const ALL_RESOLUTION = [
   "r480p",
 ] as const satisfies readonly ResolutionCap[];
 
-const VALID_TARGETS: ReadonlySet<TargetFormat> = new Set(ALL_TARGETS);
+const VALID_TARGETS: ReadonlySet<string> = new Set(Object.keys(ALL_TARGETS));
 const VALID_QUALITY: ReadonlySet<QualityPreset> = new Set(ALL_QUALITY);
 const VALID_RESOLUTION: ReadonlySet<ResolutionCap> = new Set(ALL_RESOLUTION);
 

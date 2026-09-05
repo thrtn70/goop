@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import PdfOperationPicker, { type PdfOperationKind } from "./PdfOperationPicker";
@@ -52,7 +55,7 @@ function dirname(p: string): string {
  * probes the single file to learn its page count, then hands the user a
  * picker + operation-specific sub-form + a primary action button.
  */
-export default function PdfFlow({
+function PdfFlow({
   files,
   onFilesChanged,
   onDone,
@@ -71,11 +74,11 @@ export default function PdfFlow({
     defaultOp !== "image_ocr"
       ? "merge"
       : defaultOp;
-  const [op, setOp] = useState<PdfOperationKind>(initialOp);
+  const [op, setOp] = useWorkspaceDraftState<PdfOperationKind>("PdfFlow.op", initialOp);
   const [totalPages, setTotalPages] = useState<number>(0);
-  const [ranges, setRanges] = useState<PageRange[]>([]);
-  const [quality, setQuality] = useState<PdfQuality>("ebook");
-  const [busy, setBusy] = useState(false);
+  const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfFlow.ranges", []);
+  const [quality, setQuality] = useWorkspaceDraftState<PdfQuality>("PdfFlow.quality", "ebook");
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
   const multiFile = files.length > 1;
 
@@ -91,7 +94,7 @@ export default function PdfFlow({
     ) {
       setOp("merge");
     }
-  }, [multiFile, op]);
+  }, [multiFile, op, setOp]);
 
   // Probe the single file to get the page count for the split editor.
   useEffect(() => {
@@ -115,7 +118,8 @@ export default function PdfFlow({
 
   async function handleRun() {
     if (files.length === 0) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       // handleRun is only invoked when op is merge/split/compress — the
@@ -130,14 +134,12 @@ export default function PdfFlow({
           title: "Save merged PDF",
         });
         if (!dest) {
-          setBusy(false);
           return;
         }
         await api.pdf.run(pdfMerge(files, dest));
       } else if (op === "split") {
         if (ranges.length === 0) {
           setError("Enter at least one page range.");
-          setBusy(false);
           return;
         }
         const dir = await open({ directory: true, title: "Choose output folder" });
@@ -149,12 +151,10 @@ export default function PdfFlow({
           title: "Save compressed PDF",
         });
         if (!dest) {
-          setBusy(false);
           return;
         }
         await api.pdf.run(pdfCompress(files[0], dest, quality));
       } else {
-        setBusy(false);
         return;
       }
       enqueueToast({ variant: "success", title: `PDF ${op} queued` });
@@ -162,7 +162,7 @@ export default function PdfFlow({
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -267,3 +267,5 @@ export default function PdfFlow({
     </div>
   );
 }
+
+export default withWorkspaceDrafts(PdfFlow, undefined, props => ["pdf", ...props.files.slice().sort()]);

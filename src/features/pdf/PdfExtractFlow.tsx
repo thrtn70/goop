@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfExtractPages } from "@/ipc/commands";
@@ -21,11 +24,11 @@ function stemOf(p: string): string {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
-export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
+function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [totalPages, setTotalPages] = useState<number>(0);
-  const [ranges, setRanges] = useState<PageRange[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfExtractFlow.ranges", []);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,7 +50,8 @@ export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -55,7 +59,6 @@ export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
         title: "Save extracted PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.pdf.run(pdfExtractPages(file, ranges, dest));
@@ -64,7 +67,7 @@ export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -85,3 +88,5 @@ export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(PdfExtractFlow, undefined, props => ["PdfExtractFlow", props.file]);

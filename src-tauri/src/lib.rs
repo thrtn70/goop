@@ -386,6 +386,7 @@ pub fn run() {
                     let cancel = signals.cancel;
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
+                    goop_converter::capabilities::validate_request_source(&r, &req).await?;
                     let res = if req.target.is_image() {
                         // ImageMagick runs in-process — no child PID, no
                         // pause/resume support (out of scope for Phase G).
@@ -1134,6 +1135,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::convert::convert_probe,
+            commands::convert::convert_capabilities,
+            commands::convert::convert_inspect,
             commands::convert::convert_from_file,
             commands::extract::extract_probe,
             commands::extract::extract_from_url,

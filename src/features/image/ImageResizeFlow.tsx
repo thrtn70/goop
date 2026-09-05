@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageResize } from "@/ipc/commands";
@@ -62,13 +65,13 @@ const DEFAULT_SCALE = 50;
  * Inputs are clamped numerically; the backend re-validates and returns
  * a friendly error for zero / overflow values.
  */
-export default function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
+function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [mode, setMode] = useState<ResizeMode>("fit_within");
-  const [width, setWidth] = useState<number>(DEFAULT_BOX);
-  const [height, setHeight] = useState<number>(DEFAULT_BOX);
-  const [scale, setScale] = useState<number>(DEFAULT_SCALE);
-  const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useWorkspaceDraftState<ResizeMode>("ImageResizeFlow.mode", "fit_within");
+  const [width, setWidth] = useWorkspaceDraftState<number>("ImageResizeFlow.width", DEFAULT_BOX);
+  const [height, setHeight] = useWorkspaceDraftState<number>("ImageResizeFlow.height", DEFAULT_BOX);
+  const [scale, setScale] = useWorkspaceDraftState<number>("ImageResizeFlow.scale", DEFAULT_SCALE);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const isScale = mode === "scale";
@@ -76,7 +79,8 @@ export default function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) 
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -85,7 +89,6 @@ export default function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) 
         title: "Save resized image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       // Scale mode encodes the percentage in `width`; height is ignored
@@ -100,7 +103,7 @@ export default function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) 
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -208,3 +211,5 @@ export default function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) 
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageResizeFlow, undefined, props => ["source", props.file]);

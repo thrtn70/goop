@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
@@ -42,18 +45,19 @@ interface RecognizeResult {
  * Image-OCR flow. The explicit Extract-text / OCR ops also remain there
  * for callers who want to force a specific path.
  */
-export default function RecognizePage() {
+function RecognizePage() {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const jobs = useAppStore((s) => s.jobs);
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [input, setInput] = useState<string | null>(null);
-  const [outputKind, setOutputKind] = useState<ImageOcrOutput>("text");
+  const [input, setInput] = useWorkspaceDraftState<string | null>("RecognizePage.input", null);
+  const [outputKind, setOutputKind] = useWorkspaceDraftState<ImageOcrOutput>("RecognizePage.outputKind", "text");
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
-  const [lang, setLang] = useState<string>("eng");
+  const [lang, setLang] = useWorkspaceDraftState<string>("RecognizePage.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const [phase, setPhase] = useState<Phase>("idle");
+  const { busy: submitting, begin } = useWorkspaceOperation();
   const [jobId, setJobId] = useState<JobId | null>(null);
   const [result, setResult] = useState<RecognizeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -135,7 +139,7 @@ export default function RecognizePage() {
     setResult(null);
     setError(null);
     setPhase("idle");
-  }, []);
+  }, [setInput]);
 
   const handleBrowse = useCallback(async () => {
     try {
@@ -157,6 +161,8 @@ export default function RecognizePage() {
 
   async function handleRecognize() {
     if (!input || phase === "running") return;
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     const isText = outputKind === "text";
     const stem = basename(input).replace(/\.[^.]+$/, "");
@@ -179,11 +185,13 @@ export default function RecognizePage() {
     } catch (e) {
       setError(formatError(e));
       setPhase("error");
+    } finally {
+      finish();
     }
   }
 
   const canRecognize =
-    !!input && phase !== "running" && installed.length > 0 && !!lang;
+    !!input && !submitting && phase !== "running" && installed.length > 0 && !!lang;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -301,7 +309,7 @@ export default function RecognizePage() {
               onClick={() => void handleRecognize()}
               className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {phase === "running" ? "Recognizing…" : "Recognize text"}
+              {submitting ? "Starting…" : phase === "running" ? "Recognizing…" : "Recognize text"}
             </button>
             {error && <span className="text-xs text-error">{error}</span>}
           </div>
@@ -318,3 +326,5 @@ export default function RecognizePage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(RecognizePage, "recognize");

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
+  ConversionCapabilities,
+  ConversionInspection,
   CropRect,
   ExtractRequest,
   HistoryCounts,
@@ -101,6 +103,8 @@ export type IpcLanguagePack = Omit<LanguagePack, "size_bytes"> & {
 
 export const api = {
   convert: {
+    inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
+    capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
     fromFile: (req: IpcConvertRequest) =>
       invoke<JobId>("convert_from_file", { req }),

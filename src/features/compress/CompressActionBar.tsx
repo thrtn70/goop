@@ -1,3 +1,16 @@
+import {
+  beginDestinationChoice,
+  isCurrentDestinationChoice,
+  tryBegin,
+  setSubmissionPhase,
+  finishSubmission,
+  useWorkspaceSubmissions,
+} from "@/store/workspaceSubmissions";
+import type {
+  EntryIdentity,
+  SubmissionReceipt,
+} from "@/features/workspace/entries";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, type IpcCompressMode } from "@/ipc/commands";
@@ -5,7 +18,8 @@ import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import type { CompressMode, TargetFormat } from "@/types";
 
-export interface CompressFileEntry {
+export interface CompressFileEntry extends EntryIdentity {
+  optionsReady?: boolean;
   path: string;
   /** Target format = source format (Compress keeps the container). */
   target: TargetFormat;
@@ -17,6 +31,7 @@ interface CompressActionBarProps {
   files: CompressFileEntry[];
   disabled: boolean;
   onEnqueued: () => void;
+  onSettled?: (success: SubmissionReceipt[]) => void;
   /** Optional: copies the first file's compression mode to every other staged file. */
   onApplyToAll?: () => void;
 }
@@ -27,7 +42,9 @@ function dirname(p: string): string {
   return last > 0 ? normalized.slice(0, last) : ".";
 }
 
-function normalizeCompressMode(mode: CompressMode | null): IpcCompressMode | null {
+function normalizeCompressMode(
+  mode: CompressMode | null,
+): IpcCompressMode | null {
   if (mode === null) return null;
   if (mode.kind === "target_size_bytes") {
     return { kind: "target_size_bytes", value: Number(mode.value) };
@@ -87,80 +104,99 @@ export default function CompressActionBar({
   files,
   disabled,
   onEnqueued,
+  onSettled,
   onApplyToAll,
 }: CompressActionBarProps) {
-  const [overrideDir, setOverrideDir] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>(
+    "CompressActionBar.overrideDir",
+    null,
+  );
+  const runtime = useWorkspaceSubmissions((s) => s.compress);
+  const error = runtime.error;
+  const busy = runtime.active !== null;
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
 
   async function pickOverrideDir() {
-    const picked = await open({ directory: true, title: "Choose output folder" });
-    if (typeof picked === "string") {
-      setOverrideDir(picked);
+    const generation = beginDestinationChoice("compress");
+    setPickerError(null);
+    try {
+      const picked = await open({
+        directory: true,
+        title: "Choose output folder",
+      });
+      if (
+        typeof picked === "string" &&
+        isCurrentDestinationChoice("compress", generation)
+      )
+        setOverrideDir(picked);
+    } catch (e) {
+      if (isCurrentDestinationChoice("compress", generation))
+        setPickerError(formatError(e));
     }
   }
 
   async function handleCompress() {
-    if (count === 0) return;
-    setBusy(true);
-    setError(null);
+    if (disabled || count === 0) return;
+    const token = tryBegin("compress");
+    if (token === null) return;
+    let failure: string | null = null;
     try {
-      if (count === 1) {
-        const f = files[0];
-        const dest = await save({
+      const snapshot = files.map((file) => ({
+        ...file,
+        mode: { ...file.mode },
+      }));
+      const outputFolder = overrideDir;
+      let destination: string | null = null;
+      if (snapshot.length === 1) {
+        const f = snapshot[0];
+        destination = await save({
           defaultPath: `${stemOf(f.path)}-compressed.${extFor(f.target)}`,
           title: "Save compressed file",
         });
-        if (!dest) {
-          setBusy(false);
-          return;
-        }
-        await api.convert.fromFile({
-          input_path: f.path,
-          output_path: dest,
-          target: f.target,
-          quality_preset: null,
-          resolution_cap: null,
-          gif_options: null,
-          compress_mode: normalizeCompressMode(f.mode),
-          batch_id: null,
-          // Compress preserves source metadata by default — the user
-          // is asking for a smaller file, not a re-encoded clean copy.
-          metadata_policy: "preserve",
-          subtitle: null,
-        });
-      } else {
-        const batchId = newBatchId();
-        await Promise.all(
-          files.map((f) =>
-            api.convert.fromFile({
-              input_path: f.path,
-              output_path: overrideDir ?? dirname(f.path),
-              target: f.target,
-              quality_preset: null,
-              resolution_cap: null,
-              gif_options: null,
-              compress_mode: normalizeCompressMode(f.mode),
-              batch_id: batchId,
-              metadata_policy: "preserve",
-              subtitle: null,
-            }),
-          ),
-        );
+        if (!destination) return;
       }
-      setOverrideDir(null);
-      onEnqueued();
+      setSubmissionPhase("compress", token, "enqueuing");
+      const batchId = snapshot.length > 1 ? newBatchId() : null;
+      const results = await Promise.allSettled(
+        snapshot.map((f) => {
+          const output = destination ?? outputFolder ?? dirname(f.path);
+          return api.convert.fromFile({
+            input_path: f.path,
+            output_path: output,
+            target: f.target,
+            quality_preset: null,
+            resolution_cap: null,
+            gif_options: null,
+            compress_mode: normalizeCompressMode(f.mode),
+            batch_id: batchId,
+            metadata_policy: "preserve",
+            subtitle: null,
+          });
+        }),
+      );
+      const successful = snapshot.filter(
+        (_, i) => results[i].status === "fulfilled",
+      );
+      const failures = results.filter(
+        (r): r is PromiseRejectedResult => r.status === "rejected",
+      );
+      if (successful.length > 0) {
+        if (onSettled) onSettled(successful);
+        else if (failures.length === 0) onEnqueued();
+      }
+      if (failures.length)
+        failure = `${failures.length} file(s) could not be queued: ${formatError(failures[0].reason)}`;
     } catch (e) {
-      setError(formatError(e));
+      failure = formatError(e);
     } finally {
-      setBusy(false);
+      finishSubmission("compress", token, failure);
     }
   }
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex flex-wrap items-center gap-3">
       <button
         type="button"
         disabled={disabled || busy || count === 0}
@@ -168,7 +204,9 @@ export default function CompressActionBar({
         className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out
           enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {busy ? "Enqueuing..." : `Compress ${count} file${count !== 1 ? "s" : ""}`}
+        {busy
+          ? "Enqueuing..."
+          : `Compress ${count} file${count !== 1 ? "s" : ""}`}
       </button>
       {count > 1 && (
         <button
@@ -176,7 +214,9 @@ export default function CompressActionBar({
           onClick={() => void pickOverrideDir()}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          {overrideDir ? `\u2192 ${shortenPath(overrideDir)}` : "Change output folder..."}
+          {overrideDir
+            ? `\u2192 ${shortenPath(overrideDir)}`
+            : "Change output folder..."}
         </button>
       )}
       {count > 1 && onApplyToAll && (
@@ -186,7 +226,7 @@ export default function CompressActionBar({
           title="Copy the first file's settings to every other file"
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          Apply to all
+          Apply first to all
         </button>
       )}
       {count > 0 && (
@@ -198,7 +238,11 @@ export default function CompressActionBar({
           Save as preset
         </button>
       )}
-      {error && <span className="text-xs text-error">{error}</span>}
+      {(error || pickerError) && (
+        <span role="alert" className="text-xs text-error">
+          {error || pickerError}
+        </span>
+      )}
       <PresetSaveDialog
         open={saveOpen}
         onClose={() => setSaveOpen(false)}

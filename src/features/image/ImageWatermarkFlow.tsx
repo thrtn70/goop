@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageWatermark } from "@/ipc/commands";
@@ -49,19 +52,20 @@ const DEFAULT_OPACITY = 80;
  * composites onto the source image. v0.2.5 ships text-only;
  * image-overlay watermarks defer to v0.2.6.
  */
-export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
+function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [text, setText] = useState(DEFAULT_TEXT);
-  const [position, setPosition] = useState<WatermarkPosition>(DEFAULT_POSITION);
-  const [opacity, setOpacity] = useState<number>(DEFAULT_OPACITY);
-  const [busy, setBusy] = useState(false);
+  const [text, setText] = useWorkspaceDraftState("ImageWatermarkFlow.text", DEFAULT_TEXT);
+  const [position, setPosition] = useWorkspaceDraftState<WatermarkPosition>("ImageWatermarkFlow.position", DEFAULT_POSITION);
+  const [opacity, setOpacity] = useWorkspaceDraftState<number>("ImageWatermarkFlow.opacity", DEFAULT_OPACITY);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const canApply = !busy && text.trim().length > 0;
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const ext = extOf(file);
@@ -70,7 +74,6 @@ export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowP
         title: "Save watermarked image",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       await api.image.run(
@@ -85,7 +88,7 @@ export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowP
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -152,3 +155,5 @@ export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowP
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageWatermarkFlow, undefined, props => ["source", props.file]);

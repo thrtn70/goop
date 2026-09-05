@@ -1,3 +1,4 @@
+import { clearWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -19,6 +20,49 @@ vi.mock("@/ipc/commands", () => ({
   api: {
     convert: {
       probe: (path: string) => mockProbe(path),
+      inspect: async (path: string) => {
+        const p = await mockProbe(path);
+        const targets =
+          p.source_kind === "image"
+            ? ["png", "jpeg", "webp", "bmp", "avif", "jpeg_xl", "tiff"]
+            : p.source_kind === "subtitle"
+              ? ["srt", "vtt"]
+              : [
+                  ...(p.has_video
+                    ? ["mp4", "mkv", "webm", "gif", "avi", "mov"]
+                    : []),
+                  ...(p.has_audio
+                    ? [
+                        "mp3",
+                        "m4a",
+                        "opus",
+                        "wav",
+                        "flac",
+                        "ogg",
+                        "aac",
+                        "extract_audio_keep_codec",
+                      ]
+                    : []),
+                ];
+        return {
+          probe: p,
+          capabilities: {
+            targets: targets.map((target) => ({
+              target,
+              available: true,
+              reason: null,
+              preserves_metadata: false,
+              metadata_warning: null,
+            })),
+            compression: {
+              quality: true,
+              target_size: true,
+              lossless: false,
+              reason: null,
+            },
+          },
+        };
+      },
       fromFile: (req: unknown) => mockFromFile(req),
     },
     queue: { list: vi.fn().mockResolvedValue([]) },
@@ -133,7 +177,9 @@ describe("ConvertPage", () => {
   it("renders the empty drop zone with browse link", () => {
     renderPage();
     expect(screen.getByText(/drop something here/i)).toBeDefined();
-    expect(screen.getByRole("button", { name: /pick from your computer/i })).toBeDefined();
+    expect(
+      screen.getByRole("button", { name: /pick from your computer/i }),
+    ).toBeDefined();
   });
 
   it("shows file row after browse + probe", async () => {
@@ -177,6 +223,7 @@ describe("ConvertPage", () => {
   });
 
   it("hides video targets for audio-only files", async () => {
+    clearWorkspaceDrafts("convert");
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
 
@@ -196,7 +243,10 @@ describe("ConvertPage", () => {
   });
 
   it("shows error state with retry on probe failure", async () => {
-    mockProbe.mockRejectedValue({ code: "sidecar_missing", message: "ffprobe" });
+    mockProbe.mockRejectedValue({
+      code: "sidecar_missing",
+      message: "ffprobe",
+    });
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
@@ -238,15 +288,20 @@ describe("ConvertPage", () => {
     mockProbe.mockResolvedValue(mp4Probe);
     const { unmount } = renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
     expect(screen.getByText(/subtitles:/i)).toBeDefined();
     unmount();
     cleanup();
 
+    clearWorkspaceDrafts("convert");
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
     expect(screen.queryByText(/subtitles:/i)).toBeNull();
   });
 
@@ -256,15 +311,21 @@ describe("ConvertPage", () => {
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
 
     // The browse dialog and the subtitle picker share the same mock, so
     // swap its answer before opening the subtitle one.
     mockOpen.mockResolvedValue("/tmp/movie.srt");
-    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /^add file\.\.\.$/i }),
+    );
     await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
 
-    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
 
     await waitFor(() => {
       expect(mockFromFile).toHaveBeenCalledWith(
@@ -281,17 +342,23 @@ describe("ConvertPage", () => {
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
 
     mockOpen.mockResolvedValue("/tmp/movie.srt");
-    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /^add file\.\.\.$/i }),
+    );
     await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
 
     // GIF has no video track to mux into and no burn-in support.
     await userEvent.click(screen.getByRole("button", { name: "GIF" }));
     expect(screen.queryByText("movie.srt")).toBeNull();
 
-    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
     await waitFor(() => {
       expect(mockFromFile).toHaveBeenCalledWith(
         expect.objectContaining({ target: "gif", subtitle: null }),
@@ -304,20 +371,29 @@ describe("ConvertPage", () => {
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
 
     mockOpen.mockResolvedValue("/tmp/movie.srt");
-    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /^add file\.\.\.$/i }),
+    );
     await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
 
     await userEvent.click(screen.getByRole("button", { name: "AVI" }));
 
     // The file is kept, but the only supported mode is now selected.
     expect(screen.getByText("movie.srt")).toBeDefined();
-    expect(screen.getByRole("button", { name: /burn in/i }).getAttribute("aria-pressed")).toBe(
-      "true",
+    expect(
+      screen
+        .getByRole("button", { name: /burn in/i })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(screen.getByRole("button", { name: /soft track/i })).toHaveProperty(
+      "disabled",
+      true,
     );
-    expect(screen.getByRole("button", { name: /soft track/i })).toHaveProperty("disabled", true);
   });
 
   it("keeps a subtitle through a detour via an incompatible target", async () => {
@@ -326,10 +402,14 @@ describe("ConvertPage", () => {
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
 
     mockOpen.mockResolvedValue("/tmp/movie.srt");
-    await userEvent.click(screen.getByRole("button", { name: /add file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /^add file\.\.\.$/i }),
+    );
     await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
 
     // Tap GIF by mistake, then back to MP4: re-picking the file would be
@@ -338,7 +418,9 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "MP4" }));
 
     expect(screen.getByText("movie.srt")).toBeDefined();
-    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
     await waitFor(() => {
       expect(mockFromFile).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -365,13 +447,20 @@ describe("ConvertPage", () => {
     // Attach a subtitle to the SECOND row, then set the first row to GIF
     // and push that target onto every row.
     mockOpen.mockResolvedValue("/tmp/movie.srt");
-    const addButtons = screen.getAllByRole("button", { name: /add file/i });
-    await userEvent.click(addButtons[1]);
+    await userEvent.click(screen.getByRole("button", { name: "Select b.mp4" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /^add file\.\.\.$/i }),
+    );
     await waitFor(() => expect(screen.getByText("movie.srt")).toBeDefined());
 
-    await userEvent.click(screen.getAllByRole("button", { name: "GIF" })[0]);
-    await userEvent.click(screen.getByRole("button", { name: /apply to all/i }));
-    await userEvent.click(screen.getByRole("button", { name: /convert 2 files/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Select a.mp4" }));
+    await userEvent.click(screen.getByRole("button", { name: "GIF" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /apply first to all/i }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 2 files/i }),
+    );
 
     await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(2));
     const payloads = mockFromFile.mock.calls.map(([req]) => req);
@@ -386,12 +475,16 @@ describe("ConvertPage", () => {
     renderPage();
 
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
 
     expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
     expect(screen.queryByRole("button", { name: "MP3" })).toBeNull();
     // A .srt source defaults to the other format, since srt->srt is a no-op.
-    expect(screen.getByRole("button", { name: /WebVTT/ }).className).toContain("bg-accent");
+    expect(screen.getByRole("button", { name: /WebVTT/ }).className).toContain(
+      "bg-accent",
+    );
     expect(screen.getByRole("button", { name: "SRT" })).toBeDefined();
   });
 
@@ -483,15 +576,105 @@ describe("ConvertPage applies what a preset chip promises", () => {
   async function stageFileAndApplyPreset() {
     renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
-    await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
+    await userEvent.click(
+      screen.getByRole("listitem", { name: "YouTube Upload" }),
+    );
   }
+
+  it("hides ignored video controls for audio outputs and clears inherited settings explicitly", async () => {
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: "MP3" }));
+    expect(
+      screen.queryByRole("combobox", { name: "Video quality" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("combobox", { name: "Video resolution" }),
+    ).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("do not apply");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Clear video settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({
+      target: "mp3",
+      quality_preset: null,
+      resolution_cap: null,
+    });
+  });
+
+  it("clears unsupported AVI quality without discarding its supported resolution cap", async () => {
+    await stageFileAndApplyPreset();
+    await userEvent.click(screen.getByRole("button", { name: "AVI" }));
+    expect(
+      screen.queryByRole("combobox", { name: "Video quality" }),
+    ).toBeNull();
+    expect(
+      (
+        screen.getByRole("combobox", {
+          name: "Video resolution",
+        }) as HTMLSelectElement
+      ).value,
+    ).toBe("r1080p");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Clear video settings" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({
+      target: "avi",
+      quality_preset: null,
+      resolution_cap: "r1080p",
+    });
+  });
+
+  it("GIF presets expose editable GIF settings without duplicate video controls", async () => {
+    useAppStore.setState({
+      presets: [
+        {
+          ...useAppStore.getState().presets[0],
+          target: "gif",
+          quality_preset: null,
+          resolution_cap: null,
+        },
+      ],
+    });
+    await stageFileAndApplyPreset();
+    expect(screen.getByText("GIF size")).toBeTruthy();
+    expect(
+      screen.queryByRole("combobox", { name: "Video quality" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("combobox", { name: "Video resolution" }),
+    ).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Small (320px)" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0].gif_options).toMatchObject({
+      size_preset: "small",
+      trim_start_ms: null,
+      trim_end_ms: null,
+    });
+  });
 
   it("sends the preset's quality and resolution cap on a single file", async () => {
     // The chip used to change only `target`, so a 4K source came out 4K
     // while the button said 1080p.
     await stageFileAndApplyPreset();
-    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
     await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
     const req = mockFromFile.mock.calls[0]?.[0];
     expect(req.quality_preset).toBe("balanced");
@@ -503,8 +686,12 @@ describe("ConvertPage applies what a preset chip promises", () => {
     // silently-invented default.
     renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));
-    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
-    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() =>
+      expect(screen.getByText("test-video.mp4")).toBeDefined(),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 1 file/i }),
+    );
     await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
     const req = mockFromFile.mock.calls[0]?.[0];
     expect(req.quality_preset).toBeNull();
@@ -518,7 +705,9 @@ describe("ConvertPage applies what a preset chip promises", () => {
     const savePreset = vi.fn().mockResolvedValue(undefined);
     useAppStore.setState({ savePreset });
     await stageFileAndApplyPreset();
-    await userEvent.click(screen.getByRole("button", { name: /save as preset/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /save as preset/i }),
+    );
     await userEvent.type(screen.getByRole("textbox"), "My Preset");
     await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(savePreset).toHaveBeenCalled());
@@ -534,12 +723,47 @@ describe("ConvertPage applies what a preset chip promises", () => {
     renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));
     await waitFor(() => expect(screen.getByText("a.mp4")).toBeDefined());
-    await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
-    await userEvent.click(screen.getByRole("button", { name: /convert 2 files/i }));
+    await userEvent.click(
+      screen.getByRole("listitem", { name: "YouTube Upload" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /convert 2 files/i }),
+    );
     await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(2));
     for (const call of mockFromFile.mock.calls) {
       expect(call[0].quality_preset).toBe("balanced");
       expect(call[0].resolution_cap).toBe("r1080p");
     }
   });
+});
+
+it("uses one selected inspector while inspecting hidden sources and preserves edits on selection", async () => {
+  vi.clearAllMocks();
+  mockProbe.mockResolvedValue(mp4Probe);
+  mockOpen.mockResolvedValue(["/first.mp4", "/second.mp4"]);
+  render(
+    <MemoryRouter>
+      <ConvertPage />
+    </MemoryRouter>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => expect(mockProbe).toHaveBeenCalledTimes(2));
+  expect(screen.getAllByRole("button", { name: "MP4" })).toHaveLength(1);
+  await userEvent.click(
+    screen.getByRole("button", { name: /Select second.mp4/i }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "MKV" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: /Select first.mp4/i }),
+  );
+  expect(screen.getByRole("button", { name: "MP4" }).className).toContain(
+    "bg-accent",
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: /Select second.mp4/i }),
+  );
+  expect(screen.getByRole("button", { name: "MKV" }).className).toContain(
+    "bg-accent",
+  );
+  expect(mockProbe).toHaveBeenCalledTimes(2);
 });

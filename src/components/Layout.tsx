@@ -16,18 +16,20 @@ export default function Layout() {
   useQueueHotkey();
   useHotkeys();
   return (
-    <div className="flex h-screen flex-col bg-surface-0 text-fg">
+    <div className="workspace-shell flex h-full min-h-0 flex-col bg-surface-0 text-fg">
       <SkipNav />
       <h1 className="sr-only">Goop</h1>
       <TopBar
         onSubmit={(url) => nav(`/extract?url=${encodeURIComponent(url)}`)}
       />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <LeftNav />
-        <main id="main" tabIndex={-1} className="flex-1 overflow-auto bg-surface-0">
-          <Outlet />
-        </main>
-        <QueueSidebar />
+        <div className="workspace-column">
+          <main id="main" tabIndex={-1} className="workspace-main">
+            <Outlet />
+          </main>
+          <QueueSidebar />
+        </div>
       </div>
       <CommandPalette />
       <Onboarding />

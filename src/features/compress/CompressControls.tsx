@@ -1,48 +1,8 @@
-import { useMemo, useState } from "react";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useEffect, useMemo } from "react";
 import clsx from "clsx";
-import type { CompressMode, ProbeResult } from "@/types";
+import type { CompressMode, ProbeResult, CompressionCapabilities } from "@/types";
 import { adviseTargetSize, bytesFromInput, formatBytes, type SizeUnit } from "./sizeMath";
-
-/**
- * Which controls the current source type + target format allow.
- *
- * The backend rejects invalid combinations (e.g., target-size on PNG), but
- * the UI disables them up-front to make the affordance obvious.
- */
-interface Availability {
-  quality: boolean;
-  targetSize: boolean;
-  lossless: boolean;
-  hint: string | null;
-}
-
-function availabilityFor(probe: ProbeResult): Availability {
-  if (probe.source_kind === "image") {
-    const fmt = (probe.image_format ?? "").toLowerCase();
-    if (fmt === "jpeg" || fmt === "webp") {
-      return { quality: true, targetSize: true, lossless: false, hint: null };
-    }
-    if (fmt === "png") {
-      return {
-        quality: false,
-        targetSize: false,
-        lossless: true,
-        hint: "PNG is lossless. Re-optimize shrinks without quality loss. For target-size compression, convert to JPEG or WebP first.",
-      };
-    }
-    if (fmt === "bmp") {
-      return {
-        quality: false,
-        targetSize: false,
-        lossless: false,
-        hint: "BMP has no compression. Convert to PNG first.",
-      };
-    }
-    return { quality: true, targetSize: true, lossless: false, hint: null };
-  }
-  // Video / audio: both modes available
-  return { quality: true, targetSize: true, lossless: false, hint: null };
-}
 
 function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf" {
   // A subtitle file has no size worth compressing and the Compress tab
@@ -53,30 +13,46 @@ function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf
 
 interface CompressControlsProps {
   probe: ProbeResult;
+  capabilities: CompressionCapabilities;
   mode: CompressMode;
   onChange: (mode: CompressMode) => void;
+  /** A partial value/unit edit must survive an earlier request completing. */
+  onDraftEdit?: () => void;
 }
 
-export default function CompressControls({ probe, mode, onChange }: CompressControlsProps) {
-  const avail = useMemo(() => availabilityFor(probe), [probe]);
+export default function CompressControls({ probe, mode, onChange, capabilities, onDraftEdit }: CompressControlsProps) {
+  const avail = useMemo(() => ({ quality: capabilities.quality, targetSize: capabilities.target_size, lossless: capabilities.lossless, hint: capabilities.reason }), [capabilities]);
   const sourceBytes = Number(probe.file_size);
   const durationMs = Number(probe.duration_ms);
 
   // Local draft for the Target size input (so the user can type freely before we parse on blur).
-  const [sizeInput, setSizeInput] = useState<string>(() => {
+  const [sizeInput, setSizeInput] = useWorkspaceDraftState<string>("CompressControls.sizeInput", () => {
     if (mode.kind === "target_size_bytes") {
       const mb = Number(mode.value) / (1024 * 1024);
-      if (mb >= 1) return mb.toFixed(1);
+      if (mb >= 1) return String(mb);
       const kb = Number(mode.value) / 1024;
-      return kb.toFixed(0);
+      return String(kb);
     }
     return "10";
   });
-  const [sizeUnit, setSizeUnit] = useState<SizeUnit>(() => {
+  const [sizeUnit, setSizeUnit] = useWorkspaceDraftState<SizeUnit>("CompressControls.sizeUnit", () => {
     if (mode.kind === "target_size_bytes" && Number(mode.value) < 1024 * 1024) return "kb";
     return "mb";
   });
 
+  const modeKey = mode.kind === "lossless_reoptimize" ? mode.kind : `${mode.kind}:${mode.value}`;
+  const [appliedMode, setAppliedMode] = useWorkspaceDraftState("CompressControls.appliedMode", modeKey);
+  useEffect(() => {
+    if (appliedMode === modeKey) return;
+    setAppliedMode(modeKey);
+    if (mode.kind !== "target_size_bytes") return;
+    const bytes = Number(mode.value);
+    const unit: SizeUnit = bytes < 1024 * 1024 ? "kb" : "mb";
+    setSizeUnit(unit);
+    setSizeInput(String(bytes / (unit === "kb" ? 1024 : 1024 * 1024)));
+  }, [mode, modeKey, appliedMode, setAppliedMode, setSizeUnit, setSizeInput]);
+
+  const modeAllowed = mode.kind === "quality" ? avail.quality : mode.kind === "target_size_bytes" ? avail.targetSize : avail.lossless;
   const currentTab: "quality" | "target_size" =
     mode.kind === "target_size_bytes" ? "target_size" : "quality";
 
@@ -112,6 +88,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
 
   return (
     <div className="mt-3 rounded-lg bg-surface-2 p-3">
+      {!modeAllowed && <p className="mb-3 text-xs text-warning" role="alert">The selected compression mode is unavailable. Choose a supported mode before starting.</p>}
       {/* Hint banner for formats with restrictions */}
       {avail.hint && (
         <p className="mb-3 text-xs text-fg-secondary">{avail.hint}</p>
@@ -190,7 +167,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
         </button>
       )}
 
-      {currentTab === "target_size" && (
+      {currentTab === "target_size" && avail.targetSize && (
         <div>
           <div className="flex items-center gap-2">
             <input
@@ -198,7 +175,10 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
               min={0.1}
               step={0.1}
               value={sizeInput}
-              onChange={(e) => setSizeInput(e.target.value)}
+              onChange={(e) => {
+                setSizeInput(e.target.value);
+                onDraftEdit?.();
+              }}
               onBlur={() => commitTargetSize(sizeInput, sizeUnit)}
               className="w-24 rounded-md bg-surface-1 px-2 py-1 text-sm tabular-nums text-fg focus:outline-none focus:ring-2 focus:ring-accent"
               aria-label="Target size value"
@@ -208,6 +188,7 @@ export default function CompressControls({ probe, mode, onChange }: CompressCont
               onChange={(e) => {
                 const u = e.target.value as SizeUnit;
                 setSizeUnit(u);
+                onDraftEdit?.();
                 commitTargetSize(sizeInput, u);
               }}
               className="rounded-md bg-surface-1 px-2 py-1 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"

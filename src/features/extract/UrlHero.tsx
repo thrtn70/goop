@@ -1,3 +1,9 @@
+import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
+import {
+  useExtractSession,
+  nextExtractAttemptId,
+} from "@/store/extractSession";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/ipc/commands";
@@ -5,14 +11,7 @@ import { formatError } from "@/ipc/error";
 import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import ProbeCard from "./ProbeCard";
-import {
-  IDLE_START,
-  nextStartState,
-  startBanner,
-  type StartEvent,
-  type StartOptions,
-  type StartState,
-} from "./startState";
+import { startBanner, type StartOptions } from "./startState";
 
 function looksLikeCookieError(message: string | null): boolean {
   return message != null && message.toLowerCase().includes("cookie");
@@ -22,51 +21,52 @@ export default function UrlHero({ url }: { url?: string }) {
   const [probe, setProbe] = useState<UrlProbe | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastUrl, setLastUrl] = useState<string | null>(null);
+  const [lastUrl, setLastUrl] = useWorkspaceDraftState<string | null>(
+    "UrlHero.lastUrl",
+    null,
+  );
   const cancelledRef = useRef(false);
+  const probeGeneration = useRef(0);
   // Everything about starting a download, in one place. This was five
   // separate pieces — an epoch ref, two booleans and an error object — and
   // every defect here was two of them disagreeing.
-  const [start, setStart] = useState<StartState>(IDLE_START);
-  // An id source, not a sixth owner: it is never read to decide anything.
-  // Only `start` decides, and only `nextStartState` reads the id.
-  const nextStartId = useRef(0);
-  function send(ev: StartEvent) {
-    // The functional form is the staleness guard: `prev` comes from the
-    // queue, not from the closure this callback was created in.
-    setStart((prev) => nextStartState(prev, ev));
-  }
+  const start = useExtractSession((s) => s.start);
+  const send = useExtractSession((s) => s.send);
 
   const outputDir = useAppStore(
-    (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
+    (s) =>
+      s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
   );
   const navigate = useNavigate();
 
   async function handleProbe(u: string) {
+    const generation = ++probeGeneration.current;
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
-    send({ type: "retire" });
+    if (u !== lastUrl) send({ type: "retire" });
     setProbe(null);
     setLastUrl(u);
     try {
       const result = await api.extract.probe(u);
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setProbe(result);
       }
     } catch (e) {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setError(formatError(e));
       }
     } finally {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === probeGeneration.current) {
         setLoading(false);
       }
     }
   }
 
   function handleCancel() {
+    probeGeneration.current += 1;
     cancelledRef.current = true;
+    setLastUrl(null);
     setLoading(false);
     setProbe(null);
     setError(null);
@@ -85,7 +85,7 @@ export default function UrlHero({ url }: { url?: string }) {
    */
   function startAttempt(opts: StartOptions) {
     if (!probe) return;
-    const id = (nextStartId.current += 1);
+    const id = nextExtractAttemptId();
     send({ type: "attempt", id, url: probe.url, opts });
     void runStart(id, probe, opts);
   }
@@ -141,35 +141,77 @@ export default function UrlHero({ url }: { url?: string }) {
   }
 
   useEffect(() => {
-    if (!url) return;
+    const requestedUrl = url ?? lastUrl;
+    if (!requestedUrl) return;
     let cancelled = false;
+    const generation = ++probeGeneration.current;
     (async () => {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
-      send({ type: "retire" });
+      if (requestedUrl !== lastUrl) send({ type: "retire" });
       setProbe(null);
-      setLastUrl(url);
+      setLastUrl(requestedUrl);
       try {
-        const result = await api.extract.probe(url);
-        if (!cancelled && !cancelledRef.current) setProbe(result);
+        const result = await api.extract.probe(requestedUrl);
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setProbe(result);
       } catch (e) {
-        if (!cancelled && !cancelledRef.current) setError(formatError(e));
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setError(formatError(e));
       } finally {
-        if (!cancelled && !cancelledRef.current) setLoading(false);
+        if (!cancelled && !cancelledRef.current && generation === probeGeneration.current) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
+      probeGeneration.current += 1;
       cancelledRef.current = true;
     };
+    // Re-entering the route re-probes saved input but never retires or repeats its enqueue.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
   // Either a failure to report, or the message a retry is carrying.
   const banner = startBanner(start);
 
+  const failureBanner = banner && (
+    <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
+      <p className="text-sm font-medium text-error">
+        Couldn't start that download
+      </p>
+      <p className="mt-1 text-xs text-error/80">{banner.message}</p>
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={banner.retrying}
+          onClick={() => startAttempt(banner.opts)}
+          className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
+        >
+          {banner.retrying ? "Trying…" : "Try again"}
+        </button>
+        <button
+          type="button"
+          onClick={() => send({ type: "dismiss" })}
+          className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+  if (probe)
+    return (
+      <ProbeCard
+        workspace
+        outputDir={outputDir}
+        banner={failureBanner}
+        probe={probe}
+        start={start}
+        onStart={startAttempt}
+      />
+    );
+
   return (
-    <div className="p-6">
+    <WorkspaceFrame title="Extract" description="Save a link to your computer.">
       {loading && (
         <div className="enter-up rounded-lg bg-surface-1 p-4">
           <div className="animate-pulse">
@@ -198,7 +240,9 @@ export default function UrlHero({ url }: { url?: string }) {
           still exactly one alert in this subtree at any moment. */}
       {error && (
         <div role="alert" className="enter-up rounded-lg bg-error-subtle p-4">
-          <p className="text-sm font-medium text-error">Couldn't load that link</p>
+          <p className="text-sm font-medium text-error">
+            Couldn't load that link
+          </p>
           <p className="mt-1 text-xs text-error/80">{error}</p>
           <div className="mt-3 flex gap-2">
             {lastUrl && (
@@ -221,7 +265,10 @@ export default function UrlHero({ url }: { url?: string }) {
             )}
             <button
               type="button"
-              onClick={() => { setError(null); setLastUrl(null); }}
+              onClick={() => {
+                setError(null);
+                setLastUrl(null);
+              }}
               className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
             >
               Dismiss
@@ -229,39 +276,33 @@ export default function UrlHero({ url }: { url?: string }) {
           </div>
         </div>
       )}
-      {probe && <ProbeCard probe={probe} start={start} onStart={startAttempt} />}
-      {banner && (
-        <div role="alert" className="enter-up mt-3 rounded-lg bg-error-subtle p-4">
-          <p className="text-sm font-medium text-error">Couldn't start that download</p>
-          <p className="mt-1 text-xs text-error/80">{banner.message}</p>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              disabled={banner.retrying}
-              onClick={() => startAttempt(banner.opts)}
-              className="btn-press rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-            >
-              {banner.retrying ? "Trying…" : "Try again"}
-            </button>
-            <button
-              type="button"
-              onClick={() => send({ type: "dismiss" })}
-              className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:bg-surface-3"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
+      {failureBanner}
       {!loading && !probe && !error && (
         <div className="enter-up flex h-full flex-col items-center justify-center text-center">
-          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-fg-muted/30">
-            <path d="M24 8v32M16 32l8 8 8-8" strokeLinecap="round" strokeLinejoin="round" />
+          <svg
+            width="48"
+            height="48"
+            viewBox="0 0 48 48"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            className="text-fg-muted/30"
+          >
+            <path
+              d="M24 8v32M16 32l8 8 8-8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
-          <p className="mt-3 text-sm text-fg-secondary">Paste a URL above and press Enter.</p>
-          <p className="mt-1 text-xs text-fg-muted">YouTube, SoundCloud, TikTok, Instagram, Vimeo, or any direct file link.</p>
+          <p className="mt-3 text-sm text-fg-secondary">
+            Paste a URL above and press Enter.
+          </p>
+          <p className="mt-1 text-xs text-fg-muted">
+            YouTube, SoundCloud, TikTok, Instagram, Vimeo, or any direct file
+            link.
+          </p>
         </div>
       )}
-    </div>
+    </WorkspaceFrame>
   );
 }

@@ -1,0 +1,23 @@
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { afterEach, expect, it } from "vitest";
+import type { ReactNode } from "react";
+import { WorkspaceDraftProvider } from "../workspaceDrafts";
+import { useWorkspaceOperation } from "../workspaceOperations";
+afterEach(cleanup);
+it("atomically serializes a tool across scopes/remounts and only its matching finish releases", () => {
+ const wrapper = ({children}: {children: ReactNode}) => <WorkspaceDraftProvider tool="image">{children}</WorkspaceDraftProvider>;
+ const first = renderHook(useWorkspaceOperation, {wrapper});
+ let finish: (() => void) | null = null;
+ act(() => {finish = first.result.current.begin(); expect(first.result.current.begin()).toBeNull();});
+ first.unmount();
+ const next = renderHook(useWorkspaceOperation, {wrapper});
+ const other = renderHook(useWorkspaceOperation, {wrapper: ({children}) => <WorkspaceDraftProvider tool="metadata">{children}</WorkspaceDraftProvider>});
+ expect(next.result.current.busy).toBe(true); expect(other.result.current.busy).toBe(false);
+ let finishOther: (() => void) | null = null;
+ act(() => {finishOther = other.result.current.begin(); finish?.();});
+ expect(next.result.current.busy).toBe(false); expect(other.result.current.busy).toBe(true);
+ let finishNext: (() => void) | null = null;
+ act(() => {finishNext = next.result.current.begin(); finish?.();});
+ expect(next.result.current.busy).toBe(true);
+ act(() => {finishNext?.(); finishOther?.();});
+});

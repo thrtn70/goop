@@ -1,3 +1,7 @@
+pub mod capabilities;
+pub use capabilities::{
+    CompressionCapabilities, ConversionCapabilities, ConversionInspection, TargetCapability,
+};
 pub mod convert;
 pub mod error;
 pub mod events;

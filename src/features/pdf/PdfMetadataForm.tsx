@@ -1,3 +1,5 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useId, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfSetMetadata } from "@/ipc/commands";
@@ -22,11 +24,11 @@ function stemOf(p: string): string {
 
 export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [title, setTitle] = useState<string>("");
-  const [author, setAuthor] = useState<string>("");
-  const [subject, setSubject] = useState<string>("");
-  const [keywords, setKeywords] = useState<string>("");
-  const [busy, setBusy] = useState(false);
+  const [title, setTitle] = useWorkspaceDraftState<string>("PdfMetadataForm.title", "");
+  const [author, setAuthor] = useWorkspaceDraftState<string>("PdfMetadataForm.author", "");
+  const [subject, setSubject] = useWorkspaceDraftState<string>("PdfMetadataForm.subject", "");
+  const [keywords, setKeywords] = useWorkspaceDraftState<string>("PdfMetadataForm.keywords", "");
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const titleId = useId();
@@ -40,7 +42,8 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -48,7 +51,6 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
         title: "Save PDF with updated metadata",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       // Only send fields the user actually edited (non-empty). Leaving a
@@ -67,7 +69,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

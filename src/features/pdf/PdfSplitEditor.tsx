@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useMemo } from "react";
 import type { PageRange } from "@/types";
 
 interface PdfSplitEditorProps {
@@ -51,7 +52,7 @@ export default function PdfSplitEditor({
   ranges: _parentRanges,
   onChange,
 }: PdfSplitEditorProps) {
-  const [input, setInput] = useState("");
+  const [input, setInput] = useWorkspaceDraftState("PdfSplitEditor.input", "");
   const { ranges, error } = useMemo(() => parseRanges(input, totalPages), [input, totalPages]);
 
   // Keep the parent in sync whenever parsing succeeds.

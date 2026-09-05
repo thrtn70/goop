@@ -34,8 +34,29 @@ pub async fn convert_from_file(
     req: ConvertRequest,
     state: State<'_, AppState>,
 ) -> Result<JobId, IpcError> {
+    goop_converter::capabilities::validate_request_source(&state.resolver, &req).await?;
     let payload = serde_json::to_value(&req).map_err(|e| IpcError::Queue(e.to_string()))?;
     let job = Job::new(JobKind::Convert, payload);
     state.store.insert(&job).map_err(IpcError::from)?;
     Ok(job.id)
+}
+
+#[tauri::command]
+pub async fn convert_capabilities(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<goop_core::ConversionCapabilities, IpcError> {
+    goop_converter::capabilities::probe_capabilities(&state.resolver, Path::new(&path))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn convert_inspect(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<goop_core::ConversionInspection, IpcError> {
+    goop_converter::capabilities::inspect_source(&state.resolver, Path::new(&path))
+        .await
+        .map_err(Into::into)
 }

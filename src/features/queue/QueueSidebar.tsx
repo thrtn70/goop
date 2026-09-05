@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   DndContext,
   type DragEndEvent,
@@ -15,21 +15,12 @@ import {
 } from "@dnd-kit/sortable";
 import type { JobId, JobState } from "@/types";
 import { api } from "@/ipc/commands";
-import { X } from "lucide-react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { modKeyLabel } from "@/lib/platform";
 import { formatError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
 import SortableQueueRow from "./SortableQueueRow";
-
-const MIN_WIDTH = 240;
-const MAX_WIDTH = 480;
-const DEFAULT_WIDTH = 288;
-
-function clampWidth(w: number): number {
-  if (w < MIN_WIDTH) return MIN_WIDTH;
-  if (w > MAX_WIDTH) return MAX_WIDTH;
-  return Math.round(w);
-}
 
 /** Active = running or paused. Paused rows stay in this group so the
  *  user can resume them; whether the job still holds its concurrency
@@ -62,8 +53,6 @@ export default function QueueSidebar() {
   const clearUnseen = useAppStore((s) => s.clearUnseen);
   const collapsed = useAppStore((s) => s.ui.queueCollapsed);
   const toggleCollapsed = useAppStore((s) => s.toggleQueueCollapsed);
-  const persistedWidth = useAppStore((s) => s.settings?.queue_sidebar_width ?? DEFAULT_WIDTH);
-  const patchSettings = useAppStore((s) => s.patchSettings);
   const selectedIds = useAppStore((s) => s.ui.queueSelectedIds);
   const doneToday = useAppStore((s) => s.ui.doneToday);
   const reorderQueue = useAppStore((s) => s.reorderQueue);
@@ -71,8 +60,17 @@ export default function QueueSidebar() {
   const clearQueueSelection = useAppStore((s) => s.clearQueueSelection);
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const progressById = useAppStore((s) => s.progressById);
-  const [width, setWidth] = useState<number>(persistedWidth);
-  const dragStartRef = useRef<{ x: number; w: number } | null>(null);
+  const [preferredHeight, setPreferredHeight] = useState(240);
+  const [availableHeight, setAvailableHeight] = useState(() => window.innerHeight - 48);
+  const panelRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const contentFocused = useRef(false);
+  const contentId = useId();
+  const dragStartRef = useRef<{ y: number; height: number; preferred: number } | null>(null);
+  const maxHeight = Math.max(40, Math.min(360, Math.floor(availableHeight * 0.45)));
+  const minHeight = Math.min(160, maxHeight);
+  const clampHeight = (height: number) => Math.round(Math.max(minHeight, Math.min(maxHeight, height)));
+  const height = clampHeight(preferredHeight);
   // When non-null, the user has clicked "Cancel selected" once and is
   // looking at a confirm prompt. The number is the count being confirmed
   // — if the selection changes (add/remove), the confirm resets so we
@@ -80,8 +78,27 @@ export default function QueueSidebar() {
   const [confirmingCount, setConfirmingCount] = useState<number | null>(null);
 
   useEffect(() => {
-    if (dragStartRef.current === null) setWidth(persistedWidth);
-  }, [persistedWidth]);
+    const parent = panelRef.current?.parentElement;
+    function measure() {
+      setAvailableHeight(parent?.getBoundingClientRect().height || window.innerHeight - 48);
+    }
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (parent) observer?.observe(parent);
+    window.addEventListener("resize", measure);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", measure); };
+  }, []);
+
+  useEffect(() => {
+    if (collapsed && dragStartRef.current) {
+      setPreferredHeight(dragStartRef.current.preferred);
+      dragStartRef.current = null;
+    }
+    if (collapsed && contentFocused.current) {
+      toggleRef.current?.focus();
+      contentFocused.current = false;
+    }
+  }, [collapsed]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -90,26 +107,29 @@ export default function QueueSidebar() {
 
   function onDragStart(e: React.PointerEvent<HTMLDivElement>): void {
     e.preventDefault();
-    dragStartRef.current = { x: e.clientX, w: width };
-    (e.target as Element).setPointerCapture(e.pointerId);
+    dragStartRef.current = { y: e.clientY, height, preferred: preferredHeight };
+    e.currentTarget.setPointerCapture(e.pointerId);
   }
 
   function onDragMove(e: React.PointerEvent<HTMLDivElement>): void {
     if (!dragStartRef.current) return;
-    const delta = dragStartRef.current.x - e.clientX;
-    setWidth(clampWidth(dragStartRef.current.w + delta));
+    setPreferredHeight(clampHeight(dragStartRef.current.height + dragStartRef.current.y - e.clientY));
   }
 
   function onDragEnd(e: React.PointerEvent<HTMLDivElement>): void {
     if (!dragStartRef.current) return;
-    const finalWidth = clampWidth(width);
+    if (e.type !== "pointerup") setPreferredHeight(dragStartRef.current.preferred);
     dragStartRef.current = null;
-    (e.target as Element).releasePointerCapture(e.pointerId);
-    if (finalWidth !== persistedWidth) {
-      void patchSettings({ queue_sidebar_width: finalWidth }).catch(() => {
-        /* persistence is best-effort; the width still updates locally */
-      });
+    if (e.type !== "lostpointercapture" && e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
     }
+  }
+
+  function onResizeKey(e: React.KeyboardEvent<HTMLDivElement>): void {
+    const next = { ArrowUp: height + 16, ArrowDown: height - 16, Home: minHeight, End: maxHeight }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    setPreferredHeight(clampHeight(next));
   }
 
   async function handleClearCompleted(): Promise<void> {
@@ -185,105 +205,39 @@ export default function QueueSidebar() {
     return sum + (e > 0 ? e : 0);
   }, 0);
 
-  if (collapsed) {
-    return (
-      <aside
-        className="flex w-10 shrink-0 flex-col items-center gap-2 border-l border-subtle bg-surface-1 py-3"
-        aria-label="Job queue (collapsed)"
-      >
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          aria-label="Expand queue sidebar"
-          title="Expand queue (⌘⇧Q)"
-          className="btn-press flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
-        >
-          <svg
-            aria-hidden="true"
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="10,4 4,8 10,12" />
-          </svg>
-        </button>
-        {activeCount > 0 && (
-          <span
-            aria-label={`${activeCount} active job${activeCount !== 1 ? "s" : ""}`}
-            className="flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-xs font-semibold text-accent-fg"
-          >
-            {activeCount > 99 ? "99+" : activeCount}
-          </span>
-        )}
-      </aside>
-    );
-  }
+  const current = active.find(job => job.state === "running") ?? active[0];
+  const currentProgress = current ? progressById[jobIdKey(current.id)] : undefined;
+  const summary = current?.state === "paused" ? "Paused"
+    : current ? currentProgress?.stage || "Starting"
+    : queued.length ? `${queued.length} waiting` : "No active jobs";
+  const percent = currentProgress?.percent;
+  const showPercent = current?.state === "running" && percent != null && Number.isFinite(percent)
+    && percent > 0 && !/^(downloaded |retrying)/.test(summary);
 
   return (
-    <aside
-      className="relative shrink-0 overflow-auto border-l border-subtle bg-surface-1 p-3"
-      style={{ width: `${width}px` }}
-      aria-label="Job queue"
-    >
-      <div
-        role="separator"
-        aria-label="Resize queue sidebar"
-        aria-valuemin={MIN_WIDTH}
-        aria-valuemax={MAX_WIDTH}
-        aria-valuenow={width}
-        aria-orientation="vertical"
-        onPointerDown={onDragStart}
-        onPointerMove={onDragMove}
-        onPointerUp={onDragEnd}
-        onPointerCancel={onDragEnd}
-        className="absolute left-0 top-0 h-full w-1 select-none bg-transparent transition-colors duration-fast ease-out hover:bg-accent/40"
-      />
-      <div className="flex w-full items-center gap-2">
-        <h3
-          aria-live="polite"
-          aria-atomic="true"
-          className="text-xs font-semibold uppercase tracking-wide text-fg-muted"
-        >
-          Queue ({activeCount})
-        </h3>
-        {unseen > 0 && (
-          <button
-            type="button"
-            onClick={() => clearUnseen()}
-            aria-label={`${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`}
-            className="btn-press inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-accent px-1.5 text-xs font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover"
-          >
-            {unseen > 99 ? "99+" : unseen}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          aria-label="Collapse queue sidebar"
-          title="Collapse queue (⌘⇧Q)"
-          className="btn-press ml-auto flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition duration-fast ease-out hover:bg-surface-2 hover:text-fg"
-        >
-          <svg
-            aria-hidden="true"
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="6,4 12,8 6,12" />
-          </svg>
+    <aside ref={panelRef} className="workspace-queue" style={{ height: collapsed ? 40 : height }} aria-label="Job queue">
+      {!collapsed && <div role="separator" tabIndex={0} aria-label="Resize queue"
+        aria-valuemin={minHeight} aria-valuemax={maxHeight} aria-valuenow={height} aria-orientation="horizontal"
+        onFocus={() => { contentFocused.current = true; }}
+        onBlur={() => { contentFocused.current = false; }}
+        onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd} onLostPointerCapture={onDragEnd}
+        onKeyDown={onResizeKey} className="workspace-queue-grip" />}
+      <div className="workspace-queue-header">
+        <button ref={toggleRef} type="button" onClick={toggleCollapsed}
+          aria-label={collapsed ? "Expand queue" : "Collapse queue"} aria-expanded={!collapsed} aria-controls={contentId}
+          title={`${collapsed ? "Expand" : "Collapse"} queue (${modKeyLabel()}Shift+Q)`}
+          className="workspace-queue-toggle">
+          {collapsed ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+          <span>Queue</span><span className="text-fg-muted tabular-nums">({activeCount})</span>
         </button>
+        {unseen > 0 && <button type="button" onClick={() => clearUnseen()}
+          aria-label={`${unseen} new completion${unseen !== 1 ? "s" : ""}, click to clear`}
+          className="workspace-queue-unseen">{unseen > 99 ? "99+" : unseen}</button>}
+        <span className="workspace-queue-summary">{summary}{showPercent && ` · ${Math.round(Math.min(100, percent))}%`}</span>
       </div>
-
+      <div id={contentId} hidden={collapsed} className="workspace-queue-content"
+        onFocusCapture={() => { contentFocused.current = true; }}
+        onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) contentFocused.current = false; }}>
       {(activeCount > 0 || doneToday > 0) && (
         <div className="mt-1 flex items-center justify-between text-xs tabular-nums text-fg-muted">
           <span>
@@ -388,6 +342,8 @@ export default function QueueSidebar() {
           </div>
         </>
       )}
+        {jobs.length === 0 && <p className="py-5 text-center text-sm text-fg-muted">Your next task will appear here.</p>}
+      </div>
     </aside>
   );
 }

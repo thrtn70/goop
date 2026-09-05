@@ -1,17 +1,27 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import DropZone from "@/features/convert/DropZone";
 
-// Tauri's window.onDragDropEvent isn't available in jsdom. Mock it to
-// a no-op subscribe so DropZone mounts without trying to reach the
-// platform layer. Component-level state transitions are out of scope
-// for this test — we only verify the static structural elements that
-// the empty/idle render produces (perimeter SVG, child slot).
+const callbacks: ((event: {
+  payload: { type: string; paths?: string[] };
+}) => void)[] = [];
+const unlisten = vi.fn();
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    onDragDropEvent: vi.fn().mockResolvedValue(() => {}),
+    onDragDropEvent: (
+      callback: (event: {
+        payload: { type: string; paths?: string[] };
+      }) => void,
+    ) => {
+      callbacks.push(callback);
+      return Promise.resolve(unlisten);
+    },
   }),
 }));
+beforeEach(() => {
+  callbacks.length = 0;
+  unlisten.mockClear();
+});
 
 afterEach(() => {
   cleanup();
@@ -25,7 +35,9 @@ describe("DropZone", () => {
       </DropZone>,
     );
     expect(container.querySelector("svg")).not.toBeNull();
-    expect(container.querySelector('[data-testid="child"]')?.textContent).toBe("Hello");
+    expect(container.querySelector('[data-testid="child"]')?.textContent).toBe(
+      "Hello",
+    );
   });
 
   it("idle perimeter uses the static stroke class (no flow)", () => {
@@ -39,3 +51,28 @@ describe("DropZone", () => {
     expect(rect?.getAttribute("class")).not.toContain("dropzone-stroke-flow");
   });
 });
+
+for (const compact of [false, true]) {
+  it(
+    "delivers one drop and retires its listener in compact=" + compact,
+    async () => {
+      const receive = vi.fn();
+      const view = render(
+        <DropZone onFiles={receive} compact={compact}>
+          <p>Drop here</p>
+        </DropZone>,
+      );
+      await waitFor(() => expect(callbacks).toHaveLength(1));
+      act(() =>
+        callbacks[0]({ payload: { type: "drop", paths: ["/source.mp4"] } }),
+      );
+      expect(receive).toHaveBeenCalledExactlyOnceWith(["/source.mp4"]);
+      view.unmount();
+      await waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+      act(() =>
+        callbacks[0]({ payload: { type: "drop", paths: ["/retired.mp4"] } }),
+      );
+      expect(receive).toHaveBeenCalledTimes(1);
+    },
+  );
+}

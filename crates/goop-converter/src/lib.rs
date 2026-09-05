@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod capabilities;
 pub mod compat;
 pub mod encoders;
 pub mod ffmpeg;
@@ -14,6 +15,7 @@ pub mod metadata;
 pub mod naming;
 pub mod probe_json;
 pub mod progress;
+pub mod raw;
 pub mod subtitle;
 
 pub use backend::{backend_for_extension, BackendKind, ConversionBackend};

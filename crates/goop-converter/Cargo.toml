@@ -68,3 +68,12 @@ img-parts = "0.3"
 [dev-dependencies]
 # Scratch dirs for the `#[ignore]`d real-ffmpeg tests.
 tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Storage_FileSystem"] }

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useCallback, useMemo } from "react";
 import Cropper, { type Area } from "react-easy-crop";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { CropRect } from "@/types";
@@ -45,9 +46,9 @@ function aspectOf(preset: AspectPreset): number | undefined {
  * there.
  */
 export default function CropEditor({ file, onChange }: CropEditorProps) {
-  const [aspect, setAspect] = useState<AspectPreset>("free");
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
+  const [aspect, setAspect] = useWorkspaceDraftState<AspectPreset>("CropEditor.aspect", "free");
+  const [crop, setCrop] = useWorkspaceDraftState("CropEditor.crop", { x: 0, y: 0 });
+  const [zoom, setZoom] = useWorkspaceDraftState("CropEditor.zoom", 1);
 
   // convertFileSrc is a stable synchronous helper but we memoize so
   // the Cropper's `image` prop doesn't churn each render and force a
@@ -68,14 +69,6 @@ export default function CropEditor({ file, onChange }: CropEditorProps) {
     },
     [onChange],
   );
-
-  // Reset the crop state when the file changes so a new image
-  // doesn't start at the previous image's coordinates.
-  useEffect(() => {
-    setCrop({ x: 0, y: 0 });
-    setZoom(1);
-    onChange(null);
-  }, [file, onChange]);
 
   const presets: AspectPreset[] = ["free", "1:1", "4:3", "16:9"];
 

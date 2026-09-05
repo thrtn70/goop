@@ -1,3 +1,5 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfReorder } from "@/ipc/commands";
@@ -23,10 +25,10 @@ function stemOf(p: string): string {
 
 export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [pages, setPages] = useState<PageState[]>([]);
+  const { pages, setPages, loadPages } = usePdfPageDrafts("PdfReorderFlow.pages");
   const [initial, setInitial] = useState<PageState[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -43,7 +45,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
           deleted: false,
           rotation: null,
         }));
-        setPages(initialState);
+        loadPages(initialState);
         setInitial(initialState);
       })
       .catch((e) => {
@@ -55,13 +57,14 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, loadPages]);
 
   const dirty = pages.some((p, idx) => p.originalPage !== initial[idx]?.originalPage);
 
   async function handleApply() {
     if (!dirty || pages.length === 0) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dest = await save({
@@ -69,7 +72,6 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
         title: "Save reordered PDF",
       });
       if (!dest) {
-        setBusy(false);
         return;
       }
       const order = pages.map((p) => p.originalPage);
@@ -79,7 +81,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 

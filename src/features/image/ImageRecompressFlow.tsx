@@ -1,3 +1,6 @@
+import { useWorkspaceOperation } from "@/store/workspaceOperations";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, imageRecompress } from "@/ipc/commands";
@@ -16,17 +19,18 @@ const DEFAULT_QUALITY = 75;
  * them to a chosen output folder, preserving each input's basename +
  * extension. The first image op to produce a folder result.
  */
-export default function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
+function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [quality, setQuality] = useState<number>(DEFAULT_QUALITY);
-  const [busy, setBusy] = useState(false);
+  const [quality, setQuality] = useWorkspaceDraftState<number>("ImageRecompressFlow.quality", DEFAULT_QUALITY);
+  const { busy, begin } = useWorkspaceOperation();
   const [error, setError] = useState<string | null>(null);
 
   const canApply = !busy && files.length > 0;
 
   async function handleApply() {
     if (!canApply) return;
-    setBusy(true);
+    const finish = begin();
+    if (!finish) return;
     setError(null);
     try {
       const dir = await open({
@@ -35,7 +39,6 @@ export default function ImageRecompressFlow({ files, onDone }: ImageRecompressFl
       });
       const outDir = typeof dir === "string" ? dir : null;
       if (!outDir) {
-        setBusy(false);
         return;
       }
       await api.image.run(imageRecompress(files, outDir, quality));
@@ -44,7 +47,7 @@ export default function ImageRecompressFlow({ files, onDone }: ImageRecompressFl
     } catch (e) {
       setError(formatError(e));
     } finally {
-      setBusy(false);
+      finish();
     }
   }
 
@@ -86,3 +89,5 @@ export default function ImageRecompressFlow({ files, onDone }: ImageRecompressFl
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageRecompressFlow, undefined, props => ["ImageRecompressFlow", ...props.files.slice().sort()]);
