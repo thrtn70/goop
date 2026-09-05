@@ -1,9 +1,71 @@
+import type { ReactNode } from "react";
+import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
+import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import type { DebridProbeInfo, DirectFileInfo, FormatOption, UrlProbe } from "@/types";
-import { startPhaseFor, type StartOptions, type StartPhase, type StartState } from "./startState";
+import type {
+  DebridProbeInfo,
+  DirectFileInfo,
+  FormatOption,
+  UrlProbe,
+} from "@/types";
+import {
+  startPhaseFor,
+  type StartOptions,
+  type StartPhase,
+  type StartState,
+} from "./startState";
 
-type Props = { probe: UrlProbe; start: StartState; onStart: (opts: StartOptions) => void };
+type Presentation = {
+  workspace?: boolean;
+  banner?: ReactNode;
+  outputDir?: string;
+};
+type Props = Presentation & {
+  probe: UrlProbe;
+  start: StartState;
+  onStart: (opts: StartOptions) => void;
+};
+function compose(
+  presentation: Presentation,
+  source: ReactNode,
+  fields: ReactNode,
+  actions: ReactNode,
+) {
+  if (!presentation.workspace)
+    return (
+      <div className="space-y-4">
+        {source}
+        {fields}
+        {actions}
+      </div>
+    );
+  return (
+    <WorkspaceFrame
+      title="Extract"
+      description="Save a link to your computer."
+      inspector={
+        <WorkspaceInspector title="Download settings" actions={actions}>
+          {fields ?? (
+            <p className="text-sm text-fg-secondary">
+              Ready to download this source.
+            </p>
+          )}
+        </WorkspaceInspector>
+      }
+      outputSummary={
+        <p className="break-all text-sm text-fg-secondary">
+          Save to {presentation.outputDir}
+        </p>
+      }
+    >
+      <div className="space-y-4">
+        {source}
+        {presentation.banner}
+      </div>
+    </WorkspaceFrame>
+  );
+}
 
 /**
  * The one control that enqueues, shared by all three card variants.
@@ -59,13 +121,22 @@ function StartButton({
   );
 }
 
-function ProbeCard({ probe, start, onStart }: Props) {
+function ProbeCard({ probe, start, onStart, ...presentation }: Props) {
   if (probe.direct) {
-    return <DirectCard info={probe.direct} url={probe.url} start={start} onStart={onStart} />;
+    return (
+      <DirectCard
+        {...presentation}
+        info={probe.direct}
+        url={probe.url}
+        start={start}
+        onStart={onStart}
+      />
+    );
   }
   if (probe.debrid) {
     return (
       <DebridCard
+        {...presentation}
         title={probe.title}
         info={probe.debrid}
         url={probe.url}
@@ -74,66 +145,94 @@ function ProbeCard({ probe, start, onStart }: Props) {
       />
     );
   }
-  return <MediaCard probe={probe} start={start} onStart={onStart} />;
+  return (
+    <MediaCard
+      {...presentation}
+      probe={probe}
+      start={start}
+      onStart={onStart}
+    />
+  );
 }
 
-function MediaCard({ probe, start, onStart }: Props) {
-  const [selected, setSelected] = useWorkspaceDraftState<string | null>("ProbeCard.selected", null);
-  const [audioOnly, setAudioOnly] = useWorkspaceDraftState("ProbeCard.audioOnly", false);
+function MediaCard({ probe, start, onStart, ...presentation }: Props) {
+  const [selected, setSelected] = useWorkspaceDraftState<string | null>(
+    "ProbeCard.selected",
+    null,
+  );
+  const [audioOnly, setAudioOnly] = useWorkspaceDraftState(
+    "ProbeCard.audioOnly",
+    false,
+  );
   const fmt = probe.formats.find((f) => f.format_id === selected) ?? null;
   // One object for both the phase and the call, so what the button reports
   // can never describe a different selection from the one it would send.
   const opts: StartOptions = { format: fmt, audioOnly };
-  return (
-    <div className="rounded-lg bg-surface-1 p-4">
-      <div className="flex gap-4">
-        {probe.thumbnail_url && (
-          <img src={probe.thumbnail_url} alt={`Thumbnail for ${probe.title}`} className="h-24 w-40 rounded-md object-cover" />
+  return compose(
+    presentation,
+    <div className="flex gap-4">
+      {probe.thumbnail_url && (
+        <img
+          src={probe.thumbnail_url}
+          alt={`Thumbnail for ${probe.title}`}
+          className="h-24 w-40 rounded-md object-cover"
+        />
+      )}
+      <div className="min-w-0 flex-1">
+        <h3 className="break-words text-lg font-semibold text-fg">
+          {probe.title}
+        </h3>
+        {probe.uploader && (
+          <p className="mt-1 text-sm text-fg-secondary">{probe.uploader}</p>
         )}
-        <div className="flex-1">
-          <h3 className="font-display text-lg font-semibold text-fg">{probe.title}</h3>
-          {probe.uploader && <p className="mt-1 text-sm text-fg-secondary">{probe.uploader}</p>}
-          {probe.duration_secs != null && (
-            <p className="mt-1 text-xs tabular-nums text-fg-muted">{formatSecs(Number(probe.duration_secs))}</p>
-          )}
-        </div>
+        {probe.duration_secs != null && (
+          <p className="mt-1 text-xs tabular-nums text-fg-muted">
+            {formatSecs(Number(probe.duration_secs))}
+          </p>
+        )}
       </div>
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <label className="text-sm text-fg-secondary">Format:</label>
-        <select
-          className="rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
-          value={selected ?? ""}
-          onChange={(e) => setSelected(e.target.value || null)}
-        >
-          <option value="">Best (auto)</option>
-          {selected && !fmt && <option value={selected}>Previous format unavailable — choose again</option>}
-          {/* Rendered whole and in the order the backend gave them, which
+    </div>,
+    <div className="flex min-w-0 flex-col gap-4">
+      {" "}
+      <label className="text-sm text-fg-secondary">Format:</label>
+      <select
+        aria-label="Download format"
+        className="w-full min-w-0 rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        value={selected ?? ""}
+        onChange={(e) => setSelected(e.target.value || null)}
+      >
+        <option value="">Best (auto)</option>
+        {selected && !fmt && (
+          <option value={selected}>
+            Previous format unavailable — choose again
+          </option>
+        )}
+        {/* Rendered whole and in the order the backend gave them, which
               is best-first. This list used to be capped at 20 entries,
               which cut from the wrong end and put 1080p and above out of
               reach entirely. */}
-          {probe.formats.map((f) => (
-            <option key={f.format_id} value={f.format_id}>
-              {formatLabel(f)}
-            </option>
-          ))}
-        </select>
-        <label className="ml-2 flex items-center gap-2 text-sm text-fg-secondary">
-          <input
-            type="checkbox"
-            checked={audioOnly}
-            onChange={(e) => setAudioOnly(e.target.checked)}
-            className="rounded accent-accent"
-          />
-          audio only
-        </label>
-        <StartButton
-          label="Start"
-          unavailable={selected !== null && fmt === null}
-          phase={startPhaseFor(start, probe.url, opts)}
-          onStart={() => onStart(opts)}
+        {probe.formats.map((f) => (
+          <option key={f.format_id} value={f.format_id}>
+            {formatLabel(f)}
+          </option>
+        ))}
+      </select>
+      <label className="ml-2 flex items-center gap-2 text-sm text-fg-secondary">
+        <input
+          type="checkbox"
+          checked={audioOnly}
+          onChange={(e) => setAudioOnly(e.target.checked)}
+          className="rounded accent-accent"
         />
-      </div>
-    </div>
+        audio only
+      </label>
+    </div>,
+    <StartButton
+      label="Start"
+      unavailable={selected !== null && fmt === null}
+      phase={startPhaseFor(start, probe.url, opts)}
+      onStart={() => onStart(opts)}
+    />,
   );
 }
 
@@ -142,7 +241,8 @@ function DirectCard({
   url,
   start,
   onStart,
-}: {
+  ...presentation
+}: Presentation & {
   info: DirectFileInfo;
   url: string;
   start: StartState;
@@ -156,31 +256,45 @@ function DirectCard({
     .filter((s): s is string => s != null)
     .join(" · ");
 
-  return (
-    <div className="rounded-lg bg-surface-1 p-4">
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" focusable="false">
-            <path d="M14 3v5h5M14 3l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8z" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-lg font-semibold text-fg">{info.filename}</h3>
-          <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
-          {!info.resumable && (
-            <p className="mt-1 text-xs text-fg-muted">This server may not support resuming.</p>
-          )}
-        </div>
+  return compose(
+    presentation,
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M14 3v5h5M14 3l5 5v11a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
+      <div className="min-w-0 flex-1">
+        <h3 className="truncate font-display text-lg font-semibold text-fg">
+          {info.filename}
+        </h3>
+        <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
+        {!info.resumable && (
+          <p className="mt-1 text-xs text-fg-muted">
+            This server may not support resuming.
+          </p>
+        )}
       </div>
-
-      <div className="mt-4 flex">
-        <StartButton
-          label="Download"
-          phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
-          onStart={() => onStart(SINGLE_ACTION_OPTS)}
-        />
-      </div>
-    </div>
+    </div>,
+    null,
+    <StartButton
+      label="Download"
+      phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
+      onStart={() => onStart(SINGLE_ACTION_OPTS)}
+    />,
   );
 }
 
@@ -190,7 +304,8 @@ function DebridCard({
   url,
   start,
   onStart,
-}: {
+  ...presentation
+}: Presentation & {
   title: string;
   info: DebridProbeInfo;
   url: string;
@@ -201,34 +316,46 @@ function DebridCard({
     .filter((s): s is string => s != null)
     .join(" · ");
 
-  return (
-    <div className="rounded-lg bg-surface-1 p-4">
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" focusable="false">
-            <path d="M13 3 4 14h6l-1 7 9-11h-6l1-7z" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-lg font-semibold text-fg">{title}</h3>
-          <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
-          {info.magnet && (
-            <p className="mt-1 text-xs text-fg-muted">
-              TorBox fetches the torrent, then Goop downloads it — uncached torrents can take a
-              while to become ready.
-            </p>
-          )}
-        </div>
+  return compose(
+    presentation,
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-secondary">
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M13 3 4 14h6l-1 7 9-11h-6l1-7z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
+      <div className="min-w-0 flex-1">
+        <h3 className="truncate font-display text-lg font-semibold text-fg">
+          {title}
+        </h3>
+        <p className="mt-1 text-sm text-fg-secondary">{meta}</p>
+        {info.magnet && (
+          <p className="mt-1 text-xs text-fg-muted">
+            TorBox fetches the torrent, then Goop downloads it — uncached
+            torrents can take a while to become ready.
+          </p>
+        )}
       </div>
-
-      <div className="mt-4 flex">
-        <StartButton
-          label="Download"
-          phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
-          onStart={() => onStart(SINGLE_ACTION_OPTS)}
-        />
-      </div>
-    </div>
+    </div>,
+    null,
+    <StartButton
+      label="Download"
+      phase={startPhaseFor(start, url, SINGLE_ACTION_OPTS)}
+      onStart={() => onStart(SINGLE_ACTION_OPTS)}
+    />,
   );
 }
 
@@ -271,4 +398,7 @@ function humanSize(bytes: number | bigint): string {
   return `${i === 0 ? Math.round(v).toString() : v.toFixed(1)} ${units[i]}`;
 }
 
-export default withWorkspaceDrafts(ProbeCard, undefined, props => ["source", props.probe.url]);
+export default withWorkspaceDrafts(ProbeCard, undefined, (props) => [
+  "source",
+  props.probe.url,
+]);

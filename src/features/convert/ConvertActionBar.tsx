@@ -1,3 +1,15 @@
+import {
+  beginDestinationChoice,
+  isCurrentDestinationChoice,
+  tryBegin,
+  setSubmissionPhase,
+  finishSubmission,
+  useWorkspaceSubmissions,
+} from "@/store/workspaceSubmissions";
+import type {
+  EntryIdentity,
+  SubmissionReceipt,
+} from "@/features/workspace/entries";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -15,7 +27,7 @@ import type {
   TargetFormat,
 } from "@/types";
 
-export interface FileEntry {
+export interface FileEntry extends EntryIdentity {
   optionsReady?: boolean;
   path: string;
   target: TargetFormat;
@@ -33,6 +45,7 @@ interface ConvertActionBarProps {
   files: FileEntry[];
   disabled: boolean;
   onEnqueued: () => void;
+  onSettled?: (success: SubmissionReceipt[]) => void;
   /** Optional: copies the first file's per-row settings to every other staged file. */
   onApplyToAll?: () => void;
 }
@@ -55,11 +68,17 @@ export default function ConvertActionBar({
   files,
   disabled,
   onEnqueued,
+  onSettled,
   onApplyToAll,
 }: ConvertActionBarProps) {
-  const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>("ConvertActionBar.overrideDir", null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>(
+    "ConvertActionBar.overrideDir",
+    null,
+  );
+  const runtime = useWorkspaceSubmissions((s) => s.convert);
+  const error = runtime.error;
+  const busy = runtime.active !== null;
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const count = files.length;
@@ -71,9 +90,13 @@ export default function ConvertActionBar({
    * can survive until submit. Reconciling silently would drop the file
    * with nothing on screen ever having said so. */
   function warnAboutDroppedSubtitles(entries: FileEntry[]) {
-    const dropped = entries.filter((f) => f.subtitle && !subtitleForTarget(f.subtitle, f.target));
+    const dropped = entries.filter(
+      (f) => f.subtitle && !subtitleForTarget(f.subtitle, f.target),
+    );
     if (dropped.length === 0) return;
-    const formats = [...new Set(dropped.map((f) => f.target.toUpperCase()))].join(", ");
+    const formats = [
+      ...new Set(dropped.map((f) => f.target.toUpperCase())),
+    ].join(", ");
     enqueueToast({
       variant: "info",
       title:
@@ -85,75 +108,86 @@ export default function ConvertActionBar({
   }
 
   async function pickOverrideDir() {
-    const picked = await open({ directory: true, title: "Choose output folder" });
-    if (typeof picked === "string") {
-      setOverrideDir(picked);
+    const generation = beginDestinationChoice("convert");
+    setPickerError(null);
+    try {
+      const picked = await open({
+        directory: true,
+        title: "Choose output folder",
+      });
+      if (
+        typeof picked === "string" &&
+        isCurrentDestinationChoice("convert", generation)
+      )
+        setOverrideDir(picked);
+    } catch (e) {
+      if (isCurrentDestinationChoice("convert", generation))
+        setPickerError(formatError(e));
     }
   }
 
   async function handleConvert() {
-    if (count === 0) return;
-    setBusy(true);
-    setError(null);
-    warnAboutDroppedSubtitles(files);
+    if (disabled || count === 0) return;
+    const token = tryBegin("convert");
+    if (token === null) return;
+    let failure: string | null = null;
     try {
-      if (count === 1) {
-        const f = files[0];
-        const dest = await save({
+      const snapshot = files.map((file) => ({
+        ...file,
+        gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
+        subtitle: file.subtitle ? { ...file.subtitle } : null,
+      }));
+      const outputFolder = overrideDir;
+      warnAboutDroppedSubtitles(snapshot);
+      let destination: string | null = null;
+      if (snapshot.length === 1) {
+        const f = snapshot[0];
+        destination = await save({
           defaultPath: `${stemOf(f.path)}.${extFor(f.target)}`,
           title: "Save converted file",
         });
-        if (!dest) {
-          setBusy(false);
-          return;
-        }
-        await api.convert.fromFile({
-          input_path: f.path,
-          output_path: dest,
-          target: f.target,
-          quality_preset: f.qualityPreset,
-          resolution_cap: f.resolutionCap,
-          gif_options: f.gifOptions,
-          compress_mode: null,
-          batch_id: null,
-          metadata_policy: f.metadataPolicy,
-          // Reconcile here, not just in the row: a preset or "apply to all"
-          // can change `target` without the row's coercion ever running,
-          // which would otherwise send a pairing the backend rejects.
-          subtitle: subtitleForTarget(f.subtitle, f.target),
-        });
-      } else {
-        // Tag every enqueue in this batch with a shared id so toast
-        // grouping can collapse them into a single summary notification.
-        const batchId = newBatchId();
-        await Promise.all(
-          files.map((f) =>
-            api.convert.fromFile({
-              input_path: f.path,
-              output_path: overrideDir ?? dirname(f.path),
-              target: f.target,
-              quality_preset: f.qualityPreset,
-              resolution_cap: f.resolutionCap,
-              gif_options: f.gifOptions,
-              compress_mode: null,
-              batch_id: batchId,
-              metadata_policy: f.metadataPolicy,
-              subtitle: subtitleForTarget(f.subtitle, f.target),
-            }),
-          ),
-        );
+        if (!destination) return;
       }
-      setOverrideDir(null);
-      onEnqueued();
+      setSubmissionPhase("convert", token, "enqueuing");
+      const batchId = snapshot.length > 1 ? newBatchId() : null;
+      const results = await Promise.allSettled(
+        snapshot.map((f) => {
+          const output = destination ?? outputFolder ?? dirname(f.path);
+          return api.convert.fromFile({
+            input_path: f.path,
+            output_path: output,
+            target: f.target,
+            quality_preset: f.qualityPreset,
+            resolution_cap: f.resolutionCap,
+            gif_options: f.gifOptions,
+            compress_mode: null,
+            batch_id: batchId,
+            metadata_policy: f.metadataPolicy,
+            subtitle: subtitleForTarget(f.subtitle, f.target),
+          });
+        }),
+      );
+      const successful = snapshot.filter(
+        (_, i) => results[i].status === "fulfilled",
+      );
+      const failures = results.filter(
+        (r): r is PromiseRejectedResult => r.status === "rejected",
+      );
+      if (successful.length > 0) {
+        if (onSettled) onSettled(successful);
+        else if (failures.length === 0) onEnqueued();
+      }
+      if (failures.length)
+        failure = `${failures.length} file(s) could not be queued: ${formatError(failures[0].reason)}`;
     } catch (e) {
-      setError(formatError(e));
+      failure = formatError(e);
     } finally {
-      setBusy(false);
+      finishSubmission("convert", token, failure);
     }
   }
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex flex-wrap items-center gap-3">
       <button
         type="button"
         disabled={disabled || busy || count === 0}
@@ -161,7 +195,9 @@ export default function ConvertActionBar({
         className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out
           enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {busy ? "Enqueuing..." : `Convert ${count} file${count !== 1 ? "s" : ""}`}
+        {busy
+          ? "Enqueuing..."
+          : `Convert ${count} file${count !== 1 ? "s" : ""}`}
       </button>
       {count > 1 && (
         <button
@@ -169,7 +205,9 @@ export default function ConvertActionBar({
           onClick={() => void pickOverrideDir()}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          {overrideDir ? `\u2192 ${shortenPath(overrideDir)}` : "Change output folder..."}
+          {overrideDir
+            ? `\u2192 ${shortenPath(overrideDir)}`
+            : "Change output folder..."}
         </button>
       )}
       {count > 1 && onApplyToAll && (
@@ -179,7 +217,7 @@ export default function ConvertActionBar({
           title="Copy the first file's settings to every other file"
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          Apply to all
+          Apply first to all
         </button>
       )}
       {count > 0 && (
@@ -191,7 +229,11 @@ export default function ConvertActionBar({
           Save as preset
         </button>
       )}
-      {error && <span className="text-xs text-error">{error}</span>}
+      {(error || pickerError) && (
+        <span role="alert" className="text-xs text-error">
+          {error || pickerError}
+        </span>
+      )}
       <PresetSaveDialog
         open={saveOpen}
         onClose={() => setSaveOpen(false)}

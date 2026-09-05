@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import UrlHero from "@/features/extract/UrlHero";
@@ -64,14 +71,17 @@ function pendingStart() {
       settle = (o) => ("reject" in o ? reject(o.reject) : resolve(o.resolve));
     }),
   );
-  return (outcome: { reject: unknown } | { resolve: string }) => settle(outcome);
+  return (outcome: { reject: unknown } | { resolve: string }) =>
+    settle(outcome);
 }
 
 /** The card's own Start button, whatever it currently reads. */
 function cardStartButton() {
   const b = screen
     .getAllByRole("button")
-    .find((el) => /^(Start|Starting…|Added to queue)$/.test(el.textContent ?? ""));
+    .find((el) =>
+      /^(Start|Starting…|Added to queue)$/.test(el.textContent ?? ""),
+    );
   if (!b) throw new Error("card Start button not found");
   return b;
 }
@@ -112,8 +122,12 @@ function videoFormat() {
  * Returns once the enqueue banner is on screen, so the assertions built on
  * this can't pass by looking for text that was never rendered.
  */
-async function probeThenFailStart(err: unknown = { code: "queue", message: "the queue is full" }) {
-  apiMocks.extract.probe.mockResolvedValue(probeResult({ formats: [videoFormat()] }));
+async function probeThenFailStart(
+  err: unknown = { code: "queue", message: "the queue is full" },
+) {
+  apiMocks.extract.probe.mockResolvedValue(
+    probeResult({ formats: [videoFormat()] }),
+  );
   apiMocks.extract.fromUrl.mockRejectedValue(err);
   const user = userEvent.setup();
   render(
@@ -147,7 +161,9 @@ describe("UrlHero tells an enqueue failure apart from a probe failure", () => {
     const user = await probeThenFailStart();
     apiMocks.extract.fromUrl.mockResolvedValue("job-1");
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
+    );
     expect(apiMocks.extract.probe).toHaveBeenCalledTimes(1);
     expect(apiMocks.extract.fromUrl.mock.calls[1]?.[0]?.format).toBe("299");
   });
@@ -178,9 +194,14 @@ describe("UrlHero tells an enqueue failure apart from a probe failure", () => {
     // standing in for an unhandled rejection — it pins the plain rule
     // that a second failure is reported like the first.
     const user = await probeThenFailStart();
-    apiMocks.extract.fromUrl.mockRejectedValue({ code: "queue", message: "still full" });
+    apiMocks.extract.fromUrl.mockRejectedValue({
+      code: "queue",
+      message: "still full",
+    });
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
+    );
 
     const retry = await screen.findByRole("button", { name: /^Try again$/ });
     expect(retry).toHaveProperty("disabled", false);
@@ -199,7 +220,10 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
   it("blames the link and re-probes on Try again", async () => {
     // The other half of the split: giving the enqueue its own banner must
     // not cost the probe banner its copy or its re-probe retry.
-    apiMocks.extract.probe.mockRejectedValue({ code: "unknown", message: "no extractor matched" });
+    apiMocks.extract.probe.mockRejectedValue({
+      code: "unknown",
+      message: "no extractor matched",
+    });
     const user = userEvent.setup();
     render(
       <MemoryRouter>
@@ -208,7 +232,9 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
     );
     expect(await screen.findByText(/couldn't load that link/i)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.probe).toHaveBeenCalledTimes(2),
+    );
     expect(apiMocks.extract.fromUrl).not.toHaveBeenCalled();
   });
 
@@ -217,7 +243,10 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
     // spoken. A refused lookup was not: the skeleton reading "Looking up
     // that link..." just vanished and nothing took its place, leaving a
     // screen-reader user waiting on a result that had already come back.
-    apiMocks.extract.probe.mockRejectedValue({ code: "unknown", message: "no extractor matched" });
+    apiMocks.extract.probe.mockRejectedValue({
+      code: "unknown",
+      message: "no extractor matched",
+    });
     render(
       <MemoryRouter>
         <UrlHero url="https://example.com/x" />
@@ -237,8 +266,13 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
     // the day the two can co-exist `getByRole("alert")` stops resolving
     // rather than starts failing usefully, and the report points at seven
     // healthy tests instead of at the change that broke them.
-    apiMocks.extract.probe.mockResolvedValueOnce(probeResult({ formats: [videoFormat()] }));
-    apiMocks.extract.fromUrl.mockRejectedValue({ code: "queue", message: "the queue is full" });
+    apiMocks.extract.probe.mockResolvedValueOnce(
+      probeResult({ formats: [videoFormat()] }),
+    );
+    apiMocks.extract.fromUrl.mockRejectedValue({
+      code: "queue",
+      message: "the queue is full",
+    });
     const user = userEvent.setup();
     const { rerender } = render(
       <MemoryRouter>
@@ -271,7 +305,9 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     // under the new card would offer a Try again that replays the old
     // format against the new URL.
     apiMocks.extract.probe.mockImplementation((u: string) =>
-      Promise.resolve(probeResult({ url: u, title: u, formats: [videoFormat()] })),
+      Promise.resolve(
+        probeResult({ url: u, title: u, formats: [videoFormat()] }),
+      ),
     );
     const settleFirst = pendingStart();
     const user = userEvent.setup();
@@ -290,11 +326,15 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
       </MemoryRouter>,
     );
     await waitFor(() =>
-      expect(apiMocks.extract.probe).toHaveBeenCalledWith("https://example.com/b"),
+      expect(apiMocks.extract.probe).toHaveBeenCalledWith(
+        "https://example.com/b",
+      ),
     );
     await screen.findByText("https://example.com/b");
 
-    await act(async () => settleFirst({ reject: { code: "queue", message: "the queue is full" } }));
+    await act(async () =>
+      settleFirst({ reject: { code: "queue", message: "the queue is full" } }),
+    );
     expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
   });
 
@@ -307,7 +347,9 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     // transitions that retire a card have to retire its in-flight state
     // with it, the way they already retire its error.
     apiMocks.extract.probe.mockImplementation((u: string) =>
-      Promise.resolve(probeResult({ url: u, title: u, formats: [videoFormat()] })),
+      Promise.resolve(
+        probeResult({ url: u, title: u, formats: [videoFormat()] }),
+      ),
     );
     const settleFirst = pendingStart();
     const user = userEvent.setup();
@@ -325,7 +367,9 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
       </MemoryRouter>,
     );
     await screen.findByText("https://example.com/b");
-    await act(async () => settleFirst({ reject: { code: "queue", message: "the queue is full" } }));
+    await act(async () =>
+      settleFirst({ reject: { code: "queue", message: "the queue is full" } }),
+    );
 
     const start = await screen.findByRole("button", { name: /^Start$/ });
     expect(start).toHaveProperty("disabled", false);
@@ -346,10 +390,15 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     // The attempt is still running: the card has not been handed back.
     expect(cardStartButton()).toHaveProperty("disabled", true);
 
-    await act(async () => settle({ reject: { code: "queue", message: "still full" } }));
+    await act(async () =>
+      settle({ reject: { code: "queue", message: "still full" } }),
+    );
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByText(/still full/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: /^Try again$/ })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: /^Try again$/ })).toHaveProperty(
+      "disabled",
+      false,
+    );
   });
 
   it("a dismissed retry that succeeds leaves no banner behind", async () => {
@@ -361,10 +410,9 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
 
     await act(async () => settle({ resolve: "job-1" }));
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(await screen.findByRole("button", { name: /added to queue/i })).toHaveProperty(
-      "disabled",
-      true,
-    );
+    expect(
+      await screen.findByRole("button", { name: /added to queue/i }),
+    ).toHaveProperty("disabled", true);
   });
 
   it("a Start click on the card disables the banner's retry", async () => {
@@ -376,12 +424,13 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     await probeThenFailStart();
     pendingStart();
     fireEvent.click(cardStartButton());
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
-
-    expect(screen.getByRole("button", { name: /trying|try again/i })).toHaveProperty(
-      "disabled",
-      true,
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
     );
+
+    expect(
+      screen.getByRole("button", { name: /trying|try again/i }),
+    ).toHaveProperty("disabled", true);
   });
 
   it("a retry that lands after the card was replaced does not re-arm a live one", async () => {
@@ -390,11 +439,16 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     // settles, so a stale retry re-arms the retry button of whatever card
     // is on screen now, mid-flight.
     apiMocks.extract.probe.mockImplementation((u: string) =>
-      Promise.resolve(probeResult({ url: u, title: u, formats: [videoFormat()] })),
+      Promise.resolve(
+        probeResult({ url: u, title: u, formats: [videoFormat()] }),
+      ),
     );
     const user = userEvent.setup();
 
-    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "a is full" });
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({
+      code: "queue",
+      message: "a is full",
+    });
     const { rerender } = render(
       <MemoryRouter>
         <UrlHero url="https://example.com/a" />
@@ -414,15 +468,23 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     );
     await screen.findByText("https://example.com/b");
 
-    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "b is full" });
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({
+      code: "queue",
+      message: "b is full",
+    });
     await user.click(screen.getByRole("button", { name: /^Start$/ }));
     await screen.findByText(/couldn't start that download/i);
     const settleB = pendingStart();
     await user.click(screen.getByRole("button", { name: /try again/i }));
     await screen.findByRole("button", { name: /trying/i });
 
-    await act(async () => settleA({ reject: { code: "queue", message: "a is full" } }));
-    expect(screen.getByRole("button", { name: /trying/i })).toHaveProperty("disabled", true);
+    await act(async () =>
+      settleA({ reject: { code: "queue", message: "a is full" } }),
+    );
+    expect(screen.getByRole("button", { name: /trying/i })).toHaveProperty(
+      "disabled",
+      true,
+    );
 
     await act(async () => settleB({ resolve: "job-b" }));
   });
@@ -436,7 +498,9 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     const user = await probeThenFailStart();
     const settleRetry = pendingStart();
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
+    );
 
     // fireEvent, not userEvent: userEvent refuses to click a disabled
     // control, which would make this pass without proving anything.
@@ -463,7 +527,6 @@ describe("UrlHero only reports the enqueue the user is still waiting on", () => 
     await act(async () => settleRetry({ resolve: "job-1" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
-
 });
 
 describe("UrlHero guards against a double enqueue", () => {
@@ -498,7 +561,9 @@ describe("UrlHero guards against a double enqueue", () => {
     // Re-clicking a second later is the same collision as a double-click,
     // so the button reports what happened instead of inviting a repeat.
     await probeThenStart(probeResult({}));
-    const start = await screen.findByRole("button", { name: /added to queue/i });
+    const start = await screen.findByRole("button", {
+      name: /added to queue/i,
+    });
     expect(start).toHaveProperty("disabled", true);
   });
 });
@@ -525,7 +590,10 @@ describe("UrlHero keeps one enqueue per card", () => {
         ],
       }),
     );
-    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "full" });
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({
+      code: "queue",
+      message: "full",
+    });
     const user = userEvent.setup();
     render(
       <MemoryRouter>
@@ -537,7 +605,9 @@ describe("UrlHero keeps one enqueue per card", () => {
 
     const settle = pendingStart();
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
+    );
 
     await user.selectOptions(screen.getByRole("combobox"), "299");
     fireEvent.click(cardStartButton());
@@ -559,7 +629,10 @@ describe("UrlHero keeps one enqueue per card", () => {
         },
       }),
     );
-    apiMocks.extract.fromUrl.mockRejectedValueOnce({ code: "queue", message: "full" });
+    apiMocks.extract.fromUrl.mockRejectedValueOnce({
+      code: "queue",
+      message: "full",
+    });
     const user = userEvent.setup();
     render(
       <MemoryRouter>
@@ -571,9 +644,13 @@ describe("UrlHero keeps one enqueue per card", () => {
 
     const settle = pendingStart();
     await user.click(screen.getByRole("button", { name: /try again/i }));
-    await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2),
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: /^Download$|^Starting…$/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Download$|^Starting…$/ }),
+    );
     expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(2);
 
     await act(async () => settle({ resolve: "job-1" }));
@@ -596,7 +673,9 @@ describe("UrlHero sends the format's download selector", () => {
   it("sends the selector, not the bare format id", async () => {
     // Sending the bare id is how the picker used to hand back silent
     // files: yt-dlp downloads exactly that stream and never merges audio.
-    apiMocks.extract.probe.mockResolvedValue(probeResult({ formats: [videoOnly1080p()] }));
+    apiMocks.extract.probe.mockResolvedValue(
+      probeResult({ formats: [videoOnly1080p()] }),
+    );
     apiMocks.extract.fromUrl.mockResolvedValue("job-1");
     const user = userEvent.setup();
     render(
@@ -623,30 +702,90 @@ it("restores a pending start across route remount and accepts its late acknowled
   const probe = probeResult();
   apiMocks.extract.probe.mockResolvedValue(probe);
   const settle = pendingStart();
-  const first = render(<MemoryRouter><UrlHero url={probe.url} /></MemoryRouter>);
+  const first = render(
+    <MemoryRouter>
+      <UrlHero url={probe.url} />
+    </MemoryRouter>,
+  );
   fireEvent.click(await screen.findByRole("button", { name: /^Start$/ }));
-  await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1),
+  );
   first.unmount();
-  render(<MemoryRouter><UrlHero /></MemoryRouter>);
+  render(
+    <MemoryRouter>
+      <UrlHero />
+    </MemoryRouter>,
+  );
   await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalledTimes(2));
-  expect((await screen.findByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(
+    (
+      (await screen.findByRole("button", {
+        name: "Starting…",
+      })) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
   await act(async () => settle({ resolve: "late-job" }));
-  expect((await screen.findByRole("button", { name: "Added to queue" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(
+    (
+      (await screen.findByRole("button", {
+        name: "Added to queue",
+      })) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
   expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1);
 });
 
 it("restores a selected format after re-probing and blocks a disappeared selection", async () => {
   const probe = probeResult({ formats: [videoFormat()] });
   apiMocks.extract.probe.mockResolvedValue(probe);
-  const first = render(<MemoryRouter><UrlHero url={probe.url} /></MemoryRouter>);
-  fireEvent.change(await screen.findByRole("combobox"), { target: { value: "299" } });
+  const first = render(
+    <MemoryRouter>
+      <UrlHero url={probe.url} />
+    </MemoryRouter>,
+  );
+  fireEvent.change(await screen.findByRole("combobox"), {
+    target: { value: "299" },
+  });
   first.unmount();
-  const second = render(<MemoryRouter><UrlHero /></MemoryRouter>);
-  expect((await screen.findByRole("combobox") as HTMLSelectElement).value).toBe("299");
+  const second = render(
+    <MemoryRouter>
+      <UrlHero />
+    </MemoryRouter>,
+  );
+  expect(
+    ((await screen.findByRole("combobox")) as HTMLSelectElement).value,
+  ).toBe("299");
   second.unmount();
   apiMocks.extract.probe.mockResolvedValue(probeResult());
-  render(<MemoryRouter><UrlHero /></MemoryRouter>);
-  expect(await screen.findByRole("option", { name: /Previous format unavailable/ })).toBeTruthy();
-  expect((await screen.findByRole("button", { name: /^Start$/ }) as HTMLButtonElement).disabled).toBe(true);
+  render(
+    <MemoryRouter>
+      <UrlHero />
+    </MemoryRouter>,
+  );
+  expect(
+    await screen.findByRole("option", { name: /Previous format unavailable/ }),
+  ).toBeTruthy();
+  expect(
+    (
+      (await screen.findByRole("button", {
+        name: /^Start$/,
+      })) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
   expect(apiMocks.extract.fromUrl).not.toHaveBeenCalled();
+});
+
+it("composes one source summary and one settings inspector without an extra probe", async () => {
+  apiMocks.extract.probe.mockResolvedValue(probeResult());
+  render(
+    <MemoryRouter>
+      <UrlHero url="https://example.com/watch" />
+    </MemoryRouter>,
+  );
+  expect(
+    await screen.findByRole("complementary", { name: "Download settings" }),
+  ).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: /^Start$/ })).toHaveLength(1);
+  expect(apiMocks.extract.probe).toHaveBeenCalledTimes(1);
 });

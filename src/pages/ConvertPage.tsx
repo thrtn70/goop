@@ -1,3 +1,15 @@
+import RecognizeChip from "@/features/recognize/RecognizeChip";
+import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
+import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
+import WorkspaceList from "@/components/workspace/WorkspaceList";
+import SourceRow, { sourceName } from "@/features/workspace/SourceRow";
+import {
+  newIdentity,
+  reconcileSubmitted,
+  type SubmissionReceipt,
+} from "@/features/workspace/entries";
+import { useSourceInspections, PROBING } from "@/hooks/useSourceInspections";
+import { WorkspaceDraftProvider } from "@/store/workspaceDrafts";
 import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
@@ -6,14 +18,18 @@ import { useCallback, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
-import FileRow, { defaultGifOptions } from "@/features/convert/FileRow";
+import {
+  ConvertSettingsPanel,
+  defaultGifOptions,
+} from "@/features/convert/FileRow";
 import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
-import MediaBlob from "@/features/convert/MediaBlob";
+import { smartDefault } from "@/features/convert/TargetPicker";
+import { conversionProblem } from "@/features/workspace/readiness";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
-import RecognizeChip from "@/features/recognize/RecognizeChip";
+
 import { useAppStore } from "@/store/appStore";
 import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
 
@@ -30,8 +46,66 @@ function isPdf(p: string): boolean {
 function ConvertPage() {
   const location = useLocation();
   const nav = useNavigate();
-  const [files, setFiles] = useWorkspaceDraftState<FileEntry[]>("ConvertPage.files", []);
-  const [pdfs, setPdfs] = useWorkspaceDraftState<string[]>("ConvertPage.pdfs", []);
+  const [files, setFiles] = useWorkspaceDraftState<FileEntry[]>(
+    "ConvertPage.files",
+    [],
+  );
+  const [pdfs, setPdfs] = useWorkspaceDraftState<string[]>(
+    "ConvertPage.pdfs",
+    [],
+  );
+  const [selectedId, setSelectedId] = useWorkspaceDraftState<string | null>(
+    "ConvertPage.selectedId",
+    null,
+  );
+  const { byId, retry } = useSourceInspections(files);
+  useEffect(() => {
+    if (files.some((f) => !f.id))
+      setFiles((previous) =>
+        previous.map((f) => (f.id ? f : { ...f, ...newIdentity() })),
+      );
+  }, [files, setFiles]);
+  const selected = files.find((f) => f.id === selectedId) ?? files[0];
+  const selectedState = byId[selected?.id ?? ""] ?? PROBING;
+  useEffect(() => {
+    if (selected?.id !== selectedId) setSelectedId(selected?.id ?? null);
+  }, [selected?.id, selectedId, setSelectedId]);
+  const policy =
+    useAppStore((s) => s.settings?.default_metadata_policy) ?? "preserve";
+  useEffect(() => {
+    setFiles((previous) => {
+      let changed = false;
+      const next = previous.map((f) => {
+        const state = byId[f.id ?? ""];
+        if (f.optionsReady || state?.phase !== "ready") return f;
+        changed = true;
+        const target = smartDefault(state.probe);
+        return {
+          ...f,
+          revision: (f.revision ?? 0) + 1,
+          optionsReady: true,
+          target,
+          gifOptions: target === "gif" ? defaultGifOptions() : null,
+          metadataPolicy: policy,
+        };
+      });
+      return changed ? next : previous;
+    });
+  }, [byId, policy, setFiles]);
+  const onSettled = useCallback(
+    (success: SubmissionReceipt[]) => {
+      let removed: string[] = [];
+      setFiles((previous) => {
+        const next = reconcileSubmitted(previous, success);
+        removed = previous
+          .filter((f) => !next.some((n) => n.id === f.id))
+          .map((f) => f.path);
+        return next;
+      });
+      removed.forEach((path) => forgetWorkspaceSource("convert", path));
+    },
+    [setFiles],
+  );
 
   // Convert-again from the History preview lands here with location.state.
   // Seed a FileRow from the pre-fill so the user arrives ready-to-edit.
@@ -48,6 +122,7 @@ function ConvertPage() {
           : [
               ...prev,
               {
+                ...newIdentity(),
                 path,
                 target: "mp4" as TargetFormat,
                 sourceDir: dirname(path),
@@ -64,74 +139,95 @@ function ConvertPage() {
     nav(location.pathname, { replace: true, state: null });
   }, [location, nav, setFiles, setPdfs]);
 
-  const addPaths = useCallback((paths: string[]) => {
-    const pdfPaths = paths.filter(isPdf);
-    const nonPdfPaths = paths.filter((p) => !isPdf(p));
-    if (pdfPaths.length > 0) {
-      setPdfs((prev) => {
-        const existing = new Set(prev);
-        return [...prev, ...pdfPaths.filter((p) => !existing.has(p))];
-      });
-    }
-    if (nonPdfPaths.length > 0) {
-      setFiles((prev) => {
-        const existing = new Set(prev.map((f) => f.path));
-        const fresh: FileEntry[] = nonPdfPaths
-          .filter((p) => !existing.has(p))
-          .map((p) => ({
-            path: p,
-            target: "mp4" as TargetFormat,
-            sourceDir: dirname(p),
-            gifOptions: null,
-            metadataPolicy: "preserve" as MetadataPolicy,
-            subtitle: null,
-            qualityPreset: null,
-            resolutionCap: null,
-          }));
-        return [...prev, ...fresh];
-      });
-    }
-  }, [setFiles, setPdfs]);
+  const addPaths = useCallback(
+    (paths: string[]) => {
+      const pdfPaths = paths.filter(isPdf);
+      const nonPdfPaths = paths.filter((p) => !isPdf(p));
+      if (pdfPaths.length > 0) {
+        setPdfs((prev) => {
+          const existing = new Set(prev);
+          return [...prev, ...pdfPaths.filter((p) => !existing.has(p))];
+        });
+      }
+      if (nonPdfPaths.length > 0) {
+        setFiles((prev) => {
+          const existing = new Set(prev.map((f) => f.path));
+          const fresh: FileEntry[] = nonPdfPaths
+            .filter((p) => !existing.has(p))
+            .map((p) => ({
+              ...newIdentity(),
+              path: p,
+              target: "mp4" as TargetFormat,
+              sourceDir: dirname(p),
+              gifOptions: null,
+              metadataPolicy: "preserve" as MetadataPolicy,
+              subtitle: null,
+              qualityPreset: null,
+              resolutionCap: null,
+            }));
+          return [...prev, ...fresh];
+        });
+      }
+    },
+    [setFiles, setPdfs],
+  );
 
-  const handleOptionsChange = useCallback((path: string, opts: FileRowOptions) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.path === path
-          ? {
-              ...f,
-              optionsReady: true,
-              target: opts.target,
-              gifOptions: opts.gifOptions,
-              metadataPolicy: opts.metadataPolicy,
-              subtitle: opts.subtitle,
-              qualityPreset: opts.qualityPreset ?? null,
-              resolutionCap: opts.resolutionCap ?? null,
-            }
-          : f,
-      ),
-    );
-  }, [setFiles]);
+  const handleOptionsChange = useCallback(
+    (id: string, opts: FileRowOptions) => {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === id
+            ? {
+                ...f,
+                revision: (f.revision ?? 0) + 1,
+                optionsReady: true,
+                target: opts.target,
+                gifOptions: opts.gifOptions,
+                metadataPolicy: opts.metadataPolicy,
+                subtitle: opts.subtitle,
+                qualityPreset: opts.qualityPreset ?? null,
+                resolutionCap: opts.resolutionCap ?? null,
+              }
+            : f,
+        ),
+      );
+    },
+    [setFiles],
+  );
 
-  const handleRemove = useCallback((path: string) => {
-    forgetWorkspaceSource("convert", path);
-    setFiles((prev) => prev.filter((f) => f.path !== path));
-  }, [setFiles]);
+  const handleRemove = useCallback(
+    (path: string) => {
+      const index = files.findIndex((f) => f.path === path);
+      if (files[index]?.id === selectedId)
+        setSelectedId(files[index + 1]?.id ?? files[index - 1]?.id ?? null);
+      forgetWorkspaceSource("convert", path);
+      setFiles((prev) => prev.filter((f) => f.path !== path));
+    },
+    [files, selectedId, setSelectedId, setFiles],
+  );
 
-  const applyPreset = useCallback((preset: Preset) => {
-    setFiles((prev) =>
-      prev.map((f) => ({
-        ...f,
-        optionsReady: true,
-        target: preset.target,
-        gifOptions: preset.target === "gif" ? (f.gifOptions ?? defaultGifOptions()) : null,
-        // Both are Convert-register fields on the preset, and both used to
-        // be dropped here — so a chip named "YouTube Upload" changed the
-        // container and nothing else, leaving a 4K source 4K.
-        qualityPreset: preset.quality_preset,
-        resolutionCap: preset.resolution_cap,
-      })),
-    );
-  }, [setFiles]);
+  const applyPreset = useCallback(
+    (preset: Preset) => {
+      setFiles((prev) =>
+        prev.map((f) => ({
+          ...f,
+          revision: (f.revision ?? 0) + 1,
+          optionsReady: true,
+          target: preset.target,
+          gifOptions:
+            preset.target === "gif"
+              ? (f.gifOptions ?? defaultGifOptions())
+              : null,
+          // Both are Convert-register fields on the preset, and both used to
+          // be dropped here — so a chip named "YouTube Upload" changed the
+          // container and nothing else, leaving a 4K source 4K.
+          qualityPreset: preset.quality_preset,
+          resolutionCap: preset.resolution_cap,
+        })),
+      );
+    },
+    [setFiles],
+  );
 
   const applyFirstToAll = useCallback(() => {
     setFiles((prev) => {
@@ -145,6 +241,7 @@ function ConvertPage() {
               // specific file's subtitle track, which is almost never the
               // right one for the rest of the batch.
               ...f,
+              revision: (f.revision ?? 0) + 1,
               optionsReady: true,
               target: head.target,
               gifOptions: head.gifOptions,
@@ -173,135 +270,141 @@ function ConvertPage() {
   // route transition keeps both mounted briefly.
   const pickerToken = useAppStore((s) => s.pendingFilePicker);
   useEffect(() => {
-    if (pickerToken > 0 && location.pathname.startsWith("/convert") && claimWorkspaceFilePicker(pickerToken)) {
+    if (
+      pickerToken > 0 &&
+      location.pathname.startsWith("/convert") &&
+      claimWorkspaceFilePicker(pickerToken)
+    ) {
       void handleBrowse();
     }
   }, [pickerToken, handleBrowse, location.pathname]);
 
-  const hasMedia = files.length > 0;
-  const hasPdfs = pdfs.length > 0;
-
-  if (hasPdfs && !hasMedia) {
-    return (
-      <div className="flex h-full flex-col p-6">
-        <DropZone onFiles={addPaths}>
-          <div className="p-3">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <span className="text-xs text-fg-muted">
-                PDF operations — {pdfs.length} file{pdfs.length !== 1 ? "s" : ""}
-              </span>
-              <div className="flex items-center gap-3">
-                {pdfs.length === 1 && <RecognizeChip path={pdfs[0]} />}
-                <button
-                  type="button"
-                  onClick={() => void handleBrowse()}
-                  className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
-                >
-                  Add more...
-                </button>
-              </div>
-            </div>
-          </div>
-        </DropZone>
-        <div className="mt-2 flex-1 overflow-auto">
-          <PdfFlow
-            files={pdfs}
-            onFilesChanged={next => { pdfs.filter(path => !next.includes(path)).forEach(path => forgetWorkspaceSource("convert", path)); setPdfs(next); }}
-            onDone={() => setPdfs([])}
-          />
-        </div>
-      </div>
-    );
-  }
-
+  const problems = files.map((f) =>
+    conversionProblem(f, byId[f.id ?? ""] ?? PROBING),
+  );
+  const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
-    <div className="flex h-full flex-col p-6">
+    <WorkspaceFrame
+      title="Convert"
+      description="Choose a format for each source."
+      toolbar={
+        <button
+          type="button"
+          onClick={() => void handleBrowse()}
+          className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg"
+        >
+          Add files
+        </button>
+      }
+      outputSummary={
+        <p className="text-sm text-fg-secondary">
+          {files.length} media file{files.length === 1 ? "" : "s"} ·{" "}
+          {files.length === 1
+            ? "Choose a destination when you start."
+            : "Outputs go beside each source unless you choose a folder."}
+        </p>
+      }
+      inspector={
+        <WorkspaceInspector
+          title="Output settings"
+          description={
+            selected
+              ? "Editing " + sourceName(selected.path)
+              : "Select a source to get started."
+          }
+          actions={
+            <ConvertActionBar
+              files={files}
+              disabled={blocked}
+              onEnqueued={() => {}}
+              onSettled={onSettled}
+              onApplyToAll={applyFirstToAll}
+            />
+          }
+        >
+          {selected &&
+          selectedState.phase === "ready" &&
+          selected.optionsReady ? (
+            <WorkspaceDraftProvider scope={["source", selected.path]}>
+              <ConvertSettingsPanel
+                path={selected.path}
+                options={selected}
+                state={selectedState}
+                onOptionsChange={(_, opts) =>
+                  selected.id && handleOptionsChange(selected.id, opts)
+                }
+              />
+            </WorkspaceDraftProvider>
+          ) : (
+            <p className="text-sm text-fg-secondary">
+              {selectedState.phase === "error"
+                ? selectedState.message
+                : selected
+                  ? "Inspecting source…"
+                  : "Add files or drop them into the source list."}
+            </p>
+          )}
+          {blocked && files.length > 0 && (
+            <p className="mt-4 text-xs text-warning">
+              Review the source list before starting. Every file needs supported
+              settings.
+            </p>
+          )}
+        </WorkspaceInspector>
+      }
+    >
       <DropZone onFiles={addPaths}>
-        {!hasMedia && !hasPdfs && (
-          <div className="enter-up flex flex-col items-center justify-center px-6 py-14 text-center">
-            <MediaBlob size={108} />
-            <p className="mt-5 font-display text-base font-semibold text-fg">
-              Drop something here.
-            </p>
-            <p className="mt-1.5 text-sm text-fg-secondary">
-              Video, audio, images, and PDFs — converted right on your machine.{" "}
-              <button
-                type="button"
-                onClick={() => void handleBrowse()}
-                className="text-accent underline-offset-2 transition duration-fast ease-out hover:text-accent-hover hover:underline"
-              >
-                Pick from your computer
-              </button>
-              .
-            </p>
-            {/* Educational chips — show what this page does at a glance.
-             *  Not interactive; they read as labels, not buttons, by
-             *  using <span> and reduced visual weight. The sr-only
-             *  preamble anchors the chips for screen readers so they
-             *  aren't read as orphaned tokens. */}
-            <p className="sr-only">Examples of supported conversions:</p>
-            <div className="mt-6 flex flex-wrap items-center justify-center gap-1.5">
-              {["MOV → MP4", "MP4 → MP3", "PNG → JPG", "MP4 → GIF"].map((label) => (
-                <span
-                  key={label}
-                  className="rounded-full border border-subtle bg-surface-1 px-2.5 py-1 font-mono text-xs tracking-tight text-fg-muted"
-                >
-                  {label}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-        {hasMedia && (
-          <div className="p-3">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="text-xs text-fg-muted">
-                {files.length} file{files.length !== 1 ? "s" : ""}
-              </span>
-              <button
-                type="button"
-                onClick={() => void handleBrowse()}
-                className="text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
-              >
-                Add more...
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="px-4 py-5 text-sm text-fg-secondary">
+          {files.length || pdfs.length
+            ? "Drop more files here."
+            : "Drop something here. Video, audio, images, and PDFs."}{" "}
+          <button
+            type="button"
+            onClick={() => void handleBrowse()}
+            className="text-accent underline"
+          >
+            Pick from your computer
+          </button>
+        </div>
       </DropZone>
-
-      {hasMedia && (
-        <div className="mt-3">
+      {files.length > 0 && (
+        <div className="py-4">
           <PresetChips kind="convert" onApply={applyPreset} />
         </div>
       )}
-
-      {hasMedia && (
-        <div className="mt-2 flex flex-1 flex-col gap-2 overflow-auto">
+      <WorkspaceList label="Sources">
+        <ul>
           {files.map((f, i) => (
-            <FileRow
-              key={f.path}
+            <SourceRow
+              key={f.id ?? f.path}
               path={f.path}
-              index={i}
-              options={f.optionsReady ? f : null}
-              onOptionsChange={handleOptionsChange}
-              onRemove={handleRemove}
+              selected={f.id === selected?.id}
+              state={byId[f.id ?? ""] ?? PROBING}
+              problem={problems[i]}
+              edited={f.submittedEdit}
+              onSelect={() => setSelectedId(f.id ?? null)}
+              onRemove={() => handleRemove(f.path)}
+              onRetry={() => f.id && retry(f.id)}
             />
           ))}
-        </div>
-      )}
-
-      {hasMedia && (
-        <div className="mt-4 border-t border-subtle pt-4">
-          <ConvertActionBar
-            files={files}
-            disabled={false}
-            onEnqueued={() => { files.forEach(f => forgetWorkspaceSource("convert", f.path)); setFiles([]); }}
-            onApplyToAll={applyFirstToAll}
+        </ul>
+      </WorkspaceList>
+      {pdfs.length > 0 && (
+        <section aria-label="PDF operations" className="mt-4">
+          {pdfs.length === 1 && <RecognizeChip path={pdfs[0]} />}
+          <PdfFlow
+            files={pdfs}
+            onFilesChanged={(next) => {
+              pdfs
+                .filter((path) => !next.includes(path))
+                .forEach((path) => forgetWorkspaceSource("convert", path));
+              setPdfs(next);
+            }}
+            onDone={() => setPdfs([])}
           />
-        </div>
+        </section>
       )}
-    </div>
+    </WorkspaceFrame>
   );
 }
 
