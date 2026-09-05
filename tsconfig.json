@@ -1,31 +1,7 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "useDefineForClassFields": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "noImplicitAny": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "isolatedModules": true,
-    /* `npm run build` is `tsc -b && vite build`, and vite does the
-       transpiling — tsc is only here to type-check. Without this it also
-       emitted a .js beside every source, and vite's resolve.extensions puts
-       .js ahead of .tsx, so those files shadowed their own sources on the
-       next vite/vitest run: edit a .tsx, run the tests without rebuilding,
-       and you tested the previous build's output. Type checking is
-       unaffected — `tsc -b` still fails on a real error. */
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] }
-  },
-  "include": ["src", "shared/types"]
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
 }
