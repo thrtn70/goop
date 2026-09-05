@@ -90,6 +90,10 @@ export default function QueueSidebar() {
   }, []);
 
   useEffect(() => {
+    if (collapsed && dragStartRef.current) {
+      setPreferredHeight(dragStartRef.current.preferred);
+      dragStartRef.current = null;
+    }
     if (collapsed && contentFocused.current) {
       toggleRef.current?.focus();
       contentFocused.current = false;
@@ -114,9 +118,11 @@ export default function QueueSidebar() {
 
   function onDragEnd(e: React.PointerEvent<HTMLDivElement>): void {
     if (!dragStartRef.current) return;
-    if (e.type === "pointercancel") setPreferredHeight(dragStartRef.current.preferred);
+    if (e.type !== "pointerup") setPreferredHeight(dragStartRef.current.preferred);
     dragStartRef.current = null;
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (e.type !== "lostpointercapture" && e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
   }
 
   function onResizeKey(e: React.KeyboardEvent<HTMLDivElement>): void {
@@ -214,7 +220,7 @@ export default function QueueSidebar() {
         aria-valuemin={minHeight} aria-valuemax={maxHeight} aria-valuenow={height} aria-orientation="horizontal"
         onFocus={() => { contentFocused.current = true; }}
         onBlur={() => { contentFocused.current = false; }}
-        onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}
+        onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd} onLostPointerCapture={onDragEnd}
         onKeyDown={onResizeKey} className="workspace-queue-grip" />}
       <div className="workspace-queue-header">
         <button ref={toggleRef} type="button" onClick={toggleCollapsed}

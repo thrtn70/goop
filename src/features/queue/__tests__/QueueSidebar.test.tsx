@@ -68,6 +68,43 @@ describe("bottom queue", () => {
     expect(Number(grip.getAttribute("aria-valuenow"))).toBe(initial);
     expect(patch).not.toHaveBeenCalled();
   });
+  it("retires a resize interrupted by collapse before the pointer is released", () => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    render(<QueueSidebar />);
+    fireEvent.click(screen.getByRole("button", {name: "Expand queue"}));
+    const grip = screen.getByRole("separator", {name: "Resize queue"});
+    grip.setPointerCapture = vi.fn();
+    const initial = Number(grip.getAttribute("aria-valuenow"));
+    fireEvent.pointerDown(grip, {clientY: 300});
+    fireEvent.pointerMove(grip, {clientY: 350});
+    expect(Number(grip.getAttribute("aria-valuenow"))).toBe(initial - 50);
+    act(() => useAppStore.getState().toggleQueueCollapsed());
+    fireEvent.pointerUp(window);
+    fireEvent.click(screen.getByRole("button", {name: "Expand queue"}));
+    const replacement = screen.getByRole("separator", {name: "Resize queue"});
+    fireEvent.pointerMove(replacement, {clientY: 370});
+    expect(Number(replacement.getAttribute("aria-valuenow"))).toBe(initial);
+  });
+  it("cancels lost capture but preserves a resize completed by pointerup", () => {
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    render(<QueueSidebar />);
+    fireEvent.click(screen.getByRole("button", {name: "Expand queue"}));
+    const grip = screen.getByRole("separator", {name: "Resize queue"});
+    grip.setPointerCapture = vi.fn();
+    grip.hasPointerCapture = () => true;
+    grip.releasePointerCapture = () => { fireEvent.lostPointerCapture(grip); };
+    const initial = Number(grip.getAttribute("aria-valuenow"));
+    fireEvent.pointerDown(grip, {clientY: 300});
+    fireEvent.pointerMove(grip, {clientY: 350});
+    fireEvent.lostPointerCapture(grip);
+    fireEvent.pointerMove(grip, {clientY: 370});
+    expect(Number(grip.getAttribute("aria-valuenow"))).toBe(initial);
+    fireEvent.pointerDown(grip, {clientY: 300});
+    fireEvent.pointerMove(grip, {clientY: 350});
+    fireEvent.pointerUp(grip);
+    fireEvent.pointerMove(grip, {clientY: 370});
+    expect(Number(grip.getAttribute("aria-valuenow"))).toBe(initial - 50);
+  });
   it("retains two-step selected cancellation and Escape dismissal", () => {
     useAppStore.setState({ui: {queueCollapsed: false, queueSelectedIds: new Set([job.id]), doneToday: 0}});
     render(<QueueSidebar />);
