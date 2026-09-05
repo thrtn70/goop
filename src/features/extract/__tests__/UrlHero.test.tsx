@@ -211,6 +211,57 @@ describe("UrlHero still reports a probe failure as a probe failure", () => {
     await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalledTimes(2));
     expect(apiMocks.extract.fromUrl).not.toHaveBeenCalled();
   });
+
+  it("announces the lookup failure the way it announces a start failure", async () => {
+    // The banner beside this one is a live region, so a refused enqueue is
+    // spoken. A refused lookup was not: the skeleton reading "Looking up
+    // that link..." just vanished and nothing took its place, leaving a
+    // screen-reader user waiting on a result that had already come back.
+    apiMocks.extract.probe.mockRejectedValue({ code: "unknown", message: "no extractor matched" });
+    render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/x" />
+      </MemoryRouter>,
+    );
+
+    const box = await screen.findByRole("alert");
+    expect(box.textContent).toMatch(/couldn't load that link/i);
+    expect(box.textContent).toMatch(/no extractor matched/i);
+  });
+
+  it("never puts both failures on screen at once, so one alert is the only alert", async () => {
+    // Both surfaces are alerts now, and every query above asks for that
+    // role in the singular. What keeps those honest is not luck: a probe
+    // retires the start state before it can fail, and a probe that fails
+    // has already nulled the card any start belonged to. Pin it, because
+    // the day the two can co-exist `getByRole("alert")` stops resolving
+    // rather than starts failing usefully, and the report points at seven
+    // healthy tests instead of at the change that broke them.
+    apiMocks.extract.probe.mockResolvedValueOnce(probeResult({ formats: [videoFormat()] }));
+    apiMocks.extract.fromUrl.mockRejectedValue({ code: "queue", message: "the queue is full" });
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/a" />
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: /^Start$/ }));
+    await screen.findByText(/couldn't start that download/i);
+
+    apiMocks.extract.probe.mockRejectedValueOnce({
+      code: "unknown",
+      message: "no extractor matched",
+    });
+    rerender(
+      <MemoryRouter>
+        <UrlHero url="https://example.com/b" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(/couldn't load that link/i);
+    expect(screen.queryByText(/couldn't start that download/i)).toBeNull();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
 });
 
 describe("UrlHero only reports the enqueue the user is still waiting on", () => {
