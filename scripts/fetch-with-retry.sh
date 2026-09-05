@@ -19,6 +19,7 @@
 # depend on third-party availability; everything else is deterministic.
 #
 #   fetch_url <url> <dest>
+#   fetch_verified <url> <sha256> <dest>
 #
 # The flag set, and what each one buys:
 #
@@ -54,4 +55,76 @@ fetch_url() {
   local url="$1" dest="$2"
   curl -fL --retry 5 --retry-delay 2 --retry-all-errors \
     --connect-timeout 30 --no-progress-meter -o "$dest" "$url"
+}
+
+# Download into a sibling temporary file, verify the exact pinned payload,
+# then move it into place. A failure never overwrites an existing destination.
+# macOS ships shasum; Linux and the Windows Git Bash runners ship sha256sum.
+sha256_file() {
+  local file="$1" output=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    output="$(sha256sum "$file")" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    output="$(shasum -a 256 "$file")" || return 1
+  else
+    return 1
+  fi
+  printf '%s' "${output%%[[:space:]]*}"
+}
+
+install_verified_file() {
+  mv "$1" "$2"
+}
+
+cleanup_verified_staging() {
+  rm -f "$1"
+  rmdir "$2" 2>/dev/null || true
+}
+
+fetch_verified() {
+  local url="$1" expected="$2" dest="$3"
+  local actual="" dest_dir="${dest%/*}" dest_name="${dest##*/}"
+  local staging_dir="" tmp=""
+
+  if [ "$dest_dir" = "$dest" ]; then
+    dest_dir="."
+  fi
+
+  case "$expected" in
+    *[!0-9a-fA-F]*)
+      echo "invalid SHA-256 for $url" >&2
+      return 1
+      ;;
+    *) ;;
+  esac
+  if [ "${#expected}" -ne 64 ]; then
+    echo "invalid SHA-256 length for $url" >&2
+    return 1
+  fi
+
+  staging_dir="$(mktemp -d "$dest_dir/.${dest_name}.download.XXXXXX")" || return 1
+  tmp="$staging_dir/payload"
+  if ! fetch_url "$url" "$tmp"; then
+    cleanup_verified_staging "$tmp" "$staging_dir"
+    return 1
+  fi
+
+  if ! actual="$(sha256_file "$tmp")"; then
+    echo "unable to compute SHA-256 for $url" >&2
+    cleanup_verified_staging "$tmp" "$staging_dir"
+    return 1
+  fi
+
+  if [ "$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')" != \
+       "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" ]; then
+    echo "SHA-256 mismatch for $url: expected $expected, got $actual" >&2
+    cleanup_verified_staging "$tmp" "$staging_dir"
+    return 1
+  fi
+
+  if ! install_verified_file "$tmp" "$dest"; then
+    cleanup_verified_staging "$tmp" "$staging_dir"
+    return 1
+  fi
+  cleanup_verified_staging "$tmp" "$staging_dir"
 }

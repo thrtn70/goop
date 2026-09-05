@@ -34,7 +34,7 @@ export default function UpdateBanner() {
     if (!updateInfo) return;
     setError(null);
     try {
-      await startUpdateDownload(updateInfo.download_url, Number(updateInfo.asset_size));
+      await startUpdateDownload(Number(updateInfo.asset_size));
     } catch (e) {
       setError(formatError(e));
     }

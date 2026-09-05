@@ -10,6 +10,7 @@ goop-core = { path = "../goop-core" }
 reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

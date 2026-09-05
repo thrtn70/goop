@@ -37,10 +37,12 @@ anyhow.workspace = true
 thiserror.workspace = true
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json"], default-features = false }
 semver = "1.0"
+sha2 = "0.10"
 futures-util = "0.3"
 trash = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 dashmap = "6"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+wiremock = "0.6"

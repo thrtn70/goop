@@ -158,7 +158,7 @@ export const api = {
   },
   update: {
     check: () => invoke<UpdateInfo | null>("check_for_update"),
-    download: (url: string) => invoke<void>("download_update", { url }),
+    download: () => invoke<void>("download_update"),
     openReleasesPage: () => invoke<void>("open_releases_page"),
     openAboutLink: (target: AboutLinkTarget) =>
       invoke<void>("open_about_link", { target }),

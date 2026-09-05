@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Tests for scripts/fetch-with-retry.sh.
 #
-# Two behavioural checks against a throwaway local HTTP server — that
-# fetch_url retries a failing download, and that an HTTP error status
-# fails the fetch instead of landing on disk — plus a static guard that
+# Behavioural checks against a throwaway local HTTP server prove that
+# fetch_url retries a failing download, that an HTTP error status fails
+# the fetch instead of landing on disk, and that fetch_verified accepts
+# only a payload matching its pinned SHA-256 — plus a static guard that
 # nothing under scripts/ downloads with a bare curl. The guard is the one
 # that keeps paying: the flag set only helps if the next download added
 # to the repo goes through the helper too.
@@ -129,7 +130,135 @@ else
   echo "  ok   a 404 fails the fetch instead of writing the error page"
 fi
 
-# 3. No script may download with a bare curl. Comment lines are stripped
+# 3. A verified download with the expected digest lands atomically.
+PAYLOAD_SHA256="f35e144db93df07dcb387804a9e3655f95f1109469ce59ebdea785dccdff9d92"
+staging_exists() {
+  compgen -G "$WORK/.$1.download.*" >/dev/null
+}
+
+if fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/verified.bin" 2>/dev/null \
+    && [ "$(cat "$WORK/verified.bin")" = "$PAYLOAD" ] \
+    && ! staging_exists verified.bin; then
+  echo "  ok   a matching SHA-256 installs the downloaded payload"
+else
+  echo "  FAIL a matching SHA-256 did not install cleanly"
+  fail=1
+fi
+
+# 4. A mismatch must fail closed, remove its temporary payload, and leave an
+# existing destination untouched. That last property keeps a transient CDN
+# or metadata problem from destroying the last known-good sidecar.
+printf 'known-good' > "$WORK/preserved.bin"
+if fetch_verified "$BASE/payload" "${PAYLOAD_SHA256%?}0" "$WORK/preserved.bin" 2>/dev/null; then
+  echo "  FAIL a mismatched SHA-256 was accepted"
+  fail=1
+elif [ "$(cat "$WORK/preserved.bin")" != "known-good" ]; then
+  echo "  FAIL a checksum mismatch replaced the existing destination"
+  fail=1
+elif staging_exists preserved.bin; then
+  echo "  FAIL a checksum mismatch left its temporary payload behind"
+  fail=1
+else
+  echo "  ok   a checksum mismatch fails closed and preserves the destination"
+fi
+
+# 5. The verified payload must be staged inside an exclusively created,
+# randomized directory beside the destination. This closes shared-/tmp
+# symlink and cross-process races while preserving same-filesystem renames.
+if (
+  fetch_url() {
+    case "$2" in
+      "$WORK"/.exclusive.bin.download.*/payload) printf '%s' "$PAYLOAD" > "$2" ;;
+      *) return 1 ;;
+    esac
+  }
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/exclusive.bin" 2>/dev/null
+) && [ "$(cat "$WORK/exclusive.bin")" = "$PAYLOAD" ] \
+    && ! compgen -G "$WORK/.exclusive.bin.download.*" >/dev/null; then
+  echo "  ok   verified downloads use an exclusive private staging directory"
+else
+  echo "  FAIL verified downloads did not use an exclusive private staging directory"
+  fail=1
+fi
+
+# 6. A hashing-tool failure must clean up and preserve a known-good file.
+printf 'known-good' > "$WORK/hash-tool-failure.bin"
+if (
+  sha256_file() { return 1; }
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/hash-tool-failure.bin" 2>/dev/null
+); then
+  echo "  FAIL a hashing-tool failure was accepted"
+  fail=1
+elif [ "$(cat "$WORK/hash-tool-failure.bin")" != "known-good" ] \
+    || staging_exists hash-tool-failure.bin; then
+  echo "  FAIL a hashing-tool failure did not clean up safely"
+  fail=1
+else
+  echo "  ok   a hashing-tool failure preserves the destination and cleans up"
+fi
+
+# 7. A refused final install must also remove the verified temporary file.
+printf 'known-good' > "$WORK/install-failure.bin"
+if (
+  install_verified_file() { return 1; }
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/install-failure.bin" 2>/dev/null
+); then
+  echo "  FAIL a refused final install was accepted"
+  fail=1
+elif [ "$(cat "$WORK/install-failure.bin")" != "known-good" ] \
+    || staging_exists install-failure.bin; then
+  echo "  FAIL a refused final install did not clean up safely"
+  fail=1
+else
+  echo "  ok   a refused final install preserves the destination and cleans up"
+fi
+
+# 8. The sidecar build must not bypass verification, and the expected 13
+# external artifacts lock the coverage count. Adding or removing a download
+# requires this assertion to move with it.
+unverified_fetches="$({
+  grep -n -E '^[[:space:]]*fetch_url[[:space:]]' ./fetch-sidecars.sh || true
+})"
+verified_count="$(grep -c -E '^[[:space:]]*fetch_verified[[:space:]]' ./fetch-sidecars.sh)"
+if [ -n "$unverified_fetches" ]; then
+  echo "  FAIL fetch-sidecars.sh contains unverified downloads:"
+  echo "$unverified_fetches" | sed 's/^/       /'
+  fail=1
+elif [ "$verified_count" != "13" ]; then
+  echo "  FAIL expected 13 verified sidecar artifacts, found $verified_count"
+  fail=1
+else
+  echo "  ok   all 13 sidecar artifacts are checksum-verified"
+fi
+
+# 9. Keep the macOS freezer and prebuilt sidecar on the same gallery-dl
+# release, and require the freezer inputs to stay hash-locked.
+sidecar_gallery="$(sed -n 's/^GALLERY_DL_VERSION="v\([^"]*\)"/\1/p' ./fetch-sidecars.sh)"
+requirement_gallery="$(sed -n 's/^gallery-dl==\([^[:space:]]*\).*/\1/p' ./gallery-dl-macos-requirements.txt)"
+if [ -z "$sidecar_gallery" ] || [ "$sidecar_gallery" != "$requirement_gallery" ]; then
+  echo "  FAIL gallery-dl versions differ between sidecar fetch and macOS freezer"
+  fail=1
+elif ! grep -q '^pyinstaller==[^[:space:]]* \\$' ./gallery-dl-macos-requirements.txt; then
+  echo "  FAIL PyInstaller is not pinned in the macOS freezer requirements"
+  fail=1
+elif ! grep -q -- '--require-hashes' ./build-gallery-dl-macos.sh; then
+  echo "  FAIL the macOS freezer install does not enforce requirement hashes"
+  fail=1
+else
+  echo "  ok   macOS gallery-dl freezer inputs are synchronized and hash-locked"
+fi
+
+# 10. The language pack must be fetched through verification even if an old
+# copy is already present. A conditional existence guard would silently trust
+# stale or locally modified bytes.
+if grep -q 'if \[ ! -f .*eng\.traineddata' ./fetch-sidecars.sh; then
+  echo "  FAIL an existing eng.traineddata bypasses checksum verification"
+  fail=1
+else
+  echo "  ok   eng.traineddata is always checksum-verified"
+fi
+
+# 11. No script may download with a bare curl. Comment lines are stripped
 #    so prose about curl does not trip the guard, and fetch-with-retry.sh
 #    (which owns the one legitimate invocation) plus this file (which has
 #    to spell the word to report it) are excluded by name.

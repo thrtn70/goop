@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import PresetChips from "@/features/presets/PresetChips";
 import PresetManager from "@/features/presets/PresetManager";
 import UpdateBanner from "@/components/UpdateBanner";
+import { api } from "@/ipc/commands";
 import { useAppStore } from "@/store/appStore";
 import type { Preset, Settings, UpdateInfo } from "@/types";
 
@@ -146,7 +147,10 @@ describe("PresetManager", () => {
 
 describe("UpdateBanner", () => {
   afterEach(cleanup);
-  beforeEach(() => resetStore());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore();
+  });
 
   const info: UpdateInfo = {
     current_version: "0.1.6",
@@ -210,5 +214,33 @@ describe("UpdateBanner", () => {
     expect(screen.getByRole("progressbar")).toBeDefined();
     expect(screen.getByText(/25%/)).toBeDefined();
     expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+  });
+
+  it("asks the backend to select the installer without passing a URL", async () => {
+    const download = vi.mocked(api.update.download);
+    download.mockResolvedValueOnce(undefined);
+    resetStore({ updateInfo: info, settings });
+    render(<UpdateBanner />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(download).toHaveBeenCalledOnce();
+    expect(download).toHaveBeenCalledWith();
+    expect(useAppStore.getState().updateDownload).toEqual({
+      downloaded: 12_000_000,
+      total: 12_000_000,
+      active: false,
+    });
+  });
+
+  it("clears download progress and surfaces backend failures", async () => {
+    vi.mocked(api.update.download).mockRejectedValueOnce(new Error("download failed"));
+    resetStore({ updateInfo: info, settings });
+    render(<UpdateBanner />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(await screen.findByText("download failed")).toBeDefined();
+    expect(useAppStore.getState().updateDownload).toBeNull();
   });
 });

@@ -19,9 +19,9 @@ if [ "$TARGET" != "aarch64-apple-darwin" ]; then
   exit 1
 fi
 
-GALLERY_DL_VERSION="${GALLERY_DL_VERSION:-1.32.4}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 OUT_DIR="$REPO_ROOT/src-tauri/bin"
+REQUIREMENTS="$REPO_ROOT/scripts/gallery-dl-macos-requirements.txt"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -32,8 +32,11 @@ PYTHON="${PYTHON:-python3}"
 # shellcheck disable=SC1091
 source "$WORK_DIR/venv/bin/activate"
 
-pip install --quiet --upgrade pip
-pip install --quiet "gallery-dl==${GALLERY_DL_VERSION}" pyinstaller
+# The venv-provided pip is sufficient. Every package, transitive dependency,
+# and selected macOS wheel is version- and hash-locked in the requirements
+# file. `--only-binary` prevents an sdist build from executing unreviewed
+# setup code or producing different bytes from a source archive.
+python -m pip install --quiet --only-binary=:all: --require-hashes -r "$REQUIREMENTS"
 
 # Locate the gallery_dl __main__ module so PyInstaller has a real entry
 # point. `python -c` resolves the import path inside the venv.

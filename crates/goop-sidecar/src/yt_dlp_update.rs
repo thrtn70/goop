@@ -133,7 +133,9 @@ async fn update_with(
     };
     let dest = update_dir.join(exe_name);
     let url = format!("{dl_base}/{tag}/{asset}");
-    match fetch::download_binary(&client, &url, &dest, LABEL).await {
+    let checksum_url = format!("{dl_base}/{tag}/SHA2-256SUMS");
+    let expected = fetch::fetch_checksum(&client, &checksum_url, asset, LABEL).await?;
+    match fetch::download_binary(&client, &url, &expected, &dest, LABEL).await {
         Ok(()) => {}
         // The bytes arrived but the swap was refused — almost always Windows
         // refusing to rename over a yt-dlp that is still running a job. That
@@ -330,6 +332,13 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
+            .and(path("/dl/2099.01.01/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/dl/2099.01.01/yt-dlp_linux"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
@@ -371,6 +380,13 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
             )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71  yt-dlp_linux\n",
+            ))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -460,6 +476,13 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/dl/2026.07.04/yt-dlp_linux"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.04\n".to_vec()),
@@ -505,6 +528,13 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
             )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8  yt-dlp_linux\n",
+            ))
             .mount(&server)
             .await;
         Mock::given(method("GET"))

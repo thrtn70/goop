@@ -32,14 +32,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/macos-dylib-bundle.sh"
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
 
+# Every direct download below is version/content-pinned. A source with no
+# immutable URL (the osxexperts arm64 builds) is still content-pinned: an
+# upstream replacement fails the build until its bytes are reviewed and this
+# digest is deliberately updated.
+YT_DLP_VERSION="2026.08.19"
+YT_DLP_WINDOWS_SHA256="66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+YT_DLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
+YT_DLP_PORTABLE_SHA256="1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6"
+
 # Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
 # binary and its own `--update` targets GitHub (which no longer hosts the
 # release assets — they moved to Codeberg), so the bundled gallery-dl can't
 # self-update; it ships with Goop and is refreshed by bumping this pin. Keep
 # in sync with build-gallery-dl-macos.sh (which PyInstaller-builds the same
 # version for macOS).
-GALLERY_DL_VERSION="v1.32.4"
+GALLERY_DL_VERSION="v1.32.11"
 GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLERY_DL_VERSION}"
+GALLERY_DL_WINDOWS_SHA256="f51c739d961004961e303fb9b6146ffdbac9e022163a091319c75c02760b4523"
+GALLERY_DL_LINUX_SHA256="6b96a9d2a30923703995237384b56e1c496ffa951014feebd8f0569b869198ca"
 
 # Pinned MuPDF release. Artifex publishes Windows binaries on
 # ArtifexSoftware/mupdf-downloads only for select tags (some .x patch
@@ -62,6 +73,7 @@ MUPDF_BASE="https://github.com/ArtifexSoftware/mupdf-downloads/releases/download
 TESSERACT_VER="5.5.0"
 TESSERACT_BUILD="5.5.0.20241111"
 TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/releases/download/${TESSERACT_VER}/tesseract-ocr-w64-setup-${TESSERACT_BUILD}.exe"
+TESSERACT_SHA256="f3fc4236425b690c8be756f35793f77394ee004be0a6460a440c754d892f68bc"
 
 # Pinned tessdata_fast release tag. The trained-data file under this tag
 # is compatible with tesseract 5.x; only `eng` is bundled — other
@@ -70,22 +82,30 @@ TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/releases/download/${TE
 # fixture corpus.
 TESSDATA_VER="4.1.0"
 TESSDATA_BASE="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_VER}"
+TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
 
 case "$TARGET" in
   x86_64-pc-windows-msvc)
     # ffmpeg — Gyan essentials (LGPL)
-    fetch_url "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" /tmp/ffmpeg.zip
+    fetch_verified \
+      "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip" \
+      "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec" \
+      /tmp/ffmpeg.zip
     unzip -p /tmp/ffmpeg.zip '*/bin/ffmpeg.exe' > "$OUT_DIR/ffmpeg-$TARGET.exe"
     unzip -p /tmp/ffmpeg.zip '*/bin/ffprobe.exe' > "$OUT_DIR/ffprobe-$TARGET.exe"
     # yt-dlp
-    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "$OUT_DIR/yt-dlp-$TARGET.exe"
+    fetch_verified \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp.exe" \
+      "$YT_DLP_WINDOWS_SHA256" "$OUT_DIR/yt-dlp-$TARGET.exe"
     # gallery-dl (Codeberg PyInstaller bundle)
-    fetch_url "${GALLERY_DL_BASE}/gallery-dl.exe" "$OUT_DIR/gallery-dl-$TARGET.exe"
+    fetch_verified "${GALLERY_DL_BASE}/gallery-dl.exe" \
+      "$GALLERY_DL_WINDOWS_SHA256" "$OUT_DIR/gallery-dl-$TARGET.exe"
     # Ghostscript — Artifex official release. The installer is a 7z-
     # compressed self-extractor; 7z is preinstalled on windows-latest.
     GS_VER_NODOT="10040"
-    fetch_url \
+    fetch_verified \
       "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs${GS_VER_NODOT}/gs${GS_VER_NODOT}w64.exe" \
+      "7e81126cb545e62e7ce9c92b5f11390c76c6321d25b049fdaf9aa6c6fc4eac4f" \
       /tmp/gs.exe
     rm -rf /tmp/gs_extract
     # 7z isn't on Git Bash's PATH by default; use the absolute path the
@@ -114,7 +134,9 @@ case "$TARGET" in
     # DLL co-location needed. Zip layout (as of 1.27.0) is flat at
     # the root: mupdf.exe, mupdf-gl.exe, mutool.exe — we want only
     # mutool.exe; the viewer and the GL viewer are excluded.
-    fetch_url "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip" /tmp/mupdf.zip
+    fetch_verified "${MUPDF_BASE}/mupdf-${MUPDF_VER}-windows.zip" \
+      "f3e60b630453301914e52fb8ec001f6ab56cdb90daf39e533deae3ff214fcff8" \
+      /tmp/mupdf.zip
     rm -rf /tmp/mupdf_extract
     "$SEVENZIP" x /tmp/mupdf.zip -o/tmp/mupdf_extract -y > /dev/null
     MUTOOL_BIN="$(find /tmp/mupdf_extract -name 'mutool.exe' -type f | head -1)"
@@ -125,7 +147,7 @@ case "$TARGET" in
     # MSVC build composes cleanly with the other Windows sidecars.
     # Harvests tesseract.exe + every co-located DLL into $OUT_DIR so
     # Tauri's loader resolves them as siblings of the sidecar at runtime.
-    fetch_url "$TESSERACT_URL" /tmp/tesseract.exe
+    fetch_verified "$TESSERACT_URL" "$TESSERACT_SHA256" /tmp/tesseract.exe
     rm -rf /tmp/tesseract_extract
     "$SEVENZIP" x /tmp/tesseract.exe -o/tmp/tesseract_extract -y > /dev/null
     TESS_BIN="$(find /tmp/tesseract_extract -name 'tesseract.exe' -type f | head -1)"
@@ -155,18 +177,24 @@ case "$TARGET" in
     # and triggered Apple's Intel-deprecation warning. osxexperts.net
     # explicitly publishes arm64 (Apple Silicon) static builds; verified via
     # `lipo -archs` before switching.
-    fetch_url "https://osxexperts.net/ffmpeg7arm.zip" /tmp/ffmpeg7arm.zip
+    fetch_verified "https://osxexperts.net/ffmpeg7arm.zip" \
+      "563111a239fe70d2e5c84a5382204a7d0bf0a332385a92a44baff36d313e27f2" \
+      /tmp/ffmpeg7arm.zip
     unzip -o /tmp/ffmpeg7arm.zip -d /tmp/ffmpeg7arm/
     mv /tmp/ffmpeg7arm/ffmpeg "$OUT_DIR/ffmpeg-$TARGET"
     chmod +x "$OUT_DIR/ffmpeg-$TARGET"
     rm -rf /tmp/ffmpeg7arm.zip /tmp/ffmpeg7arm/
-    fetch_url "https://osxexperts.net/ffprobe7arm.zip" /tmp/ffprobe7arm.zip
+    fetch_verified "https://osxexperts.net/ffprobe7arm.zip" \
+      "e5ae34ee2f0b3594892a695fd733646904bbc7eb40af3b359ed91538ddcb5513" \
+      /tmp/ffprobe7arm.zip
     unzip -o /tmp/ffprobe7arm.zip -d /tmp/ffprobe7arm/
     mv /tmp/ffprobe7arm/ffprobe "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
     rm -rf /tmp/ffprobe7arm.zip /tmp/ffprobe7arm/
     # yt-dlp
-    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" "$OUT_DIR/yt-dlp-$TARGET"
+    fetch_verified \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp_macos" \
+      "$YT_DLP_MACOS_SHA256" "$OUT_DIR/yt-dlp-$TARGET"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
     # gallery-dl — built locally via PyInstaller because Codeberg ships
     # no macOS binary. The build script writes directly to OUT_DIR.
@@ -370,7 +398,10 @@ case "$TARGET" in
     # job never runs the binary — it only needs the file to exist.
     EXTRACT_DIR="$(mktemp -d)"
     trap 'rm -rf "$EXTRACT_DIR"' EXIT
-    fetch_url "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" "$EXTRACT_DIR/ffmpeg.tar.xz"
+    fetch_verified \
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-05-13-10/ffmpeg-N-126416-g9997fd0606-linux64-lgpl.tar.xz" \
+      "8ad0f604bbeb6f580840d47b65001ba370d69eec4263423235a604dd3728cab6" \
+      "$EXTRACT_DIR/ffmpeg.tar.xz"
     tar -xf "$EXTRACT_DIR/ffmpeg.tar.xz" -C "$EXTRACT_DIR/"
     FFMPEG_BIN="$(find "$EXTRACT_DIR" -name 'ffmpeg' -type f -perm -u+x 2>/dev/null | head -1)"
     [[ -n "$FFMPEG_BIN" ]] || { echo "ffmpeg binary not found in archive"; exit 1; }
@@ -381,11 +412,14 @@ case "$TARGET" in
     cp "$FFPROBE_BIN" "$OUT_DIR/ffprobe-$TARGET"
     chmod +x "$OUT_DIR/ffprobe-$TARGET"
     # yt-dlp
-    fetch_url "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" "$OUT_DIR/yt-dlp-$TARGET"
+    fetch_verified \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp" \
+      "$YT_DLP_PORTABLE_SHA256" "$OUT_DIR/yt-dlp-$TARGET"
     chmod +x "$OUT_DIR/yt-dlp-$TARGET"
     # gallery-dl (Codeberg PyInstaller bundle for Linux). Used by the
     # audit job's sidecar-smoke `--version` check; never shipped.
-    fetch_url "${GALLERY_DL_BASE}/gallery-dl.bin" "$OUT_DIR/gallery-dl-$TARGET"
+    fetch_verified "${GALLERY_DL_BASE}/gallery-dl.bin" \
+      "$GALLERY_DL_LINUX_SHA256" "$OUT_DIR/gallery-dl-$TARGET"
     chmod +x "$OUT_DIR/gallery-dl-$TARGET"
     # gs stub — empty executable file. Satisfies Tauri's externalBin
     # existence check without shipping Ghostscript on Linux.
@@ -417,14 +451,13 @@ case "$TARGET" in
 esac
 
 # eng.traineddata — bundled Tesseract language pack. Architecture-
-# agnostic, so download once per build (skip if already present from a
-# prior target's fetch). Other languages download on demand at runtime
+# agnostic, so download once per build. Re-fetch even when a prior target left
+# a copy behind: fetch_verified preserves good bytes on failure and prevents
+# stale or locally modified bytes from bypassing the pin. Other languages download on demand
 # into the app's data dir (Settings → OCR Languages).
-if [ ! -f "$OUT_DIR/tesseract-data/eng.traineddata" ]; then
-  mkdir -p "$OUT_DIR/tesseract-data"
-  fetch_url "${TESSDATA_BASE}/eng.traineddata" \
-    "$OUT_DIR/tesseract-data/eng.traineddata"
-fi
+mkdir -p "$OUT_DIR/tesseract-data"
+fetch_verified "${TESSDATA_BASE}/eng.traineddata" "$TESSDATA_ENG_SHA256" \
+  "$OUT_DIR/tesseract-data/eng.traineddata"
 
 echo "Sidecars written to $OUT_DIR/"
 ls -la "$OUT_DIR/"

@@ -169,7 +169,7 @@ type AppStoreState = {
   checkForUpdate: () => Promise<void>;
   dismissUpdate: (version: string) => Promise<void>;
   applyUpdateProgress: (downloaded: number, total: number) => void;
-  startUpdateDownload: (url: string, total: number) => Promise<void>;
+  startUpdateDownload: (total: number) => Promise<void>;
   /** Fetch the terminal-state job list + per-kind counts. */
   loadHistory: () => Promise<void>;
   setHistorySearch: (search: string) => void;
@@ -509,10 +509,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   applyUpdateProgress(downloaded, total) {
     set({ updateDownload: { downloaded, total, active: true } });
   },
-  async startUpdateDownload(url, total) {
+  async startUpdateDownload(total) {
     set({ updateDownload: { downloaded: 0, total, active: true } });
     try {
-      await api.update.download(url);
+      await api.update.download();
       set({ updateDownload: { downloaded: total, total, active: false } });
     } catch (e) {
       set({ updateDownload: null });

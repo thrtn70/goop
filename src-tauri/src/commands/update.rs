@@ -28,9 +28,9 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, IpcError> {
 }
 
 #[tauri::command]
-pub async fn download_update(app: AppHandle, url: String) -> Result<(), IpcError> {
+pub async fn download_update(app: AppHandle) -> Result<(), IpcError> {
     let app_for_progress = app.clone();
-    let path = app_update::download(&url, current_version(), move |downloaded, total| {
+    let path = app_update::download_latest(current_version(), move |downloaded, total| {
         let _ = app_for_progress.emit(
             "goop://update/progress",
             UpdateProgress { downloaded, total },
