@@ -44,6 +44,14 @@ fn supports_cooperative_pause(kind: &JobKind) -> bool {
     matches!(kind, JobKind::Extract)
 }
 
+fn log_terminal_outcome(id: JobId, kind: Option<&JobKind>, state: &JobState) {
+    match state {
+        JobState::Done => tracing::info!(?id, ?kind, "job completed"),
+        JobState::Cancelled => tracing::info!(?id, ?kind, "job cancelled"),
+        _ => {}
+    }
+}
+
 pub struct Scheduler {
     store: QueueStore,
     sink: Arc<dyn EventSink>,
@@ -273,6 +281,7 @@ impl Scheduler {
                                 {
                                     tracing::warn!(?job.id, error = %e, "failed to finalize cancel after yield");
                                 }
+                                log_terminal_outcome(job.id, Some(&job.kind), &JobState::Cancelled);
                                 sink.emit_queue(QueueEvent {
                                     job_id: job.id,
                                     state: JobState::Cancelled,
@@ -345,6 +354,7 @@ impl Scheduler {
                         )
                     }
                 };
+                log_terminal_outcome(job.id, Some(&job.kind), &state);
                 if let Err(e) = store.update_state(job.id, &state, result.as_ref(), now_ms()) {
                     tracing::warn!(?job.id, ?state, error = %e, "failed to persist terminal state; in-memory event still emitted");
                 }
@@ -369,6 +379,8 @@ impl Scheduler {
             return Ok(());
         }
         if self.store.cancel_inactive(id)? > 0 {
+            let kind = self.store.get_by_id(id).ok().flatten().map(|job| job.kind);
+            log_terminal_outcome(id, kind.as_ref(), &JobState::Cancelled);
             self.sink.emit_queue(QueueEvent {
                 job_id: id,
                 state: JobState::Cancelled,
@@ -561,8 +573,46 @@ mod tests {
     use goop_core::events::RecordingSink;
     use goop_core::{Job, JobKind, ResultKind};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<StdMutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogWriter(self.0.clone())
+        }
+    }
+
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
 
     fn done_result() -> JobResult {
         JobResult {
@@ -572,6 +622,24 @@ mod tests {
             result_kind: ResultKind::File,
             file_count: 1,
         }
+    }
+
+    #[test]
+    fn terminal_outcomes_are_logged_at_info() {
+        let done_id = JobId::new();
+        let cancelled_id = JobId::new();
+        let logs = capture_logs(|| {
+            log_terminal_outcome(done_id, Some(&JobKind::Extract), &JobState::Done);
+            log_terminal_outcome(cancelled_id, Some(&JobKind::Convert), &JobState::Cancelled);
+        });
+
+        assert!(logs.contains("job completed"), "logs were: {logs}");
+        assert!(logs.contains("job cancelled"), "logs were: {logs}");
+        assert!(logs.contains(&done_id.0.to_string()), "logs were: {logs}");
+        assert!(
+            logs.contains(&cancelled_id.0.to_string()),
+            "logs were: {logs}"
+        );
     }
 
     fn noop_worker() -> WorkerFn {

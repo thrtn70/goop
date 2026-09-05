@@ -11,12 +11,13 @@
 //! are classified here where the structure is still visible.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use goop_core::error::GoopError;
 use goop_core::{EventSink, JobId, JobSignals, ProgressEvent};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{BackendOutcome, ResultKindTag};
 use crate::retry::transient_status;
@@ -64,6 +65,21 @@ pub struct ResolvedFile {
     pub size: Option<u64>,
     pub url: String,
 }
+
+/// Internal queue-payload metadata for locating resumable child downloads
+/// after a restart. The directory is relative to the request's canonical
+/// output root; absolute and parent-traversing paths are rejected by the host
+/// when it rebuilds cleanup inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebridPartialArtifact {
+    pub relative_dir: String,
+    pub resume_key: String,
+}
+
+pub const PARTIAL_ARTIFACTS_PAYLOAD_KEY: &str = "_debrid_partial_artifacts";
+
+pub type PersistPartials =
+    Arc<dyn Fn(&[DebridPartialArtifact]) -> Result<(), GoopError> + Send + Sync>;
 
 /// Outcome of a single readiness check. `NotReady` is the yield signal —
 /// the scheduler re-queues the job with a delay instead of blocking a
@@ -152,6 +168,10 @@ pub struct DebridCtx {
     /// item handle (`"torrent:42"` / `"web:abc"`). The host writes it
     /// into the job's stored payload as `debrid_item`.
     pub persist_item: Arc<dyn Fn(&str) + Send + Sync>,
+    /// Called after TorBox resolves the files and before the first child
+    /// download starts. The host persists exact child directories/resume keys
+    /// so startup cleanup never has to recursively crawl the output root.
+    pub persist_partials: PersistPartials,
     /// The handle resolved earlier in THIS scheduler pickup. `dispatch`
     /// builds one `DebridCtx` per pickup and the retry loop reuses it
     /// across attempts, but the borrowed `req` still carries the
@@ -342,7 +362,16 @@ pub async fn run(
             Err(yield_waiting(&sink, job_id, stage))
         }
         CheckOutcome::Ready { name, files } => {
-            download_resolved(sink, job_id, req, signals, name, files, start).await
+            download_resolved(
+                sink,
+                job_id,
+                req,
+                signals,
+                ctx,
+                ResolvedItem { name, files },
+                start,
+            )
+            .await
         }
     }
 }
@@ -393,15 +422,21 @@ pub async fn remote_cancel(api_base: &str, api_key: &str, item: &str) -> Result<
 /// created from the TorBox item name. Files that already exist at their
 /// full path with the expected size are skipped so a resumed job doesn't
 /// duplicate finished files.
+struct ResolvedItem {
+    name: Option<String>,
+    files: Vec<ResolvedFile>,
+}
+
 async fn download_resolved(
     sink: Arc<dyn EventSink>,
     job_id: JobId,
     req: &ExtractRequest,
     signals: JobSignals,
-    name: Option<String>,
-    files: Vec<ResolvedFile>,
+    ctx: &DebridCtx,
+    resolved: ResolvedItem,
     start: Instant,
 ) -> Result<BackendOutcome, GoopError> {
+    let ResolvedItem { name, files } = resolved;
     let multi = files.len() > 1;
     let out_root = goop_core::path::expand(&req.output_dir);
 
@@ -428,8 +463,11 @@ async fn download_resolved(
             }
         }
     } else {
-        (out_root.clone(), out_root)
+        (out_root.clone(), out_root.clone())
     };
+
+    let partial_artifacts = planned_partial_artifacts(req, &out_root, &base, &files, multi);
+    (ctx.persist_partials)(&partial_artifacts)?;
 
     let total = files.len() as u32;
     let mut bytes: u64 = 0;
@@ -509,6 +547,35 @@ async fn download_resolved(
         },
         file_count: total,
     })
+}
+
+fn planned_partial_artifacts(
+    req: &ExtractRequest,
+    out_root: &Path,
+    base: &Path,
+    files: &[ResolvedFile],
+    multi: bool,
+) -> Vec<DebridPartialArtifact> {
+    files
+        .iter()
+        .map(|file| {
+            let dest = base.join(&file.name);
+            let file_dir = dest.parent().unwrap_or(base);
+            let relative_dir = file_dir
+                .strip_prefix(out_root)
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .into_owned();
+            DebridPartialArtifact {
+                relative_dir,
+                resume_key: if multi {
+                    format!("{}#{}", req.url, file.file_id)
+                } else {
+                    req.url.clone()
+                },
+            }
+        })
+        .collect()
 }
 
 /// Thin TorBox REST client. One instance per resolve/poll call is fine —
@@ -922,6 +989,7 @@ fn envelope_error(
 mod tests {
     use super::*;
     use goop_core::events::RecordingSink;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param};
@@ -956,8 +1024,43 @@ mod tests {
             api_key: "k".into(),
             session_item: DebridCtx::session(),
             persist_item: Arc::new(move |item| p.lock().unwrap().push(item.to_string())),
+            persist_partials: Arc::new(|_| Ok(())),
         };
         (ctx, persisted)
+    }
+
+    #[test]
+    fn planned_partials_keep_relative_directories_and_file_resume_keys() {
+        let dir = TempDir::new().unwrap();
+        let req = test_req("magnet:?xt=urn:btih:abc", dir.path(), Some("torrent:1"));
+        let files = vec![
+            ResolvedFile {
+                file_id: "10".into(),
+                name: "release/episode-1.mkv".into(),
+                size: Some(10),
+                url: "https://cdn.test/1".into(),
+            },
+            ResolvedFile {
+                file_id: "11".into(),
+                name: "release/extras/clip.mkv".into(),
+                size: Some(20),
+                url: "https://cdn.test/2".into(),
+            },
+        ];
+
+        let artifacts = planned_partial_artifacts(&req, dir.path(), dir.path(), &files, true);
+
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(
+            PathBuf::from(&artifacts[0].relative_dir),
+            PathBuf::from("release")
+        );
+        assert_eq!(
+            PathBuf::from(&artifacts[1].relative_dir),
+            PathBuf::from("release/extras")
+        );
+        assert_eq!(artifacts[0].resume_key, "magnet:?xt=urn:btih:abc#10");
+        assert_eq!(artifacts[1].resume_key, "magnet:?xt=urn:btih:abc#11");
     }
 
     #[tokio::test]
@@ -1050,7 +1153,13 @@ mod tests {
             .await;
 
         let dir = TempDir::new().unwrap();
-        let (ctx, persisted) = ctx_with_recorder(server.uri());
+        let (mut ctx, persisted) = ctx_with_recorder(server.uri());
+        let recorded_partials = Arc::new(Mutex::new(Vec::new()));
+        let partials_for_callback = recorded_partials.clone();
+        ctx.persist_partials = Arc::new(move |artifacts| {
+            *partials_for_callback.lock().unwrap() = artifacts.to_vec();
+            Ok(())
+        });
         let rec = Arc::new(RecordingSink::new());
         let req = test_req("magnet:?xt=urn:btih:abc", dir.path(), Some("torrent:7"));
 
@@ -1064,6 +1173,13 @@ mod tests {
         assert_eq!(outcome.bytes, 10);
         assert_eq!(outcome.file_count, 1);
         assert_eq!(outcome.result_kind, ResultKindTag::File);
+        assert_eq!(
+            recorded_partials.lock().unwrap().as_slice(),
+            [DebridPartialArtifact {
+                relative_dir: String::new(),
+                resume_key: "magnet:?xt=urn:btih:abc".into(),
+            }]
+        );
         let written = std::fs::read(dir.path().join("payload.bin")).unwrap();
         assert_eq!(written, b"helloworld");
     }

@@ -35,3 +35,4 @@ windows-sys = { version = "0.60", features = [
 [dev-dependencies]
 tempfile = "3"
 goop-core = { path = "../goop-core", features = ["test-util"] }
+tracing-subscriber.workspace = true

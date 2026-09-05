@@ -144,6 +144,28 @@ impl QueueStore {
         Ok(out)
     }
 
+    /// Return every extract job, including terminal rows hidden from the
+    /// queue tab. Startup partial cleanup uses historical payloads to discover
+    /// output directories and active/error rows to protect resumable files.
+    pub fn list_extract_jobs(&self) -> Result<Vec<Job>, GoopError> {
+        let c = self.conn.lock();
+        let mut stmt = c
+            .prepare(
+                "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
+                 FROM jobs WHERE kind = 'extract'
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let rows = stmt
+            .query_map([], row_to_job)
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| GoopError::Queue(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// Reorder a list of queued jobs. Assigns priority values so the given
     /// IDs come out in the same order from `next_queued` / `list`. Jobs not
     /// in `ordered_ids` are unaffected; if any ID isn't in the queued state,
@@ -200,20 +222,26 @@ impl QueueStore {
         }
     }
 
-    /// Rewrite a job's stored payload. Used by the debrid path to persist
-    /// the TorBox item handle after the first create call, so poll cycles
-    /// and app restarts don't re-submit the link.
+    /// Rewrite a job's stored payload. The debrid path uses this for the
+    /// TorBox item handle and exact child partial locations, so poll cycles,
+    /// retries, and startup cleanup can resume without re-submitting or
+    /// recursively scanning the output root.
     pub fn update_payload(&self, id: JobId, payload: &serde_json::Value) -> Result<(), GoopError> {
         let c = self.conn.lock();
-        c.execute(
-            "UPDATE jobs SET payload = ?2 WHERE id = ?1",
-            params![
-                id.0.to_string(),
-                serde_json::to_string(payload).map_err(|e| GoopError::Queue(e.to_string()))?,
-            ],
-        )
-        .map_err(|e| GoopError::Queue(e.to_string()))?;
-        Ok(())
+        let updated = c
+            .execute(
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+                params![
+                    id.0.to_string(),
+                    serde_json::to_string(payload).map_err(|e| GoopError::Queue(e.to_string()))?,
+                ],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(GoopError::Queue(format!("job not found: {id:?}")))
+        }
     }
 
     /// Yield a running job back to the queue with a wake-up deadline: the
@@ -232,10 +260,41 @@ impl QueueStore {
         Ok(n)
     }
 
-    /// On boot, flip any `running` jobs to `error{reason:"interrupted"}`.
-    pub fn reconcile(&self) -> Result<usize, GoopError> {
-        let c = self.conn.lock();
-        let n = c
+    /// On boot, flip any `running` jobs to `error{reason:"interrupted"}`
+    /// and return their IDs/kinds so the host can record terminal outcomes.
+    pub fn reconcile(&self) -> Result<Vec<(JobId, JobKind)>, GoopError> {
+        let mut c = self.conn.lock();
+        let tx = c
+            .transaction()
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let interrupted = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, kind FROM jobs WHERE state = 'running' ORDER BY created_at ASC",
+                )
+                .map_err(|e| GoopError::Queue(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let id = uuid::Uuid::parse_str(&id).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                    let kind = str_to_kind(&row.get::<_, String>(1)?)
+                        .ok_or(rusqlite::Error::InvalidQuery)?;
+                    Ok((JobId(id), kind))
+                })
+                .map_err(|e| GoopError::Queue(e.to_string()))?;
+            let mut interrupted = Vec::new();
+            for row in rows {
+                interrupted.push(row.map_err(|e| GoopError::Queue(e.to_string()))?);
+            }
+            interrupted
+        };
+        let updated = tx
             .execute(
                 "UPDATE jobs SET state = ?1, finished_at = ?2, error_detail = NULL
                  WHERE state = 'running'",
@@ -248,7 +307,14 @@ impl QueueStore {
                 ],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
-        Ok(n)
+        if updated != interrupted.len() {
+            return Err(GoopError::Queue(format!(
+                "reconciled {updated} running rows after selecting {}",
+                interrupted.len()
+            )));
+        }
+        tx.commit().map_err(|e| GoopError::Queue(e.to_string()))?;
+        Ok(interrupted)
     }
 
     /// Reset rows left in `paused` state from a previous run back to
@@ -905,6 +971,33 @@ mod tests {
     }
 
     #[test]
+    fn list_extract_jobs_includes_hidden_rows_and_excludes_other_kinds() {
+        let (s, _tmp) = temp_store();
+        let active = Job::new(
+            JobKind::Extract,
+            serde_json::json!({"url":"https://active"}),
+        );
+        let mut finished = Job::new(
+            JobKind::Extract,
+            serde_json::json!({"url":"https://finished"}),
+        );
+        finished.state = JobState::Done;
+        let mut convert = Job::new(JobKind::Convert, serde_json::Value::Null);
+        convert.state = JobState::Done;
+        for job in [&active, &finished, &convert] {
+            s.insert(job).unwrap();
+        }
+        s.clear_completed().unwrap();
+
+        let jobs = s.list_extract_jobs().unwrap();
+        let ids: Vec<_> = jobs.into_iter().map(|job| job.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&active.id));
+        assert!(ids.contains(&finished.id));
+        assert!(!ids.contains(&convert.id));
+    }
+
+    #[test]
     fn next_queued_returns_highest_priority() {
         let (s, _tmp) = temp_store();
         let mut a = Job::new(JobKind::Extract, serde_json::Value::Null);
@@ -930,6 +1023,17 @@ mod tests {
         let row = s.get_by_id(j.id).unwrap().unwrap();
         assert_eq!(row.payload["debrid_item"], "torrent:7");
         assert_eq!(row.payload["url"], "magnet:?xt=x");
+    }
+
+    #[test]
+    fn update_payload_rejects_an_unknown_job() {
+        let (s, _tmp) = temp_store();
+
+        let error = s
+            .update_payload(JobId::new(), &serde_json::json!({"url":"https://x"}))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("job not found"));
     }
 
     #[test]
@@ -1324,8 +1428,8 @@ mod tests {
         let mut j = Job::new(JobKind::Extract, serde_json::Value::Null);
         j.state = JobState::Running;
         s.insert(&j).unwrap();
-        let n = s.reconcile().unwrap();
-        assert_eq!(n, 1);
+        let interrupted = s.reconcile().unwrap();
+        assert_eq!(interrupted, vec![(j.id, JobKind::Extract)]);
         let all = s.list().unwrap();
         assert!(
             matches!(&all[0].state, JobState::Error { message, .. } if message == "interrupted")
