@@ -87,7 +87,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             target: TargetFormat::Webp,
             quality_preset: None,
             resolution_cap: None,
-            compress_mode: Some(CompressMode::Quality(85)),
+            compress_mode: Some(CompressMode::LosslessReoptimize),
             is_builtin: true,
             created_at: now,
         },
@@ -184,6 +184,35 @@ mod tests {
         // Second call returns the same entries without re-seeding.
         let again = load_or_seed(&p).unwrap();
         assert_eq!(again, seeded);
+    }
+
+    #[test]
+    fn fresh_web_image_preset_uses_supported_lossless_mode() {
+        let dir = tempdir().unwrap();
+        let seeded = load_or_seed(&dir.path().join("presets.json")).unwrap();
+        let web_image = seeded
+            .iter()
+            .find(|preset| preset.id == "builtin-web-image")
+            .unwrap();
+        assert_eq!(web_image.target, TargetFormat::Webp);
+        assert_eq!(
+            web_image.compress_mode,
+            Some(CompressMode::LosslessReoptimize)
+        );
+    }
+
+    #[test]
+    fn loading_saved_legacy_webp_mode_does_not_rewrite_user_data() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut legacy = sample("builtin-web-image", "My existing Web Image");
+        legacy.target = TargetFormat::Webp;
+        legacy.compress_mode = Some(CompressMode::Quality(85));
+        legacy.is_builtin = true;
+        save(&path, std::slice::from_ref(&legacy)).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(load_or_seed(&path).unwrap(), vec![legacy]);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
