@@ -127,8 +127,8 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 ### Prerequisites
 
 - **Rust** 1.75+ (`rustup install stable`)
-- **Node** 20+ (`nvm install 20`)
-- **npm** 10+ (ships with Node 20)
+- **Node** 22.12+ (`nvm install 22`)
+- **npm** 10+ (ships with Node 22)
 - **cmake** 3.23+ (`brew install cmake` / preinstalled on most Linux distros) — builds the vendored image codecs (libjxl, libheif)
 - macOS / Linux: run `./scripts/build-static-heif-deps.sh` once before the first build — it compiles the static HEIC decode stack (libde265 + libheif) into `.heif-deps/` and prints the two `export` lines the cargo build needs
 - Windows: `vcpkg install "libheif[core]:x64-windows-static"` and set `VCPKGRS_TRIPLET=x64-windows-static`
@@ -181,7 +181,7 @@ The pre-push gate (`scripts/pre-push.sh`) runs `cargo fmt --check`, `cargo clipp
 |---|---|
 | Desktop shell | Tauri 2 (`tauri = { version = "2", features = ["protocol-asset"] }`) |
 | Backend | Rust 2021 edition, 8-crate workspace |
-| Frontend | React 18 + TypeScript 5 + Tailwind 3 + Vite 5 + Zustand 4 |
+| Frontend | React 18 + TypeScript 5 + Tailwind 3 + Vite 8 + Zustand 4 |
 | Type bridge | `ts-rs` Rust → TypeScript bindings |
 | Sidecars | ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript |
 | Drag/drop | `@dnd-kit/core` + `@dnd-kit/sortable` |

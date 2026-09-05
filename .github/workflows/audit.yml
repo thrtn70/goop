@@ -86,13 +86,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: "20", cache: "npm" }
+        with: { node-version: "22", cache: "npm" }
       - run: npm ci
+      # Keep both shipped and development dependencies free of advisories at
+      # moderate severity or above. The lockfile makes the audited dependency
+      # graph reproducible; low-severity advisories remain visible without
+      # blocking maintenance.
+      - run: npm audit --audit-level=moderate
       - run: npm run typecheck
       # Same order as scripts/pre-push.sh. The local gate is a git hook and
       # can be bypassed; this is the only lint enforcement that always runs.
       - run: npm run lint
       - run: npm run test
+      - run: npm run build
 
   legal:
     # AGPL firewall — see LICENSING.md. Two checks: no `mupdf-*`
@@ -139,7 +145,7 @@ jobs:
       # (the sidecar dylib bundle map) with `node`. Declare the dependency
       # rather than leaning on the runner image happening to preinstall Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: "20" }
+        with: { node-version: "22" }
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"

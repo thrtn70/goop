@@ -155,7 +155,7 @@ jobs:
         with:
           save-if: "false"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: "20", cache: "npm" }
+        with: { node-version: "22", cache: "npm" }
       # v0.2.8: static HEIC decode stack (libheif + libde265, no other
       # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
       # upload flow below are untouched. Nothing needs bundling at

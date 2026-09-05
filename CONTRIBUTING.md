@@ -17,12 +17,12 @@ Goop is a Cargo workspace with a Tauri 2 shell. The Rust backend lives in `crate
 | `goop-sidecar` | `BinaryResolver` — sidecar dir → `$PATH` fallback. |
 | `src-tauri` | Tauri shell, `AppState`, IPC commands (`commands/*.rs`), `ThumbnailService` (video first frame, image decode, PDF page 1, audio waveform). |
 
-Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + react-router 6 + Vite 5. State lives in `src/store/appStore.ts`. IPC commands are wrapped in `src/ipc/commands.ts` (`api.queue.*`, `api.preset.*`, …). Rust types reach TS via `ts-rs` — when a struct on the Rust side changes, run `scripts/generate-bindings.sh` to refresh `shared/types/`.
+Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + React Router 7 + Vite 8. State lives in `src/store/appStore.ts`. IPC commands are wrapped in `src/ipc/commands.ts` (`api.queue.*`, `api.preset.*`, …). Rust types reach TS via `ts-rs` — when a struct on the Rust side changes, run `scripts/generate-bindings.sh` to refresh `shared/types/`.
 
 ## Build Prerequisites
 
 - **Rust:** stable 1.80+. Use `rustup` and the pinned toolchain in `rust-toolchain.toml`.
-- **Node.js:** 20+ with `npm`. Tauri 2's CLI and the Vite dev server need it.
+- **Node.js:** 22.12+ with `npm`. Tauri 2's CLI and the Vite dev server need it.
 - **Git:** recent.
 - **Platform system libraries for Tauri 2:**
   - **Windows:** MSVC Build Tools 2022 and WebView2 Runtime (usually pre-installed on Windows 11).
