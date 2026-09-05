@@ -1,11 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useAppStore } from "@/store/appStore";
-import BrandMark from "@/components/BrandMark";
+import { useLocation } from "react-router-dom";
+import { Link2 } from "lucide-react";
+import { NAV_ITEMS } from "@/lib/navItems";
+import { useWorkspaceDraftState, withWorkspaceDrafts } from "@/store/workspaceDrafts";
 
 type Props = { onSubmit: (url: string) => void };
 
-export default function TopBar({ onSubmit }: Props) {
-  const [url, setUrl] = useState("");
+function TopBar({ onSubmit }: Props) {
+  const [url, setUrl] = useWorkspaceDraftState("TopBar.url", "");
+  const location = useLocation();
+  const title = NAV_ITEMS.find(item => location.pathname.startsWith(item.to))?.label ?? "Goop";
   const inputRef = useRef<HTMLInputElement>(null);
   const focusToken = useAppStore((s) => s.pendingFocusUrlInput);
   // Phase H: Cmd+N increments `pendingFocusUrlInput`. Mirror that increment
@@ -17,8 +22,10 @@ export default function TopBar({ onSubmit }: Props) {
     }
   }, [focusToken]);
   return (
-    <header className="flex items-center gap-3 border-b border-subtle bg-surface-1 px-4 py-2">
-      <BrandMark size={24} className="shrink-0" />
+    <header className="workspace-topbar">
+      <span className="workspace-tool-title">{title}</span>
+      <div className="workspace-url">
+      <Link2 size={15} aria-hidden="true" className="shrink-0 text-fg-muted" />
       <input
         ref={inputRef}
         type="text"
@@ -32,8 +39,11 @@ export default function TopBar({ onSubmit }: Props) {
           }
         }}
         placeholder="Paste a link and press Enter..."
-        className="w-full min-w-0 rounded-md bg-surface-2 px-3 py-2 text-sm text-fg placeholder:text-fg-muted transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        className="min-w-0 flex-1 rounded bg-transparent py-1 text-sm text-fg placeholder:text-fg-muted focus:outline-none"
       />
+      </div>
     </header>
   );
 }
+
+export default withWorkspaceDrafts(TopBar, "extract");
