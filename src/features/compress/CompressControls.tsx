@@ -16,9 +16,11 @@ interface CompressControlsProps {
   capabilities: CompressionCapabilities;
   mode: CompressMode;
   onChange: (mode: CompressMode) => void;
+  /** A partial value/unit edit must survive an earlier request completing. */
+  onDraftEdit?: () => void;
 }
 
-export default function CompressControls({ probe, mode, onChange, capabilities }: CompressControlsProps) {
+export default function CompressControls({ probe, mode, onChange, capabilities, onDraftEdit }: CompressControlsProps) {
   const avail = useMemo(() => ({ quality: capabilities.quality, targetSize: capabilities.target_size, lossless: capabilities.lossless, hint: capabilities.reason }), [capabilities]);
   const sourceBytes = Number(probe.file_size);
   const durationMs = Number(probe.duration_ms);
@@ -173,7 +175,10 @@ export default function CompressControls({ probe, mode, onChange, capabilities }
               min={0.1}
               step={0.1}
               value={sizeInput}
-              onChange={(e) => setSizeInput(e.target.value)}
+              onChange={(e) => {
+                setSizeInput(e.target.value);
+                onDraftEdit?.();
+              }}
               onBlur={() => commitTargetSize(sizeInput, sizeUnit)}
               className="w-24 rounded-md bg-surface-1 px-2 py-1 text-sm tabular-nums text-fg focus:outline-none focus:ring-2 focus:ring-accent"
               aria-label="Target size value"
@@ -183,6 +188,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities }
               onChange={(e) => {
                 const u = e.target.value as SizeUnit;
                 setSizeUnit(u);
+                onDraftEdit?.();
                 commitTargetSize(sizeInput, u);
               }}
               className="rounded-md bg-surface-1 px-2 py-1 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"

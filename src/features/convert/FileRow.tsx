@@ -59,11 +59,13 @@ export function ConvertSettingsPanel({
   options: opts,
   state,
   onOptionsChange,
+  onDraftEdit,
 }: {
   path: string;
   options: FileRowOptions;
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
+  onDraftEdit?: () => void;
 }) {
   const p = state.probe;
   const { target, gifOptions, metadataPolicy, subtitle } = opts;
@@ -213,6 +215,7 @@ export function ConvertSettingsPanel({
       {showGifOpts && gifOptions && (
         <GifOptionsPanel
           gifOptions={gifOptions}
+          onDraftEdit={onDraftEdit}
           onChange={(o) => update({ gifOptions: o })}
           maxDurationMs={Number(p.duration_ms)}
         />

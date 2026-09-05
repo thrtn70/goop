@@ -24,10 +24,12 @@ export function CompressSettingsPanel({
   state,
   mode,
   onChange,
+  onDraftEdit,
 }: {
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   mode: CompressMode;
   onChange: (mode: CompressMode) => void;
+  onDraftEdit?: () => void;
 }) {
   return (
     <CompressControls
@@ -35,6 +37,7 @@ export function CompressSettingsPanel({
       probe={state.probe}
       mode={mode}
       onChange={onChange}
+      onDraftEdit={onDraftEdit}
     />
   );
 }

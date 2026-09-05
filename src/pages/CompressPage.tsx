@@ -160,6 +160,20 @@ function CompressPage() {
     [setFiles, setPdfs],
   );
 
+  // Partial text is still a newer edit, even before blur commits request fields.
+  const handleDraftEdit = useCallback(
+    (id: string) => {
+      setFiles((previous) =>
+        previous.map((file) =>
+          file.id === id
+            ? { ...file, revision: (file.revision ?? 0) + 1 }
+            : file,
+        ),
+      );
+    },
+    [setFiles],
+  );
+
   const handleOptionsChange = useCallback(
     (id: string, opts: CompressRowOptions) => {
       setFiles((prev) =>
@@ -296,6 +310,7 @@ function CompressPage() {
           selected.optionsReady ? (
             <WorkspaceDraftProvider scope={["source", selected.path]}>
               <CompressSettingsPanel
+                onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 state={selectedState}
                 mode={selected.mode}
                 onChange={(mode) =>

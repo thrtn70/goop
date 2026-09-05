@@ -172,6 +172,20 @@ function ConvertPage() {
     [setFiles, setPdfs],
   );
 
+  // Partial text is still a newer edit, even before blur commits request fields.
+  const handleDraftEdit = useCallback(
+    (id: string) => {
+      setFiles((previous) =>
+        previous.map((file) =>
+          file.id === id
+            ? { ...file, revision: (file.revision ?? 0) + 1 }
+            : file,
+        ),
+      );
+    },
+    [setFiles],
+  );
+
   const handleOptionsChange = useCallback(
     (id: string, opts: FileRowOptions) => {
       setFiles((prev) =>
@@ -327,6 +341,7 @@ function ConvertPage() {
           selected.optionsReady ? (
             <WorkspaceDraftProvider scope={["source", selected.path]}>
               <ConvertSettingsPanel
+                onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 path={selected.path}
                 options={selected}
                 state={selectedState}

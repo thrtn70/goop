@@ -13,6 +13,8 @@ interface GifOptionsPanelProps {
   gifOptions: GifOptions;
   onChange: (opts: GifOptions) => void;
   maxDurationMs: number;
+  /** Notify the entry owner of text edits without committing a parsed trim. */
+  onDraftEdit?: () => void;
 }
 
 function msToMmSs(ms: number): string {
@@ -35,6 +37,7 @@ export default function GifOptionsPanel({
   gifOptions,
   onChange,
   maxDurationMs,
+  onDraftEdit,
 }: GifOptionsPanelProps) {
   const startValue = gifOptions.trim_start_ms == null ? "" : msToMmSs(Number(gifOptions.trim_start_ms));
   const endValue = gifOptions.trim_end_ms == null ? "" : msToMmSs(Number(gifOptions.trim_end_ms));
@@ -85,7 +88,10 @@ export default function GifOptionsPanel({
               placeholder="00:00"
               className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
               value={startDraft}
-              onChange={(e) => setStartDraft(e.target.value)}
+              onChange={(e) => {
+                setStartDraft(e.target.value);
+                onDraftEdit?.();
+              }}
               onBlur={(e) => {
                 const ms = mmSsToMs(e.target.value);
                 onChange({ ...gifOptions, trim_start_ms: ms != null ? BigInt(ms) : null });
@@ -99,7 +105,10 @@ export default function GifOptionsPanel({
               placeholder={msToMmSs(maxDurationMs)}
               className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
               value={endDraft}
-              onChange={(e) => setEndDraft(e.target.value)}
+              onChange={(e) => {
+                setEndDraft(e.target.value);
+                onDraftEdit?.();
+              }}
               onBlur={(e) => {
                 const ms = mmSsToMs(e.target.value);
                 onChange({ ...gifOptions, trim_end_ms: ms != null ? BigInt(ms) : null });

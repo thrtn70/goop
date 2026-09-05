@@ -392,3 +392,77 @@ for (const tool of ["convert", "compress"] as const) {
     expect(mocks.inspect.mock.calls.map((c) => c[0])).toEqual(["/a.mp4"]);
   });
 }
+
+for (const field of ["Start", "End"] as const) {
+  it(
+    "keeps newer unblurred GIF " +
+      field +
+      " text after an earlier enqueue succeeds",
+    async () => {
+      let settle!: (job: string) => void;
+      mocks.enqueue.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+      );
+      render(page("convert"));
+      fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+      fireEvent.click(await screen.findByRole("button", { name: "GIF" }));
+      fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+      await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+      const input = screen.getByLabelText(field) as HTMLInputElement;
+      input.focus();
+      fireEvent.change(input, { target: { value: "12:" } });
+      expect(document.activeElement).toBe(input);
+      await act(async () => settle("job"));
+      expect(screen.getByRole("button", { name: "Select a.mp4" })).toBeTruthy();
+      expect((screen.getByLabelText(field) as HTMLInputElement).value).toBe(
+        "12:",
+      );
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByText(/Earlier settings queued/)).toBeTruthy();
+      expect(mocks.enqueue).toHaveBeenCalledOnce();
+      expect(mocks.enqueue.mock.calls[0][0].gif_options).toMatchObject({
+        trim_start_ms: null,
+        trim_end_ms: null,
+      });
+    },
+  );
+}
+it("keeps newer unblurred target-size text and unit after an earlier enqueue succeeds", async () => {
+  let settle!: (job: string) => void;
+  mocks.enqueue.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+  );
+  render(page("compress"));
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Target size" }));
+  fireEvent.click(screen.getByRole("button", { name: "Compress 1 file" }));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+  const input = screen.getByLabelText("Target size value") as HTMLInputElement;
+  input.focus();
+  fireEvent.change(input, { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Target size unit"), {
+    target: { value: "kb" },
+  });
+  expect(document.activeElement).toBe(input);
+  await act(async () => settle("job"));
+  expect(screen.getByRole("button", { name: "Select a.mp4" })).toBeTruthy();
+  expect(
+    (screen.getByLabelText("Target size value") as HTMLInputElement).value,
+  ).toBe("");
+  expect(
+    (screen.getByLabelText("Target size unit") as HTMLSelectElement).value,
+  ).toBe("kb");
+  expect(document.activeElement).toBe(input);
+  expect(screen.getByText(/Earlier settings queued/)).toBeTruthy();
+  expect(mocks.enqueue).toHaveBeenCalledOnce();
+  expect(mocks.enqueue.mock.calls[0][0].compress_mode).toEqual({
+    kind: "target_size_bytes",
+    value: 10485760,
+  });
+});
