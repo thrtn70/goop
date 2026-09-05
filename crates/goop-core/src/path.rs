@@ -28,15 +28,37 @@ pub fn default_output_dir() -> PathBuf {
 }
 
 pub fn config_file() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("goop").join("settings.json"))
-        .unwrap_or_else(|| PathBuf::from("settings.json"))
+    resolve_config_path(
+        dirs::config_dir(),
+        std::env::var("GOOP_CONFIG_DIR").ok(),
+        "settings.json",
+    )
 }
 
 pub fn presets_file() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("goop").join("presets.json"))
-        .unwrap_or_else(|| PathBuf::from("presets.json"))
+    resolve_config_path(
+        dirs::config_dir(),
+        std::env::var("GOOP_CONFIG_DIR").ok(),
+        "presets.json",
+    )
+}
+
+// An explicit directory contains the config files directly. Without it,
+// preserve the OS config directory and bare-filename fallback exactly.
+fn resolve_config_path(
+    base: Option<PathBuf>,
+    env_override: Option<String>,
+    filename: &str,
+) -> PathBuf {
+    if let Some(dir) = env_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return PathBuf::from(dir).join(filename);
+    }
+    base.map(|d| d.join("goop").join(filename))
+        .unwrap_or_else(|| PathBuf::from(filename))
 }
 
 pub fn data_dir() -> PathBuf {
@@ -126,5 +148,74 @@ mod tests {
     fn resolve_data_dir_ignores_whitespace_only_env_override() {
         let p = resolve_data_dir(PathBuf::from("/data"), true, Some("   ".into()));
         assert_eq!(p, PathBuf::from("/data/goop-dev"));
+    }
+
+    #[test]
+    fn resolve_config_path_absent_override_preserves_base_and_filenames() {
+        let base = PathBuf::from("config-base");
+        for filename in ["settings.json", "presets.json"] {
+            assert_eq!(
+                resolve_config_path(Some(base.clone()), None, filename),
+                base.join("goop").join(filename)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_missing_base_preserves_bare_filenames() {
+        for filename in ["settings.json", "presets.json"] {
+            let path = resolve_config_path(None, None, filename);
+            assert_eq!(path.as_os_str(), std::ffi::OsStr::new(filename));
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_ignores_blank_override() {
+        for base in [Some(PathBuf::from("config-base")), None] {
+            for filename in ["settings.json", "presets.json"] {
+                let expected = base
+                    .as_ref()
+                    .map(|p| p.join("goop").join(filename))
+                    .unwrap_or_else(|| PathBuf::from(filename));
+                for blank in ["", " \t\n "] {
+                    let path = resolve_config_path(base.clone(), Some(blank.into()), filename);
+                    assert_eq!(path.as_os_str(), expected.as_os_str());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_override_is_exact_parent() {
+        for base in [Some(PathBuf::from("config-base")), None] {
+            for filename in ["settings.json", "presets.json"] {
+                assert_eq!(
+                    resolve_config_path(base.clone(), Some("/isolated/config".into()), filename),
+                    PathBuf::from("/isolated/config").join(filename)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_trims_override() {
+        for filename in ["settings.json", "presets.json"] {
+            assert_eq!(
+                resolve_config_path(None, Some("  /isolated/config files \t".into()), filename),
+                PathBuf::from("/isolated/config files").join(filename)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_relative_override_stays_literal() {
+        for directory in ["relative/config", "~/config"] {
+            for filename in ["settings.json", "presets.json"] {
+                assert_eq!(
+                    resolve_config_path(None, Some(directory.into()), filename),
+                    PathBuf::from(directory).join(filename)
+                );
+            }
+        }
     }
 }
