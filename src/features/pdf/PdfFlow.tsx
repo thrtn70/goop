@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import PdfOperationPicker, { type PdfOperationKind } from "./PdfOperationPicker";
@@ -52,7 +54,7 @@ function dirname(p: string): string {
  * probes the single file to learn its page count, then hands the user a
  * picker + operation-specific sub-form + a primary action button.
  */
-export default function PdfFlow({
+function PdfFlow({
   files,
   onFilesChanged,
   onDone,
@@ -71,10 +73,10 @@ export default function PdfFlow({
     defaultOp !== "image_ocr"
       ? "merge"
       : defaultOp;
-  const [op, setOp] = useState<PdfOperationKind>(initialOp);
+  const [op, setOp] = useWorkspaceDraftState<PdfOperationKind>("PdfFlow.op", initialOp);
   const [totalPages, setTotalPages] = useState<number>(0);
-  const [ranges, setRanges] = useState<PageRange[]>([]);
-  const [quality, setQuality] = useState<PdfQuality>("ebook");
+  const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfFlow.ranges", []);
+  const [quality, setQuality] = useWorkspaceDraftState<PdfQuality>("PdfFlow.quality", "ebook");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const multiFile = files.length > 1;
@@ -91,7 +93,7 @@ export default function PdfFlow({
     ) {
       setOp("merge");
     }
-  }, [multiFile, op]);
+  }, [multiFile, op, setOp]);
 
   // Probe the single file to get the page count for the split editor.
   useEffect(() => {
@@ -267,3 +269,5 @@ export default function PdfFlow({
     </div>
   );
 }
+
+export default withWorkspaceDrafts(PdfFlow, undefined, props => ["pdf", ...props.files.slice().sort()]);

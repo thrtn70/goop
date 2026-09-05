@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, imageAppIcon } from "@/ipc/commands";
@@ -46,9 +48,9 @@ const PLATFORMS: PlatformOption[] = [
  * at "Use a square image" but doesn't reject — power users sometimes
  * pass tall logos on purpose and want the squashed result.
  */
-export default function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
+function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [selected, setSelected] = useState<Set<IconPlatform>>(
+  const [selected, setSelected] = useWorkspaceDraftState<Set<IconPlatform>>("ImageAppIconFlow.selected",
     () => new Set<IconPlatform>(["macos", "windows", "web"]),
   );
   const [busy, setBusy] = useState(false);
@@ -169,3 +171,5 @@ export default function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageAppIconFlow, undefined, props => ["source", props.file]);

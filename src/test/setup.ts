@@ -1,3 +1,9 @@
+import { resetExtractSession } from "@/store/extractSession";
+beforeEach(resetExtractSession);
+import { beforeEach } from "vitest";
+import { resetWorkspaceDrafts } from "@/store/workspaceDrafts";
+beforeEach(resetWorkspaceDrafts);
+
 // Vitest jsdom environment setup. Polyfills the few browser APIs that
 // jsdom doesn't ship and our component dependencies require.
 

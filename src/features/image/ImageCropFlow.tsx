@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import CropEditor, { type EditorRect } from "./CropEditor";
@@ -32,9 +34,9 @@ function extOf(p: string): string {
  * source-pixel coords via `onChange`; we hand that straight to the
  * `imageCrop` IPC builder when the user picks an output path.
  */
-export default function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
+function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [rect, setRect] = useState<EditorRect | null>(null);
+  const [rect, setRect] = useWorkspaceDraftState<EditorRect | null>("ImageCropFlow.rect", null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,3 +87,5 @@ export default function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageCropFlow, undefined, props => ["source", props.file]);

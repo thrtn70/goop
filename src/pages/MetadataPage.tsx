@@ -1,4 +1,7 @@
-import { useCallback, useState } from "react";
+import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import MetadataEditorFlow from "@/features/metadata/MetadataEditorFlow";
@@ -30,9 +33,9 @@ function isSupported(p: string): boolean {
  * each file and routes to the audio editor (single or batch) and/or the
  * read-only universal viewer.
  */
-export default function MetadataPage() {
+function MetadataPage() {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [files, setFiles] = useState<string[]>([]);
+  const [files, setFiles] = useWorkspaceDraftState<string[]>("MetadataPage.files", []);
 
   const addPaths = useCallback((paths: string[]) => {
     const fresh = paths.filter(isSupported);
@@ -41,7 +44,7 @@ export default function MetadataPage() {
       const existing = new Set(prev);
       return [...prev, ...fresh.filter((p) => !existing.has(p))];
     });
-  }, []);
+  }, [setFiles]);
 
   const handleBrowse = useCallback(async () => {
     try {
@@ -62,12 +65,14 @@ export default function MetadataPage() {
   }, [addPaths, enqueueToast]);
 
   const handleRemove = useCallback((path: string) => {
+    forgetWorkspaceSource("metadata", path);
     setFiles((prev) => prev.filter((f) => f !== path));
-  }, []);
+  }, [setFiles]);
 
   const handleDone = useCallback(() => {
+    files.forEach(path => forgetWorkspaceSource("metadata", path));
     setFiles([]);
-  }, []);
+  }, [files, setFiles]);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -136,3 +141,5 @@ export default function MetadataPage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(MetadataPage, "metadata");

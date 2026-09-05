@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useEffect } from "react";
 import clsx from "clsx";
 import type { GifOptions, GifSizePreset } from "@/types";
 
@@ -37,12 +38,18 @@ export default function GifOptionsPanel({
 }: GifOptionsPanelProps) {
   const startValue = gifOptions.trim_start_ms == null ? "" : msToMmSs(Number(gifOptions.trim_start_ms));
   const endValue = gifOptions.trim_end_ms == null ? "" : msToMmSs(Number(gifOptions.trim_end_ms));
-  const [startDraft, setStartDraft] = useState(startValue);
-  const [endDraft, setEndDraft] = useState(endValue);
+  const [startDraft, setStartDraft] = useWorkspaceDraftState("GifOptionsPanel.startDraft", startValue);
+  const [endDraft, setEndDraft] = useWorkspaceDraftState("GifOptionsPanel.endDraft", endValue);
   // Preserve partial typing across unrelated row updates, while batch-applied
   // trim changes replace the corresponding visible draft.
-  useEffect(() => setStartDraft(startValue), [startValue]);
-  useEffect(() => setEndDraft(endValue), [endValue]);
+  const [appliedStart, setAppliedStart] = useWorkspaceDraftState("GifOptionsPanel.appliedStart", startValue);
+  const [appliedEnd, setAppliedEnd] = useWorkspaceDraftState("GifOptionsPanel.appliedEnd", endValue);
+  useEffect(() => {
+    if (appliedStart !== startValue) { setStartDraft(startValue); setAppliedStart(startValue); }
+  }, [appliedStart, startValue, setStartDraft, setAppliedStart]);
+  useEffect(() => {
+    if (appliedEnd !== endValue) { setEndDraft(endValue); setAppliedEnd(endValue); }
+  }, [appliedEnd, endValue, setEndDraft, setAppliedEnd]);
 
   return (
     <div className="mt-3 space-y-2 rounded-md bg-surface-0 p-3">

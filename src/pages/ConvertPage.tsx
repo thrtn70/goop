@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
+import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useCallback, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -23,11 +27,11 @@ function isPdf(p: string): boolean {
   return p.toLowerCase().endsWith(".pdf");
 }
 
-export default function ConvertPage() {
+function ConvertPage() {
   const location = useLocation();
   const nav = useNavigate();
-  const [files, setFiles] = useState<FileEntry[]>([]);
-  const [pdfs, setPdfs] = useState<string[]>([]);
+  const [files, setFiles] = useWorkspaceDraftState<FileEntry[]>("ConvertPage.files", []);
+  const [pdfs, setPdfs] = useWorkspaceDraftState<string[]>("ConvertPage.pdfs", []);
 
   // Convert-again from the History preview lands here with location.state.
   // Seed a FileRow from the pre-fill so the user arrives ready-to-edit.
@@ -58,7 +62,7 @@ export default function ConvertPage() {
     }
     // Clear the navigation state so a back/forward doesn't re-seed.
     nav(location.pathname, { replace: true, state: null });
-  }, [location, nav]);
+  }, [location, nav, setFiles, setPdfs]);
 
   const addPaths = useCallback((paths: string[]) => {
     const pdfPaths = paths.filter(isPdf);
@@ -87,7 +91,7 @@ export default function ConvertPage() {
         return [...prev, ...fresh];
       });
     }
-  }, []);
+  }, [setFiles, setPdfs]);
 
   const handleOptionsChange = useCallback((path: string, opts: FileRowOptions) => {
     setFiles((prev) =>
@@ -106,11 +110,12 @@ export default function ConvertPage() {
           : f,
       ),
     );
-  }, []);
+  }, [setFiles]);
 
   const handleRemove = useCallback((path: string) => {
+    forgetWorkspaceSource("convert", path);
     setFiles((prev) => prev.filter((f) => f.path !== path));
-  }, []);
+  }, [setFiles]);
 
   const applyPreset = useCallback((preset: Preset) => {
     setFiles((prev) =>
@@ -126,7 +131,7 @@ export default function ConvertPage() {
         resolutionCap: preset.resolution_cap,
       })),
     );
-  }, []);
+  }, [setFiles]);
 
   const applyFirstToAll = useCallback(() => {
     setFiles((prev) => {
@@ -149,7 +154,7 @@ export default function ConvertPage() {
             },
       );
     });
-  }, []);
+  }, [setFiles]);
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -168,7 +173,7 @@ export default function ConvertPage() {
   // route transition keeps both mounted briefly.
   const pickerToken = useAppStore((s) => s.pendingFilePicker);
   useEffect(() => {
-    if (pickerToken > 0 && location.pathname.startsWith("/convert")) {
+    if (pickerToken > 0 && location.pathname.startsWith("/convert") && claimWorkspaceFilePicker(pickerToken)) {
       void handleBrowse();
     }
   }, [pickerToken, handleBrowse, location.pathname]);
@@ -201,7 +206,7 @@ export default function ConvertPage() {
         <div className="mt-2 flex-1 overflow-auto">
           <PdfFlow
             files={pdfs}
-            onFilesChanged={setPdfs}
+            onFilesChanged={next => { pdfs.filter(path => !next.includes(path)).forEach(path => forgetWorkspaceSource("convert", path)); setPdfs(next); }}
             onDone={() => setPdfs([])}
           />
         </div>
@@ -291,7 +296,7 @@ export default function ConvertPage() {
           <ConvertActionBar
             files={files}
             disabled={false}
-            onEnqueued={() => setFiles([])}
+            onEnqueued={() => { files.forEach(f => forgetWorkspaceSource("convert", f.path)); setFiles([]); }}
             onApplyToAll={applyFirstToAll}
           />
         </div>
@@ -299,3 +304,5 @@ export default function ConvertPage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ConvertPage, "convert");

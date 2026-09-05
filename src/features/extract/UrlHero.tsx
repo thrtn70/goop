@@ -1,3 +1,5 @@
+import { useExtractSession, nextExtractAttemptId } from "@/store/extractSession";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/ipc/commands";
@@ -6,12 +8,8 @@ import type { UrlProbe } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import ProbeCard from "./ProbeCard";
 import {
-  IDLE_START,
-  nextStartState,
   startBanner,
-  type StartEvent,
   type StartOptions,
-  type StartState,
 } from "./startState";
 
 function looksLikeCookieError(message: string | null): boolean {
@@ -22,20 +20,13 @@ export default function UrlHero({ url }: { url?: string }) {
   const [probe, setProbe] = useState<UrlProbe | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastUrl, setLastUrl] = useState<string | null>(null);
+  const [lastUrl, setLastUrl] = useWorkspaceDraftState<string | null>("UrlHero.lastUrl", null);
   const cancelledRef = useRef(false);
   // Everything about starting a download, in one place. This was five
   // separate pieces — an epoch ref, two booleans and an error object — and
   // every defect here was two of them disagreeing.
-  const [start, setStart] = useState<StartState>(IDLE_START);
-  // An id source, not a sixth owner: it is never read to decide anything.
-  // Only `start` decides, and only `nextStartState` reads the id.
-  const nextStartId = useRef(0);
-  function send(ev: StartEvent) {
-    // The functional form is the staleness guard: `prev` comes from the
-    // queue, not from the closure this callback was created in.
-    setStart((prev) => nextStartState(prev, ev));
-  }
+  const start = useExtractSession(s => s.start);
+  const send = useExtractSession(s => s.send);
 
   const outputDir = useAppStore(
     (s) => s.settings?.output_dir_extract ?? s.settings?.output_dir ?? "~/Downloads",
@@ -46,7 +37,7 @@ export default function UrlHero({ url }: { url?: string }) {
     cancelledRef.current = false;
     setLoading(true);
     setError(null);
-    send({ type: "retire" });
+    if (u !== lastUrl) send({ type: "retire" });
     setProbe(null);
     setLastUrl(u);
     try {
@@ -67,6 +58,7 @@ export default function UrlHero({ url }: { url?: string }) {
 
   function handleCancel() {
     cancelledRef.current = true;
+    setLastUrl(null);
     setLoading(false);
     setProbe(null);
     setError(null);
@@ -85,7 +77,7 @@ export default function UrlHero({ url }: { url?: string }) {
    */
   function startAttempt(opts: StartOptions) {
     if (!probe) return;
-    const id = (nextStartId.current += 1);
+    const id = nextExtractAttemptId();
     send({ type: "attempt", id, url: probe.url, opts });
     void runStart(id, probe, opts);
   }
@@ -141,17 +133,18 @@ export default function UrlHero({ url }: { url?: string }) {
   }
 
   useEffect(() => {
-    if (!url) return;
+    const requestedUrl = url ?? lastUrl;
+    if (!requestedUrl) return;
     let cancelled = false;
     (async () => {
       cancelledRef.current = false;
       setLoading(true);
       setError(null);
-      send({ type: "retire" });
+      if (requestedUrl !== lastUrl) send({ type: "retire" });
       setProbe(null);
-      setLastUrl(url);
+      setLastUrl(requestedUrl);
       try {
-        const result = await api.extract.probe(url);
+        const result = await api.extract.probe(requestedUrl);
         if (!cancelled && !cancelledRef.current) setProbe(result);
       } catch (e) {
         if (!cancelled && !cancelledRef.current) setError(formatError(e));
@@ -163,6 +156,8 @@ export default function UrlHero({ url }: { url?: string }) {
       cancelled = true;
       cancelledRef.current = true;
     };
+  // Re-entering the route re-probes saved input but never retires or repeats its enqueue.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
   // Either a failure to report, or the message a retry is carrying.

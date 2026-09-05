@@ -1,3 +1,4 @@
+import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfReorder } from "@/ipc/commands";
@@ -23,7 +24,7 @@ function stemOf(p: string): string {
 
 export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [pages, setPages] = useState<PageState[]>([]);
+  const { pages, setPages, loadPages } = usePdfPageDrafts("PdfReorderFlow.pages");
   const [initial, setInitial] = useState<PageState[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -43,7 +44,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
           deleted: false,
           rotation: null,
         }));
-        setPages(initialState);
+        loadPages(initialState);
         setInitial(initialState);
       })
       .catch((e) => {
@@ -55,7 +56,7 @@ export default function PdfReorderFlow({ file, onDone }: PdfReorderFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, loadPages]);
 
   const dirty = pages.some((p, idx) => p.originalPage !== initial[idx]?.originalPage);
 

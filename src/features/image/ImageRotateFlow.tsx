@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageRotate } from "@/ipc/commands";
@@ -33,9 +35,9 @@ function extOf(p: string): string {
  * Output keeps the input's file extension so a JPEG rotated stays a
  * JPEG; the user picks the destination path via the OS save dialog.
  */
-export default function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
+function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [degrees, setDegrees] = useState<RotationDegrees>("cw90");
+  const [degrees, setDegrees] = useWorkspaceDraftState<RotationDegrees>("ImageRotateFlow.degrees", "cw90");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,3 +113,5 @@ export default function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) 
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageRotateFlow, undefined, props => ["source", props.file]);

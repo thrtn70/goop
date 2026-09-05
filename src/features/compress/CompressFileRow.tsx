@@ -1,3 +1,4 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useEffect } from "react";
 import type { CompressMode, CompressionCapabilities } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
@@ -47,7 +48,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export default function CompressFileRow({
+function CompressFileRow({
   path,
   index = 0,
   selectedMode,
@@ -149,3 +150,5 @@ export default function CompressFileRow({
     </div>
   );
 }
+
+export default withWorkspaceDrafts(CompressFileRow, undefined, props => ["source", props.path]);

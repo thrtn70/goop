@@ -1,3 +1,4 @@
+import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfRotate } from "@/ipc/commands";
@@ -24,7 +25,7 @@ function stemOf(p: string): string {
 
 export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [pages, setPages] = useState<PageState[]>([]);
+  const { pages, setPages, loadPages } = usePdfPageDrafts("PdfRotateFlow.pages");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +38,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
       .then(([probe, thumbs]) => {
         if (cancelled) return;
         const total = Number(probe.pages);
-        setPages(
+        loadPages(
           Array.from({ length: total }, (_, i) => ({
             originalPage: i + 1,
             thumbPath: thumbs[i] ?? null,
@@ -55,7 +56,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, loadPages]);
 
   function rotateAll(deg: RotationDegrees) {
     setPages((prev) =>

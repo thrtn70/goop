@@ -1,3 +1,4 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useEffect } from "react";
 import type { GifOptions, MetadataPolicy, SubtitleOptions, TargetFormat, QualityPreset, ResolutionCap } from "@/types";
 import { useProbe } from "@/hooks/useProbe";
@@ -76,7 +77,7 @@ export function defaultGifOptions(): GifOptions {
   return { size_preset: "medium", trim_start_ms: null, trim_end_ms: null };
 }
 
-export default function FileRow({ path, index = 0, onOptionsChange, onRemove, options }: FileRowProps) {
+function FileRow({ path, index = 0, onOptionsChange, onRemove, options }: FileRowProps) {
   const { state, retry } = useProbe(path);
   const opts = options;
   // Read the global default once at seed time so a later Settings
@@ -276,3 +277,5 @@ export default function FileRow({ path, index = 0, onOptionsChange, onRemove, op
     </div>
   );
 }
+
+export default withWorkspaceDrafts(FileRow, undefined, props => ["source", props.path]);

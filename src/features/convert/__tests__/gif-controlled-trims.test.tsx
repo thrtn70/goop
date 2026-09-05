@@ -22,3 +22,15 @@ it("resynchronizes batch trim changes without interrupting local draft edits", a
   await userEvent.tab();
   expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ trim_start_ms: 5000n, trim_end_ms: 12000n }));
 });
+
+it("retains an unfinished trim string across unmount without committing it", async () => {
+  const options: GifOptions = { size_preset: "medium", trim_start_ms: 1000n, trim_end_ms: null };
+  const onChange = vi.fn();
+  const first = render(<GifOptionsPanel gifOptions={options} onChange={onChange} maxDurationMs={60000} />);
+  await userEvent.clear(screen.getByRole("textbox", { name: "Start" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Start" }), "00:0");
+  first.unmount();
+  render(<GifOptionsPanel gifOptions={options} onChange={onChange} maxDurationMs={60000} />);
+  expect((screen.getByRole("textbox", { name: "Start" }) as HTMLInputElement).value).toBe("00:0");
+  expect(onChange).not.toHaveBeenCalled();
+});

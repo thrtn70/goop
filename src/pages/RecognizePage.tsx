@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
@@ -42,16 +44,16 @@ interface RecognizeResult {
  * Image-OCR flow. The explicit Extract-text / OCR ops also remain there
  * for callers who want to force a specific path.
  */
-export default function RecognizePage() {
+function RecognizePage() {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const jobs = useAppStore((s) => s.jobs);
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [input, setInput] = useState<string | null>(null);
-  const [outputKind, setOutputKind] = useState<ImageOcrOutput>("text");
+  const [input, setInput] = useWorkspaceDraftState<string | null>("RecognizePage.input", null);
+  const [outputKind, setOutputKind] = useWorkspaceDraftState<ImageOcrOutput>("RecognizePage.outputKind", "text");
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
-  const [lang, setLang] = useState<string>("eng");
+  const [lang, setLang] = useWorkspaceDraftState<string>("RecognizePage.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const [phase, setPhase] = useState<Phase>("idle");
   const [jobId, setJobId] = useState<JobId | null>(null);
@@ -135,7 +137,7 @@ export default function RecognizePage() {
     setResult(null);
     setError(null);
     setPhase("idle");
-  }, []);
+  }, [setInput]);
 
   const handleBrowse = useCallback(async () => {
     try {
@@ -318,3 +320,5 @@ export default function RecognizePage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(RecognizePage, "recognize");

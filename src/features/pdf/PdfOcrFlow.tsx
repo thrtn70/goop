@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -34,7 +35,7 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const navigate = useNavigate();
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
-  const [lang, setLang] = useState<string>("eng");
+  const [lang, setLang] = useWorkspaceDraftState<string>("PdfOcrFlow.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);

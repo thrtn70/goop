@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, pdfExtractImages } from "@/ipc/commands";
@@ -22,8 +23,8 @@ const DPI_DEFAULT = 150;
  */
 export default function PdfToImagesFlow({ file, onDone }: PdfToImagesFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [format, setFormat] = useState<PdfImageFormat>("png");
-  const [dpi, setDpi] = useState<number>(DPI_DEFAULT);
+  const [format, setFormat] = useWorkspaceDraftState<PdfImageFormat>("PdfToImagesFlow.format", "png");
+  const [dpi, setDpi] = useWorkspaceDraftState<number>("PdfToImagesFlow.dpi", DPI_DEFAULT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

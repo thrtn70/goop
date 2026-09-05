@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useMemo, useState } from "react";
 import { api, metadataWrite } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -27,22 +29,22 @@ const EMPTY: AudioTags = {
 
 /** Single-file audio editor: every field is prefilled with the file's current
  * value and diffed on save, so unchanged fields are left untouched. */
-export default function AudioTagForm({ view, onDone }: AudioTagFormProps) {
+function AudioTagForm({ view, onDone }: AudioTagFormProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const orig = useMemo(() => view.audio ?? EMPTY, [view.audio]);
 
-  const [title, setTitle] = useState(orig.title ?? "");
-  const [artist, setArtist] = useState(orig.artist ?? "");
-  const [album, setAlbum] = useState(orig.album ?? "");
-  const [albumArtist, setAlbumArtist] = useState(orig.album_artist ?? "");
-  const [track, setTrack] = useState(orig.track ?? "");
-  const [disc, setDisc] = useState(orig.disc ?? "");
-  const [year, setYear] = useState(orig.year ?? "");
-  const [genre, setGenre] = useState(orig.genre ?? "");
-  const [composer, setComposer] = useState(orig.composer ?? "");
-  const [comment, setComment] = useState(orig.comment ?? "");
-  const [cover, setCover] = useState<CoverArtOp>({ kind: "keep" });
-  const [backup, setBackup] = useState(false);
+  const [title, setTitle] = useWorkspaceDraftState("AudioTagForm.title", orig.title ?? "");
+  const [artist, setArtist] = useWorkspaceDraftState("AudioTagForm.artist", orig.artist ?? "");
+  const [album, setAlbum] = useWorkspaceDraftState("AudioTagForm.album", orig.album ?? "");
+  const [albumArtist, setAlbumArtist] = useWorkspaceDraftState("AudioTagForm.albumArtist", orig.album_artist ?? "");
+  const [track, setTrack] = useWorkspaceDraftState("AudioTagForm.track", orig.track ?? "");
+  const [disc, setDisc] = useWorkspaceDraftState("AudioTagForm.disc", orig.disc ?? "");
+  const [year, setYear] = useWorkspaceDraftState("AudioTagForm.year", orig.year ?? "");
+  const [genre, setGenre] = useWorkspaceDraftState("AudioTagForm.genre", orig.genre ?? "");
+  const [composer, setComposer] = useWorkspaceDraftState("AudioTagForm.composer", orig.composer ?? "");
+  const [comment, setComment] = useWorkspaceDraftState("AudioTagForm.comment", orig.comment ?? "");
+  const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioTagForm.cover", { kind: "keep" });
+  const [backup, setBackup] = useWorkspaceDraftState("AudioTagForm.backup", false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -128,3 +130,5 @@ export default function AudioTagForm({ view, onDone }: AudioTagFormProps) {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(AudioTagForm, undefined, props => ["source", props.view.path]);

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useEffect, useMemo } from "react";
 import clsx from "clsx";
 import type { CompressMode, ProbeResult, CompressionCapabilities } from "@/types";
 import { adviseTargetSize, bytesFromInput, formatBytes, type SizeUnit } from "./sizeMath";
@@ -23,27 +24,31 @@ export default function CompressControls({ probe, mode, onChange, capabilities }
   const durationMs = Number(probe.duration_ms);
 
   // Local draft for the Target size input (so the user can type freely before we parse on blur).
-  const [sizeInput, setSizeInput] = useState<string>(() => {
+  const [sizeInput, setSizeInput] = useWorkspaceDraftState<string>("CompressControls.sizeInput", () => {
     if (mode.kind === "target_size_bytes") {
       const mb = Number(mode.value) / (1024 * 1024);
-      if (mb >= 1) return mb.toFixed(1);
+      if (mb >= 1) return String(mb);
       const kb = Number(mode.value) / 1024;
-      return kb.toFixed(0);
+      return String(kb);
     }
     return "10";
   });
-  const [sizeUnit, setSizeUnit] = useState<SizeUnit>(() => {
+  const [sizeUnit, setSizeUnit] = useWorkspaceDraftState<SizeUnit>("CompressControls.sizeUnit", () => {
     if (mode.kind === "target_size_bytes" && Number(mode.value) < 1024 * 1024) return "kb";
     return "mb";
   });
 
+  const modeKey = mode.kind === "lossless_reoptimize" ? mode.kind : `${mode.kind}:${mode.value}`;
+  const [appliedMode, setAppliedMode] = useWorkspaceDraftState("CompressControls.appliedMode", modeKey);
   useEffect(() => {
+    if (appliedMode === modeKey) return;
+    setAppliedMode(modeKey);
     if (mode.kind !== "target_size_bytes") return;
     const bytes = Number(mode.value);
     const unit: SizeUnit = bytes < 1024 * 1024 ? "kb" : "mb";
     setSizeUnit(unit);
     setSizeInput(String(bytes / (unit === "kb" ? 1024 : 1024 * 1024)));
-  }, [mode]);
+  }, [mode, modeKey, appliedMode, setAppliedMode, setSizeUnit, setSizeInput]);
 
   const modeAllowed = mode.kind === "quality" ? avail.quality : mode.kind === "target_size_bytes" ? avail.targetSize : avail.lossless;
   const currentTab: "quality" | "target_size" =

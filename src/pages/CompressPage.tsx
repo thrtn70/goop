@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
+import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useCallback, useEffect } from "react";
 import { useLocation } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -55,10 +59,10 @@ function targetFromPath(path: string): TargetFormat {
   return map[ext] ?? "mp4";
 }
 
-export default function CompressPage() {
+function CompressPage() {
   const location = useLocation();
-  const [files, setFiles] = useState<CompressFileEntry[]>([]);
-  const [pdfs, setPdfs] = useState<string[]>([]);
+  const [files, setFiles] = useWorkspaceDraftState<CompressFileEntry[]>("CompressPage.files", []);
+  const [pdfs, setPdfs] = useWorkspaceDraftState<string[]>("CompressPage.pdfs", []);
 
   const addPaths = useCallback((paths: string[]) => {
     const pdfPaths = paths.filter(isPdf);
@@ -83,7 +87,7 @@ export default function CompressPage() {
         return [...prev, ...fresh];
       });
     }
-  }, []);
+  }, [setFiles, setPdfs]);
 
   const handleOptionsChange = useCallback(
     (path: string, opts: CompressRowOptions) => {
@@ -91,18 +95,19 @@ export default function CompressPage() {
         prev.map((f) => (f.path === path ? { ...f, mode: opts.mode, optionsReady: true } : f)),
       );
     },
-    [],
+    [setFiles],
   );
 
   const handleRemove = useCallback((path: string) => {
+    forgetWorkspaceSource("compress", path);
     setFiles((prev) => prev.filter((f) => f.path !== path));
-  }, []);
+  }, [setFiles]);
 
   const applyPreset = useCallback((preset: Preset) => {
     if (!preset.compress_mode) return;
     const mode = preset.compress_mode;
     setFiles((prev) => prev.map((f) => ({ ...f, mode, optionsReady: true })));
-  }, []);
+  }, [setFiles]);
 
   const applyFirstToAll = useCallback(() => {
     setFiles((prev) => {
@@ -110,7 +115,7 @@ export default function CompressPage() {
       const headMode = prev[0].mode;
       return prev.map((f, i) => (i === 0 ? f : { ...f, mode: headMode, optionsReady: true }));
     });
-  }, []);
+  }, [setFiles]);
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -129,7 +134,7 @@ export default function CompressPage() {
   // briefly.
   const pickerToken = useAppStore((s) => s.pendingFilePicker);
   useEffect(() => {
-    if (pickerToken > 0 && location.pathname.startsWith("/compress")) {
+    if (pickerToken > 0 && location.pathname.startsWith("/compress") && claimWorkspaceFilePicker(pickerToken)) {
       void handleBrowse();
     }
   }, [pickerToken, handleBrowse, location.pathname]);
@@ -192,7 +197,7 @@ export default function CompressPage() {
         <div className="mt-3">
           <PdfFlow
             files={pdfs}
-            onFilesChanged={setPdfs}
+            onFilesChanged={next => { pdfs.filter(path => !next.includes(path)).forEach(path => forgetWorkspaceSource("compress", path)); setPdfs(next); }}
             onDone={() => setPdfs([])}
             defaultOp="compress"
           />
@@ -225,7 +230,7 @@ export default function CompressPage() {
           <CompressActionBar
             files={files}
             disabled={false}
-            onEnqueued={() => setFiles([])}
+            onEnqueued={() => { files.forEach(f => forgetWorkspaceSource("compress", f.path)); setFiles([]); }}
             onApplyToAll={applyFirstToAll}
           />
         </div>
@@ -233,3 +238,5 @@ export default function CompressPage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(CompressPage, "compress");

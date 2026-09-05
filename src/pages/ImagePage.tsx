@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import ImageOperationPicker, {
@@ -54,10 +57,10 @@ function basename(p: string): string {
  * Watermark, Recompress, AppIcon; the picker greys them out with a
  * "soon" badge in the meantime.
  */
-export default function ImagePage() {
+function ImagePage() {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [files, setFiles] = useState<string[]>([]);
-  const [op, setOp] = useState<ImageOperationKind>("rotate");
+  const [files, setFiles] = useWorkspaceDraftState<string[]>("ImagePage.files", []);
+  const [op, setOp] = useWorkspaceDraftState<ImageOperationKind>("ImagePage.op", "rotate");
   const multiFile = files.length > 1;
 
   // Multi-file selections route to `recompress` automatically — it's
@@ -67,10 +70,9 @@ export default function ImagePage() {
   useEffect(() => {
     if (multiFile && op !== "recompress") {
       setOp("recompress");
-    } else if (!multiFile && op === "recompress") {
-      setOp("rotate");
+
     }
-  }, [multiFile, op]);
+  }, [multiFile, op, setOp]);
 
   const addPaths = useCallback((paths: string[]) => {
     const fresh = paths.filter(isImage);
@@ -79,7 +81,7 @@ export default function ImagePage() {
       const existing = new Set(prev);
       return [...prev, ...fresh.filter((p) => !existing.has(p))];
     });
-  }, []);
+  }, [setFiles]);
 
   const handleBrowse = useCallback(async () => {
     try {
@@ -101,12 +103,14 @@ export default function ImagePage() {
   }, [addPaths, enqueueToast]);
 
   const handleRemove = useCallback((path: string) => {
+    forgetWorkspaceSource("image", path);
     setFiles((prev) => prev.filter((f) => f !== path));
-  }, []);
+  }, [setFiles]);
 
   const handleDone = useCallback(() => {
+    files.forEach(path => forgetWorkspaceSource("image", path));
     setFiles([]);
-  }, []);
+  }, [files, setFiles]);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -196,3 +200,5 @@ export default function ImagePage() {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImagePage, "image");

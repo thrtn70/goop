@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import type { DebridProbeInfo, DirectFileInfo, FormatOption, UrlProbe } from "@/types";
 import { startPhaseFor, type StartOptions, type StartPhase, type StartState } from "./startState";
 
@@ -20,10 +21,12 @@ const SINGLE_ACTION_OPTS: StartOptions = { format: null, audioOnly: false };
 function StartButton({
   label,
   phase,
+  unavailable = false,
   onStart,
 }: {
   label: string;
   phase: StartPhase;
+  unavailable?: boolean;
   onStart: () => void;
 }) {
   return (
@@ -35,7 +38,7 @@ function StartButton({
         // there is the duplicate enqueue all over again. React declines to
         // deliver a click to a disabled button, so this is the guard, not
         // a hint about one.
-        disabled={phase !== "idle"}
+        disabled={unavailable || phase !== "idle"}
         className="btn-press ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out hover:bg-accent-hover disabled:cursor-default disabled:bg-surface-2 disabled:text-fg-secondary disabled:hover:bg-surface-2"
         onClick={onStart}
       >
@@ -56,7 +59,7 @@ function StartButton({
   );
 }
 
-export default function ProbeCard({ probe, start, onStart }: Props) {
+function ProbeCard({ probe, start, onStart }: Props) {
   if (probe.direct) {
     return <DirectCard info={probe.direct} url={probe.url} start={start} onStart={onStart} />;
   }
@@ -75,8 +78,8 @@ export default function ProbeCard({ probe, start, onStart }: Props) {
 }
 
 function MediaCard({ probe, start, onStart }: Props) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const [audioOnly, setAudioOnly] = useState(false);
+  const [selected, setSelected] = useWorkspaceDraftState<string | null>("ProbeCard.selected", null);
+  const [audioOnly, setAudioOnly] = useWorkspaceDraftState("ProbeCard.audioOnly", false);
   const fmt = probe.formats.find((f) => f.format_id === selected) ?? null;
   // One object for both the phase and the call, so what the button reports
   // can never describe a different selection from the one it would send.
@@ -103,6 +106,7 @@ function MediaCard({ probe, start, onStart }: Props) {
           onChange={(e) => setSelected(e.target.value || null)}
         >
           <option value="">Best (auto)</option>
+          {selected && !fmt && <option value={selected}>Previous format unavailable — choose again</option>}
           {/* Rendered whole and in the order the backend gave them, which
               is best-first. This list used to be capped at 20 entries,
               which cut from the wrong end and put 1080p and above out of
@@ -124,6 +128,7 @@ function MediaCard({ probe, start, onStart }: Props) {
         </label>
         <StartButton
           label="Start"
+          unavailable={selected !== null && fmt === null}
           phase={startPhaseFor(start, probe.url, opts)}
           onStart={() => onStart(opts)}
         />
@@ -265,3 +270,5 @@ function humanSize(bytes: number | bigint): string {
   }
   return `${i === 0 ? Math.round(v).toString() : v.toFixed(1)} ${units[i]}`;
 }
+
+export default withWorkspaceDrafts(ProbeCard, undefined, props => ["source", props.probe.url]);

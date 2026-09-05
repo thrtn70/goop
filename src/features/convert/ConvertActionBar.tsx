@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
@@ -56,7 +57,7 @@ export default function ConvertActionBar({
   onEnqueued,
   onApplyToAll,
 }: ConvertActionBarProps) {
-  const [overrideDir, setOverrideDir] = useState<string | null>(null);
+  const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>("ConvertActionBar.overrideDir", null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);

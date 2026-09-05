@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Plus, X } from "lucide-react";
@@ -23,8 +24,8 @@ function stemOf(p: string): string {
 export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [totalPages, setTotalPages] = useState<number>(0);
-  const [positions, setPositions] = useState<number[]>([]);
-  const [draft, setDraft] = useState<string>("");
+  const [positions, setPositions] = useWorkspaceDraftState<number[]>("PdfInsertBlankFlow.positions", []);
+  const [draft, setDraft] = useWorkspaceDraftState<string>("PdfInsertBlankFlow.draft", "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

@@ -618,3 +618,35 @@ describe("UrlHero sends the format's download selector", () => {
     expect(sentRequest()?.format).toBeNull();
   });
 });
+
+it("restores a pending start across route remount and accepts its late acknowledgement once", async () => {
+  const probe = probeResult();
+  apiMocks.extract.probe.mockResolvedValue(probe);
+  const settle = pendingStart();
+  const first = render(<MemoryRouter><UrlHero url={probe.url} /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: /^Start$/ }));
+  await waitFor(() => expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1));
+  first.unmount();
+  render(<MemoryRouter><UrlHero /></MemoryRouter>);
+  await waitFor(() => expect(apiMocks.extract.probe).toHaveBeenCalledTimes(2));
+  expect((await screen.findByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => settle({ resolve: "late-job" }));
+  expect((await screen.findByRole("button", { name: "Added to queue" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(apiMocks.extract.fromUrl).toHaveBeenCalledTimes(1);
+});
+
+it("restores a selected format after re-probing and blocks a disappeared selection", async () => {
+  const probe = probeResult({ formats: [videoFormat()] });
+  apiMocks.extract.probe.mockResolvedValue(probe);
+  const first = render(<MemoryRouter><UrlHero url={probe.url} /></MemoryRouter>);
+  fireEvent.change(await screen.findByRole("combobox"), { target: { value: "299" } });
+  first.unmount();
+  const second = render(<MemoryRouter><UrlHero /></MemoryRouter>);
+  expect((await screen.findByRole("combobox") as HTMLSelectElement).value).toBe("299");
+  second.unmount();
+  apiMocks.extract.probe.mockResolvedValue(probeResult());
+  render(<MemoryRouter><UrlHero /></MemoryRouter>);
+  expect(await screen.findByRole("option", { name: /Previous format unavailable/ })).toBeTruthy();
+  expect((await screen.findByRole("button", { name: /^Start$/ }) as HTMLButtonElement).disabled).toBe(true);
+  expect(apiMocks.extract.fromUrl).not.toHaveBeenCalled();
+});

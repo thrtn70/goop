@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useId, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfSetMetadata } from "@/ipc/commands";
@@ -22,10 +23,10 @@ function stemOf(p: string): string {
 
 export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [title, setTitle] = useState<string>("");
-  const [author, setAuthor] = useState<string>("");
-  const [subject, setSubject] = useState<string>("");
-  const [keywords, setKeywords] = useState<string>("");
+  const [title, setTitle] = useWorkspaceDraftState<string>("PdfMetadataForm.title", "");
+  const [author, setAuthor] = useWorkspaceDraftState<string>("PdfMetadataForm.author", "");
+  const [subject, setSubject] = useWorkspaceDraftState<string>("PdfMetadataForm.subject", "");
+  const [keywords, setKeywords] = useWorkspaceDraftState<string>("PdfMetadataForm.keywords", "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

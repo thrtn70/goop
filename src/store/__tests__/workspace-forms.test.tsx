@@ -1,0 +1,32 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import ImageWatermarkFlow from "@/features/image/ImageWatermarkFlow";
+import PdfMetadataForm from "@/features/pdf/PdfMetadataForm";
+import { WorkspaceDraftProvider } from "../workspaceDrafts";
+const mocks = vi.hoisted(() => ({ save: vi.fn(), write: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
+vi.mock("@/ipc/commands", () => ({ api: {}, imageWatermark: mocks.write, pdfSetMetadata: mocks.write }));
+afterEach(cleanup);
+it("restores image text only for its source without opening a save dialog", () => {
+ const view = (file: string) => <WorkspaceDraftProvider tool="image"><ImageWatermarkFlow file={file} onDone={() => {}} /></WorkspaceDraftProvider>;
+ const first = render(view("/a.png"));
+ fireEvent.change(screen.getByRole("textbox"), { target: { value: "unfinished text" } });
+ first.unmount();
+ const other = render(view("/b.png"));
+ expect((screen.getByRole("textbox") as HTMLInputElement).value).not.toBe("unfinished text");
+ other.unmount();
+ render(view("/a.png"));
+ expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("unfinished text");
+ expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.write).not.toHaveBeenCalled();
+});
+it("keeps PDF metadata edits separate in Convert and Compress", () => {
+ const view = (tool: "convert" | "compress") => <WorkspaceDraftProvider tool={tool} scope={["pdf", "/a.pdf"]}><PdfMetadataForm file="/a.pdf" onDone={() => {}} /></WorkspaceDraftProvider>;
+ const first = render(view("convert"));
+ fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Draft title" } });
+ first.unmount();
+ const other = render(view("compress"));
+ expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("");
+ other.unmount(); render(view("convert"));
+ expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Draft title");
+ expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.write).not.toHaveBeenCalled();
+});

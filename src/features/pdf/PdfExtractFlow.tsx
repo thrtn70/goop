@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfExtractPages } from "@/ipc/commands";
@@ -21,10 +23,10 @@ function stemOf(p: string): string {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
-export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
+function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [totalPages, setTotalPages] = useState<number>(0);
-  const [ranges, setRanges] = useState<PageRange[]>([]);
+  const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfExtractFlow.ranges", []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,3 +87,5 @@ export default function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
     </div>
   );
 }
+
+export default withWorkspaceDrafts(PdfExtractFlow, undefined, props => ["PdfExtractFlow", props.file]);

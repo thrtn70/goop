@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
@@ -27,7 +28,7 @@ function basename(p: string): string {
  */
 export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useWorkspaceDraftState<string[]>("ImagesToPdfFlow.images", []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

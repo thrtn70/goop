@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageWatermark } from "@/ipc/commands";
@@ -49,11 +51,11 @@ const DEFAULT_OPACITY = 80;
  * composites onto the source image. v0.2.5 ships text-only;
  * image-overlay watermarks defer to v0.2.6.
  */
-export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
+function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [text, setText] = useState(DEFAULT_TEXT);
-  const [position, setPosition] = useState<WatermarkPosition>(DEFAULT_POSITION);
-  const [opacity, setOpacity] = useState<number>(DEFAULT_OPACITY);
+  const [text, setText] = useWorkspaceDraftState("ImageWatermarkFlow.text", DEFAULT_TEXT);
+  const [position, setPosition] = useWorkspaceDraftState<WatermarkPosition>("ImageWatermarkFlow.position", DEFAULT_POSITION);
+  const [opacity, setOpacity] = useWorkspaceDraftState<number>("ImageWatermarkFlow.opacity", DEFAULT_OPACITY);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -152,3 +154,5 @@ export default function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowP
     </div>
   );
 }
+
+export default withWorkspaceDrafts(ImageWatermarkFlow, undefined, props => ["source", props.file]);

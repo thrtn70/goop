@@ -1,3 +1,4 @@
+import { clearWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -182,6 +183,7 @@ describe("ConvertPage", () => {
   });
 
   it("hides video targets for audio-only files", async () => {
+    clearWorkspaceDrafts("convert");
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
 
@@ -248,6 +250,7 @@ describe("ConvertPage", () => {
     unmount();
     cleanup();
 
+    clearWorkspaceDrafts("convert");
     mockProbe.mockResolvedValue(audioOnlyProbe);
     renderPage();
     await userEvent.click(screen.getByText(/pick from your computer/i));

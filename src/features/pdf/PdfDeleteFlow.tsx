@@ -1,10 +1,10 @@
+import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfDeletePages } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 import PdfPageGrid from "./PdfPageGrid";
-import type { PageState } from "./PdfPageCard";
 
 interface PdfDeleteFlowProps {
   file: string;
@@ -23,7 +23,7 @@ function stemOf(p: string): string {
 
 export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const [pages, setPages] = useState<PageState[]>([]);
+  const { pages, setPages, loadPages } = usePdfPageDrafts("PdfDeleteFlow.pages");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +36,7 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
       .then(([probe, thumbs]) => {
         if (cancelled) return;
         const total = Number(probe.pages);
-        setPages(
+        loadPages(
           Array.from({ length: total }, (_, i) => ({
             originalPage: i + 1,
             thumbPath: thumbs[i] ?? null,
@@ -54,7 +54,7 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, loadPages]);
 
   const toDelete = pages.filter((p) => p.deleted).map((p) => p.originalPage);
   const wouldEmpty = toDelete.length > 0 && toDelete.length === pages.length;

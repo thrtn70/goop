@@ -1,3 +1,4 @@
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -24,10 +25,10 @@ function basename(p: string): string {
 export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const navigate = useNavigate();
-  const [images, setImages] = useState<string[]>([]);
-  const [outputKind, setOutputKind] = useState<ImageOcrOutput>("text");
+  const [images, setImages] = useWorkspaceDraftState<string[]>("ImageOcrFlow.images", []);
+  const [outputKind, setOutputKind] = useWorkspaceDraftState<ImageOcrOutput>("ImageOcrFlow.outputKind", "text");
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
-  const [lang, setLang] = useState<string>("eng");
+  const [lang, setLang] = useWorkspaceDraftState<string>("ImageOcrFlow.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);

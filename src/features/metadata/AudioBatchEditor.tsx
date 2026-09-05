@@ -1,3 +1,5 @@
+import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useState } from "react";
 import { api, metadataWrite } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -28,29 +30,29 @@ function sharedPlaceholder(views: MetadataView[], get: (a: AudioTags) => string 
  * selected file when filled, and are left untouched when blank. Title and track
  * are edited per file in the table. "Apply" fans out into a single batch job.
  */
-export default function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
+function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
 
   // Shared fields start blank: blank = leave each file's value untouched.
-  const [artist, setArtist] = useState("");
-  const [album, setAlbum] = useState("");
-  const [albumArtist, setAlbumArtist] = useState("");
-  const [year, setYear] = useState("");
-  const [genre, setGenre] = useState("");
-  const [disc, setDisc] = useState("");
-  const [composer, setComposer] = useState("");
-  const [comment, setComment] = useState("");
+  const [artist, setArtist] = useWorkspaceDraftState("AudioBatchEditor.artist", "");
+  const [album, setAlbum] = useWorkspaceDraftState("AudioBatchEditor.album", "");
+  const [albumArtist, setAlbumArtist] = useWorkspaceDraftState("AudioBatchEditor.albumArtist", "");
+  const [year, setYear] = useWorkspaceDraftState("AudioBatchEditor.year", "");
+  const [genre, setGenre] = useWorkspaceDraftState("AudioBatchEditor.genre", "");
+  const [disc, setDisc] = useWorkspaceDraftState("AudioBatchEditor.disc", "");
+  const [composer, setComposer] = useWorkspaceDraftState("AudioBatchEditor.composer", "");
+  const [comment, setComment] = useWorkspaceDraftState("AudioBatchEditor.comment", "");
 
   // Per-file fields prefilled with current values.
-  const [titles, setTitles] = useState<Record<string, string>>(() =>
+  const [titles, setTitles] = useWorkspaceDraftState<Record<string, string>>("AudioBatchEditor.titles", () =>
     Object.fromEntries(views.map((v) => [v.path, v.audio?.title ?? ""])),
   );
-  const [tracks, setTracks] = useState<Record<string, string>>(() =>
+  const [tracks, setTracks] = useWorkspaceDraftState<Record<string, string>>("AudioBatchEditor.tracks", () =>
     Object.fromEntries(views.map((v) => [v.path, v.audio?.track ?? ""])),
   );
 
-  const [cover, setCover] = useState<CoverArtOp>({ kind: "keep" });
-  const [backup, setBackup] = useState(false);
+  const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioBatchEditor.cover", { kind: "keep" });
+  const [backup, setBackup] = useWorkspaceDraftState("AudioBatchEditor.backup", false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -176,3 +178,5 @@ export default function AudioBatchEditor({ views, onDone }: AudioBatchEditorProp
     </div>
   );
 }
+
+export default withWorkspaceDrafts(AudioBatchEditor, undefined, props => ["batch", ...props.views.map(v => v.path).sort()]);
