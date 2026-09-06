@@ -204,7 +204,107 @@ unsafe impl Sync for ProcessTree {}
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+    use std::io::Read;
+    use std::path::Path;
     use std::time::Duration;
+
+    fn sentinel_command(sentinel: &Path) -> Command {
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Set-Content -LiteralPath '{}' -Value ready; Start-Sleep -Seconds 60",
+                sentinel.display()
+            ));
+        command.kill_on_drop(true);
+        command
+    }
+
+    async fn wait_for_sentinel(
+        sentinel: &Path,
+        child: &mut Child,
+        tree: Option<&ProcessTree>,
+        stderr: &Path,
+        leader_sentinel: Option<&Path>,
+    ) -> Result<(), String> {
+        let readiness = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if sentinel.exists() {
+                    return Ok(());
+                }
+                match child.try_wait() {
+                    Ok(None) => {}
+                    status => return Err(format!("child stopped before sentinel: {status:?}")),
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if matches!(readiness, Ok(Ok(()))) {
+            return Ok(());
+        }
+        let before_cleanup = child.try_wait();
+        let cleanup = if let Some(tree) = tree {
+            // Includes descendants and has bounded leader/job waits.
+            format!("{:?}", tree.finish(child).await)
+        } else {
+            // The unsuspended control launches no descendants.
+            format!(
+                "{:?}",
+                tokio::time::timeout(Duration::from_secs(2), child.kill()).await
+            )
+        };
+        let stderr_text = std::fs::File::open(stderr).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        });
+        Err(format!(
+            "sentinel readiness: {readiness:?}; child before cleanup: {before_cleanup:?}; \
+             leader sentinel: {:?}; cleanup: {cleanup}; stderr: {stderr_text:?}",
+            leader_sentinel.map(Path::exists)
+        ))
+    }
+
+    #[tokio::test]
+    async fn windows_powershell_fixture_runs_without_suspension() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("sentinel");
+        let stderr = dir.path().join("stderr");
+        let mut command = sentinel_command(&sentinel);
+        command.stderr(std::fs::File::create(&stderr).unwrap());
+        let mut child = command.spawn().unwrap();
+        wait_for_sentinel(&sentinel, &mut child, None, &stderr, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), child.kill())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn windows_powershell_fixture_failure_reports_exit_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("sentinel");
+        let stderr = dir.path().join("stderr");
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Error.WriteLine('fixture failure detail'); exit 7",
+        ]);
+        command.kill_on_drop(true);
+        command.stderr(std::fs::File::create(&stderr).unwrap());
+        let mut child = command.spawn().unwrap();
+        let error = wait_for_sentinel(&sentinel, &mut child, None, &stderr, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("child stopped before sentinel"), "{error}");
+        assert!(error.contains("fixture failure detail"), "{error}");
+        assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(7));
+    }
 
     #[tokio::test]
     async fn windows_job_termination_failure_returns_without_waiting_for_leader() {
@@ -234,13 +334,9 @@ mod windows_tests {
     async fn windows_job_object_owns_suspended_child_before_any_write() {
         let dir = tempfile::tempdir().unwrap();
         let sentinel = dir.path().join("sentinel");
-        let mut command = Command::new("powershell.exe");
-        command
-            .args(["-NoProfile", "-NonInteractive", "-Command"])
-            .arg(format!(
-                "Set-Content -LiteralPath '{}' -Value ready; Start-Sleep -Seconds 60",
-                sentinel.display()
-            ));
+        let stderr = dir.path().join("stderr");
+        let mut command = sentinel_command(&sentinel);
+        command.stderr(std::fs::File::create(&stderr).unwrap());
         ProcessTree::configure(&mut command);
         let mut child = command.spawn().unwrap();
         assert!(
@@ -248,13 +344,9 @@ mod windows_tests {
             "CREATE_SUSPENDED prohibits execution before ownership"
         );
         let tree = ProcessTree::new(&child).unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !sentinel.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_sentinel(&sentinel, &mut child, Some(&tree), &stderr, None)
+            .await
+            .unwrap();
         tree.finish(&mut child).await.unwrap();
     }
 
@@ -263,22 +355,28 @@ mod windows_tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("writer.ps1");
         let sentinel = dir.path().join("sentinel");
+        let leader_sentinel = dir.path().join("leader-sentinel");
+        let stderr = dir.path().join("stderr");
         std::fs::write(&script, format!("while ($true) {{ Add-Content -LiteralPath '{}' -Value writing; Start-Sleep -Milliseconds 10 }}", sentinel.display())).unwrap();
         let mut command = Command::new("powershell.exe");
         command
             .args(["-NoProfile", "-NonInteractive", "-Command"])
             .arg(format!(
-                "& powershell.exe -NoProfile -NonInteractive -File '{}'",
+                "Set-Content -LiteralPath '{}' -Value ready; & powershell.exe -NoProfile -NonInteractive -File '{}'",
+                leader_sentinel.display(),
                 script.display()
             ));
+        command.stderr(std::fs::File::create(&stderr).unwrap());
         ProcessTree::configure(&mut command);
         let mut child = command.spawn().unwrap();
         let tree = ProcessTree::new(&child).unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !sentinel.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
+        wait_for_sentinel(
+            &sentinel,
+            &mut child,
+            Some(&tree),
+            &stderr,
+            Some(&leader_sentinel),
+        )
         .await
         .unwrap();
         tree.finish(&mut child).await.unwrap();
