@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, imageAppIcon } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -55,7 +55,7 @@ function ImageAppIconFlow({ file, onDone }: ImageAppIconFlowProps) {
     () => new Set<IconPlatform>(["macos", "windows", "web"]),
   );
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageAppIconFlow.error", null);
 
   function toggle(p: IconPlatform) {
     setSelected((prev) => {

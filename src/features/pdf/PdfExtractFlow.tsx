@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
@@ -29,7 +30,7 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
   const [totalPages, setTotalPages] = useState<number>(0);
   const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfExtractFlow.ranges", []);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfExtractFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +45,7 @@ function PdfExtractFlow({ file, onDone }: PdfExtractFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, setError]);
 
   const canApply = ranges.length > 0 && !busy;
 

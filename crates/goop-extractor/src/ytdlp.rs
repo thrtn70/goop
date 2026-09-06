@@ -1,3 +1,4 @@
+use crate::recovery::{ExtractRecovery, RecoveryCheckpoint};
 use goop_core::{
     is_cookie_db_error, EventSink, GoopError, Interrupt, JobId, JobSignals, ProgressEvent,
     SidecarEvent, WarningCode,
@@ -313,21 +314,12 @@ impl<'a> YtDlp<'a> {
         job_id: JobId,
         req: &ExtractRequest,
         signals: JobSignals,
+        recovery: ExtractRecovery,
     ) -> Result<ExtractResult, GoopError> {
         let bin = self.resolver.resolve("yt-dlp")?;
-        let output_dir = canonical_output_dir(&req.output_dir)?;
-        let template_str = match req.output_template.as_deref() {
-            Some(t) if KNOWN_TEMPLATES.contains(&t) => t,
-            Some(unknown) => {
-                tracing::warn!(
-                    template = unknown,
-                    "unknown output_template rejected, using default"
-                );
-                "%(title)s.%(ext)s"
-            }
-            None => "%(title)s.%(ext)s",
-        };
-        let out_template = output_dir.join(template_str);
+        let checkpoint = recovery.allocate(job_id, req)?;
+        let output_dir = checkpoint.owned_directory()?;
+        let out_template = output_dir.join("source.%(ext)s");
 
         // First attempt: with cookies (if the request had any).
         let first = self
@@ -339,6 +331,7 @@ impl<'a> YtDlp<'a> {
                 &out_template,
                 signals.clone(),
                 /* with_cookies: */ true,
+                &recovery,
             )
             .await;
 
@@ -353,7 +346,7 @@ impl<'a> YtDlp<'a> {
         // re-run us, and each would hit the same locked cookie DB.
         // Collapsing those repeats is `WarnOnceSink`'s job, installed by
         // `backend::dispatch_with_policy` — don't add a guard here.
-        match first {
+        let result = match first {
             Err(GoopError::SubprocessFailed { ref stderr, .. })
                 if is_cookie_db_error(stderr)
                     && req.cookies_from_browser.is_some()
@@ -375,11 +368,18 @@ impl<'a> YtDlp<'a> {
                     &out_template,
                     signals,
                     /* with_cookies: */ false,
+                    &recovery,
                 )
                 .await
             }
             other => other,
+        };
+        if matches!(result, Err(GoopError::Cancelled))
+            && recovery.checkpoint().is_some_and(|cp| !cp.writer_active)
+        {
+            recovery.cleanup()?;
         }
+        result
     }
 
     /// Single spawn + drive of yt-dlp. Pulled out of `download` so the
@@ -396,70 +396,36 @@ impl<'a> YtDlp<'a> {
         out_template: &Path,
         signals: JobSignals,
         with_cookies: bool,
+        recovery: &ExtractRecovery,
     ) -> Result<ExtractResult, GoopError> {
+        if let Some(int) = signals.check() {
+            return Err(int.into());
+        }
+        let replay = recovery.replay(signals.clone()).await?;
         let mut cmd = Command::new(bin_path);
-        cmd.arg("--newline") // each progress line on its own
-            // `--print` puts yt-dlp into implicit quiet mode, which otherwise
-            // suppresses every `[download] N%` line — leaving the queue bar
-            // stuck at 0% until the job jumps to done. `--progress` forces the
-            // progress output back on so `parse_progress` can drive the UI.
-            .arg("--progress")
-            .arg("--no-warnings")
-            .arg("--continue") // resume .part files on restart
-            .arg("-o")
-            .arg(out_template)
-            .arg("--print")
-            .arg("after_move:filepath")
-            // And pin the ENCODING of that line, not just its content.
-            //
-            // The `after_move:filepath` line is the only stdout line under
-            // this argv that carries a title, and it is where `output_path`
-            // below comes from. yt-dlp writes it with
-            // `buffer.write(s.encode(enc, 'ignore'))`, where `enc` falls
-            // back to the stream's own encoding — for a redirected pipe on
-            // Windows, the ANSI codepage. Both halves of that lose the
-            // download:
-            //
-            //   - a character the codepage CAN represent becomes a legacy
-            //     byte (cp1252 `é` -> 0xE9), which is not valid UTF-8. The
-            //     stdout arm below takes that line with `?`, so a download
-            //     that actually succeeded returns a raw IO error instead;
-            //   - a character it CANNOT is DROPPED by `ignore`, so a
-            //     Japanese or Cyrillic title decodes cleanly into a path
-            //     that does not exist. The `.exists()` guard rejects it,
-            //     `output_path` stays None, and the run fails as "no output
-            //     file reported" with nothing in the log — silently.
-            //
-            // The output directory rides in the same line, so a profile
-            // path like `C:\Users\José\Downloads` breaks it even when the
-            // title is pure ASCII.
-            //
-            // `--encoding` lands on exactly this path: `--print` writes via
-            // `to_stdout` -> `YoutubeDL._write_string`, which passes
-            // `params['encoding']` down to `write_string`. Same class as
-            // gallery-dl's `-o output.stdout=utf-8`.
-            //
-            // On the command line rather than through the environment,
-            // because the environment does not reach this sidecar: against
-            // the shipped 2026.06.09 PyInstaller build, `PYTHONIOENCODING`
-            // is ignored outright — `-v` reports `out utf-8` with and
-            // without it — so neither it nor `PYTHONUTF8=1` can be relied on
-            // to pin the stream. Accepted by that same build with no change
-            // to output shape: the `[download]` progress lines `parse_progress`
-            // reads are byte-identical, and the path line still lands last.
-            //
-            // Unlike gallery-dl's `-o` pins, this one cannot be undone by a
-            // user-level config. Goop passes no `--ignore-config` to either
-            // tool, but yt-dlp's `Config.all_args` yields config-file args
-            // BEFORE the command line and `--encoding` is a plain `store`,
-            // so ours is the one that lands.
-            .arg("--encoding")
-            .arg("utf-8");
-        // Matches the probe (see `probe_once`). The probe showed the user
-        // one video; without this the download would fetch the whole
-        // playlist behind that one job's progress bar, and `output_path`
-        // would record only the last file.
-        cmd.arg("--no-playlist");
+        cmd.args([
+            "--ignore-config",
+            "--newline",
+            "--progress",
+            "--continue",
+            "--keep-video",
+            "--no-playlist",
+            "--no-simulate",
+            "--encoding",
+            "utf-8",
+            "--print",
+            "post_process:__GOOP_SOURCE__%()j",
+            "--print",
+            "after_move:__GOOP_FINAL__%(filepath)j",
+            "--progress-template",
+            "download:__GOOP_DL__%(progress)j",
+            "--progress-template",
+            "postprocess:__GOOP_PP__%(progress)j",
+        ])
+        .arg("-o")
+        .arg(out_template);
+        let tools = prepare_media_tools(self.resolver, output_dir, signals.clone()).await?;
+        cmd.arg("--ffmpeg-location").arg(output_dir);
         if req.audio_only {
             cmd.arg("-x").arg("--audio-format").arg("mp3");
         }
@@ -472,12 +438,35 @@ impl<'a> YtDlp<'a> {
             }
         }
         // arg(), not shell: URL is passed as argv, not expanded by a shell.
-        cmd.arg(&req.url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if let Some(path) = replay {
+            cmd.args([
+                "--proxy",
+                "",
+                "--socket-timeout",
+                "1",
+                "--retries",
+                "0",
+                "--fragment-retries",
+                "0",
+            ])
+            .arg("--load-info-json")
+            .arg(path);
+        } else {
+            cmd.arg("--").arg(&req.url);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let started = std::time::Instant::now();
-        let mut child: Child = cmd.spawn()?;
+        recovery.set_writer(true)?;
+        crate::process::ProcessTree::configure(&mut cmd);
+        let mut child: Child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                recovery.set_writer(false)?;
+                return Err(error.into());
+            }
+        };
+        let tree = crate::process::ProcessTree::new(&child)?;
         // invariant: stdout was requested with Stdio::piped above.
         let stdout = child.stdout.take().expect("stdout was piped");
         // invariant: stderr was requested with Stdio::piped above.
@@ -494,7 +483,7 @@ impl<'a> YtDlp<'a> {
         // Capture the first matching line so we can preserve the signal
         // in the final SubprocessFailed.stderr regardless of truncation.
         let mut cookie_error_line: Option<String> = None;
-        let mut last_progress_line: Option<String> = None;
+        let mut processing = false;
         // Stdout lines dropped because they weren't valid UTF-8. Counted
         // rather than logged where they happen: reported once after the
         // loop, below.
@@ -521,18 +510,18 @@ impl<'a> YtDlp<'a> {
                 // as the direct downloader's loop.
                 biased;
                 int = signals.interrupted() => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    return Err(finish_interrupt(int, output_dir, last_progress_line.as_deref()));
+                    tree.finish(&mut child).await?;
+                    recovery.set_writer(false)?;
+                    if int == Interrupt::Cancel { recovery.cleanup()?; }
+                    return Err(int.into());
                 }
                 line = out_reader.next_line(), if !out_done => {
                     match line {
                         Ok(Some(l)) => {
-                            if let Some(ev) = parse_progress(job_id, &l) {
-                                self.sink.emit_progress(ev);
-                                last_progress_line = Some(l);
-                            } else if !l.starts_with('[') && PathBuf::from(&l).exists() {
-                                output_path = Some(l);
+                            if let Err(error) = self.handle_line(job_id, &l, recovery, &signals, &mut output_path, &mut processing).await {
+                                tree.finish(&mut child).await?;
+                                recovery.set_writer(false)?;
+                                return Err(error);
                             }
                         }
                         Ok(None) => out_done = true,
@@ -569,6 +558,11 @@ impl<'a> YtDlp<'a> {
                 line = err_reader.next_line(), if !err_done => {
                     match line {
                         Ok(Some(l)) => {
+                            if let Err(error) = self.handle_line(job_id, &l, recovery, &signals, &mut output_path, &mut processing).await {
+                                tree.finish(&mut child).await?;
+                                recovery.set_writer(false)?;
+                                return Err(error);
+                            }
                             if cookie_error_line.is_none() && is_cookie_db_error(&l) {
                                 cookie_error_line = Some(l.clone());
                             }
@@ -641,7 +635,18 @@ impl<'a> YtDlp<'a> {
             );
         }
 
-        let status = child.wait().await?;
+        tokio::select! {
+            biased;
+            int = signals.interrupted() => {
+                tree.finish(&mut child).await?;
+                recovery.set_writer(false)?;
+                    if int == Interrupt::Cancel { recovery.cleanup()?; }
+                    return Err(int.into());
+            }
+            stopped = tree.wait_leader(&mut child) => stopped?,
+        };
+        let status = tree.finish(&mut child).await?;
+        recovery.set_writer(false)?;
         if !status.success() {
             // Preserve the cookie-error signal even if the tail
             // truncated it out — prepend the captured line so the retry
@@ -652,6 +657,9 @@ impl<'a> YtDlp<'a> {
                 }
                 _ => stderr_tail,
             };
+            if processing || recovery.checkpoint().is_some_and(|c| !c.sources.is_empty()) {
+                return Err(GoopError::Queue(format!("Extract processing failed; completed sources were retained for Retry: {stderr}")));
+            }
             return Err(GoopError::SubprocessFailed {
                 binary: "yt-dlp".into(),
                 stderr,
@@ -670,14 +678,165 @@ impl<'a> YtDlp<'a> {
                 n => format!("no output file reported; {n} stdout line(s) were not valid UTF-8"),
             },
         })?;
-        let bytes = std::fs::metadata(&output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        Ok(ExtractResult {
-            output_path,
-            bytes,
-            duration_ms: started.elapsed().as_millis() as u64,
-        })
+        let cp = recovery
+            .checkpoint()
+            .ok_or_else(|| GoopError::Queue("missing Extract recovery".into()))?;
+        let reported = Path::new(&output_path);
+        let filename = reported
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| GoopError::Queue("invalid Extract final path".into()))?;
+        let source = cp.file(filename)?;
+        if reported != source {
+            return Err(GoopError::Queue(
+                "Extract final path escaped its workspace".into(),
+            ));
+        }
+        self.sink.emit_progress(stage_event(job_id, "validating"));
+        validate_media(&tools.1, &source, req, &cp, &signals).await?;
+        let bytes = std::fs::metadata(&source)?.len();
+        recovery.mark_verified()?;
+        self.sink.emit_progress(stage_event(job_id, "saving"));
+        // Copy into a distinct candidate so atomic publication never consumes a
+        // completed source required by a later retry after a receipt-write crash.
+        let candidate = output_dir.join(format!("publish-{}", JobId::new().0));
+        let copy_from = source.clone();
+        let copy_to = candidate.clone();
+        let copy_signals = signals.clone();
+        tokio::task::spawn_blocking(move || copy_candidate(&copy_from, &copy_to, &copy_signals))
+            .await
+            .map_err(|e| GoopError::Queue(e.to_string()))??;
+        let ext = source
+            .extension()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| GoopError::Queue("missing output extension".into()))?;
+        if !ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(GoopError::Queue("unsafe output extension".into()));
+        }
+        let stem = match req
+            .output_template
+            .as_deref()
+            .filter(|t| KNOWN_TEMPLATES.contains(t))
+        {
+            Some("%(title)s — %(extractor)s.%(ext)s") => {
+                format!("{} — {}", cp.title, cp.extractor)
+            }
+            Some("%(upload_date)s — %(title)s.%(ext)s") => {
+                format!("{} — {}", cp.upload_date, cp.title)
+            }
+            _ => cp.title.clone(),
+        };
+        // Reserve the longest collision suffix up front so retries retain the
+        // same stem. UTF-8 bytes also conservatively bound Windows UTF-16 units.
+        let budget = 255usize
+            .checked_sub(ext.len() + 1 + " (9999)".len())
+            .ok_or_else(|| GoopError::Queue("Extract output extension is too long".into()))?;
+        let mut stem = stem;
+        let device = stem
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_ascii_uppercase();
+        let numbered_device = ["COM", "LPT"].iter().any(|prefix| {
+            device.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        });
+        if matches!(
+            device.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || numbered_device
+        {
+            stem.insert(0, '_');
+        }
+        let mut end = stem.len().min(budget);
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+        if stem.is_empty() {
+            return Err(GoopError::Queue(
+                "Extract output filename has no available stem".into(),
+            ));
+        }
+        for suffix in 0..10_000 {
+            cp.owned_directory()?;
+            if let Some(int) = signals.check() {
+                if int == Interrupt::Cancel {
+                    recovery.cleanup()?;
+                }
+                return Err(int.into());
+            }
+            let name = if suffix == 0 {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{stem} ({suffix}).{ext}")
+            };
+            if !crate::recovery::safe_public_component(&name) {
+                return Err(GoopError::Queue("unsafe Extract output filename".into()));
+            }
+            let destination = cp.root.join(name);
+            if destination.parent() != Some(cp.root.as_path()) {
+                return Err(GoopError::Queue(
+                    "Extract publication escaped its output root".into(),
+                ));
+            }
+            match goop_core::output::publish_no_replace(&candidate, &destination) {
+                Ok(()) => {
+                    // The atomic commit wins a subsequent cancellation. A missing
+                    // receipt can leave a valid file plus an interrupted row; never
+                    // adopt or delete that file on a later attempt.
+                    if let Err(error) = recovery.receipt(destination.clone()) {
+                        tracing::error!(%error, "Extract output published but receipt persistence failed");
+                    }
+                    return Ok(ExtractResult {
+                        output_path: destination.to_string_lossy().into(),
+                        bytes,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(GoopError::Queue(
+            "No unused Extract output name available".into(),
+        ))
+    }
+
+    async fn handle_line(
+        &self,
+        job_id: JobId,
+        line: &str,
+        recovery: &ExtractRecovery,
+        signals: &JobSignals,
+        output: &mut Option<String>,
+        processing: &mut bool,
+    ) -> Result<(), GoopError> {
+        if let Some(raw) = line.strip_prefix("__GOOP_SOURCE__") {
+            *processing = true;
+            recovery
+                .capture(serde_json::from_str(raw)?, signals.clone())
+                .await?;
+        } else if let Some(raw) = line.strip_prefix("__GOOP_FINAL__") {
+            let path: String = serde_json::from_str(raw)?;
+            if output.as_ref().is_some_and(|old| old != &path) {
+                return Err(GoopError::Queue("ambiguous Extract output markers".into()));
+            }
+            *output = Some(path);
+        } else if let Some(event) = parse_progress(job_id, line) {
+            if line.starts_with("__GOOP_PP__") {
+                *processing = true;
+            }
+            if !*processing || event.stage != "downloading" {
+                self.sink.emit_progress(event);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -758,6 +917,135 @@ fn parse_format(v: &serde_json::Value) -> Option<FormatOption> {
     })
 }
 
+fn stage_event(job_id: JobId, stage: &str) -> ProgressEvent {
+    ProgressEvent {
+        job_id,
+        percent: 0.0,
+        eta_secs: None,
+        speed_hr: None,
+        stage: stage.into(),
+        encoder: None,
+    }
+}
+
+async fn prepare_media_tools(
+    resolver: &BinaryResolver,
+    workspace: &Path,
+    signals: JobSignals,
+) -> Result<(PathBuf, PathBuf), GoopError> {
+    let paths = [
+        resolver.resolve("ffmpeg")?.path,
+        resolver.resolve("ffprobe")?.path,
+    ];
+    let workspace = workspace.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut resolved = Vec::new();
+        for (name, path) in ["ffmpeg", "ffprobe"].into_iter().zip(paths) {
+            if let Some(int) = signals.check() {
+                return Err(int.into());
+            }
+            let original = std::fs::canonicalize(path)?;
+            let local = workspace.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            if let Ok(meta) = std::fs::symlink_metadata(&local) {
+                #[cfg(unix)]
+                if !meta.file_type().is_symlink() || std::fs::read_link(&local)? != original {
+                    return Err(GoopError::Queue("Extract tool link changed".into()));
+                }
+                #[cfg(not(unix))]
+                if !meta.is_file() || !same_tool_bytes(&original, &local, &signals)? {
+                    return Err(GoopError::Queue("Extract tool alias changed".into()));
+                }
+            } else {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&original, &local)?;
+                #[cfg(not(unix))]
+                if std::fs::hard_link(&original, &local).is_err() {
+                    copy_candidate(&original, &local, &signals)?;
+                }
+            }
+            resolved.push(original);
+        }
+        Ok((resolved.remove(0), resolved.remove(0)))
+    })
+    .await
+    .map_err(|e| GoopError::Queue(format!("cannot prepare Extract tools: {e}")))?
+}
+
+#[cfg(any(test, windows))]
+fn same_tool_bytes(original: &Path, alias: &Path, signals: &JobSignals) -> Result<bool, GoopError> {
+    Ok(crate::recovery::hash(original, signals)? == crate::recovery::hash(alias, signals)?)
+}
+
+async fn validate_media(
+    probe: &Path,
+    path: &Path,
+    req: &ExtractRequest,
+    cp: &RecoveryCheckpoint,
+    signals: &JobSignals,
+) -> Result<(), GoopError> {
+    let mut command = Command::new(probe);
+    command
+        .args(["-v", "error", "-show_streams", "-of", "json"])
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::select! {
+        biased;
+        int = signals.interrupted() => return Err(int.into()),
+        output = command.output() => output?,
+    };
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let streams = info["streams"]
+        .as_array()
+        .ok_or_else(|| GoopError::Queue("Extract output has no media streams".into()))?;
+    let audio = streams.iter().any(|s| s["codec_type"] == "audio");
+    let video = streams.iter().any(|s| s["codec_type"] == "video");
+    let needs_audio = req.audio_only
+        || cp
+            .sources
+            .iter()
+            .any(|s| s.acodec.as_deref().is_some_and(|codec| codec != "none"));
+    let needs_video = !req.audio_only
+        && cp
+            .sources
+            .iter()
+            .any(|s| s.vcodec.as_deref().is_some_and(|codec| codec != "none"));
+    if !output.status.success()
+        || (!audio && !video)
+        || (needs_audio && !audio)
+        || (needs_video && !video)
+        || (req.audio_only && video)
+    {
+        return Err(GoopError::Queue(
+            "Extract output did not contain the expected media streams".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_candidate(source: &Path, candidate: &Path, signals: &JobSignals) -> Result<(), GoopError> {
+    use std::io::{Read, Write};
+    let mut from = std::fs::File::open(source)?;
+    let mut to = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(candidate)?;
+    let mut buffer = [0; 128 * 1024];
+    loop {
+        if let Some(int) = signals.check() {
+            return Err(int.into());
+        }
+        let n = from.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        to.write_all(&buffer[..n])?;
+    }
+    to.sync_all()?;
+    Ok(())
+}
+
 fn progress_regexes() -> &'static (Regex, Regex, Regex) {
     static REGEXES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
     REGEXES.get_or_init(|| {
@@ -773,6 +1061,44 @@ fn progress_regexes() -> &'static (Regex, Regex, Regex) {
 /// Parse yt-dlp's `--newline` progress line, e.g.
 /// `[download]  42.3% of ~1.23MiB at 1.20MiB/s ETA 00:10`
 fn parse_progress(job_id: JobId, line: &str) -> Option<ProgressEvent> {
+    if let Some(raw) = line.strip_prefix("__GOOP_DL__") {
+        let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let total = v["total_bytes"]
+            .as_f64()
+            .or_else(|| v["total_bytes_estimate"].as_f64());
+        let percent = total
+            .filter(|n| *n > 0.0)
+            .map(|n| v["downloaded_bytes"].as_f64().unwrap_or(0.0) / n * 100.0)
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0);
+        return Some(ProgressEvent {
+            job_id,
+            percent: percent as f32,
+            eta_secs: v["eta"].as_f64().filter(|n| *n >= 0.0).map(|n| n as u64),
+            speed_hr: v["speed"]
+                .as_f64()
+                .filter(|n| *n >= 0.0)
+                .map(|n| format!("{:.1} MiB/s", n / 1048576.0)),
+            stage: "downloading".into(),
+            encoder: None,
+        });
+    }
+    if let Some(raw) = line.strip_prefix("__GOOP_PP__") {
+        let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let stage = match v["postprocessor"].as_str()? {
+            "Merger" => "merging",
+            "ExtractAudio" => "converting",
+            _ => "processing",
+        };
+        return Some(ProgressEvent {
+            job_id,
+            percent: 0.0,
+            eta_secs: None,
+            speed_hr: None,
+            stage: stage.into(),
+            encoder: None,
+        });
+    }
     if !line.starts_with("[download]") {
         return None;
     }
@@ -801,72 +1127,6 @@ fn parse_progress(job_id: JobId, line: &str) -> Option<ProgressEvent> {
     })
 }
 
-fn canonical_output_dir(raw: &str) -> Result<PathBuf, GoopError> {
-    let expanded = goop_core::path::expand(raw);
-    let dir = std::fs::canonicalize(&expanded)?;
-    if !dir.is_dir() {
-        return Err(GoopError::Config(format!(
-            "output path is not a directory: {}",
-            expanded.display()
-        )));
-    }
-    Ok(dir)
-}
-
-/// Cancel: the user is done — best-effort removal of yt-dlp's partials.
-/// Pause: KEEP them. `--continue` (always passed) resumes the `.part` via
-/// a Range request for plain formats, and the `.ytdl` fragment-state file
-/// lets fragmented (dash/hls-native) downloads pick up at the last
-/// completed fragment. Formats yt-dlp hands to its internal ffmpeg
-/// downloader can't resume and restart from scratch — cosmetic, the
-/// resumed run's own progress lines drive the bar.
-fn finish_interrupt(
-    int: Interrupt,
-    output_dir: &Path,
-    last_progress_line: Option<&str>,
-) -> GoopError {
-    match int {
-        Interrupt::Cancel => {
-            cleanup_partials(output_dir, last_progress_line);
-            GoopError::Cancelled
-        }
-        Interrupt::Pause => GoopError::Paused,
-    }
-}
-
-/// Best-effort removal of yt-dlp's `.part` / `.ytdl` partial files on cancel.
-/// yt-dlp doesn't emit the target filename until the move step, so we scan
-/// the output directory for recently-modified `.part` / `.ytdl` files. This
-/// is a best-effort cleanup — failures are silent by design (logged at debug).
-pub(crate) fn cleanup_partials(output_dir: &Path, _last_progress_line: Option<&str>) {
-    let Ok(entries) = std::fs::read_dir(output_dir) else {
-        return;
-    };
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(3600))
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_partial = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e == "part" || e == "ytdl");
-        if !is_partial {
-            continue;
-        }
-        let recent = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .map(|m| m >= cutoff)
-            .unwrap_or(false);
-        if recent {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::debug!(path = %path.display(), error = %e, "failed to remove partial file");
-            }
-        }
-    }
-}
-
 fn parse_eta(s: &str) -> Option<u64> {
     let parts: Vec<u64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
     match parts.len() {
@@ -879,6 +1139,44 @@ fn parse_eta(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_replaced_tool_alias_is_rejected_before_retry() {
+        let bins = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for name in ["ffmpeg.exe", "ffprobe.exe"] {
+            std::fs::write(bins.path().join(name), b"trusted executable").unwrap();
+        }
+        let resolver = BinaryResolver::new(bins.path().to_owned());
+        prepare_media_tools(&resolver, workspace.path(), JobSignals::new())
+            .await
+            .unwrap();
+        let alias = workspace.path().join("ffmpeg.exe");
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::write(&alias, b"changed executable").unwrap();
+        assert!(
+            prepare_media_tools(&resolver, workspace.path(), JobSignals::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(bins.path().join("ffmpeg.exe")).unwrap(),
+            b"trusted executable"
+        );
+    }
+
+    #[test]
+    fn copied_tool_alias_requires_matching_bytes_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let alias = dir.path().join("alias");
+        std::fs::write(&original, b"trusted executable").unwrap();
+        std::fs::copy(&original, &alias).unwrap();
+        assert!(same_tool_bytes(&original, &alias, &JobSignals::new()).unwrap());
+        std::fs::write(&alias, b"changed executable").unwrap();
+        assert!(!same_tool_bytes(&original, &alias, &JobSignals::new()).unwrap());
+    }
 
     #[test]
     fn parses_download_progress_line() {
@@ -1153,26 +1451,5 @@ mod tests {
                 assert_ne!(a, b, "duplicate template at indices {i}/{j}");
             }
         }
-    }
-
-    #[test]
-    fn finish_interrupt_pause_keeps_partials_cancel_cleans_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("video.mp4.part");
-        let ytdl = dir.path().join("video.mp4.ytdl");
-        std::fs::write(&part, b"x").unwrap();
-        std::fs::write(&ytdl, b"y").unwrap();
-
-        let err = finish_interrupt(Interrupt::Cancel, dir.path(), None);
-        assert!(matches!(err, GoopError::Cancelled));
-        assert!(!part.exists(), "cancel removes the .part");
-        assert!(!ytdl.exists(), "cancel removes the .ytdl fragment state");
-
-        std::fs::write(&part, b"x").unwrap();
-        std::fs::write(&ytdl, b"y").unwrap();
-        let err = finish_interrupt(Interrupt::Pause, dir.path(), None);
-        assert!(matches!(err, GoopError::Paused));
-        assert!(part.exists(), "pause keeps the .part for --continue");
-        assert!(ytdl.exists(), "pause keeps the fragment state");
     }
 }

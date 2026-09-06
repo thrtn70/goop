@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { markInitialDataReady } from "@/performance/startup";
 import type {
   HistoryCounts,
   HistoryFilter,
@@ -99,6 +100,10 @@ export interface HistoryState {
 type AppStoreState = {
   settings: Settings | null;
   jobs: Job[];
+  /** Issued list requests, including requests still pending or failed. */
+  queueRequestGeneration: number;
+  /** Request generation that produced the latest accepted successful list. */
+  queueSnapshotGeneration: number;
   progressById: Record<string, ProgressEntry>;
   toasts: Toast[];
   /** Jobs finished while user was on a different page — clears on queue-focus. */
@@ -319,6 +324,8 @@ let versionsInFlight: Promise<AppVersionInfo> | null = null;
 export const useAppStore = create<AppStoreState>((set, get) => ({
   settings: null,
   jobs: [],
+  queueRequestGeneration: 0,
+  queueSnapshotGeneration: 0,
   progressById: {},
   toasts: [],
   unseenCompletions: 0,
@@ -333,36 +340,46 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   pendingFocusUrlInput: 0,
   pendingFilePicker: 0,
   async loadAll() {
+    const generation = get().queueRequestGeneration + 1;
+    set({queueRequestGeneration: generation});
     const [settings, jobs] = await Promise.all([
       api.settings.get(),
       api.queue.list(),
     ]);
-    set({ settings, jobs });
+    set(state => generation >= state.queueSnapshotGeneration ? { settings, jobs, queueSnapshotGeneration: generation } : {settings});
   },
   async refreshJobs() {
+    const generation = get().queueRequestGeneration + 1;
+    set({queueRequestGeneration: generation});
     const jobs = await api.queue.list();
-    set({ jobs });
+    set(state => generation >= state.queueSnapshotGeneration ? { jobs, queueSnapshotGeneration: generation } : {});
   },
   applyProgress(e) {
     const key = jobIdKey(e.job_id);
-    set((s) => ({
-      progressById: {
-        ...s.progressById,
-        [key]: {
-          // Retry-status events ("retrying (attempt N/M)") carry percent 0
-          // — the retry layer doesn't know the transfer offset. Hold the
-          // last rendered percent so the bar doesn't collapse during the
-          // backoff wait; the next real downloading event overwrites it.
-          percent: e.stage.startsWith("retrying")
-            ? (s.progressById[key]?.percent ?? e.percent)
-            : e.percent,
-          eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
-          speed_hr: e.speed_hr ?? null,
-          encoder: e.encoder ?? null,
-          stage: e.stage,
+    set((s) => {
+      const job = s.jobs.find((job) => jobIdKey(job.id) === key);
+      if (job && (job.state === "done" || job.state === "cancelled" || typeof job.state === "object")) {
+        return {};
+      }
+      return {
+        progressById: {
+          ...s.progressById,
+          [key]: {
+            // Retry-status events ("retrying (attempt N/M)") carry percent 0
+            // — the retry layer doesn't know the transfer offset. Hold the
+            // last rendered percent so the bar doesn't collapse during the
+            // backoff wait; the next real downloading event overwrites it.
+            percent: e.stage.startsWith("retrying")
+              ? (s.progressById[key]?.percent ?? e.percent)
+              : e.percent,
+            eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
+            speed_hr: e.speed_hr ?? null,
+            encoder: e.encoder ?? null,
+            stage: e.stage,
+          },
         },
-      },
-    }));
+      };
+    });
   },
   applyQueue(e) {
     set((s) => {
@@ -375,7 +392,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         state: e.state,
         result: e.result ?? next[idx].result,
       };
-      return { jobs: next };
+      const progressById = { ...s.progressById };
+      if (e.state === "queued" && !progressById[targetKey]?.stage.startsWith("waiting on TorBox")) {
+        delete progressById[targetKey];
+      }
+      return { jobs: next, progressById };
     });
   },
   async cancel(id) {
@@ -645,8 +666,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   async reorderQueue(orderedIds) {
     if (orderedIds.length === 0) return;
     await api.queue.reorder(orderedIds);
-    const jobs = await api.queue.list();
-    set({ jobs });
+    await get().refreshJobs();
   },
   async cancelSelectedQueue() {
     const selected = get().ui.queueSelectedIds;
@@ -747,6 +767,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
   try {
     await useAppStore.getState().loadAll();
+    markInitialDataReady();
   } catch {
     /* Tauri not available or backend not ready — continue with empty state. */
   }
@@ -789,8 +810,7 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
 
   const refresh = async (): Promise<void> => {
     try {
-      const jobs = await api.queue.list();
-      useAppStore.setState({ jobs });
+      await useAppStore.getState().refreshJobs();
     } catch {
       /* ignore transient errors */
     }

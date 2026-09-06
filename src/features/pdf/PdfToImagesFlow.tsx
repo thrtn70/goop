@@ -1,6 +1,6 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, pdfExtractImages } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -27,7 +27,7 @@ export default function PdfToImagesFlow({ file, onDone }: PdfToImagesFlowProps) 
   const [format, setFormat] = useWorkspaceDraftState<PdfImageFormat>("PdfToImagesFlow.format", "png");
   const [dpi, setDpi] = useWorkspaceDraftState<number>("PdfToImagesFlow.dpi", DPI_DEFAULT);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfToImagesFlow.error", null);
 
   async function handleApply() {
     if (busy) return;

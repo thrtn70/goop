@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageResize } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -72,7 +72,7 @@ function ImageResizeFlow({ file, onDone }: ImageResizeFlowProps) {
   const [height, setHeight] = useWorkspaceDraftState<number>("ImageResizeFlow.height", DEFAULT_BOX);
   const [scale, setScale] = useWorkspaceDraftState<number>("ImageResizeFlow.scale", DEFAULT_SCALE);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageResizeFlow.error", null);
 
   const isScale = mode === "scale";
   const canApply = !busy && (isScale ? scale >= 1 && scale <= 2000 : width > 0 && height > 0);

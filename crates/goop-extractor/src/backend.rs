@@ -24,6 +24,7 @@ use std::sync::Arc;
 use crate::classify::{classify_extractor, ExtractorChoice};
 use crate::debrid::{self, DebridCtx, TorBoxClient};
 use crate::gallery_dl::GalleryDl;
+use crate::recovery::ExtractRecovery;
 use crate::retry::{with_retry, RetryPolicy, DEFAULT_RETRY_POLICY};
 use crate::ytdlp::{ExtractRequest, YtDlp};
 
@@ -135,13 +136,39 @@ pub async fn dispatch_with_update_hook(
     debrid: Option<DebridCtx>,
     hook: Option<UpdateHook>,
 ) -> Result<BackendOutcome, GoopError> {
-    let err = match dispatch(
+    dispatch_with_recovery(
+        resolver,
+        sink,
+        job_id,
+        req,
+        signals,
+        debrid,
+        hook,
+        ExtractRecovery::ephemeral(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_with_recovery(
+    resolver: &BinaryResolver,
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
+    debrid: Option<DebridCtx>,
+    hook: Option<UpdateHook>,
+    recovery: ExtractRecovery,
+) -> Result<BackendOutcome, GoopError> {
+    let err = match dispatch_policy_recovery(
         resolver,
         sink.clone(),
         job_id,
         req,
         signals.clone(),
+        &DEFAULT_RETRY_POLICY,
         debrid.clone(),
+        recovery.clone(),
     )
     .await
     {
@@ -168,7 +195,18 @@ pub async fn dispatch_with_update_hook(
     if signals.check().is_some() {
         return Err(err);
     }
-    match dispatch(resolver, sink, job_id, req, signals, debrid).await {
+    match dispatch_policy_recovery(
+        resolver,
+        sink,
+        job_id,
+        req,
+        signals,
+        &DEFAULT_RETRY_POLICY,
+        debrid,
+        recovery,
+    )
+    .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(err2) => Err(note_update(err2, &updated)),
     }
@@ -287,6 +325,30 @@ pub(crate) async fn dispatch_with_policy(
     policy: &RetryPolicy,
     debrid: Option<DebridCtx>,
 ) -> Result<BackendOutcome, GoopError> {
+    dispatch_policy_recovery(
+        resolver,
+        sink,
+        job_id,
+        req,
+        signals,
+        policy,
+        debrid,
+        ExtractRecovery::ephemeral(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_policy_recovery(
+    resolver: &BinaryResolver,
+    sink: Arc<dyn EventSink>,
+    job_id: JobId,
+    req: &ExtractRequest,
+    signals: JobSignals,
+    policy: &RetryPolicy,
+    debrid: Option<DebridCtx>,
+    recovery: ExtractRecovery,
+) -> Result<BackendOutcome, GoopError> {
     // Warnings are raised by whichever extractor hits the condition, but
     // this is the only layer that knows how many extractors ran and how
     // often the pipeline replayed: `with_retry` re-runs `dispatch_once`,
@@ -308,6 +370,7 @@ pub(crate) async fn dispatch_with_policy(
             req,
             signals.clone(),
             debrid.clone(),
+            recovery.clone(),
         )
     })
     .await
@@ -328,6 +391,7 @@ async fn dispatch_once(
     req: &ExtractRequest,
     signals: JobSignals,
     debrid: Option<DebridCtx>,
+    recovery: ExtractRecovery,
 ) -> Result<BackendOutcome, GoopError> {
     // Debrid path: magnet links always (only a debrid service can turn
     // them into HTTP), plus hoster links the probe already matched.
@@ -364,6 +428,7 @@ async fn dispatch_once(
         req,
         signals.clone(),
         primary,
+        recovery.clone(),
     )
     .await
     {
@@ -389,6 +454,7 @@ async fn dispatch_once(
         req,
         signals.clone(),
         primary.other(),
+        recovery,
     )
     .await
     {
@@ -454,11 +520,12 @@ async fn run_one(
     req: &ExtractRequest,
     signals: JobSignals,
     backend: ExtractorChoice,
+    recovery: ExtractRecovery,
 ) -> Result<BackendOutcome, GoopError> {
     match backend {
         ExtractorChoice::YtDlp => {
             let yt = YtDlp::new(resolver, sink);
-            let res = yt.download(job_id, req, signals).await?;
+            let res = yt.download(job_id, req, signals, recovery).await?;
             Ok(BackendOutcome {
                 output_path: res.output_path,
                 bytes: res.bytes,
@@ -509,8 +576,26 @@ pub fn cleanup_partials_for(req: &ExtractRequest) {
     let expanded = goop_core::path::expand(&req.output_dir);
     let output_dir = std::fs::canonicalize(&expanded).unwrap_or(expanded);
     crate::direct::remove_partials(&output_dir, &req.url);
-    crate::ytdlp::cleanup_partials(&output_dir, None);
-    crate::gallery_dl::cleanup_run_artifacts(&output_dir);
+    // Legacy yt-dlp metadata establishes no ownership; retain uncertain files.
+    if req
+        .extractor_hint
+        .unwrap_or_else(|| classify_extractor(&req.url))
+        == ExtractorChoice::GalleryDl
+    {
+        crate::gallery_dl::cleanup_run_artifacts(&output_dir);
+    }
+}
+
+/// Cleanup a recovered yt-dlp job without invoking gallery's shared-root sweep.
+/// Direct fallback partials retain their existing exact URL-keyed cleanup.
+pub fn cleanup_partials_for_recovery(
+    req: &ExtractRequest,
+    id: JobId,
+    checkpoint: &crate::recovery::RecoveryCheckpoint,
+) -> Result<(), GoopError> {
+    checkpoint.cleanup_for(id, req)?;
+    crate::direct::remove_partials(&checkpoint.root, &req.url);
+    Ok(())
 }
 
 /// End-to-end dispatch tests driven by fake sidecars — shell scripts that
@@ -534,6 +619,1662 @@ mod fake_sidecar_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn recovered_gallery_classified_job_does_not_sweep_shared_partials() {
+        let out = TempDir::new().unwrap();
+        let req = request("https://imgur.com/gallery/example", out.path());
+        let id = JobId::new();
+        let recovery = ExtractRecovery::ephemeral();
+        let checkpoint = recovery.allocate(id, &req).unwrap();
+        let unrelated = out.path().join("unrelated.part");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        cleanup_partials_for_recovery(&req, id, &checkpoint).unwrap();
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep");
+        assert!(!checkpoint.root.join(checkpoint.workspace).exists());
+    }
+
+    #[tokio::test]
+    async fn failed_postprocess_never_exposes_public_output_or_cleans_unrelated_partials() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let unrelated = out.path().join("unrelated.mp4.part");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            r#"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dir=$(dirname "$a"); fi
+  prev="$a"
+done
+printf 'broken' > "$dir/failed.mp4"
+echo "__GOOP_FINAL__\"$dir/failed.mp4\""
+echo 'ERROR: conversion failed' >&2
+exit 1
+"#,
+        );
+        let req: ExtractRequest = serde_json::from_value(serde_json::json!({
+            "url":"https://youtube.com/watch?v=test", "output_dir":out.path(),
+            "format":null,"audio_only":false
+        }))
+        .unwrap();
+        let result = dispatch(
+            &resolver_at(bins.path()),
+            Arc::new(RecordingSink::default()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            !out.path().join("failed.mp4").exists(),
+            "failed media must remain private"
+        );
+        cleanup_partials_for(&req);
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"unrelated");
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_merging_and_cancels_after_pipe_eof() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let barrier = out.path().join("barrier");
+        // Keep this pipe-EOF fixture to one leader. External touch or a
+        // non-exec sleep can race cancellation before the shell reaps them;
+        // descendant termination has its own writer and native ffmpeg tests.
+        write_fake(bins.path(), "yt-dlp", &format!(
+            "echo '__GOOP_PP__{{\"status\":\"started\",\"postprocessor\":\"Merger\"}}' >&2\nexec 1>&- 2>&-\n: > '{}'\nexec sleep 20\n", barrier.display()));
+        let req: ExtractRequest = serde_json::from_value(serde_json::json!({
+            "url":"https://youtube.com/watch?v=test", "output_dir":out.path(),
+            "format":null,"audio_only":false
+        }))
+        .unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let signals = JobSignals::new();
+        let resolver = resolver_at(bins.path());
+        let future = dispatch(
+            &resolver,
+            sink.clone(),
+            JobId::new(),
+            &req,
+            signals.clone(),
+            None,
+        );
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => panic!("unexpected completion: {result:?}"),
+            _ = async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let merging = sink.progress.lock().iter().any(|p| {
+                            p.stage == "merging" && p.eta_secs.is_none() && p.speed_hr.is_none()
+                        });
+                        if barrier.exists() && merging { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+            } => {}
+        }
+        let merging = sink
+            .progress
+            .lock()
+            .iter()
+            .any(|p| p.stage == "merging" && p.eta_secs.is_none() && p.speed_hr.is_none());
+        signals.cancel.cancel();
+        let stopped = tokio::time::timeout(Duration::from_secs(3), &mut future).await;
+        assert!(stopped.is_ok(), "cancel must interrupt wait after pipe EOF");
+        let stopped = stopped.unwrap();
+        assert!(matches!(stopped, Err(GoopError::Cancelled)), "{stopped:?}");
+        assert!(
+            merging,
+            "observed postprocessor must report indeterminate merging"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit local native fixture and bundled binary directories"]
+    async fn native_completed_source_replay_validates_real_postprocessors() {
+        use crate::recovery::{ExtractRecovery, RECOVERY_PAYLOAD_KEY};
+        use goop_core::{Job, JobKind};
+        use goop_queue::QueueStore;
+        let fixture_root = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_FIXTURES").expect("fixture directory"),
+        );
+        let binary_root = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_BIN_DIR").expect("binary directory"),
+        );
+        let resolver = BinaryResolver::new(binary_root);
+        for mode in ["muxed", "split", "audio"] {
+            let out = TempDir::new().unwrap();
+            let database = TempDir::new().unwrap();
+            let fixture = fixture_root.join(mode);
+            let info: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(fixture.join("sanitized.json")).unwrap())
+                    .unwrap();
+            let mut req = request("https://example.invalid/offline-recovery", out.path());
+            req.cookies_from_browser = None;
+            req.audio_only = mode == "audio";
+            req.format = Some(
+                if mode == "split" {
+                    "v+a"
+                } else if mode == "audio" {
+                    "a"
+                } else {
+                    "m"
+                }
+                .into(),
+            );
+            // The fixture records the actual muxed format id.
+            if mode == "muxed" {
+                req.format = Some(info["formats"][0]["format_id"].as_str().unwrap().into());
+            }
+            let job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+            let db = database.path().join("queue.db");
+            let store = QueueStore::open(&db).unwrap();
+            store.insert(&job).unwrap();
+            let id = job.id;
+            let callback = |store: QueueStore| -> crate::recovery::PersistRecovery {
+                Arc::new(move |cp| {
+                    store.patch_payload_field(
+                        id,
+                        RECOVERY_PAYLOAD_KEY,
+                        serde_json::to_value(cp).unwrap(),
+                    )
+                })
+            };
+            let recovery = ExtractRecovery::new(None, callback(store.clone())).unwrap();
+            let cp = recovery.allocate(id, &req).unwrap();
+            let dir = cp.owned_directory().unwrap();
+            let formats = info["formats"].as_array().unwrap();
+            let mut raw =
+                serde_json::json!({"title":format!("native-{mode}"), "extractor":"generic"});
+            let mut selected = Vec::new();
+            let mut merge = Vec::new();
+            for format in formats {
+                let id = format["format_id"].as_str().unwrap();
+                let ext = format["ext"].as_str().unwrap();
+                let original = if mode == "split" {
+                    format!("fixture-split.f{id}.{ext}")
+                } else {
+                    format!("fixture-{mode}.{ext}")
+                };
+                let local = if mode == "split" {
+                    format!("source.f{id}.{ext}")
+                } else {
+                    format!("source.{ext}")
+                };
+                std::fs::copy(fixture.join(original), dir.join(&local)).unwrap();
+                let mut selected_format = format.clone();
+                selected_format["filepath"] = serde_json::json!(dir.join(local));
+                merge.push(selected_format["filepath"].clone());
+                selected.push(selected_format);
+            }
+            if mode == "split" {
+                raw["requested_formats"] = serde_json::json!(selected);
+                raw["__files_to_merge"] = serde_json::json!(merge);
+            } else {
+                for (key, value) in selected[0].as_object().unwrap() {
+                    raw[key] = value.clone();
+                }
+            }
+            recovery.capture(raw, JobSignals::new()).await.unwrap();
+            let saved = recovery.checkpoint().unwrap();
+            drop(recovery);
+            drop(store);
+            let store = QueueStore::open(&db).unwrap();
+            let row = store.get_by_id(job.id).unwrap().unwrap();
+            let recovery = ExtractRecovery::new(
+                row.payload.get(RECOVERY_PAYLOAD_KEY).cloned(),
+                callback(store),
+            )
+            .unwrap();
+            let sink = Arc::new(RecordingSink::default());
+            let result = dispatch_with_recovery(
+                &resolver,
+                sink.clone(),
+                job.id,
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{mode}: {e:?}"));
+            saved.validate_sources(&JobSignals::new()).unwrap();
+            let decode = tokio::process::Command::new(resolver.resolve("ffmpeg").unwrap().path)
+                .args(["-v", "error", "-i"])
+                .arg(&result.output_path)
+                .args(["-f", "null", "-"])
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                decode.status.success(),
+                "{mode}: {}",
+                String::from_utf8_lossy(&decode.stderr)
+            );
+            let stages: Vec<_> = sink
+                .progress
+                .lock()
+                .iter()
+                .map(|e| e.stage.clone())
+                .collect();
+            assert!(stages.iter().any(|s| s == "validating"));
+            if mode == "split" {
+                assert!(stages.iter().any(|s| s == "merging"));
+            }
+            if mode == "audio" {
+                assert!(stages.iter().any(|s| s == "converting"));
+            }
+            if mode == "muxed" {
+                let offline = ExtractRecovery::new(
+                    Some(serde_json::to_value(&saved).unwrap()),
+                    Arc::new(|_| Ok(())),
+                )
+                .unwrap();
+                let replay = offline.replay(JobSignals::new()).await.unwrap().unwrap();
+                std::fs::remove_file(saved.file(&saved.sources[0].relative_path).unwrap()).unwrap();
+                let command =
+                    tokio::process::Command::new(resolver.resolve("yt-dlp").unwrap().path)
+                        .args([
+                            "--ignore-config",
+                            "--proxy",
+                            "",
+                            "--socket-timeout",
+                            "1",
+                            "--retries",
+                            "0",
+                            "--no-simulate",
+                            "--load-info-json",
+                        ])
+                        .arg(replay)
+                        .arg("-o")
+                        .arg(saved.root.join(&saved.workspace).join("source.%(ext)s"))
+                        .env("HTTP_PROXY", "http://127.0.0.1:1")
+                        .env("HTTPS_PROXY", "http://127.0.0.1:1")
+                        .kill_on_drop(true)
+                        .output();
+                let output = tokio::time::timeout(Duration::from_secs(5), command)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    !output.status.success(),
+                    "missing input must fail against inert URL"
+                );
+                assert!(!saved
+                    .root
+                    .join(&saved.workspace)
+                    .join(&saved.sources[0].relative_path)
+                    .exists());
+                eprintln!("NATIVE INERT URL: missing source rejected within 5s, proxy explicitly disabled");
+            }
+            eprintln!("NATIVE REPLAY {mode}: {} bytes; source hashes unchanged; full decode passed; stages {stages:?}", result.bytes);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit local native fixture and bundled binary directories"]
+    async fn native_failure_reopen_retry_performs_no_additional_media_requests() {
+        use crate::recovery::{ExtractRecovery, RECOVERY_PAYLOAD_KEY};
+        use goop_core::{Job, JobKind};
+        use goop_queue::QueueStore;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let fixtures = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_FIXTURES").expect("fixture directory"),
+        );
+        let native = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_BIN_DIR").expect("binary directory"),
+        );
+        let media = std::fs::read(fixtures.join("muxed/fixture-muxed.mp4")).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let gets = Arc::new(AtomicUsize::new(0));
+        let requests = gets.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![0; 8192];
+                let n = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..n]);
+                let head = request.starts_with("HEAD ");
+                if request.starts_with("GET ") {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", media.len());
+                if socket.write_all(header.as_bytes()).await.is_ok() && !head {
+                    let _ = socket.write_all(&media).await;
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+        struct ServerGuard(tokio::task::JoinHandle<()>);
+        impl Drop for ServerGuard {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server = ServerGuard(server);
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let database = TempDir::new().unwrap();
+        for name in ["yt-dlp", "ffprobe"] {
+            std::os::unix::fs::symlink(
+                std::fs::canonicalize(native.join(name)).unwrap(),
+                bins.path().join(name),
+            )
+            .unwrap();
+        }
+        let failed = database.path().join("processing-failed-once");
+        let real_ffmpeg = std::fs::canonicalize(native.join("ffmpeg")).unwrap();
+        write_fake(
+            bins.path(),
+            "ffmpeg",
+            &format!(
+                r#"
+processing=""
+for a in "$@"; do if [ "$a" = "-i" ]; then processing=yes; fi; done
+if [ "$processing" = yes ] && [ ! -f '{}' ]; then
+  touch '{}'
+  echo 'intentional fixture conversion failure' >&2
+  exit 1
+fi
+exec '{}' "$@"
+"#,
+                failed.display(),
+                failed.display(),
+                real_ffmpeg.display()
+            ),
+        );
+        let resolver = BinaryResolver::new(bins.path().to_owned());
+        let mut req = request(&format!("http://{address}/fixture.mp4"), out.path());
+        req.cookies_from_browser = None;
+        req.audio_only = true;
+        req.extractor_hint = Some(ExtractorChoice::YtDlp);
+        let job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+        let id = job.id;
+        let db = database.path().join("queue.db");
+        let store = QueueStore::open(&db).unwrap();
+        store.insert(&job).unwrap();
+        store.claim_queued(id, 1).unwrap();
+        let callback = |store: QueueStore| -> crate::recovery::PersistRecovery {
+            Arc::new(move |cp| {
+                store.patch_payload_field(
+                    id,
+                    RECOVERY_PAYLOAD_KEY,
+                    serde_json::to_value(cp).unwrap(),
+                )
+            })
+        };
+        let recovery = ExtractRecovery::new(None, callback(store.clone())).unwrap();
+        let first = tokio::time::timeout(
+            Duration::from_secs(20),
+            dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                id,
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery.clone(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(first.is_err(), "first processing must fail");
+        assert!(
+            failed.exists(),
+            "actual FFmpeg conversion was invoked: {first:?}"
+        );
+        let checkpoint = recovery.checkpoint().unwrap();
+        assert_eq!(
+            checkpoint.sources.len(),
+            1,
+            "real acquisition must persist its completed source: {first:?}"
+        );
+        assert!(!checkpoint.writer_active);
+        let before = gets.load(Ordering::SeqCst);
+        assert!(before > 0);
+        drop(recovery);
+        drop(store);
+        let store = QueueStore::open(&db).unwrap();
+        store.reconcile().unwrap();
+        store.retry_errored(id).unwrap();
+        let payload = store.get_by_id(id).unwrap().unwrap().payload;
+        let recovery =
+            ExtractRecovery::new(payload.get(RECOVERY_PAYLOAD_KEY).cloned(), callback(store))
+                .unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            dispatch_with_recovery(
+                &resolver,
+                sink.clone(),
+                id,
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            gets.load(Ordering::SeqCst),
+            before,
+            "retry must not perform another media GET"
+        );
+        checkpoint.validate_sources(&JobSignals::new()).unwrap();
+        let decode = tokio::process::Command::new(&real_ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&result.output_path)
+            .args(["-f", "null", "-"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            decode.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decode.stderr)
+        );
+        assert!(sink
+            .progress
+            .lock()
+            .iter()
+            .any(|event| event.stage == "converting"));
+        eprintln!("NATIVE FAILURE RECOVERY: initial media GETs={before}; retry GETs=0; {} bytes; real source checkpoint/store reopen/reconcile/retry; unchanged source hash; full decode passed", result.bytes);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires explicit local native fixture and bundled binary directories"]
+    async fn native_ffmpeg_cancel_and_pause_stop_real_descendants() {
+        let fixtures = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_FIXTURES").expect("fixture directory"),
+        );
+        let native = std::path::PathBuf::from(
+            std::env::var_os("GOOP_EXTRACT_NATIVE_BIN_DIR").expect("binary directory"),
+        );
+        for pause in [false, true] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let witness = TempDir::new().unwrap();
+            let pidfile = witness.path().join("ffmpeg-pid");
+            for name in ["yt-dlp", "ffprobe"] {
+                std::os::unix::fs::symlink(
+                    std::fs::canonicalize(native.join(name)).unwrap(),
+                    bins.path().join(name),
+                )
+                .unwrap();
+            }
+            let real = std::fs::canonicalize(native.join("ffmpeg")).unwrap();
+            write_fake(
+                bins.path(),
+                "ffmpeg",
+                &format!(
+                    r#"
+for a in "$@"; do
+  if [ "$a" = "-i" ]; then
+    echo $$ > '{}'
+    exec '{}' -re "$@"
+  fi
+done
+exec '{}' "$@"
+"#,
+                    pidfile.display(),
+                    real.display(),
+                    real.display()
+                ),
+            );
+            let resolver = BinaryResolver::new(bins.path().to_owned());
+            let mut req = request("https://example.invalid/completed", out.path());
+            req.audio_only = true;
+            req.format = Some("a".into());
+            req.cookies_from_browser = None;
+            let id = JobId::new();
+            let recovery = ExtractRecovery::ephemeral();
+            let cp = recovery.allocate(id, &req).unwrap();
+            let dir = cp.owned_directory().unwrap();
+            let source = dir.join("source.m4a");
+            std::fs::copy(fixtures.join("audio/fixture-audio.m4a"), &source).unwrap();
+            recovery.capture(serde_json::json!({"title":"native-audio","format_id":"a","ext":"m4a","vcodec":"none","acodec":"aac","filepath":source}), JobSignals::new()).await.unwrap();
+            let signals = JobSignals::new();
+            let future = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                id,
+                &req,
+                signals.clone(),
+                None,
+                None,
+                recovery.clone(),
+            );
+            tokio::pin!(future);
+            let pid = tokio::select! {
+                result = &mut future => panic!("processor finished before native cancellation witness: {result:?}"),
+                pid = async {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+                                let process = tokio::process::Command::new("/bin/ps").args(["-p", pid.trim(), "-o", "comm="]).output().await.unwrap();
+                                if String::from_utf8_lossy(&process.stdout).contains("ffmpeg-aarch64") { break pid.trim().parse::<i32>().unwrap(); }
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await.unwrap()
+                } => pid,
+            };
+            if pause {
+                signals.pause.cancel();
+            } else {
+                signals.cancel.cancel();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(3), &mut future)
+                .await
+                .unwrap();
+            assert!(
+                if pause {
+                    matches!(result, Err(GoopError::Paused))
+                } else {
+                    matches!(result, Err(GoopError::Cancelled))
+                },
+                "{result:?}"
+            );
+            // SAFETY: signal zero only observes the witnessed, nonpersisted PID.
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "real ffmpeg must be gone"
+            );
+            assert!(!out.path().join("native-audio.mp3").exists());
+            if pause {
+                recovery
+                    .checkpoint()
+                    .unwrap()
+                    .validate_sources(&JobSignals::new())
+                    .unwrap();
+                let result = dispatch_with_recovery(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    id,
+                    &req,
+                    JobSignals::new(),
+                    None,
+                    None,
+                    recovery.clone(),
+                )
+                .await
+                .unwrap();
+                assert!(std::path::Path::new(&result.output_path).is_file());
+            } else {
+                assert!(!dir.exists());
+            }
+            eprintln!("NATIVE FFMPEG {}: observed real descendant PID {pid}, tree stopped, no early public output{}", if pause { "PAUSE" } else { "CANCEL" }, if pause { "; fresh-signal resume reused source and succeeded" } else { "; exact workspace removed" });
+        }
+    }
+
+    fn recovery_fake(counter: &std::path::Path) -> String {
+        format!(
+            r#"
+prev=""
+replay=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dir=$(dirname "$a"); fi
+  if [ "$a" = "--load-info-json" ]; then replay=yes; fi
+  prev="$a"
+done
+if [ -z "$replay" ]; then
+  echo acquisition >> '{counter}'
+  printf 'completed original' > "$dir/source.mp4"
+fi
+echo processing >> '{counter}'
+printf '__GOOP_SOURCE__{{"title":"video","format_id":"18","ext":"mp4","vcodec":"h264","acodec":"aac","filepath":"%s/source.mp4"}}\n' "$dir"
+echo '__GOOP_PP__{{"status":"started","postprocessor":"Merger"}}' >&2
+if [ -z "$replay" ]; then
+  echo 'ERROR: conversion failed' >&2
+  exit 1
+fi
+printf '__GOOP_FINAL__"%s/source.mp4"\n' "$dir"
+exit 0
+"#,
+            counter = counter.display()
+        )
+    }
+
+    #[tokio::test]
+    async fn reopened_store_retry_reuses_completed_sources() {
+        use crate::recovery::{ExtractRecovery, RECOVERY_PAYLOAD_KEY};
+        use goop_core::{Job, JobKind, JobState};
+        use goop_queue::QueueStore;
+        for paused in [false, true] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let database = TempDir::new().unwrap();
+            let counter = out.path().join("counter");
+            write_fake(bins.path(), "yt-dlp", &recovery_fake(&counter));
+            let resolver = Arc::new(resolver_at(bins.path()));
+            let req = request("https://youtube.com/watch?v=test", out.path());
+            let job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+            let db = database.path().join("queue.db");
+            let store = QueueStore::open(&db).unwrap();
+            store.insert(&job).unwrap();
+            store.claim_queued(job.id, 1).unwrap();
+            let callback = |store: QueueStore| -> crate::recovery::PersistRecovery {
+                let id = job.id;
+                Arc::new(move |checkpoint| {
+                    store.patch_payload_field(
+                        id,
+                        RECOVERY_PAYLOAD_KEY,
+                        serde_json::to_value(checkpoint).unwrap(),
+                    )
+                })
+            };
+            let recovery = ExtractRecovery::new(None, callback(store.clone())).unwrap();
+            let first = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                job.id,
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery.clone(),
+            )
+            .await;
+            assert!(first.is_err());
+            let checkpoint = recovery.checkpoint().unwrap();
+            assert!(!checkpoint.writer_active);
+            assert_eq!(checkpoint.sources.len(), 1);
+            let source = checkpoint
+                .file(&checkpoint.sources[0].relative_path)
+                .unwrap();
+            let original = std::fs::read(&source).unwrap();
+            let root = checkpoint.root.clone();
+            let workspace = checkpoint.workspace.clone();
+            drop(recovery);
+            if paused {
+                store
+                    .update_state(job.id, &JobState::Paused, None, 2)
+                    .unwrap();
+            }
+            drop(store);
+            let store = QueueStore::open(&db).unwrap();
+            store.reconcile().unwrap();
+            if paused {
+                assert_eq!(
+                    store.get_by_id(job.id).unwrap().unwrap().state,
+                    JobState::Paused
+                );
+                store.requeue_paused(job.id).unwrap();
+            } else {
+                assert!(matches!(
+                    store.get_by_id(job.id).unwrap().unwrap().state,
+                    JobState::Error { .. }
+                ));
+                store.retry_errored(job.id).unwrap();
+            }
+            let row = store.get_by_id(job.id).unwrap().unwrap();
+            assert_eq!(row.payload["url"], req.url);
+            let worker_store = store.clone();
+            let worker: goop_queue::WorkerFn = Arc::new(move |id, payload, signals| {
+                let store = worker_store.clone();
+                let resolver = resolver.clone();
+                Box::pin(async move {
+                    let callback_store = store.clone();
+                    let recovery = ExtractRecovery::new(
+                        payload.get(RECOVERY_PAYLOAD_KEY).cloned(),
+                        Arc::new(move |cp| {
+                            callback_store.patch_payload_field(
+                                id,
+                                RECOVERY_PAYLOAD_KEY,
+                                serde_json::to_value(cp)?,
+                            )
+                        }),
+                    )?;
+                    let req = serde_json::from_value(payload)?;
+                    let out = dispatch_with_recovery(
+                        &resolver,
+                        Arc::new(RecordingSink::default()),
+                        id,
+                        &req,
+                        signals,
+                        None,
+                        None,
+                        recovery,
+                    )
+                    .await?;
+                    assert!(
+                        std::path::Path::new(&out.output_path).is_file(),
+                        "worker success requires public output"
+                    );
+                    Ok(goop_core::JobResult {
+                        output_path: Some(out.output_path),
+                        bytes: Some(out.bytes),
+                        duration_ms: out.duration_ms,
+                        result_kind: goop_core::ResultKind::File,
+                        file_count: 1,
+                        source_bytes: None,
+                        target_bytes: None,
+                        reencoded: None,
+                    })
+                })
+            });
+            let scheduler = goop_queue::Scheduler::new(
+                store.clone(),
+                Arc::new(RecordingSink::default()),
+                1,
+                1,
+                1,
+                1,
+                1,
+                worker.clone(),
+                worker.clone(),
+                worker.clone(),
+                worker.clone(),
+                worker,
+            );
+            let runner = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+            let row = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let row = store.get_by_id(job.id).unwrap().unwrap();
+                    if row.is_terminal() {
+                        break row;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            runner.abort();
+            assert_eq!(row.state, JobState::Done, "{:?}", row.state);
+            let restored: crate::recovery::RecoveryCheckpoint =
+                serde_json::from_value(row.payload[RECOVERY_PAYLOAD_KEY].clone()).unwrap();
+            assert_eq!(restored.root, root);
+            assert_eq!(restored.workspace, workspace);
+            let result = row.result.unwrap();
+            let output_path = result.output_path.unwrap();
+            assert_eq!(std::fs::read(source).unwrap(), original);
+            assert_eq!(std::fs::read(&output_path).unwrap(), original);
+            let calls = std::fs::read_to_string(counter).unwrap();
+            assert_eq!(
+                calls.lines().filter(|line| *line == "acquisition").count(),
+                1
+            );
+            assert_eq!(
+                calls.lines().filter(|line| *line == "processing").count(),
+                2
+            );
+            assert!(output_path.ends_with("video.mp4"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reopened_title_cannot_escape_public_output_root() {
+        let bins = TempDir::new().unwrap();
+        let outer = TempDir::new().unwrap();
+        let out = outer.path().join("outputs");
+        std::fs::create_dir(&out).unwrap();
+        let counter = outer.path().join("counter");
+        write_fake(bins.path(), "yt-dlp", &recovery_fake(&counter));
+        let resolver = resolver_at(bins.path());
+        let req = request("https://youtube.com/watch?v=test", &out);
+        let id = JobId::new();
+        let recovery = ExtractRecovery::ephemeral();
+        assert!(dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            recovery.clone()
+        )
+        .await
+        .is_err());
+        for field in ["title", "extractor", "upload_date"] {
+            let mut checkpoint = serde_json::to_value(recovery.checkpoint().unwrap()).unwrap();
+            checkpoint[field] = serde_json::json!("../escaped");
+            let recovery = ExtractRecovery::new(Some(checkpoint), Arc::new(|_| Ok(()))).unwrap();
+            let result = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                id,
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery,
+            )
+            .await;
+            assert!(result.is_err(), "tampered public filename must fail closed");
+            assert!(!outer.path().join("escaped.mp4").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_changed_sources_and_metadata_before_spawn() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let counter = out.path().join("counter");
+        write_fake(bins.path(), "yt-dlp", &recovery_fake(&counter));
+        let resolver = resolver_at(bins.path());
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let id = JobId::new();
+        let recovery = ExtractRecovery::ephemeral();
+        assert!(dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            recovery.clone()
+        )
+        .await
+        .is_err());
+        let cp = recovery.checkpoint().unwrap();
+        let source = cp.file(&cp.sources[0].relative_path).unwrap();
+        let before = std::fs::read_to_string(&counter).unwrap();
+        for case in [
+            "schema",
+            "job",
+            "root",
+            "workspace",
+            "absolute",
+            "traversal",
+            "format",
+            "empty",
+            "truncated",
+            "mutated",
+            "missing",
+            "symlink",
+            "selector",
+            "audio",
+            "url",
+        ] {
+            let mut raw = serde_json::to_value(&cp).unwrap();
+            let mut request = req.clone();
+            std::fs::write(&source, b"completed original").unwrap();
+            match case {
+                "schema" => raw["version"] = serde_json::json!(99),
+                "job" => raw["job_id"] = serde_json::to_value(JobId::new()).unwrap(),
+                "root" => raw["root"] = serde_json::json!("/"),
+                "workspace" => raw["workspace"] = serde_json::json!("../other"),
+                "absolute" => raw["sources"][0]["relative_path"] = serde_json::json!(source),
+                "traversal" => {
+                    raw["sources"][0]["relative_path"] = serde_json::json!("../source.mp4")
+                }
+                "format" => raw["sources"][0]["format_id"] = serde_json::json!("different"),
+                "empty" => std::fs::write(&source, []).unwrap(),
+                "truncated" => std::fs::write(&source, b"short").unwrap(),
+                "mutated" => std::fs::write(&source, b"completed mutated!").unwrap(),
+                "missing" => std::fs::remove_file(&source).unwrap(),
+                "symlink" => {
+                    std::fs::remove_file(&source).unwrap();
+                    std::os::unix::fs::symlink(&counter, &source).unwrap();
+                }
+                "selector" => request.format = Some("other".into()),
+                "audio" => request.audio_only = true,
+                "url" => request.url.push('x'),
+                _ => unreachable!(),
+            }
+            let recovery = ExtractRecovery::new(Some(raw), Arc::new(|_| Ok(()))).unwrap();
+            let result = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                id,
+                &request,
+                JobSignals::new(),
+                None,
+                None,
+                recovery,
+            )
+            .await;
+            assert!(result.is_err(), "{case}: {result:?}");
+            assert_eq!(
+                std::fs::read_to_string(&counter).unwrap(),
+                before,
+                "{case} spawned a sidecar"
+            );
+            if std::fs::symlink_metadata(&source).is_ok() {
+                std::fs::remove_file(&source).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn active_crash_checkpoint_is_quarantined_without_reusing_or_deleting_sources() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let resolver = resolver_at(bins.path());
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let id = JobId::new();
+        let old = ExtractRecovery::ephemeral();
+        let cp = old.allocate(id, &req).unwrap();
+        let old_dir = cp.owned_directory().unwrap();
+        std::fs::write(old_dir.join("source.mp4"), b"uncertain old writer").unwrap();
+        old.set_writer(true).unwrap();
+        let resumed = ExtractRecovery::new(
+            Some(serde_json::to_value(old.checkpoint()).unwrap()),
+            Arc::new(|_| Ok(())),
+        )
+        .unwrap();
+        let result = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            resumed.clone(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(resumed.checkpoint().unwrap().workspace, cp.workspace);
+        assert_eq!(
+            std::fs::read(old_dir.join("source.mp4")).unwrap(),
+            b"uncertain old writer"
+        );
+        assert_eq!(std::fs::read(result.output_path).unwrap(), b"x");
+        assert!(old.cleanup().is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_cleanup_rejects_uncertain_or_forged_rows_and_preserves_neighbors() {
+        use crate::recovery::{cleanup_completed_recovery, RecoveryPhase, RECOVERY_PAYLOAD_KEY};
+        use goop_core::{Job, JobKind, JobState, ResultKind};
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let resolver = resolver_at(bins.path());
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let mut job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+        let recovery = ExtractRecovery::ephemeral();
+        let result = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            job.id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            recovery.clone(),
+        )
+        .await
+        .unwrap();
+        let cp = recovery.checkpoint().unwrap();
+        let directory = cp.root.join(&cp.workspace);
+        job.state = JobState::Done;
+        job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(&cp).unwrap();
+        job.result = Some(goop_core::JobResult {
+            output_path: Some(result.output_path.clone()),
+            bytes: Some(result.bytes),
+            duration_ms: 0,
+            result_kind: ResultKind::File,
+            file_count: 1,
+            source_bytes: None,
+            target_bytes: None,
+            reencoded: None,
+        });
+        for state in [
+            JobState::Paused,
+            JobState::Queued,
+            JobState::Running,
+            JobState::Error {
+                message: "failed".into(),
+                detail: None,
+            },
+        ] {
+            let mut row = job.clone();
+            row.state = state;
+            cleanup_completed_recovery(&row).unwrap();
+            assert!(directory.exists());
+        }
+        let mut non_extract = job.clone();
+        non_extract.kind = JobKind::Convert;
+        cleanup_completed_recovery(&non_extract).unwrap();
+        assert!(directory.exists());
+        for field in [
+            "writer",
+            "receipt",
+            "job",
+            "root",
+            "fingerprint",
+            "workspace",
+            "output",
+            "result",
+            "schema",
+        ] {
+            let mut row = job.clone();
+            let mut forged = cp.clone();
+            match field {
+                "writer" => forged.writer_active = true,
+                "receipt" => forged.phase = RecoveryPhase::OutputVerified,
+                "job" => forged.job_id = JobId::new(),
+                "root" => forged.root = bins.path().to_path_buf(),
+                "fingerprint" => forged.fingerprint = "wrong".into(),
+                "workspace" => forged.workspace = "../unrelated".into(),
+                "output" => forged.published_path = Some(directory.join("source.mp4")),
+                "result" => {
+                    row.result.as_mut().unwrap().output_path = Some("/unrelated.mp4".into())
+                }
+                "schema" => forged.version = 99,
+                _ => unreachable!(),
+            }
+            row.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(forged).unwrap();
+            assert!(
+                cleanup_completed_recovery(&row).is_err(),
+                "accepted forged {field}"
+            );
+            assert!(directory.exists());
+        }
+        let sibling = cp.root.join(".goop-extract-unrelated");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("keep"), b"sibling").unwrap();
+        let unrelated = cp.root.join("unrelated.part");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        std::os::unix::fs::symlink(&unrelated, directory.join("linked-artifact")).unwrap();
+        let held = cp.root.join("held-workspace");
+        std::fs::rename(&directory, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &directory).unwrap();
+        assert!(cleanup_completed_recovery(&job).is_err());
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&held, &directory).unwrap();
+        // Simulate interruption at an unlink boundary. Ownership must outlive
+        // every private media entry so the durable row can retry cleanup.
+        let mut entries: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        // Directory enumeration order is unspecified; exercise marker-first.
+        entries.sort_by_key(|path| match path.file_name().unwrap().to_str().unwrap() {
+            "owner.json" => 0,
+            "source.mp4" => 2,
+            _ => 1,
+        });
+        let interrupted = crate::recovery::unlink_owned_entries(&directory, entries, |path| {
+            if path.file_name().unwrap() == "owner.json" {
+                assert_eq!(
+                    std::fs::read_dir(&directory)?.count(),
+                    1,
+                    "ownership marker must be the last private entry removed"
+                );
+            }
+            if path.file_name().unwrap() == "source.mp4" {
+                return Err(std::io::Error::other("injected cleanup interruption"));
+            }
+            std::fs::remove_file(path)
+        });
+        assert!(interrupted.is_err());
+        assert!(directory.join("owner.json").is_file());
+        assert!(directory.join("source.mp4").is_file());
+        assert_eq!(
+            std::fs::read_dir(&directory).unwrap().count(),
+            2,
+            "earlier private entries were removed before the interruption"
+        );
+        cleanup_completed_recovery(&job).unwrap();
+        cleanup_completed_recovery(&job).unwrap();
+        assert!(!directory.exists());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep");
+        assert_eq!(std::fs::read(sibling.join("keep")).unwrap(), b"sibling");
+        assert_eq!(std::fs::read(result.output_path).unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn durable_done_cleans_exact_workspace_after_real_dispatch() {
+        use goop_core::{Job, JobKind, JobState, ResultKind};
+        use goop_queue::{QueueStore, Scheduler, WorkerFn};
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let db = TempDir::new().unwrap();
+        let resolver = Arc::new(resolver_at(bins.path()));
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let store = QueueStore::open(&db.path().join("queue.db")).unwrap();
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+        store.insert(&job).unwrap();
+        let persist_store = store.clone();
+        let worker: WorkerFn = Arc::new(move |id, payload, signals| {
+            let store = persist_store.clone();
+            let resolver = resolver.clone();
+            Box::pin(async move {
+                let recovery = ExtractRecovery::new(
+                    None,
+                    Arc::new(move |cp| {
+                        store.patch_payload_field(
+                            id,
+                            crate::recovery::RECOVERY_PAYLOAD_KEY,
+                            serde_json::to_value(cp).unwrap(),
+                        )
+                    }),
+                )?;
+                let result = dispatch_with_recovery(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    id,
+                    &serde_json::from_value(payload)?,
+                    signals,
+                    None,
+                    None,
+                    recovery,
+                )
+                .await?;
+                Ok(goop_core::JobResult {
+                    output_path: Some(result.output_path),
+                    bytes: Some(result.bytes),
+                    duration_ms: result.duration_ms,
+                    result_kind: ResultKind::File,
+                    file_count: 1,
+                    source_bytes: None,
+                    target_bytes: None,
+                    reencoded: None,
+                })
+            })
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let hook: goop_queue::CompletionHook = Arc::new(|job| {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::recovery::cleanup_completed_recovery(&job)
+                })
+                .await
+                .unwrap()
+            })
+        });
+        let scheduler = Scheduler::with_pids_and_completion(
+            store.clone(),
+            sink.clone(),
+            1,
+            1,
+            1,
+            1,
+            1,
+            worker.clone(),
+            worker.clone(),
+            worker.clone(),
+            worker.clone(),
+            worker,
+            Arc::new(goop_queue::SchedulerPidRegistry::new()),
+            Some(hook),
+        );
+        let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sink.queue.lock().iter().any(|e| e.state == JobState::Done) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let row = store.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(row.state, JobState::Done);
+        let cp: crate::recovery::RecoveryCheckpoint =
+            serde_json::from_value(row.payload[crate::recovery::RECOVERY_PAYLOAD_KEY].clone())
+                .unwrap();
+        assert!(
+            !cp.root.join(&cp.workspace).exists(),
+            "durable success must release its private media copies"
+        );
+        assert_eq!(
+            std::fs::read(row.result.unwrap().output_path.unwrap()).unwrap(),
+            b"x"
+        );
+    }
+
+    #[tokio::test]
+    async fn normalized_edge_dot_titles_publish_on_first_attempt_and_resumed_retry() {
+        for raw in ["... hello ...", " . . hello . . "] {
+            for retry in [false, true] {
+                let bins = TempDir::new().unwrap();
+                let out = TempDir::new().unwrap();
+                let counter = out.path().join("counter");
+                let script = if retry {
+                    recovery_fake(&counter)
+                } else {
+                    yt_dlp_succeeds(out.path())
+                };
+                write_fake(
+                    bins.path(),
+                    "yt-dlp",
+                    &script.replace(
+                        "\"title\":\"video\"",
+                        &format!("\"title\":{}", serde_json::to_string(raw).unwrap()),
+                    ),
+                );
+                let resolver = resolver_at(bins.path());
+                let req = request("https://youtube.com/watch?v=test", out.path());
+                let id = JobId::new();
+                let recovery = ExtractRecovery::ephemeral();
+                let first = dispatch_with_recovery(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    id,
+                    &req,
+                    JobSignals::new(),
+                    None,
+                    None,
+                    recovery.clone(),
+                )
+                .await;
+                let checkpoint = recovery.checkpoint().unwrap();
+                assert_eq!(
+                    checkpoint.owned_directory().unwrap(),
+                    checkpoint.root.join(&checkpoint.workspace)
+                );
+                assert_eq!(checkpoint.title, "hello");
+                let result = if retry {
+                    assert!(first.is_err());
+                    assert_eq!(checkpoint.sources.len(), 1);
+                    let resumed = ExtractRecovery::new(
+                        Some(serde_json::to_value(checkpoint).unwrap()),
+                        Arc::new(|_| Ok(())),
+                    )
+                    .unwrap();
+                    let result = dispatch_with_recovery(
+                        &resolver,
+                        Arc::new(RecordingSink::default()),
+                        id,
+                        &req,
+                        JobSignals::new(),
+                        None,
+                        None,
+                        resumed,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        std::fs::read_to_string(counter)
+                            .unwrap()
+                            .matches("acquisition")
+                            .count(),
+                        1
+                    );
+                    result
+                } else {
+                    first.unwrap()
+                };
+                assert_eq!(
+                    std::path::Path::new(&result.output_path)
+                        .file_name()
+                        .unwrap(),
+                    "hello.mp4"
+                );
+                assert_eq!(
+                    std::fs::read(result.output_path).unwrap(),
+                    if retry {
+                        b"completed original".as_slice()
+                    } else {
+                        b"x".as_slice()
+                    }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_budgets_long_utf8_and_composed_names_with_collisions() {
+        for (title, extractor, template) in [
+            ("界".repeat(100), "site".into(), None),
+            (
+                "a".repeat(150),
+                "b".repeat(150),
+                Some("%(title)s — %(extractor)s.%(ext)s"),
+            ),
+            ("CON".into(), "site".into(), None),
+            ("aux.backup".into(), "site".into(), None),
+            ("COM1".into(), "site".into(), None),
+            ("LPT9".into(), "site".into(), None),
+        ] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let resolver = resolver_at(bins.path());
+            let script = yt_dlp_succeeds(out.path()).replace(
+                "\"title\":\"video\"",
+                &format!(
+                    "\"title\":{},\"extractor\":{}",
+                    serde_json::to_string(&title).unwrap(),
+                    serde_json::to_string(&extractor).unwrap()
+                ),
+            );
+            write_fake(bins.path(), "yt-dlp", &script);
+            let mut req = request("https://youtube.com/watch?v=test", out.path());
+            req.output_template = template.map(str::to_owned);
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let result = dispatch(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    JobId::new(),
+                    &req,
+                    JobSignals::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let path = std::path::PathBuf::from(result.output_path);
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(
+                    name.len() <= 255,
+                    "filename exceeds portable byte budget: {}",
+                    name.len()
+                );
+                assert!(name.ends_with(".mp4"));
+                let device = name.split('.').next().unwrap().to_ascii_uppercase();
+                assert!(
+                    !["CON", "AUX", "COM1", "LPT9"].contains(&device.as_str()),
+                    "reserved device basename: {name}"
+                );
+                if !paths.is_empty() {
+                    assert!(name.ends_with(" (1).mp4"));
+                }
+                paths.push(path);
+            }
+            assert_ne!(paths[0], paths[1]);
+            for path in paths {
+                assert_eq!(std::fs::read(path).unwrap(), b"x");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_collision_preserves_symlink_and_concurrent_same_title_jobs() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let resolver = resolver_at(bins.path());
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        std::os::unix::fs::symlink("missing-target", out.path().join("video.mp4")).unwrap();
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let one = dispatch(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        );
+        let two = dispatch(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            JobId::new(),
+            &req,
+            JobSignals::new(),
+            None,
+        );
+        let (one, two) = tokio::join!(one, two);
+        let (one, two) = (one.unwrap(), two.unwrap());
+        assert_ne!(one.output_path, two.output_path);
+        assert_eq!(std::fs::read(one.output_path).unwrap(), b"x");
+        assert_eq!(std::fs::read(two.output_path).unwrap(), b"x");
+        assert_eq!(
+            std::fs::read_link(out.path().join("video.mp4")).unwrap(),
+            std::path::Path::new("missing-target")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_and_after_atomic_publication_respects_commit_authority() {
+        use crate::recovery::RecoveryPhase;
+        for after_commit in [false, true] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let resolver = resolver_at(bins.path());
+            write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+            let req = request("https://youtube.com/watch?v=test", out.path());
+            let signals = JobSignals::new();
+            let cancel = signals.cancel.clone();
+            let recovery = ExtractRecovery::new(
+                None,
+                Arc::new(move |cp| {
+                    if cp.phase
+                        == if after_commit {
+                            RecoveryPhase::Published
+                        } else {
+                            RecoveryPhase::OutputVerified
+                        }
+                    {
+                        cancel.cancel();
+                    }
+                    Ok(())
+                }),
+            )
+            .unwrap();
+            let result = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                JobId::new(),
+                &req,
+                signals,
+                None,
+                None,
+                recovery.clone(),
+            )
+            .await;
+            if after_commit {
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(std::fs::read(result.unwrap().output_path).unwrap(), b"x");
+            } else {
+                assert!(matches!(result, Err(GoopError::Cancelled)));
+                assert!(!out.path().join("video.mp4").exists());
+                let cp = recovery.checkpoint().unwrap();
+                assert!(
+                    !cp.root.join(cp.workspace).exists(),
+                    "cancel must clean its exact workspace after validation"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_publication_receipt_preserves_existing_output_on_recovery() {
+        use crate::recovery::RecoveryPhase;
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let resolver = resolver_at(bins.path());
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let id = JobId::new();
+        let recovery = ExtractRecovery::new(
+            None,
+            Arc::new(|cp| {
+                if cp.phase == RecoveryPhase::Published {
+                    return Err(GoopError::Queue("receipt write failed".into()));
+                }
+                Ok(())
+            }),
+        )
+        .unwrap();
+        let first = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            recovery.clone(),
+        )
+        .await
+        .unwrap();
+        let checkpoint = recovery.checkpoint().unwrap();
+        assert_eq!(checkpoint.phase, RecoveryPhase::OutputVerified);
+        let resumed = ExtractRecovery::new(
+            Some(serde_json::to_value(checkpoint).unwrap()),
+            Arc::new(|_| Ok(())),
+        )
+        .unwrap();
+        let second = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            resumed,
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            first.output_path, second.output_path,
+            "an interrupted receipt cannot authorize adopting a same-name file"
+        );
+        assert_eq!(std::fs::read(first.output_path).unwrap(), b"x");
+        assert_eq!(std::fs::read(second.output_path).unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_write_failure_prevents_spawn_or_publication() {
+        use crate::recovery::{ExtractRecovery, RecoveryCheckpoint, RecoveryPhase};
+        for fail_at in ["allocation", "writer", "source"] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let counter = out.path().join("counter");
+            write_fake(bins.path(), "yt-dlp", &recovery_fake(&counter));
+            let resolver = resolver_at(bins.path());
+            let persisted = Arc::new(std::sync::Mutex::new(None::<RecoveryCheckpoint>));
+            let durable = persisted.clone();
+            let recovery = ExtractRecovery::new(
+                None,
+                Arc::new(move |cp| {
+                    let refused = match fail_at {
+                        "allocation" => true,
+                        "writer" => cp.writer_active,
+                        "source" => !cp.sources.is_empty(),
+                        _ => unreachable!(),
+                    };
+                    if refused {
+                        return Err(GoopError::Queue(
+                            "injected database failure: payload update affected 0 rows".into(),
+                        ));
+                    }
+                    *durable.lock().unwrap() = Some(cp.clone());
+                    Ok(())
+                }),
+            )
+            .unwrap();
+            let req = request("https://youtube.com/watch?v=test", out.path());
+            let error = dispatch_with_recovery(
+                &resolver,
+                Arc::new(RecordingSink::default()),
+                JobId::new(),
+                &req,
+                JobSignals::new(),
+                None,
+                None,
+                recovery.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("injected database failure"));
+            let durable = persisted.lock().unwrap().clone();
+            assert_eq!(
+                serde_json::to_value(recovery.checkpoint()).unwrap(),
+                serde_json::to_value(&durable).unwrap(),
+                "refused writes must not advance the in-memory checkpoint"
+            );
+            if fail_at == "allocation" {
+                assert!(durable.is_none());
+            } else {
+                let checkpoint = durable.unwrap();
+                assert_eq!(checkpoint.phase, RecoveryPhase::Allocated);
+                assert!(checkpoint.sources.is_empty());
+                assert!(!checkpoint.writer_active);
+                assert!(checkpoint.published_path.is_none());
+            }
+            if fail_at != "source" {
+                assert!(
+                    !counter.exists(),
+                    "allocation and writer state must be durable before spawn"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(counter)
+                        .unwrap()
+                        .matches("acquisition")
+                        .count(),
+                    1
+                );
+            }
+            assert!(!out.path().join("video.mp4").exists());
+            assert!(
+                !std::fs::read_dir(out.path()).unwrap().any(|entry| {
+                    let name = entry.unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with(".goop-extract-") && name != "counter"
+                }),
+                "failed persistence must not publish an output"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_descendant_writer_and_cleans_only_owned_workspace() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let barrier = out.path().join("writer-count");
+        let unrelated = out.path().join("other.part");
+        std::fs::write(&unrelated, b"other").unwrap();
+        write_fake(
+            bins.path(),
+            "yt-dlp",
+            &format!(
+                r#"
+echo '__GOOP_PP__{{"status":"started","postprocessor":"Merger"}}' >&2
+(while :; do echo write >> '{}'; sleep 0.01; done) &
+wait
+"#,
+                barrier.display()
+            ),
+        );
+        let resolver = resolver_at(bins.path());
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let signals = JobSignals::new();
+        let recovery = ExtractRecovery::ephemeral();
+        let future = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            JobId::new(),
+            &req,
+            signals.clone(),
+            None,
+            None,
+            recovery.clone(),
+        );
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => panic!("premature result: {result:?}"),
+            _ = async { tokio::time::timeout(Duration::from_secs(3), async {
+                while !barrier.exists() { tokio::task::yield_now().await; }
+            }).await.unwrap(); } => {}
+        }
+        signals.cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut future)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(GoopError::Cancelled)), "{result:?}");
+        let count = std::fs::metadata(&barrier).unwrap().len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(std::fs::metadata(barrier).unwrap().len(), count);
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"other");
+        let cp = recovery.checkpoint().unwrap();
+        assert!(!cp.root.join(cp.workspace).exists());
+    }
 
     /// Bails out the way a locked or unreadable browser cookie DB does,
     /// but only when `--cookies-from-browser` is on the argv — so the
@@ -579,6 +2320,12 @@ exit 0
     };
 
     fn resolver_at(bins: &std::path::Path) -> BinaryResolver {
+        write_fake(bins, "ffmpeg", "exit 0\n");
+        write_fake(
+            bins,
+            "ffprobe",
+            "echo '{\"streams\":[{\"codec_type\":\"video\"},{\"codec_type\":\"audio\"}]}'\n",
+        );
         BinaryResolver::new(bins.to_path_buf())
     }
 
@@ -598,10 +2345,18 @@ exit 0
     /// that doesn't start with `[` and names an existing path). The path is
     /// baked in at write time rather than parsed off argv — the wrapper's
     /// flag spelling is not what these tests are about.
-    fn yt_dlp_succeeds(out: &std::path::Path) -> String {
-        let f = out.join("video.mp4");
-        let f = f.to_string_lossy();
-        format!("printf 'x' > '{f}'\necho '{f}'\nexit 0\n")
+    fn yt_dlp_succeeds(_out: &std::path::Path) -> String {
+        r#"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dir=$(dirname "$a"); fi
+  prev="$a"
+done
+printf 'x' > "$dir/source.mp4"
+printf '__GOOP_SOURCE__{"title":"video","format_id":"18","ext":"mp4","vcodec":"h264","acodec":"aac","filepath":"%s/source.mp4"}\n' "$dir"
+printf '__GOOP_FINAL__"%s/source.mp4"\n' "$dir"
+exit 0
+"#.into()
     }
 
     /// Appends one line per run, so a test can count spawns rather than
@@ -698,7 +2453,7 @@ exit 0
             &format!("{COOKIE_FAIL_WITH_COOKIES}{GALLERY_DL_WRITES_ONE_FILE}"),
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let req = request("https://example.com/x", out.path());
 
@@ -749,7 +2504,7 @@ exit 0
             "echo 'ERROR: Unsupported URL' >&2\nexit 1\n",
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let req = request("https://example.com/x", out.path());
 
@@ -817,7 +2572,7 @@ exit 0
             &format!("{COOKIE_FAIL_WITH_COOKIES}{GALLERY_DL_WRITES_ONE_FILE}"),
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         // One sink across both dispatches — the app-level sink outlives any
         // single job, which is exactly why the wrapper must not.
         let rec = Arc::new(RecordingSink::new());
@@ -893,7 +2648,7 @@ done
             &format!("{CLOSE_STDOUT_THEN_COOKIE_FAIL}{GALLERY_DL_WRITES_ONE_FILE}"),
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let req = request("https://example.com/x", out.path());
 
@@ -949,7 +2704,7 @@ done
             "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let mut req = request("https://example.com/x", out.path());
         // Isolate the decode path: no cookies, so nothing else can drive
@@ -1014,11 +2769,9 @@ done
             bins.path(),
             "yt-dlp",
             &format!(
-                "printf '%s/Caf\\351.mp4\\n' '{dir}'\n\
-                 printf 'x' > '{file}'\n\
-                 echo '{file}'\n\
-                 exit 0\n",
-                dir = out.path().display()
+                "printf '%s/Caf\\351.mp4\\n' '{dir}'\n{success}",
+                dir = out.path().display(),
+                success = yt_dlp_succeeds(out.path())
             ),
         );
         // Never reached: yt-dlp succeeds, and the IO error it used to
@@ -1030,7 +2783,7 @@ done
             "echo 'ERROR: the fallback extractor ran' >&2\nexit 1\n",
         );
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let mut req = request("https://example.com/x", out.path());
         // Isolate the decode path: no cookies, so nothing else can send
@@ -1050,7 +2803,8 @@ done
         .expect("the undecodable line must not end the run");
 
         assert_eq!(
-            outcome.output_path, file,
+            std::path::PathBuf::from(outcome.output_path),
+            std::fs::canonicalize(file).unwrap(),
             "the path printed after the bad line must still be the result"
         );
     }
@@ -1497,8 +3251,14 @@ done
             "the test needs gallery-dl to be tried first"
         );
 
+        let resolver = resolver_at(bins.path());
+        write_fake(
+            bins.path(),
+            "ffprobe",
+            "echo '{\"streams\":[{\"codec_type\":\"audio\"}]}'\n",
+        );
         let res = dispatch(
-            &resolver_at(bins.path()),
+            &resolver,
             rec.clone(),
             JobId::new(),
             &req,
@@ -1591,7 +3351,7 @@ done
             );
         });
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let rec = Arc::new(RecordingSink::new());
         let req = stale_request(out.path());
 
@@ -1643,7 +3403,7 @@ done
         );
         let (hook, calls) = hook_returning(Some(updated()), || {});
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let req = stale_request(out.path());
         let err = dispatch_with_update_hook(
             &resolver,
@@ -1674,7 +3434,7 @@ done
         let (bins, out, counter) = stale_yt_dlp();
         let (hook, calls) = hook_returning(None, || {});
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let req = stale_request(out.path());
         let err = dispatch_with_update_hook(
             &resolver,
@@ -1710,7 +3470,7 @@ done
         let (bins, out, counter) = stale_yt_dlp();
         let (hook, calls) = hook_returning(Some(updated()), || {});
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let req = stale_request(out.path());
         let err = dispatch_with_update_hook(
             &resolver,
@@ -1763,7 +3523,7 @@ done
         let to_cancel = signals.clone();
         let (hook, calls) = hook_returning(Some(updated()), move || to_cancel.cancel.cancel());
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let req = stale_request(out.path());
         let err = dispatch_with_update_hook(
             &resolver,
@@ -1823,7 +3583,7 @@ done
         let mut req = request("https://imgur.com/gallery/abc", out.path());
         req.cookies_from_browser = None;
 
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let err = dispatch_with_update_hook(
             &resolver,
             Arc::new(RecordingSink::new()),
@@ -1853,7 +3613,7 @@ done
     #[tokio::test]
     async fn without_a_hook_it_is_just_dispatch() {
         let (bins, out, counter) = stale_yt_dlp();
-        let resolver = BinaryResolver::new(bins.path().to_path_buf());
+        let resolver = resolver_at(bins.path());
         let req = stale_request(out.path());
         let err = dispatch_with_update_hook(
             &resolver,

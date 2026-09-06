@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import PresetChips from "@/features/presets/PresetChips";
 import PresetManager from "@/features/presets/PresetManager";
@@ -86,8 +86,8 @@ describe("PresetChips", () => {
       ],
     });
     render(<PresetChips kind="convert" onApply={() => {}} />);
-    expect(screen.getByRole("listitem", { name: "YouTube Upload" })).toBeDefined();
-    expect(screen.getByRole("listitem", { name: "Web Image" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "YouTube Upload" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Web Image" })).toBeDefined();
   });
 
   it("hides presets without a compress_mode on the Compress page", () => {
@@ -103,8 +103,8 @@ describe("PresetChips", () => {
       ],
     });
     render(<PresetChips kind="compress" onApply={() => {}} />);
-    expect(screen.queryByRole("listitem", { name: "YouTube Upload" })).toBeNull();
-    expect(screen.getByRole("listitem", { name: "Podcast MP3" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "YouTube Upload" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Podcast MP3" })).toBeDefined();
   });
 
   it("calls onApply with the full preset when a chip is clicked", async () => {
@@ -112,8 +112,45 @@ describe("PresetChips", () => {
     resetStore({ presets: [preset] });
     const onApply = vi.fn();
     render(<PresetChips kind="convert" onApply={onApply} />);
-    await userEvent.click(screen.getByRole("listitem", { name: "YouTube Upload" }));
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Upload" }));
     expect(onApply).toHaveBeenCalledWith(preset);
+  });
+
+  it("exposes named preset buttons in list items with native keyboard activation", async () => {
+    const preset = makePreset({
+      id: "gif-social",
+      name: "Social GIF",
+      target: "gif",
+      quality_preset: "balanced",
+      resolution_cap: "r720p",
+      compress_mode: { kind: "target_size_bytes", value: BigInt(8_000_000) },
+      metadata_policy: "strip_all",
+      gif_options: {
+        size_preset: "medium",
+        trim_start_ms: BigInt(1_000),
+        trim_end_ms: BigInt(5_000),
+      },
+      subtitle: { source_path: "/tmp/captions.srt", mode: "burn_in" },
+      is_builtin: true,
+      created_at: BigInt(1_800_000_000_000),
+    });
+    resetStore({ presets: [preset] });
+    const onApply = vi.fn();
+    const user = userEvent.setup();
+    render(<PresetChips kind="convert" onApply={onApply} />);
+
+    const list = screen.getByRole("list", { name: "Saved presets" });
+    expect(list.getAttribute("role")).toBe("list");
+    const items = within(list).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    const button = within(items[0]).getByRole("button", { name: preset.name });
+
+    button.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+
+    expect(onApply).toHaveBeenNthCalledWith(1, preset);
+    expect(onApply).toHaveBeenNthCalledWith(2, preset);
   });
 });
 

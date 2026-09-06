@@ -397,3 +397,35 @@ describe("refreshJobs", () => {
     expect(jobs[0].state).toBe("queued");
   });
 });
+
+describe("Extract progress authority", () => {
+  it("ignores late terminal progress and clears the old attempt on requeue", () => {
+    const id = "00000000-0000-7000-8000-000000000001";
+    const job = makeJob(id, "running");
+    useAppStore.setState({ jobs: [job], progressById: {} });
+    const event = { job_id: id, percent: 100, stage: "downloading", eta_secs: 3n, speed_hr: "1 MiB/s", encoder: null };
+    useAppStore.getState().applyProgress(event);
+    useAppStore.getState().applyQueue({ job_id: id, state: "done", result: null });
+    useAppStore.getState().applyProgress({ ...event, stage: "merging" });
+    expect(useAppStore.getState().progressById[id]?.stage).not.toBe("merging");
+    useAppStore.getState().applyQueue({ job_id: id, state: "queued", result: null });
+    expect(useAppStore.getState().progressById[id]).toBeUndefined();
+  });
+});
+
+it("publishes only successful queue snapshot request generations and ignores older responses", async () => {
+ let resolve!: (jobs: Job[]) => void;
+ vi.mocked(api.queue.list).mockReturnValueOnce(new Promise(done => {resolve = done;}));
+ const older = useAppStore.getState().refreshJobs();
+ const started = useAppStore.getState().queueRequestGeneration;
+ vi.mocked(api.queue.list).mockResolvedValueOnce([makeJob("new")]);
+ await useAppStore.getState().refreshJobs();
+ const successful = useAppStore.getState().queueSnapshotGeneration;
+ expect(successful).toBeGreaterThan(started);
+ resolve([]); await older;
+ expect(useAppStore.getState().jobs.map(job => job.id)).toEqual(["new"]);
+ expect(useAppStore.getState().queueSnapshotGeneration).toBe(successful);
+ vi.mocked(api.queue.list).mockRejectedValueOnce(new Error("offline"));
+ await expect(useAppStore.getState().refreshJobs()).rejects.toThrow("offline");
+ expect(useAppStore.getState().queueSnapshotGeneration).toBe(successful);
+});

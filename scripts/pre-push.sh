@@ -12,7 +12,7 @@ if [[ "${FORCE_FAIL:-0}" == "1" ]]; then
 fi
 
 # Preflight: required tools must be present, else fail closed (never fail open).
-for tool in cargo npm; do
+for tool in cargo npm node; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "[goop] required tool '$tool' not found — cannot run quality gate; blocking push." >&2
     exit 1
@@ -42,6 +42,11 @@ run_step "tsc typecheck"     npm run --silent typecheck
 # pages.yml without a single check running against it.
 run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
+run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  run_step "macOS baselines" node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
+fi
 
 if [[ "$fail" != "0" ]]; then
   echo "[goop] Pre-push gate blocked push. Fix issues above."

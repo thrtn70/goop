@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, imageRecompress } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -23,7 +23,7 @@ function ImageRecompressFlow({ files, onDone }: ImageRecompressFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [quality, setQuality] = useWorkspaceDraftState<number>("ImageRecompressFlow.quality", DEFAULT_QUALITY);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageRecompressFlow.error", null);
 
   const canApply = !busy && files.length > 0;
 

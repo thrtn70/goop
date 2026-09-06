@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
@@ -28,7 +29,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
   const [positions, setPositions] = useWorkspaceDraftState<number[]>("PdfInsertBlankFlow.positions", []);
   const [draft, setDraft] = useWorkspaceDraftState<string>("PdfInsertBlankFlow.draft", "");
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfInsertBlankFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,7 +44,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
     return () => {
       cancelled = true;
     };
-  }, [file]);
+  }, [file, setError]);
 
   function addPosition() {
     const n = Number(draft);

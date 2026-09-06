@@ -2,6 +2,7 @@ pub mod app_update;
 pub mod commands;
 pub mod events;
 pub mod logging;
+mod performance;
 mod startup_cleanup;
 pub mod state;
 pub mod thumbnail;
@@ -29,6 +30,11 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
 pub fn run() {
+    let started = std::time::Instant::now();
+    let performance = performance::PerformanceState::new(
+        std::env::var_os("GOOP_STARTUP_REPORT").map(PathBuf::from),
+        started,
+    );
     // Installs stderr AND a daily rolling file under `data_dir()/logs`. The
     // writer thread is owned by the module for the whole process; see
     // `logging::flush`, which every exit path below has to call because
@@ -53,6 +59,7 @@ pub fn run() {
         }));
     }
     let result = builder
+        .manage(performance)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -271,6 +278,13 @@ pub fn run() {
                 let store = store_for_extract.clone();
                 let updates = updates_for_extract.clone();
                 Box::pin(async move {
+                    let recovery_store = store.clone();
+                    let recovery = goop_extractor::recovery::ExtractRecovery::new(
+                        payload.get(goop_extractor::recovery::RECOVERY_PAYLOAD_KEY).cloned(),
+                        Arc::new(move |checkpoint| {
+                            persist_job_payload_field(&recovery_store, id, goop_extractor::recovery::RECOVERY_PAYLOAD_KEY, serde_json::to_value(checkpoint)?)
+                        }),
+                    )?;
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     // Debrid context rides along only when a key is set.
@@ -329,7 +343,7 @@ pub fn run() {
                     // network failures with backoff. Downloads honor both
                     // signals: cancel deletes partials, pause keeps them
                     // for resume.
-                    let outcome = goop_extractor::dispatch_with_update_hook(
+                    let outcome = goop_extractor::dispatch_with_recovery(
                         &r,
                         s,
                         id,
@@ -337,6 +351,7 @@ pub fn run() {
                         signals,
                         debrid,
                         Some(hook),
+                        recovery,
                     )
                     .await?;
                     Ok(JobResult {
@@ -501,7 +516,7 @@ pub fn run() {
             // can land later if user feedback suggests image ops need a
             // distinct budget (e.g. RAW decoding is heavier than typical
             // convert jobs).
-            let scheduler = Scheduler::with_pids(
+            let scheduler = Scheduler::with_pids_and_completion(
                 store.clone(),
                 sink.clone(),
                 settings.extract_concurrency,
@@ -515,6 +530,10 @@ pub fn run() {
                 image_worker,
                 metadata_worker,
                 pid_registry,
+                Some(Arc::new(|job| Box::pin(async move {
+                    tokio::task::spawn_blocking(move || goop_extractor::recovery::cleanup_completed_recovery(&job))
+                        .await.map_err(|e| goop_core::GoopError::Queue(e.to_string()))?
+                }))),
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
             // so spawn the worker loops on Tauri's own async runtime.
@@ -583,6 +602,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            performance::performance_status,
+            performance::performance_ready,
             commands::preview::generate_preview,
             commands::preview::cancel_preview,
             commands::convert::convert_probe,

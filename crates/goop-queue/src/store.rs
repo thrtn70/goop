@@ -103,22 +103,28 @@ impl QueueStore {
             JobState::Error { detail, .. } => detail.as_ref(),
             _ => None,
         };
-        c.execute(
-            "UPDATE jobs SET state = ?2, result = ?3,
+        let updated = c
+            .execute(
+                "UPDATE jobs SET state = ?2, result = ?3,
                 started_at = COALESCE(?4, started_at),
                 finished_at = COALESCE(?5, finished_at),
                 error_detail = ?6
              WHERE id = ?1",
-            params![
-                id.0.to_string(),
-                state_to_str(state),
-                result.and_then(|r| serde_json::to_string(r).ok()),
-                started_at,
-                finished_at,
-                error_detail,
-            ],
-        )
-        .map_err(|e| GoopError::Queue(e.to_string()))?;
+                params![
+                    id.0.to_string(),
+                    state_to_str(state),
+                    result.and_then(|r| serde_json::to_string(r).ok()),
+                    started_at,
+                    finished_at,
+                    error_detail,
+                ],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if updated != 1 {
+            return Err(GoopError::Queue(
+                "job state was not persisted: expected exactly one row".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -242,6 +248,45 @@ impl QueueStore {
         } else {
             Err(GoopError::Queue(format!("job not found: {id:?}")))
         }
+    }
+
+    /// Patch one internal field while holding the same write transaction used
+    /// to read it, so independent recovery callbacks cannot erase each other.
+    pub fn patch_payload_field(
+        &self,
+        id: JobId,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), GoopError> {
+        let mut connection = self.conn.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let raw: String = tx
+            .query_row(
+                "SELECT payload FROM jobs WHERE id = ?1",
+                params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| GoopError::Queue(format!("cannot read job {id:?}: {e}")))?;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| GoopError::Queue(e.to_string()))?;
+        payload
+            .as_object_mut()
+            .ok_or_else(|| GoopError::Queue("extract payload is not an object".into()))?
+            .insert(key.into(), value);
+        let updated = tx
+            .execute(
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+                params![id.0.to_string(), payload.to_string()],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if updated != 1 {
+            return Err(GoopError::Queue(format!(
+                "cannot persist payload field {key} for job {id:?}: update affected {updated} rows"
+            )));
+        }
+        tx.commit().map_err(|e| GoopError::Queue(e.to_string()))
     }
 
     /// Yield a running job back to the queue with a wake-up deadline: the
@@ -763,6 +808,14 @@ mod tests {
         (s, d)
     }
 
+    #[test]
+    fn missing_job_state_update_cannot_claim_persistence() {
+        let (store, _dir) = temp_store();
+        assert!(store
+            .update_state(JobId::new(), &JobState::Done, None, 1)
+            .is_err());
+    }
+
     /// Persisting a failure keeps the raw detail alongside the friendly
     /// message, and hands both back on every read path.
     #[test]
@@ -1008,6 +1061,71 @@ mod tests {
         s.insert(&b).unwrap();
         let n = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(n.id, b.id);
+    }
+
+    #[test]
+    fn payload_field_patches_preserve_concurrent_fields_and_reopened_retry() {
+        let (store, tmp) = temp_store();
+        let mut job = Job::new(JobKind::Extract, serde_json::json!({"url":"original"}));
+        job.state = JobState::Running;
+        store.insert(&job).unwrap();
+        std::thread::scope(|scope| {
+            for index in 0..16 {
+                let store = &store;
+                let id = job.id;
+                scope.spawn(move || {
+                    store
+                        .patch_payload_field(id, &format!("field{index}"), serde_json::json!(index))
+                        .unwrap()
+                });
+            }
+        });
+        let payload = store.get_by_id(job.id).unwrap().unwrap().payload;
+        assert_eq!(payload.as_object().unwrap().len(), 17);
+        let path = tmp.path().join("q.db");
+        drop(store);
+        let store = QueueStore::open(&path).unwrap();
+        store.reconcile().unwrap();
+        store.retry_errored(job.id).unwrap();
+        assert_eq!(store.get_by_id(job.id).unwrap().unwrap().payload, payload);
+    }
+
+    #[test]
+    fn payload_field_patch_rejects_ignored_update_without_advancing_durable_state() {
+        let (store, tmp) = temp_store();
+        let job = Job::new(
+            JobKind::Extract,
+            serde_json::json!({
+                "url": "original", "_extract_recovery": {"phase": "allocated"}
+            }),
+        );
+        store.insert(&job).unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse_payload BEFORE UPDATE OF payload ON jobs
+             BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        let error = store
+            .patch_payload_field(
+                job.id,
+                "_extract_recovery",
+                serde_json::json!({"phase": "sources_complete"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot persist payload field"));
+        assert_eq!(
+            store.get_by_id(job.id).unwrap().unwrap().payload,
+            job.payload
+        );
+        drop(store);
+        let reopened = QueueStore::open(&tmp.path().join("q.db")).unwrap();
+        assert_eq!(
+            reopened.get_by_id(job.id).unwrap().unwrap().payload,
+            job.payload
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ import { useAppStore } from "@/store/appStore";
  * Ctrl on Windows automatically.
  *
  * Other hotkeys live where they're scoped:
- *   - `$mod+Shift+Q` toggles the queue sidebar (`useQueueHotkey`)
+ *   - `Cmd/Ctrl+J` toggles the queue sidebar (`useQueueHotkey`)
  *   - `Space` opens Quick View (HistoryGrid / HistoryList row handlers)
  *   - Modal-internal `Escape` is handled by each modal
  */

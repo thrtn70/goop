@@ -138,7 +138,7 @@ function stateInfo(name: StateName): { glyph: string; label: string } {
     case "paused":
       return { glyph: "⏸", label: "Paused" };
     case "done":
-      return { glyph: "\u2713", label: "Completed" };
+      return { glyph: "\u2713", label: "Ready" };
     case "error":
       return { glyph: "!", label: "Failed" };
     case "cancelled":
@@ -188,6 +188,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const name = stateName(job.state);
   const pct = progress?.percent ?? 0;
+  const finishing = job.kind === "extract" && /^(merging|converting|processing|validating|saving)$/.test(progress?.stage ?? "");
   // Spring-settle the ETA so it doesn't jitter "12s … 11s … 13s" on
   // every progress event. Pause settles too — when paused the underlying
   // value is null, which the hook surfaces as null without trying to
@@ -310,8 +311,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
     setMenuOpen(false);
     try {
       await api.queue.moveToTop(job.id);
-      const jobs = await api.queue.list();
-      useAppStore.setState({ jobs });
+      await useAppStore.getState().refreshJobs();
     } catch (err) {
       enqueueToast({
         variant: "error",
@@ -384,6 +384,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
         >
           <span title={stateInfo(name).label}>{stateInfo(name).glyph}</span> {shortLabel(job)}
         </span>
+        {name === "done" && job.kind === "extract" && outputPath && <span className="text-xs text-fg-muted">Ready</span>}
         {name === "running" && (
           <div className="flex shrink-0 items-center gap-1">
             {isPausable(job) && (
@@ -537,7 +538,8 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           <div className={clsx("mt-1 flex items-center gap-2", name === "paused" && "opacity-50")}>
             <div
               role="progressbar"
-              aria-valuenow={Math.round(pct)}
+              aria-valuenow={finishing ? undefined : Math.round(pct)}
+              aria-valuetext={finishing ? progress?.stage : undefined}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-label={`${shortLabel(job)} progress`}
@@ -549,7 +551,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
                   name === "paused" ? "bg-fg-muted" : "bg-accent",
                 )}
                 style={{
-                  transform: `scaleX(${pct / 100})`,
+                  transform: `scaleX(${finishing ? 1 : pct / 100})`,
                   transition: `transform var(--duration-normal) var(--ease-out)`,
                 }}
               >
@@ -588,7 +590,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
              *  slots (no event for the job yet); `.stage` is
              *  non-nullable on the wire so no inner optional chain is
              *  needed. */}
-            {progress?.stage.startsWith("downloaded ") ||
+            {finishing ? <span>{progress?.stage}</span> : progress?.stage.startsWith("downloaded ") ||
             (name === "running" && progress?.stage.startsWith("retrying")) ? (
               <span>
                 {progress.stage.startsWith("retrying")

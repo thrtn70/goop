@@ -1,0 +1,121 @@
+{
+  "bricolage-grotesque": {
+    "package": "@fontsource-variable/bricolage-grotesque",
+    "version": "5.3.0",
+    "registry_tarball": "https://registry.npmjs.org/@fontsource-variable/bricolage-grotesque/-/bricolage-grotesque-5.3.0.tgz",
+    "tarball_sha256": "6e99e0d844f7bc152bb3b007f9b1493c53e60cc0744cc681bb744e0b5f14665e",
+    "metadata": {
+      "id": "bricolage-grotesque",
+      "family": "Bricolage Grotesque",
+      "subsets": [
+        "latin",
+        "latin-ext",
+        "vietnamese"
+      ],
+      "weights": [
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ],
+      "styles": [
+        "normal"
+      ],
+      "defSubset": "latin",
+      "variable": {
+        "opsz": {
+          "default": "14",
+          "min": "12",
+          "max": "96",
+          "step": "0.1"
+        },
+        "wdth": {
+          "default": "100",
+          "min": "75",
+          "max": "100",
+          "step": "0.1"
+        },
+        "wght": {
+          "default": "400",
+          "min": "200",
+          "max": "800",
+          "step": "1"
+        }
+      },
+      "lastModified": "2025-09-11",
+      "version": "v9",
+      "category": "sans-serif",
+      "license": {
+        "type": "OFL-1.1",
+        "url": "https://openfontlicense.org",
+        "attribution": "Copyright 2022 The Bricolage Grotesque Project Authors (https://github.com/ateliertriay/bricolage)"
+      },
+      "source": "https://github.com/google/fonts",
+      "type": "google"
+    },
+    "files_sha256": {
+      "bricolage-grotesque-vietnamese-opsz-normal.woff2": "b50a9d90a5264f20d1e45be0b948fe947ddb3644557f1e85ef5d3bd06427c944",
+      "bricolage-grotesque-latin-ext-opsz-normal.woff2": "776f6dcaf03636cd69a5802c94808cc8896c0a66c8e9ce0fe147231b6ee01957",
+      "bricolage-grotesque-latin-opsz-normal.woff2": "a79fdb52d4a5c76552452f69202add96e287401fff03d3e8c0e38b4dcb5a99cd"
+    }
+  },
+  "figtree": {
+    "package": "@fontsource-variable/figtree",
+    "version": "5.3.0",
+    "registry_tarball": "https://registry.npmjs.org/@fontsource-variable/figtree/-/figtree-5.3.0.tgz",
+    "tarball_sha256": "745eb850be26774948b5aa9342b7182660ed3a48ac40509c7babcfdcd90c39d7",
+    "metadata": {
+      "id": "figtree",
+      "family": "Figtree",
+      "subsets": [
+        "latin",
+        "latin-ext"
+      ],
+      "weights": [
+        300,
+        400,
+        500,
+        600,
+        700,
+        800,
+        900
+      ],
+      "styles": [
+        "italic",
+        "normal"
+      ],
+      "defSubset": "latin",
+      "variable": {
+        "ital": {
+          "default": "0",
+          "min": "0",
+          "max": "1",
+          "step": "1"
+        },
+        "wght": {
+          "default": "400",
+          "min": "300",
+          "max": "900",
+          "step": "1"
+        }
+      },
+      "lastModified": "2025-09-11",
+      "version": "v9",
+      "category": "sans-serif",
+      "license": {
+        "type": "OFL-1.1",
+        "url": "https://openfontlicense.org",
+        "attribution": "Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree) Figtree-Italic[wght].ttf: Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)"
+      },
+      "source": "https://github.com/google/fonts",
+      "type": "google"
+    },
+    "files_sha256": {
+      "figtree-latin-ext-wght-normal.woff2": "bf7828e2c258cffcfa50a048ee388a36b95bc16b452e8d36fa797635dbe15965",
+      "figtree-latin-wght-normal.woff2": "4ba7d3d096695818fe0686be4f1e82c6b05134e18a22260336130335027462dd"
+    }
+  }
+}

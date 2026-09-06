@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
@@ -79,7 +80,7 @@ function PdfFlow({
   const [ranges, setRanges] = useWorkspaceDraftState<PageRange[]>("PdfFlow.ranges", []);
   const [quality, setQuality] = useWorkspaceDraftState<PdfQuality>("PdfFlow.quality", "ebook");
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfFlow." + op + ".error", null);
   const multiFile = files.length > 1;
 
   // Auto-switch operation when the file count changes so we never land in
@@ -114,7 +115,7 @@ function PdfFlow({
     return () => {
       cancelled = true;
     };
-  }, [files]);
+  }, [files, setError]);
 
   async function handleRun() {
     if (files.length === 0) return;
