@@ -5,6 +5,7 @@ pub mod encoders;
 pub mod ffmpeg;
 pub mod image_app_icon;
 pub mod image_crop;
+pub mod image_operation;
 pub mod image_recompress;
 pub mod image_resize;
 pub mod image_rotate;
@@ -26,3 +27,5 @@ pub use imagemagick::ImageMagickBackend;
 pub use naming::{allocate_output_path, stem_of};
 pub use probe_json::parse_probe_json;
 pub use progress::{ProgressSnapshot, ProgressTracker};
+
+pub mod preview;

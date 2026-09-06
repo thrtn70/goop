@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   open: vi.fn(),
   save: vi.fn(),
+  preset: null as import("@/types").Preset | null,
 }));
 vi.mock("@/ipc/commands", () => ({
   api: {
@@ -31,7 +32,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@/features/convert/DropZone", () => ({
   default: ({ children }: { children: React.ReactNode }) => children,
 }));
-vi.mock("@/features/presets/PresetChips", () => ({ default: () => null }));
+vi.mock("@/features/presets/PresetChips", () => ({ default: ({onApply}:{onApply:(preset:import("@/types").Preset)=>void}) => mocks.preset ? <button onClick={()=>onApply(mocks.preset!)}>Apply test preset</button> : null }));
 vi.mock("@/features/presets/PresetSaveDialog", () => ({ default: () => null }));
 const inspection = {
   probe: {
@@ -64,6 +65,7 @@ const inspection = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.preset = null;
   mocks.inspect.mockResolvedValue(inspection);
   mocks.open.mockResolvedValue(["/a.mp4"]);
   mocks.save.mockResolvedValue("/out.mp4");
@@ -497,3 +499,34 @@ for (const tool of ["convert", "compress"] as const) {
     );
   }
 }
+
+for (const tool of ["convert", "compress"] as const) {
+  it(`${tool} appends a completed-file handoff to unfinished drafts without enqueueing`, async () => {
+    clearWorkspaceDrafts(tool);
+    const view = render(page(tool));
+    fireEvent.click(screen.getByRole("button", {name:/add files/i}));
+    await screen.findByText("a.mp4");
+    view.unmount();
+    const handoff = {id:"transfer-1",sourceJobId:"finished-job",path:"/b.mp4",destination:tool};
+    render(<MemoryRouter initialEntries={[{pathname:"/"+tool,state:{handoff}}]}>{tool === "convert" ? <ConvertPage/> : <CompressPage/>}</MemoryRouter>);
+    await screen.findByText("b.mp4");
+    expect(screen.getAllByText("a.mp4").length).toBeGreaterThan(0);
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+    await waitFor(()=>expect(mocks.inspect).toHaveBeenCalledWith("/b.mp4"));
+  });
+}
+
+it("convert presets preserve metadata and subtitle intent in every batch request", async () => {
+  clearWorkspaceDrafts("convert");
+  mocks.open.mockResolvedValue(["/a.mp4","/b.mp4"]);
+  mocks.preset = {target:"mp4",quality_preset:"small",resolution_cap:"r720p",metadata_policy:"strip_all",subtitle:{source_path:"/captions.srt",mode:"soft"},gif_options:null} as import("@/types").Preset;
+  render(page("convert"));
+  fireEvent.click(screen.getByRole("button",{name:/add files/i}));
+  await screen.findByText("b.mp4");
+  fireEvent.click(screen.getByRole("button",{name:"Apply test preset"}));
+  const run = screen.getByRole("button",{name:/Convert 2 files/i});
+  await waitFor(()=>expect((run as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(run);
+  await waitFor(()=>expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+  for (const [request] of mocks.enqueue.mock.calls) expect(request).toMatchObject({target:"mp4",quality_preset:"small",resolution_cap:"r720p",metadata_policy:"strip_all",subtitle:{source_path:"/captions.srt",mode:"soft"}});
+});

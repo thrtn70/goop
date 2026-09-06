@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import type { Job } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { api } from "@/ipc/commands";
+import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
 import PreviewContent from "./PreviewContent";
 
 /**
@@ -20,15 +21,11 @@ export default function PreviewPanel() {
   const job = jobs.find((j) => jobIdKey(j.id) === selectedId) ?? null;
   if (!job) return null;
 
-  function handleConvertAgain(j: Job) {
-    const outputPath = j.result?.output_path;
-    if (!outputPath) return;
-    // Pre-fill Convert with the output file + a reasonable default target
-    // (the prior target was part of the ConvertRequest payload; the fresh
-    // Convert page will probe and pick a new default).
-    nav("/convert", { state: { prefill: { path: outputPath } } });
+  function handleHandoff(j: Job, destination: HandoffDestination) {
+    const handoff = createHandoff(j, destination);
+    if (!handoff) return;
+    nav("/" + destination, { state: { handoff } });
   }
-
   function handleReveal(path: string) {
     void api.queue.reveal(path);
   }
@@ -52,7 +49,8 @@ export default function PreviewPanel() {
       <PreviewContent
         job={job}
         variant="panel"
-        onConvertAgain={handleConvertAgain}
+        onConvertAgain={job => handleHandoff(job, "convert")}
+        onCompress={job => handleHandoff(job, "compress")}
         onReveal={handleReveal}
       />
     </aside>

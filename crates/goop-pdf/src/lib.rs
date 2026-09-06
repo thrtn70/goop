@@ -1,6 +1,7 @@
 //! PDF operations for Goop. Merge and split are pure-Rust via `lopdf`;
 //! compress shells out to a bundled Ghostscript sidecar. All functions are
-//! sync + blocking — callers run them on `spawn_blocking`.
+//! available as low-level transforms. Queued jobs use `operation::run`, which
+//! owns staging, cancellation, complete output validation and publication.
 
 pub mod compress;
 pub mod delete_pages;
@@ -13,6 +14,7 @@ pub mod merge;
 pub mod metadata;
 pub mod ocr;
 pub mod ocr_image;
+pub mod operation;
 pub mod page_thumbs;
 pub mod probe;
 pub mod range_parser;
@@ -29,6 +31,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PdfError {
+    #[error("cancelled")]
+    Cancelled,
     #[error("pdf parse error: {0}")]
     Parse(String),
     #[error("pdf write error: {0}")]
@@ -58,6 +62,29 @@ pub enum PdfError {
 
 impl From<PdfError> for GoopError {
     fn from(e: PdfError) -> Self {
-        GoopError::Queue(e.to_string())
+        match e {
+            PdfError::Cancelled => GoopError::Cancelled,
+            other => GoopError::Queue(other.to_string()),
+        }
+    }
+}
+
+impl From<GoopError> for PdfError {
+    fn from(error: GoopError) -> Self {
+        match error {
+            GoopError::Cancelled => Self::Cancelled,
+            other => Self::Write(other.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    #[test]
+    fn pdf_cancellation_remains_typed() {
+        assert!(matches!(
+            goop_core::GoopError::from(super::PdfError::Cancelled),
+            goop_core::GoopError::Cancelled
+        ));
     }
 }

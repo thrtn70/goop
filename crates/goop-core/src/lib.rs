@@ -10,6 +10,7 @@ pub mod image;
 pub mod instance;
 pub mod job;
 pub mod metadata;
+pub mod output;
 pub mod path;
 pub mod pdf;
 pub mod preset;
@@ -45,3 +46,6 @@ pub use preset::Preset;
 pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};
 pub use signals::{Interrupt, JobSignals};
 pub use update::UpdateInfo;
+
+pub mod preview;
+pub use preview::{PreviewKind, PreviewRequest, PreviewResult};

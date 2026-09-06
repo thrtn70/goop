@@ -557,7 +557,7 @@ fn plan_extract_audio(acodec: Option<&str>) -> Plan {
 // Quality preset mappings
 // ---------------------------------------------------------------------------
 
-fn h264_preset(q: QualityPreset) -> (&'static str, &'static str) {
+pub(crate) fn h264_preset(q: QualityPreset) -> (&'static str, &'static str) {
     match q {
         QualityPreset::Original | QualityPreset::Balanced => ("medium", "23"),
         QualityPreset::Fast => ("ultrafast", "28"),

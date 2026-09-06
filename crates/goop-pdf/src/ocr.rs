@@ -75,7 +75,7 @@ pub async fn ocr(
     // expose TIFF output; PNG is the universal intermediate tesseract
     // accepts.)
     if cancel.is_cancelled() {
-        return Err(PdfError::Ocr("cancelled before raster".into()));
+        return Err(PdfError::Cancelled);
     }
     let raster_template = work.join("page-%d.png");
     let mut draw = Command::new(&mutool_bin.path);
@@ -88,7 +88,7 @@ pub async fn ocr(
         .arg(OCR_RASTER_DPI.to_string())
         .arg("--")
         .arg(input);
-    let mut draw_child = draw.spawn().map_err(PdfError::Io)?;
+    let mut draw_child = draw.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
     let _draw_guard = match (pids.as_ref(), job_id, draw_child.id()) {
         (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
         _ => None,
@@ -105,7 +105,7 @@ pub async fn ocr(
         _ = cancel.cancelled() => {
             let _ = draw_child.start_kill();
             let _ = draw_child.wait().await;
-            return Err(PdfError::Ocr("cancelled during raster".into()));
+            return Err(PdfError::Cancelled);
         }
     }
     drop(_draw_guard);
@@ -144,7 +144,7 @@ pub async fn ocr(
     let mut page_pdfs: Vec<PathBuf> = Vec::with_capacity(rasters.len());
     for raster in &rasters {
         if cancel.is_cancelled() {
-            return Err(PdfError::Ocr("cancelled during ocr".into()));
+            return Err(PdfError::Cancelled);
         }
         let stem = raster
             .file_stem()
@@ -169,7 +169,7 @@ pub async fn ocr(
             .arg(lang)
             .arg("-c")
             .arg("tessedit_create_pdf=1");
-        let mut tess_child = tess.spawn().map_err(PdfError::Io)?;
+        let mut tess_child = tess.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
         let _tess_guard = match (pids.as_ref(), job_id, tess_child.id()) {
             (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
             _ => None,
@@ -187,7 +187,7 @@ pub async fn ocr(
             _ = cancel.cancelled() => {
                 let _ = tess_child.start_kill();
                 let _ = tess_child.wait().await;
-                return Err(PdfError::Ocr("cancelled during ocr".into()));
+                return Err(PdfError::Cancelled);
             }
         }
         let page_pdf = work.join(format!("{stem}-ocr.pdf"));

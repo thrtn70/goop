@@ -9,26 +9,14 @@ pub mod ytdlp_auto_update;
 
 use events::TauriSink;
 use goop_config as cfg;
-use goop_converter::{
-    detect_encoders, image_app_icon as image_app_icon_mod, image_crop as image_crop_mod,
-    image_recompress as image_recompress_mod, image_resize as image_resize_mod,
-    image_rotate as image_rotate_mod, image_watermark as image_watermark_mod, ConversionBackend,
-    FfmpegBackend, ImageMagickBackend,
-};
+use goop_converter::{detect_encoders, ConversionBackend, FfmpegBackend, ImageMagickBackend};
 use goop_core::{
     path as gpath, ConvertRequest, EventSink, GoopError, ImageOperation, JobResult,
     MetadataOperation, PdfOperation, PidRegistry, ProgressEvent, ResultKind,
 };
 use goop_extractor::debrid::PARTIAL_ARTIFACTS_PAYLOAD_KEY;
 use goop_extractor::ytdlp::ExtractRequest;
-use goop_pdf::{
-    compress as pdf_compress, delete_pages as pdf_delete_pages,
-    extract_images as pdf_extract_images, extract_pages as pdf_extract_pages,
-    extract_text as pdf_extract_text, images_to_pdf as pdf_images_to_pdf,
-    insert_blank as pdf_insert_blank, merge as pdf_merge, metadata as pdf_metadata,
-    ocr as pdf_ocr_mod, ocr_image as pdf_ocr_image, recognize as pdf_recognize,
-    reorder as pdf_reorder, rotate as pdf_rotate, split as pdf_split,
-};
+
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
 use startup_cleanup::{cleanup_orphaned_downloads, persist_job_payload_field};
@@ -352,6 +340,9 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        source_bytes: None,
+                        target_bytes: None,
+                        reencoded: None,
                         output_path: Some(outcome.output_path),
                         bytes: Some(outcome.bytes),
                         duration_ms: outcome.duration_ms,
@@ -399,6 +390,9 @@ pub fn run() {
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
+                        source_bytes: res.source_bytes,
+                        target_bytes: res.target_bytes,
+                        reencoded: Some(res.reencoded),
                         output_path: Some(res.output_path),
                         bytes: Some(res.bytes),
                         duration_ms: res.duration_ms,
@@ -408,579 +402,29 @@ pub fn run() {
                 })
             });
 
-            // Real PDF worker: deserialize the op, run merge/split on a
-            // blocking thread (lopdf is sync), or dispatch compress to the
-            // async Ghostscript helper. `JobResult.output_path` for Split
-            // points at the output directory since there are N files rather
-            // than one — the UI formats the directory reveal-in-OS that way.
+            // Engine runners own staging, cancellation and final measurements.
             let r_for_pdf = resolver.clone();
             let gs_dir_for_pdf = gs_resource_dir.clone();
             let pids_for_pdf = pid_registry.clone();
             let tessdata_user_for_pdf = tessdata_user_dir.clone();
             let tessdata_bundled_for_pdf = tessdata_bundled_dir.clone();
             let pdf_worker: WorkerFn = Arc::new(move |id, payload, signals| {
-                let r = r_for_pdf.clone();
-                let gs_dir = gs_dir_for_pdf.clone();
-                let pids = pids_for_pdf.clone();
-                let tessdata_user = tessdata_user_for_pdf.clone();
-                let tessdata_bundled = tessdata_bundled_for_pdf.clone();
+                let context = goop_pdf::operation::Context {
+                    resolver: r_for_pdf.clone(), gs_dir: gs_dir_for_pdf.clone(),
+                    pids: pids_for_pdf.clone(), tessdata_user: tessdata_user_for_pdf.clone(),
+                    tessdata_bundled: tessdata_bundled_for_pdf.clone(), id,
+                };
                 Box::pin(async move {
-                    // External-tool PDF ops pause via the PID registry, so
-                    // only the cancel token threads down.
-                    let cancel = signals.cancel;
                     let op: PdfOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad pdf payload: {e}")))?;
-                    let started = std::time::Instant::now();
-                    let (output_path, bytes, result_kind, file_count) = match op {
-                        PdfOperation::Merge {
-                            inputs,
-                            output_path,
-                        } => {
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let input_paths: Vec<PathBuf> =
-                                    inputs.into_iter().map(PathBuf::from).collect();
-                                let input_refs: Vec<&std::path::Path> =
-                                    input_paths.iter().map(|p| p.as_path()).collect();
-                                pdf_merge::merge(&input_refs, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::Split {
-                            input,
-                            ranges,
-                            output_dir,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let dir = PathBuf::from(output_dir);
-                            let dir_for_task = dir.clone();
-                            let outputs = tokio::task::spawn_blocking(move || {
-                                pdf_split::split(&in_path, &ranges, &dir_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes: u64 = outputs
-                                .iter()
-                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                                .sum();
-                            // Report the output directory — Folder result_kind
-                            // tells the UI to render "Open folder" instead of
-                            // "Reveal" and to show the file count.
-                            (
-                                Some(dir.to_string_lossy().into_owned()),
-                                Some(bytes),
-                                ResultKind::Folder,
-                                outputs.len() as u32,
-                            )
-                        }
-                        PdfOperation::Compress {
-                            input,
-                            output_path,
-                            quality,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            pdf_compress::compress(
-                                &r,
-                                gs_dir.as_deref(),
-                                &in_path,
-                                &out,
-                                quality,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::ExtractPages {
-                            input,
-                            ranges,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_extract_pages::extract_pages(&in_path, &ranges, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::DeletePages {
-                            input,
-                            pages,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_delete_pages::delete_pages(&in_path, &pages, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::InsertBlank {
-                            input,
-                            positions,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_insert_blank::insert_blank(&in_path, &positions, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::SetMetadata {
-                            input,
-                            metadata,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_metadata::set_metadata(&in_path, &metadata, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::Rotate {
-                            input,
-                            rotations,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_rotate::rotate(&in_path, &rotations, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::Reorder {
-                            input,
-                            order,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                pdf_reorder::reorder(&in_path, &order, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        // Remaining v0.2.4 stubs — replaced in Phases 4-7.
-                        // Error messages use the snake_case wire discriminator so log
-                        // scrapers can match against the same string they see on the IPC.
-                        PdfOperation::ExtractText { input, output_path } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            pdf_extract_text::extract_text(
-                                &r,
-                                &in_path,
-                                &out,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::ExtractImages {
-                            input,
-                            output_dir,
-                            format,
-                            dpi,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out_dir = PathBuf::from(output_dir);
-                            let outs = pdf_extract_images::extract_images(
-                                &r,
-                                &in_path,
-                                &out_dir,
-                                format,
-                                dpi,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            let total_bytes: u64 = outs
-                                .iter()
-                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                                .sum();
-                            (
-                                Some(out_dir.to_string_lossy().into_owned()),
-                                Some(total_bytes),
-                                ResultKind::Folder,
-                                outs.len() as u32,
-                            )
-                        }
-                        PdfOperation::ImagesToPdf {
-                            inputs,
-                            output_path,
-                        } => {
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                let in_paths: Vec<PathBuf> =
-                                    inputs.into_iter().map(PathBuf::from).collect();
-                                let refs: Vec<&std::path::Path> =
-                                    in_paths.iter().map(|p| p.as_path()).collect();
-                                pdf_images_to_pdf::images_to_pdf(&refs, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))?
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::PdfOcr {
-                            input,
-                            output_path,
-                            lang,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let mut dirs: Vec<&std::path::Path> = vec![tessdata_user.as_path()];
-                            if let Some(b) = tessdata_bundled.as_ref() {
-                                dirs.push(b.as_path());
-                            }
-                            pdf_ocr_mod::ocr(
-                                &r,
-                                &dirs,
-                                &in_path,
-                                &out,
-                                &lang,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::ImageOcr {
-                            inputs,
-                            output_path,
-                            output_kind,
-                            lang,
-                        } => {
-                            let out = PathBuf::from(output_path);
-                            let in_paths: Vec<PathBuf> =
-                                inputs.into_iter().map(PathBuf::from).collect();
-                            let in_refs: Vec<&std::path::Path> =
-                                in_paths.iter().map(|p| p.as_path()).collect();
-                            let mut dirs: Vec<&std::path::Path> = vec![tessdata_user.as_path()];
-                            if let Some(b) = tessdata_bundled.as_ref() {
-                                dirs.push(b.as_path());
-                            }
-                            pdf_ocr_image::ocr_image(
-                                &r,
-                                &dirs,
-                                &in_refs,
-                                &out,
-                                output_kind,
-                                &lang,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                        PdfOperation::RecognizeText {
-                            input,
-                            output_path,
-                            output_kind,
-                            lang,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let mut dirs: Vec<&std::path::Path> = vec![tessdata_user.as_path()];
-                            if let Some(b) = tessdata_bundled.as_ref() {
-                                dirs.push(b.as_path());
-                            }
-                            let (_out, method) = pdf_recognize::recognize_text(
-                                &r,
-                                &dirs,
-                                &in_path,
-                                &out,
-                                output_kind,
-                                &lang,
-                                cancel,
-                                Some(pids),
-                                Some(id),
-                            )
-                            .await
-                            .map_err(GoopError::from)?;
-                            tracing::info!(?method, "recognize_text routed input");
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (
-                                Some(out.to_string_lossy().into_owned()),
-                                bytes,
-                                ResultKind::File,
-                                1u32,
-                            )
-                        }
-                    };
-                    Ok(JobResult {
-                        output_path,
-                        bytes,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                        result_kind,
-                        file_count,
-                    })
+                    goop_pdf::operation::run(op, context, signals.cancel).await
                 })
             });
-
-            // Phase 4 (v0.2.5) image worker. Rotate + Resize land here.
-            // Crop / Watermark / Recompress / AppIcon variants still return a
-            // clear "not yet implemented" error so the queue surface signals
-            // progress instead of silently succeeding or panicking — they're
-            // wired up in Phases 5–7.
-            let image_worker: WorkerFn = Arc::new(move |_id, payload, _signals| {
+            let image_worker: WorkerFn = Arc::new(move |_id, payload, signals| {
                 Box::pin(async move {
                     let op: ImageOperation = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad image payload: {e}")))?;
-                    let started = std::time::Instant::now();
-                    let (output_path, bytes) = match op {
-                        ImageOperation::Rotate {
-                            input,
-                            degrees,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                image_rotate_mod::rotate(&in_path, degrees, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
-                        }
-                        ImageOperation::Resize {
-                            input,
-                            width,
-                            height,
-                            mode,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                image_resize_mod::resize(
-                                    &in_path,
-                                    width,
-                                    height,
-                                    mode,
-                                    &out_for_task,
-                                )
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
-                        }
-                        ImageOperation::Crop {
-                            input,
-                            rect,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                image_crop_mod::crop(&in_path, rect, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
-                        }
-                        ImageOperation::Watermark {
-                            input,
-                            spec,
-                            output_path,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out = PathBuf::from(output_path);
-                            let out_for_task = out.clone();
-                            tokio::task::spawn_blocking(move || {
-                                image_watermark_mod::watermark(&in_path, &spec, &out_for_task)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let bytes = std::fs::metadata(&out).map(|m| m.len()).ok();
-                            (Some(out.to_string_lossy().into_owned()), bytes)
-                        }
-                        ImageOperation::Recompress {
-                            inputs,
-                            output_dir,
-                            quality,
-                        } => {
-                            let out_dir = PathBuf::from(output_dir);
-                            let out_for_task = out_dir.clone();
-                            let outputs = tokio::task::spawn_blocking(move || {
-                                let in_paths: Vec<PathBuf> =
-                                    inputs.into_iter().map(PathBuf::from).collect();
-                                let refs: Vec<&std::path::Path> =
-                                    in_paths.iter().map(|p| p.as_path()).collect();
-                                image_recompress_mod::recompress(&refs, &out_for_task, quality)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let total_bytes: u64 = outputs
-                                .iter()
-                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                                .sum();
-                            // Recompress is the first image op to produce
-                            // a folder result. Same shape as the PDF
-                            // ExtractImages branch above.
-                            return Ok(JobResult {
-                                output_path: Some(out_dir.to_string_lossy().into_owned()),
-                                bytes: Some(total_bytes),
-                                duration_ms: started.elapsed().as_millis() as u64,
-                                result_kind: ResultKind::Folder,
-                                file_count: outputs.len() as u32,
-                            });
-                        }
-                        ImageOperation::AppIcon {
-                            input,
-                            output_dir,
-                            platforms,
-                        } => {
-                            let in_path = PathBuf::from(input);
-                            let out_dir = PathBuf::from(output_dir);
-                            let out_for_task = out_dir.clone();
-                            let outputs = tokio::task::spawn_blocking(move || {
-                                image_app_icon_mod::app_icon(&in_path, &out_for_task, &platforms)
-                            })
-                            .await
-                            .map_err(|e| GoopError::Queue(e.to_string()))??;
-                            let total_bytes: u64 = outputs
-                                .iter()
-                                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                                .sum();
-                            return Ok(JobResult {
-                                output_path: Some(out_dir.to_string_lossy().into_owned()),
-                                bytes: Some(total_bytes),
-                                duration_ms: started.elapsed().as_millis() as u64,
-                                result_kind: ResultKind::Folder,
-                                file_count: outputs.len() as u32,
-                            });
-                        }
-                    };
-                    Ok(JobResult {
-                        output_path,
-                        bytes,
-                        duration_ms: started.elapsed().as_millis() as u64,
-                        result_kind: ResultKind::File,
-                        file_count: 1,
-                    })
+                    goop_converter::image_operation::run(op, signals.cancel).await
                 })
             });
 
@@ -1039,6 +483,9 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        source_bytes: None,
+                        target_bytes: None,
+                        reencoded: None,
                         output_path,
                         bytes: None,
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -1116,6 +563,8 @@ pub fn run() {
             }
 
             let thumbs = ThumbnailService::new(gpath::data_dir(), gs_resource_dir.clone());
+            goop_converter::preview::cleanup_stale_sessions(&gpath::data_dir().join("previews"))?;
+            app.manage(goop_converter::preview::PreviewService::new(gpath::data_dir().join("previews")));
             app.manage(AppState {
                 resolver,
                 store,
@@ -1134,6 +583,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::preview::generate_preview,
+            commands::preview::cancel_preview,
             commands::convert::convert_probe,
             commands::convert::convert_capabilities,
             commands::convert::convert_inspect,

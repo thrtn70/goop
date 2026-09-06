@@ -1,3 +1,4 @@
+import { outputSummary } from "@/features/preview/outputSummary";
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import type { Job, JobState, TargetFormat } from "@/types";
@@ -447,6 +448,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           </button>
         )}
       </div>
+      {name === "done" && outputSummary(job.result) && <p className="mt-1 text-xs text-fg-secondary">{outputSummary(job.result)}</p>}
       {failure && (
         <div className="mt-1 space-y-1">
           <div className="truncate text-xs text-error/80" title={failure.message}>

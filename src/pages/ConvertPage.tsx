@@ -1,3 +1,4 @@
+import SettingsPreview from "@/features/preview/SettingsPreview";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
@@ -15,6 +16,7 @@ import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect } from "react";
+import { readHandoff } from "@/features/workspace/handoff";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -111,18 +113,21 @@ function ConvertPage() {
   // Seed a FileRow from the pre-fill so the user arrives ready-to-edit.
   useEffect(() => {
     const state = location.state as { prefill?: { path: string } } | null;
-    if (!state?.prefill?.path) return;
-    const path = state.prefill.path;
+    const handoff = readHandoff(location.state, "convert");
+    const path = handoff?.path ?? state?.prefill?.path;
+    if (typeof path !== "string" || !path) return;
     if (isPdf(path)) {
       setPdfs((prev) => (prev.includes(path) ? prev : [...prev, path]));
     } else {
+      const identity = newIdentity();
+      setSelectedId(files.find(f => f.path === path)?.id ?? identity.id);
       setFiles((prev) =>
         prev.some((f) => f.path === path)
           ? prev
           : [
               ...prev,
               {
-                ...newIdentity(),
+                ...identity,
                 path,
                 target: "mp4" as TargetFormat,
                 sourceDir: dirname(path),
@@ -137,7 +142,7 @@ function ConvertPage() {
     }
     // Clear the navigation state so a back/forward doesn't re-seed.
     nav(location.pathname, { replace: true, state: null });
-  }, [location, nav, setFiles, setPdfs]);
+  }, [location, nav, setFiles, setPdfs, setSelectedId, files]);
 
   const addPaths = useCallback(
     (paths: string[]) => {
@@ -230,11 +235,13 @@ function ConvertPage() {
           target: preset.target,
           gifOptions:
             preset.target === "gif"
-              ? (f.gifOptions ?? defaultGifOptions())
+              ? (preset.gif_options ?? defaultGifOptions())
               : null,
           // Both are Convert-register fields on the preset, and both used to
           // be dropped here — so a chip named "YouTube Upload" changed the
           // container and nothing else, leaving a 4K source 4K.
+          metadataPolicy: preset.metadata_policy ?? "preserve",
+          subtitle: preset.subtitle ?? null,
           qualityPreset: preset.quality_preset,
           resolutionCap: preset.resolution_cap,
         })),
@@ -251,14 +258,12 @@ function ConvertPage() {
         i === 0
           ? f
           : {
-              // `subtitle` is deliberately not copied: it points at one
-              // specific file's subtitle track, which is almost never the
-              // right one for the rest of the batch.
               ...f,
               revision: (f.revision ?? 0) + 1,
               optionsReady: true,
               target: head.target,
               gifOptions: head.gifOptions,
+              subtitle: head.subtitle,
               metadataPolicy: head.metadataPolicy,
               qualityPreset: head.qualityPreset,
               resolutionCap: head.resolutionCap,
@@ -349,6 +354,10 @@ function ConvertPage() {
                   selected.id && handleOptionsChange(selected.id, opts)
                 }
               />
+              <SettingsPreview request={{input_path:selected.path,target:selected.target,
+                quality_preset:selected.qualityPreset,resolution_cap:selected.resolutionCap,
+                compress_mode:null,metadata_policy:selected.metadataPolicy,
+                subtitle:selected.subtitle,gif_options:selected.gifOptions}}/>
             </WorkspaceDraftProvider>
           ) : (
             <p className="text-sm text-fg-secondary">

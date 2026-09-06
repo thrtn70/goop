@@ -11,3 +11,5 @@ pub mod settings;
 pub mod sidecar;
 pub mod thumbnail;
 pub mod update;
+
+pub mod preview;

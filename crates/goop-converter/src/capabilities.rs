@@ -102,6 +102,7 @@ pub fn capabilities_for(probe: &ProbeResult) -> ConversionCapabilities {
                 Some("The first subtitle stream is bitmap-based or unknown. Text extraction requires a supported text subtitle stream; bitmap subtitles need OCR.".into())
             } else { None };
             TargetCapability {
+                compression: Some(compression_for(target)),
                 target,
                 available: reason.is_none(),
                 reason,

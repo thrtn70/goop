@@ -30,8 +30,8 @@ fn pdf_settings_flag(q: PdfQuality) -> &'static str {
 /// (e.g. tests, or call sites that don't go through the queue).
 ///
 /// Ghostscript writes everything to a single output file — no incremental
-/// output, so no streamed progress is available. We emit a cancellation
-/// check only at start/end for this reason.
+/// output, so no streamed progress is available. Cancellation interrupts and
+/// reaps the child; completed output is published without replacing files.
 #[allow(clippy::too_many_arguments)]
 pub async fn compress(
     resolver: &BinaryResolver,
@@ -43,14 +43,20 @@ pub async fn compress(
     pids: Option<Arc<dyn PidRegistry>>,
     job_id: Option<JobId>,
 ) -> Result<(), PdfError> {
+    if cancel.is_cancelled() {
+        return Err(PdfError::Cancelled);
+    }
     let bin = resolver
         .resolve("gs")
         .map_err(|e| PdfError::Ghostscript(format!("gs binary not found: {e}")))?;
 
     if cancel.is_cancelled() {
-        return Err(PdfError::Ghostscript("cancelled before start".into()));
+        return Err(PdfError::Cancelled);
     }
 
+    let destination = goop_core::output::OutputDestination::explicit(output.to_path_buf());
+    let staged = goop_core::output::StagedOutput::new(output)?;
+    let output = staged.path();
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -68,10 +74,10 @@ pub async fn compress(
         .arg("-dBATCH")
         .arg(gs_output_arg(output))
         .arg(input)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(PdfError::Io)?;
+    let mut child = cmd.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
     // Phase G: register the gs child PID for pause/resume. RAII guard
     // unregisters on Drop (covers success, error, cancel, panic).
     let _pid_guard = match (pids.as_ref(), job_id, child.id()) {
@@ -79,28 +85,48 @@ pub async fn compress(
         _ => None,
     };
 
-    tokio::select! {
-        status = child.wait() => {
-            let status = status.map_err(PdfError::Io)?;
-            if !status.success() {
-                let stderr = match child.stderr.take() {
-                    Some(mut s) => {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let _ = s.read_to_end(&mut buf).await;
-                        String::from_utf8_lossy(&buf).into_owned()
-                    }
-                    None => String::new(),
-                };
-                return Err(PdfError::Ghostscript(stderr));
+    use tokio::io::AsyncReadExt;
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let mut tail = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut stderr_done = false;
+    let status = loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let _ = child.start_kill(); let _ = child.wait().await;
+                return Err(PdfError::Cancelled);
+            }
+            status = child.wait() => break status?,
+            count = stderr.read(&mut buffer), if !stderr_done => {
+                let count = count?;
+                stderr_done = count == 0;
+                append_tail(&mut tail, &buffer[..count]);
             }
         }
-        _ = cancel.cancelled() => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return Err(PdfError::Ghostscript("cancelled".into()));
+    };
+    let drain = async {
+        while !stderr_done {
+            let count = stderr.read(&mut buffer).await?;
+            stderr_done = count == 0;
+            if stderr_done {
+                break;
+            }
+            append_tail(&mut tail, &buffer[..count]);
         }
+        Ok::<(), std::io::Error>(())
+    };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(PdfError::Cancelled),
+        _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain) => {},
     }
+    if !status.success() {
+        return Err(PdfError::Ghostscript(
+            String::from_utf8_lossy(&tail).into_owned(),
+        ));
+    }
+    staged.publish(&destination, None, false, &cancel)?;
     Ok(())
 }
 
@@ -124,6 +150,13 @@ fn gs_generic_resource_dir_arg(gs_resource_dir: &Path) -> String {
         "-sGenericResourceDir={}/",
         gs_resource_dir.join("Resource").display()
     )
+}
+
+fn append_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
+    tail.extend_from_slice(bytes);
+    if tail.len() > 8192 {
+        tail.drain(..tail.len() - 8192);
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +248,59 @@ mod tests {
         .await
         .expect("the bundled gs must succeed for this ignored test");
         assert!(output.exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reliability_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture(body: &str) -> (tempfile::TempDir, BinaryResolver) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("gs");
+        std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_path_buf());
+        (dir, resolver)
+    }
+    #[tokio::test]
+    async fn ghostscript_failure_keeps_original() {
+        let (dir,resolver)=fixture("for arg do case $arg in -sOutputFile=*) out=${arg#-sOutputFile=};; esac; done; printf partial > \"$out\"; exit 1");
+        let output = dir.path().join("out.pdf");
+        std::fs::write(&output, b"original").unwrap();
+        assert!(compress(
+            &resolver,
+            None,
+            &dir.path().join("input.pdf"),
+            &output,
+            PdfQuality::Screen,
+            CancellationToken::new(),
+            None,
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(output).unwrap(), b"original");
+    }
+    #[tokio::test]
+    async fn ghostscript_large_stderr_does_not_deadlock() {
+        let (dir, resolver) = fixture("dd if=/dev/zero bs=65536 count=8 >&2 2>/dev/null; exit 1");
+        let output = dir.path().join("out.pdf");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            compress(
+                &resolver,
+                None,
+                &dir.path().join("input.pdf"),
+                &output,
+                PdfQuality::Screen,
+                CancellationToken::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(_))));
+        assert!(!output.exists());
     }
 }

@@ -33,6 +33,24 @@ pub fn app_icon(
     output_dir: &Path,
     platforms: &[IconPlatform],
 ) -> Result<Vec<PathBuf>, GoopError> {
+    app_icon_cancellable(
+        input,
+        output_dir,
+        platforms,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+pub(crate) fn app_icon_cancellable(
+    input: &Path,
+    output_dir: &Path,
+    platforms: &[IconPlatform],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<PathBuf>, GoopError> {
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+
     if platforms.is_empty() {
         return Err(GoopError::SubprocessFailed {
             binary: "image".into(),
@@ -62,6 +80,9 @@ pub fn app_icon(
     let mut wrote_web = false;
 
     for platform in platforms {
+        if cancel.is_cancelled() {
+            return Err(GoopError::Cancelled);
+        }
         // Idempotency: if the caller passes `[Macos, Macos]` we still
         // do it once; the second pass is a no-op rather than an
         // overwrite-and-no-progress confusing result.
@@ -196,6 +217,20 @@ mod tests {
         img.save(path).unwrap();
     }
 
+    #[test]
+    fn cancelled_batch_does_not_start() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            app_icon_cancellable(
+                Path::new("missing.png"),
+                Path::new("unused"),
+                &[IconPlatform::Web],
+                &cancel
+            ),
+            Err(GoopError::Cancelled)
+        ));
+    }
     #[test]
     fn icns_output_has_apple_magic_bytes() {
         let dir = tmp_dir("icns");

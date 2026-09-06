@@ -84,6 +84,16 @@ pub enum ResultKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct JobResult {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub target_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reencoded: Option<bool>,
+
     pub output_path: Option<String>,
     pub bytes: Option<u64>,
     pub duration_ms: u64,
@@ -150,6 +160,17 @@ fn chrono_now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_result_has_unknown_measurements() {
+        let result: JobResult = serde_json::from_value(
+            serde_json::json!({"output_path":"out", "bytes":10,"duration_ms":1}),
+        )
+        .unwrap();
+        assert_eq!(result.source_bytes, None);
+        assert_eq!(result.target_bytes, None);
+        assert_eq!(result.reencoded, None);
+    }
 
     #[test]
     fn job_id_is_unique_and_time_sortable() {

@@ -13,6 +13,24 @@ pub fn split(
     ranges: &[PageRange],
     output_dir: &Path,
 ) -> Result<Vec<PathBuf>, PdfError> {
+    split_cancellable(
+        input,
+        ranges,
+        output_dir,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+pub(crate) fn split_cancellable(
+    input: &Path,
+    ranges: &[PageRange],
+    output_dir: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<PathBuf>, PdfError> {
+    if cancel.is_cancelled() {
+        return Err(PdfError::Cancelled);
+    }
+
     if ranges.is_empty() {
         return Err(PdfError::Range("no ranges provided".into()));
     }
@@ -25,6 +43,9 @@ pub fn split(
 
     let mut outputs = Vec::with_capacity(ranges.len());
     for range in ranges {
+        if cancel.is_cancelled() {
+            return Err(PdfError::Cancelled);
+        }
         let mut doc = Document::load(input).map_err(|e| PdfError::Parse(e.to_string()))?;
         let pages = doc.get_pages();
         let keep: std::collections::BTreeSet<u32> = (range.start..=range.end).collect();
@@ -84,6 +105,20 @@ mod tests {
         doc.save(path).unwrap();
     }
 
+    #[test]
+    fn cancelled_batch_does_not_start() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            split_cancellable(
+                Path::new("missing.pdf"),
+                &[PageRange { start: 1, end: 1 }],
+                Path::new("unused"),
+                &cancel
+            ),
+            Err(PdfError::Cancelled)
+        ));
+    }
     #[test]
     fn split_five_pages_into_two_ranges() {
         let tmp = tempfile::tempdir().unwrap();

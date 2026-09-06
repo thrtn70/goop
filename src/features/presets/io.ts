@@ -6,7 +6,7 @@
  * across machines.
  */
 
-import type { CompressMode, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 
 /** Current bundle schema version. Bump when the shape changes. */
 export const PRESET_BUNDLE_VERSION = 1 as const;
@@ -76,6 +76,9 @@ interface PresetEntry {
   quality_preset: QualityPreset | null;
   resolution_cap: ResolutionCap | null;
   compress_mode: CompressMode | null;
+  metadata_policy: MetadataPolicy | null;
+  gif_options: GifOptions | null;
+  subtitle: SubtitleOptions | null;
 }
 
 function compressModeForWire(m: CompressMode | null): WireCompressMode | null {
@@ -104,6 +107,9 @@ interface PresetBundleWire {
     quality_preset: QualityPreset | null;
     resolution_cap: ResolutionCap | null;
     compress_mode: WireCompressMode | null;
+    metadata_policy: MetadataPolicy | null;
+    gif_options: GifOptions | null;
+    subtitle: SubtitleOptions | null;
   }>;
 }
 
@@ -119,9 +125,12 @@ export function serializePresets(presets: readonly Preset[]): string {
       quality_preset: p.quality_preset,
       resolution_cap: p.resolution_cap,
       compress_mode: compressModeForWire(p.compress_mode),
+      metadata_policy: p.metadata_policy ?? null,
+      gif_options: p.gif_options ?? null,
+      subtitle: p.subtitle ?? null,
     })),
   };
-  return JSON.stringify(bundle, null, 2);
+  return JSON.stringify(bundle, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value, 2);
 }
 
 export class PresetParseError extends Error {
@@ -143,10 +152,10 @@ function validateCompressMode(v: unknown): CompressMode | null {
   if (v.kind === "lossless_reoptimize") {
     return { kind: "lossless_reoptimize" };
   }
-  if (v.kind === "quality" && typeof v.value === "number") {
+  if (v.kind === "quality" && typeof v.value === "number" && Number.isInteger(v.value) && v.value >= 1 && v.value <= 100) {
     return { kind: "quality", value: v.value };
   }
-  if (v.kind === "target_size_bytes" && typeof v.value === "number") {
+  if (v.kind === "target_size_bytes" && typeof v.value === "number" && Number.isSafeInteger(v.value) && v.value > 0) {
     // Bundle stores number; the IPC boundary converts back to bigint.
     return {
       kind: "target_size_bytes",
@@ -154,6 +163,28 @@ function validateCompressMode(v: unknown): CompressMode | null {
     } as CompressMode;
   }
   throw new PresetParseError(`unsupported compress_mode kind: ${String(v.kind)}`);
+}
+
+function validateMetadata(value: unknown): MetadataPolicy | null {
+  if (value == null) return null;
+  if (value === "preserve" || value === "strip_all") return value;
+  throw new PresetParseError("metadata_policy is not recognized");
+}
+function validateGif(value: unknown): GifOptions | null {
+  if (value == null) return null;
+  if (!isObject(value) || typeof value.size_preset !== "string" || !["small", "medium", "large"].includes(value.size_preset)) throw new PresetParseError("invalid gif_options");
+  const start = value.trim_start_ms ?? null;
+  const end = value.trim_end_ms ?? null;
+  for (const trim of [start, end]) {
+    if (trim !== null && (typeof trim !== "number" || !Number.isSafeInteger(trim) || trim < 0)) throw new PresetParseError("GIF trim must be nonnegative whole milliseconds");
+  }
+  if (end !== null && Number(end) <= Number(start ?? 0)) throw new PresetParseError("GIF end must follow start");
+  return { size_preset: value.size_preset, trim_start_ms: start, trim_end_ms: end } as GifOptions;
+}
+function validateSubtitle(value: unknown): SubtitleOptions | null {
+  if (value == null) return null;
+  if (!isObject(value) || typeof value.source_path !== "string" || !value.source_path.trim() || typeof value.mode !== "string" || !["soft", "burn_in"].includes(value.mode)) throw new PresetParseError("invalid subtitle settings");
+  return { source_path: value.source_path, mode: value.mode } as SubtitleOptions;
 }
 
 function validateEntry(v: unknown, index: number): PresetEntry {
@@ -192,6 +223,9 @@ function validateEntry(v: unknown, index: number): PresetEntry {
     quality_preset: (v.quality_preset as QualityPreset | null | undefined) ?? null,
     resolution_cap: (v.resolution_cap as ResolutionCap | null | undefined) ?? null,
     compress_mode: validateCompressMode(v.compress_mode),
+    metadata_policy: validateMetadata(v.metadata_policy),
+    gif_options: validateGif(v.gif_options),
+    subtitle: validateSubtitle(v.subtitle),
   };
 }
 
@@ -246,6 +280,9 @@ export function entriesToPresets(
       quality_preset: entry.quality_preset,
       resolution_cap: entry.resolution_cap,
       compress_mode: entry.compress_mode,
+      metadata_policy: entry.metadata_policy,
+      gif_options: entry.gif_options,
+      subtitle: entry.subtitle,
       is_builtin: false,
       // i64 in Rust ↔ bigint in TS; the IPC layer converts to a wire number.
       created_at: BigInt(Date.now()),

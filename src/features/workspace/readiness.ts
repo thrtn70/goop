@@ -1,10 +1,11 @@
 import type { ProbeState } from "@/hooks/useProbe";
-import type { CompressMode } from "@/types";
+import { subtitleForTarget } from "@/features/convert/FileRow";
+import type { TargetFormat, CompressMode } from "@/types";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 export function conversionProblem(
   entry: Pick<
     FileEntry,
-    "target" | "optionsReady" | "qualityPreset" | "resolutionCap"
+    "target" | "optionsReady" | "qualityPreset" | "resolutionCap" | "subtitle"
   >,
   state: ProbeState,
 ): string | null {
@@ -16,6 +17,8 @@ export function conversionProblem(
   );
   if (!target?.available)
     return target?.reason ?? "Choose an available output format.";
+  if (entry.subtitle && !subtitleForTarget(entry.subtitle, entry.target))
+    return "Choose a supported subtitle mode or remove the subtitle before starting.";
   const quality =
     state.probe.source_kind === "video" &&
     ["mp4", "mkv", "webm", "mov"].includes(entry.target);
@@ -31,10 +34,13 @@ export function conversionProblem(
 export function compressionProblem(
   mode: CompressMode,
   state: ProbeState,
+  target?: TargetFormat,
 ): string | null {
   if (state.phase === "probing") return "Inspecting source…";
   if (state.phase === "error") return state.message;
-  const caps = state.capabilities.compression;
+  const output = state.capabilities.targets.find(c => c.target === target);
+  if (target && !output?.available) return output?.reason ?? "Choose an available output format.";
+  const caps = output?.compression ?? state.capabilities.compression;
   const allowed =
     mode.kind === "quality"
       ? caps.quality

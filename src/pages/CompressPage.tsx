@@ -1,3 +1,4 @@
+import SettingsPreview from "@/features/preview/SettingsPreview";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import WorkspaceList from "@/components/workspace/WorkspaceList";
@@ -14,7 +15,8 @@ import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect } from "react";
-import { useLocation } from "react-router-dom";
+import { readHandoff } from "@/features/workspace/handoff";
+import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
 import { compressionProblem } from "@/features/workspace/readiness";
@@ -75,6 +77,7 @@ function targetFromPath(path: string): TargetFormat {
 
 function CompressPage() {
   const location = useLocation();
+  const nav = useNavigate();
   const [files, setFiles] = useWorkspaceDraftState<CompressFileEntry[]>(
     "CompressPage.files",
     [],
@@ -160,6 +163,23 @@ function CompressPage() {
     [setFiles, setPdfs],
   );
 
+  useEffect(() => {
+    const handoff = readHandoff(location.state, "compress");
+    if (!handoff) return;
+    const path = handoff.path;
+    if (isPdf(path)) {
+      setPdfs(previous => previous.includes(path) ? previous : [...previous, path]);
+    } else {
+      const identity = newIdentity();
+      setSelectedId(files.find(file => file.path === path)?.id ?? identity.id);
+      setFiles(previous => previous.some(file => file.path === path) ? previous : [...previous, {
+        ...identity, path, target: targetFromPath(path), sourceDir: dirname(path),
+        mode: {kind:"quality",value:75},
+      }]);
+    }
+    nav(location.pathname, {replace:true,state:null});
+  }, [location, nav, files, setFiles, setPdfs, setSelectedId]);
+
   // Partial text is still a newer edit, even before blur commits request fields.
   const handleDraftEdit = useCallback(
     (id: string) => {
@@ -175,7 +195,7 @@ function CompressPage() {
   );
 
   const handleOptionsChange = useCallback(
-    (id: string, opts: CompressRowOptions) => {
+    (id: string, opts: CompressRowOptions & { metadataPolicy?: import("@/types").MetadataPolicy }) => {
       setFiles((prev) =>
         prev.map((f) =>
           f.id === id
@@ -183,6 +203,7 @@ function CompressPage() {
                 ...f,
                 revision: (f.revision ?? 0) + 1,
                 mode: opts.mode,
+                metadataPolicy: opts.metadataPolicy ?? f.metadataPolicy,
                 optionsReady: true,
               }
             : f,
@@ -212,6 +233,8 @@ function CompressPage() {
           ...f,
           revision: (f.revision ?? 0) + 1,
           mode,
+          target: preset.target,
+          metadataPolicy: preset.metadata_policy ?? "preserve",
           optionsReady: true,
         })),
       );
@@ -230,6 +253,8 @@ function CompressPage() {
               ...f,
               revision: (f.revision ?? 0) + 1,
               mode: headMode,
+              target: prev[0].target,
+              metadataPolicy: prev[0].metadataPolicy,
               optionsReady: true,
             },
       );
@@ -263,7 +288,7 @@ function CompressPage() {
   }, [pickerToken, handleBrowse, location.pathname]);
 
   const problems = files.map((f) =>
-    compressionProblem(f.mode, byId[f.id ?? ""] ?? PROBING),
+    compressionProblem(f.mode, byId[f.id ?? ""] ?? PROBING, f.target),
   );
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
@@ -309,7 +334,14 @@ function CompressPage() {
           selectedState.phase === "ready" &&
           selected.optionsReady ? (
             <WorkspaceDraftProvider scope={["source", selected.path]}>
+              <p className="mb-3 text-xs text-fg-secondary">Output: {selected.target.toUpperCase()}</p>
+              {selectedState.probe.source_kind === "image" && <label className="mb-3 flex items-center gap-2 text-xs text-fg-secondary">Metadata
+                <select aria-label="Compression metadata" value={selected.metadataPolicy ?? "preserve"} onChange={event => selected.id && handleOptionsChange(selected.id, {mode: selected.mode, metadataPolicy: event.target.value === "strip_all" ? "strip_all" : "preserve"})} className="rounded-md bg-surface-2 px-2 py-1">
+                  <option value="preserve">Preserve when supported</option><option value="strip_all">Strip</option>
+                </select>
+              </label>}
               <CompressSettingsPanel
+                target={selected.target}
                 onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 state={selectedState}
                 mode={selected.mode}
@@ -317,6 +349,9 @@ function CompressPage() {
                   selected.id && handleOptionsChange(selected.id, { mode })
                 }
               />
+              <SettingsPreview request={{input_path:selected.path,target:selected.target,
+                quality_preset:null,resolution_cap:null,compress_mode:selected.mode,
+                metadata_policy:selected.metadataPolicy ?? "preserve",subtitle:null,gif_options:null}}/>
             </WorkspaceDraftProvider>
           ) : (
             <p className="text-sm text-fg-secondary">

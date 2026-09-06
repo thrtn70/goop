@@ -8,9 +8,8 @@ export type SubmissionReceipt = {
   revision?: number;
   path: string;
 };
-let nextEntry = 0;
 export function newIdentity() {
-  return { id: `source-${++nextEntry}`, revision: 0 };
+  return { id: crypto.randomUUID(), revision: 0 };
 }
 export function reconcileSubmitted<T extends EntryIdentity & { path: string }>(
   current: T[],

@@ -17,7 +17,6 @@ import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import { subtitleForTarget } from "./FileRow";
-import { useAppStore } from "@/store/appStore";
 import type {
   GifOptions,
   MetadataPolicy,
@@ -80,32 +79,7 @@ export default function ConvertActionBar({
   const busy = runtime.active !== null;
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
-  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const count = files.length;
-
-  /** Warn about subtitles the chosen output format can't carry.
-   *
-   * A row clears its own subtitle when you change its format, but a preset
-   * or "apply to all" sets `target` from outside the row, so the mismatch
-   * can survive until submit. Reconciling silently would drop the file
-   * with nothing on screen ever having said so. */
-  function warnAboutDroppedSubtitles(entries: FileEntry[]) {
-    const dropped = entries.filter(
-      (f) => f.subtitle && !subtitleForTarget(f.subtitle, f.target),
-    );
-    if (dropped.length === 0) return;
-    const formats = [
-      ...new Set(dropped.map((f) => f.target.toUpperCase())),
-    ].join(", ");
-    enqueueToast({
-      variant: "info",
-      title:
-        dropped.length === 1
-          ? "Subtitle left out of the conversion"
-          : `${dropped.length} subtitles left out of the conversion`,
-      detail: `${formats} can't carry subtitles. Everything else was converted as set.`,
-    });
-  }
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("convert");
@@ -138,7 +112,9 @@ export default function ConvertActionBar({
         subtitle: file.subtitle ? { ...file.subtitle } : null,
       }));
       const outputFolder = overrideDir;
-      warnAboutDroppedSubtitles(snapshot);
+      if (snapshot.some(f => f.subtitle && !subtitleForTarget(f.subtitle, f.target))) {
+        throw new Error("The selected subtitle mode is unavailable for this output. Change the subtitle mode or remove the subtitle before starting.");
+      }
       let destination: string | null = null;
       if (snapshot.length === 1) {
         const f = snapshot[0];
@@ -163,7 +139,7 @@ export default function ConvertActionBar({
             compress_mode: null,
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
-            subtitle: subtitleForTarget(f.subtitle, f.target),
+            subtitle: f.subtitle,
           });
         }),
       );
@@ -242,6 +218,9 @@ export default function ConvertActionBar({
           // The dialog documents these as the Convert-register fields to
           // pass, and now that a preset actually applies them, omitting
           // them here would save the fork with both cleared.
+          metadata_policy: files[0]?.metadataPolicy ?? null,
+          gif_options: files[0]?.gifOptions ?? null,
+          subtitle: files[0]?.subtitle ?? null,
           quality_preset: files[0]?.qualityPreset ?? null,
           resolution_cap: files[0]?.resolutionCap ?? null,
         }}

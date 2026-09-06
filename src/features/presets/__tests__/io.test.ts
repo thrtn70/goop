@@ -96,6 +96,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
+      metadata_policy: null, gif_options: null, subtitle: null,
     }]);
   });
 
@@ -231,4 +232,28 @@ describe("preset I/O — target_size_bytes round-trip", () => {
     const entries = parsePresetBundle(serializePresets([original]));
     expect(entries[0].compress_mode).toEqual({ kind: "quality", value: 75 });
   });
+});
+
+it("roundtrips all supported settings including safe numeric GIF trims", () => {
+  const preset = makePreset({
+    metadata_policy: "strip_all",
+    gif_options: { size_preset: "small", trim_start_ms: 1000n, trim_end_ms: 2500n },
+    subtitle: { source_path: "/captions.srt", mode: "soft" },
+  });
+  const restored = entriesToPresets(parsePresetBundle(serializePresets([preset])), [])[0];
+  expect(restored).toMatchObject({ metadata_policy: "strip_all", subtitle: preset.subtitle,
+    gif_options: { size_preset: "small", trim_start_ms: 1000, trim_end_ms: 2500 } });
+});
+
+it.each([
+  { compress_mode: { kind: "quality", value: 101 } },
+  { compress_mode: { kind: "target_size_bytes", value: 0 } },
+  { compress_mode: { kind: "target_size_bytes", value: 0.5 } },
+  { gif_options: { size_preset: "small", trim_start_ms: 2000, trim_end_ms: 1000 } },
+  { gif_options: { size_preset: ["small"] } },
+  { subtitle: { source_path: "/s.srt", mode: ["soft"] } },
+  { metadata_policy: "invented" },
+  { subtitle: { source_path: "", mode: "soft" } },
+])("rejects invalid supported preset settings: %j", fields => {
+  expect(() => parsePresetBundle(JSON.stringify({ version: 1, presets: [{ name: "Invalid", target: "mp4", ...fields }] }))).toThrow(PresetParseError);
 });

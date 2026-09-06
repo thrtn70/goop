@@ -12,7 +12,7 @@ use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
@@ -73,6 +73,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 "-show_streams",
             ])
             .arg(path)
+            .kill_on_drop(true)
             .output()
             .await?;
         if !out.status.success() {
@@ -96,6 +97,9 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         req: &ConvertRequest,
         cancel: CancellationToken,
     ) -> Result<ConvertResult, GoopError> {
+        if cancel.is_cancelled() {
+            return Err(GoopError::Cancelled);
+        }
         let bin = self.resolver.resolve("ffmpeg")?;
         let expanded_input = goop_core::path::expand(&req.input_path);
         let input = match std::fs::canonicalize(&expanded_input) {
@@ -107,10 +111,30 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 });
             }
         };
-        let probe = FfmpegBackend::probe(self.resolver, &input).await?;
+        let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
+        let probe = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(GoopError::Cancelled),
+            probe = FfmpegBackend::probe(self.resolver, &input) => probe?,
+        };
         let (mut plan, subtitle_input) = build_plan(req, &probe)?;
 
-        let output_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
+        let final_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
+        let destination = if goop_core::path::expand(&req.output_path).is_dir() {
+            goop_core::output::OutputDestination::automatic(
+                final_path,
+                stem_of(&req.input_path),
+                plan.ext.into(),
+            )
+        } else {
+            goop_core::output::OutputDestination::explicit(final_path)
+        };
+        let staged = goop_core::output::StagedOutput::new(&destination.path)?;
+        let output_path = staged.path().to_path_buf();
+        let target_bytes = match req.compress_mode {
+            Some(goop_core::CompressMode::TargetSizeBytes(n)) => Some(n),
+            _ => None,
+        };
 
         // Same effective quality the plan was built with, so the GPU
         // encoder's quality args can't drift from the software ones.
@@ -166,23 +190,22 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                     &probe,
                     job_id,
                     current_encoder,
-                    cancel,
+                    cancel.clone(),
                 )
                 .await
             }
             other => other,
         };
 
-        result.map(|reencoded| {
-            let bytes = std::fs::metadata(&output_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            ConvertResult {
-                output_path: output_path.to_string_lossy().into_owned(),
-                bytes,
-                duration_ms: started.elapsed().as_millis() as u64,
-                reencoded,
-            }
+        let reencoded = result?;
+        let published = staged.publish(&destination, target_bytes, false, &cancel)?;
+        Ok(ConvertResult {
+            source_bytes: Some(source_bytes),
+            target_bytes,
+            output_path: published.path.to_string_lossy().into_owned(),
+            bytes: published.bytes,
+            duration_ms: started.elapsed().as_millis() as u64,
+            reencoded,
         })
     }
 }
@@ -243,7 +266,9 @@ impl<'a> FfmpegBackend<'a> {
 
         cmd.arg("-progress").arg("pipe:1").arg("-nostats");
         cmd.arg(output_path);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         let mut child: Child = cmd.spawn()?;
         // Phase G: register the child PID for pause/resume. The guard
@@ -260,7 +285,7 @@ impl<'a> FfmpegBackend<'a> {
         // invariant: stderr was requested with Stdio::piped above.
         let stderr = child.stderr.take().expect("stderr was piped");
         let mut out_reader = BufReader::new(stdout).lines();
-        let mut err_reader = BufReader::new(stderr).lines();
+        let mut err_reader = stderr;
 
         let mut tracker = ProgressTracker::new(probe.duration_ms);
         let stage = if plan.reencoded {
@@ -268,47 +293,59 @@ impl<'a> FfmpegBackend<'a> {
         } else {
             "remuxing"
         };
-        let mut stderr_tail = String::new();
-
-        loop {
+        let mut stderr_bytes = Vec::new();
+        let mut error_buffer = [0u8; 4096];
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let status = loop {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    let _ = std::fs::remove_file(output_path);
                     return Err(GoopError::Cancelled);
                 }
-                line = out_reader.next_line() => {
+                status = child.wait() => break status?,
+                line = out_reader.next_line(), if !stdout_done => {
                     match line? {
                         Some(l) => {
                             if let Some(snap) = tracker.ingest(&l) {
                                 self.sink.emit_progress(ProgressEvent {
-                                    job_id,
-                                    percent: snap.percent as f32,
-                                    eta_secs: snap.eta_secs,
+                                    job_id, percent: snap.percent as f32, eta_secs: snap.eta_secs,
                                     speed_hr: snap.speed_factor.map(|f| format!("{f:.2}x")),
-                                    stage: stage.into(),
-                                    encoder: encoder.map(String::from),
+                                    stage: stage.into(), encoder: encoder.map(String::from),
                                 });
                             }
                         }
-                        None => break,
+                        None => stdout_done = true,
                     }
                 }
-                line = err_reader.next_line() => {
-                    if let Ok(Some(l)) = line {
-                        stderr_tail.push_str(&l);
-                        stderr_tail.push('\n');
-                        if stderr_tail.len() > 8192 {
-                            let drop_to = stderr_tail.len() - 4096;
-                            stderr_tail = stderr_tail[drop_to..].to_string();
-                        }
-                    }
+                count = err_reader.read(&mut error_buffer), if !stderr_done => {
+                    let count = count?;
+                    stderr_done = count == 0;
+                    append_stderr_tail(&mut stderr_bytes, &error_buffer[..count]);
                 }
             }
+        };
+        // Drain the child's buffered diagnostics without hanging on a descendant
+        // that inherited the pipe. The child itself has already been reaped.
+        let drain = async {
+            while !stderr_done {
+                let count = err_reader.read(&mut error_buffer).await?;
+                stderr_done = count == 0;
+                if stderr_done {
+                    break;
+                }
+                append_stderr_tail(&mut stderr_bytes, &error_buffer[..count]);
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(GoopError::Cancelled),
+            _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain) => {},
         }
-
-        let status = child.wait().await?;
+        let stderr_tail = String::from_utf8_lossy(&stderr_bytes).into_owned();
         if !status.success() {
             let _ = std::fs::remove_file(output_path);
             return Err(GoopError::SubprocessFailed {
@@ -613,6 +650,13 @@ fn resolve_output_path(
 
 pub fn target_extension(target: TargetFormat, acodec: Option<&str>) -> &'static str {
     decide(target, None, acodec, None, None, None).ext
+}
+
+fn append_stderr_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
+    tail.extend_from_slice(bytes);
+    if tail.len() > 8192 {
+        tail.drain(..tail.len() - 8192);
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import { formatError } from "@/ipc/error";
 
@@ -16,6 +16,9 @@ interface PresetSaveDialogProps {
     quality_preset?: QualityPreset | null;
     resolution_cap?: ResolutionCap | null;
     compress_mode?: CompressMode | null;
+    metadata_policy?: MetadataPolicy | null;
+    gif_options?: GifOptions | null;
+    subtitle?: SubtitleOptions | null;
   };
 }
 
@@ -62,6 +65,9 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
         quality_preset: snapshot.quality_preset ?? null,
         resolution_cap: snapshot.resolution_cap ?? null,
         compress_mode: snapshot.compress_mode ?? null,
+        metadata_policy: snapshot.metadata_policy ?? null,
+        gif_options: snapshot.gif_options ?? null,
+        subtitle: snapshot.subtitle ?? null,
         is_builtin: false,
         // Rust side ignores client created_at for ordering; the wire IPC
         // boundary converts this Number to i64.

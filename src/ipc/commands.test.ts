@@ -362,3 +362,13 @@ describe("conversion inspection", () => {
     expect(invokeMock).toHaveBeenCalledWith("convert_inspect", { path: "/tmp/photo.dng" });
   });
 });
+
+it("normalizes GIF trim integers at the conversion IPC boundary", async () => {
+  const req = { input_path:"/in.mp4", output_path:"/out.gif", target:"gif", quality_preset:null,
+    resolution_cap:null, compress_mode:null, batch_id:null, metadata_policy:null, subtitle:null,
+    gif_options:{size_preset:"medium",trim_start_ms:1000n,trim_end_ms:2500n} } as const;
+  await api.convert.fromFile(req);
+  const payload = invokeMock.mock.calls.at(-1)?.[1];
+  expect(() => JSON.stringify(payload)).not.toThrow();
+  expect(payload.req.gif_options).toEqual({size_preset:"medium",trim_start_ms:1000,trim_end_ms:2500});
+});
