@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { markInitialDataReady } from "@/performance/startup";
 import type {
   HistoryCounts,
   HistoryFilter,
@@ -747,6 +748,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
   try {
     await useAppStore.getState().loadAll();
+    markInitialDataReady();
   } catch {
     /* Tauri not available or backend not ready — continue with empty state. */
   }

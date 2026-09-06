@@ -1,5 +1,6 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { markShellReady } from "@/performance/startup";
 import Layout from "@/components/Layout";
 import ToastContainer from "@/components/ToastContainer";
 import UpdateBanner from "@/components/UpdateBanner";
@@ -36,6 +37,7 @@ function PageFallback() {
 }
 
 export default function App() {
+  useEffect(() => { markShellReady(); }, []);
   useToastTriggers();
   useWindowTitle();
   return (

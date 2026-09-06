@@ -2,6 +2,7 @@ pub mod app_update;
 pub mod commands;
 pub mod events;
 pub mod logging;
+mod performance;
 mod startup_cleanup;
 pub mod state;
 pub mod thumbnail;
@@ -29,6 +30,11 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
 pub fn run() {
+    let started = std::time::Instant::now();
+    let performance = performance::PerformanceState::new(
+        std::env::var_os("GOOP_STARTUP_REPORT").map(PathBuf::from),
+        started,
+    );
     // Installs stderr AND a daily rolling file under `data_dir()/logs`. The
     // writer thread is owned by the module for the whole process; see
     // `logging::flush`, which every exit path below has to call because
@@ -53,6 +59,7 @@ pub fn run() {
         }));
     }
     let result = builder
+        .manage(performance)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -583,6 +590,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            performance::performance_status,
+            performance::performance_ready,
             commands::preview::generate_preview,
             commands::preview::cancel_preview,
             commands::convert::convert_probe,
