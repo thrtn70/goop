@@ -25,7 +25,7 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000 }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
   for (const name of ['config', 'data', 'outputs']) mkdirSync(join(directory, name));
@@ -52,8 +52,12 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const samples = [];
   const sample = () => {
     try {
-      const snapshot = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 });
-      const tree = treeRss(snapshot, child.pid);
+      const snapshot = readSnapshot();
+      // close events cannot run while ps blocks. Validate liveness in this
+      // very snapshot instead of accepting a missing root as zero idle RSS.
+      const root = snapshot.trim().split('\n').map(line => line.trim().split(/\s+/)).find(row => Number(row[0]) === child.pid);
+      if (!root || !Number.isFinite(Number(root[2])) || Number(root[2]) <= 0) return null;
+      const tree = { ...treeRss(snapshot, child.pid), root_pid: child.pid, root_rss_KiB: Number(root[2]) };
       samples.push({ elapsed_ms: performance.now() - start, ...tree });
       return tree;
     } catch { return null; }
