@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// Errors:
 /// - `PdfError::MutoolMissing` if mutool isn't resolvable
-/// - `PdfError::Mutool` if the subprocess fails or is cancelled
+/// - `PdfError::Mutool` if the subprocess fails; `PdfError::Cancelled` on cancellation
 /// - `PdfError::Io` for fs operations
 pub async fn extract_text(
     resolver: &BinaryResolver,
@@ -33,6 +33,9 @@ pub async fn extract_text(
     pids: Option<Arc<dyn PidRegistry>>,
     job_id: Option<JobId>,
 ) -> Result<PathBuf, PdfError> {
+    if cancel.is_cancelled() {
+        return Err(PdfError::Cancelled);
+    }
     let bin = resolver
         .resolve("mutool")
         .map_err(|e| PdfError::MutoolMissing(format!("mutool: {e}")))?;
@@ -43,7 +46,7 @@ pub async fn extract_text(
             .map_err(PdfError::Io)?;
     }
     if cancel.is_cancelled() {
-        return Err(PdfError::Mutool("cancelled before start".into()));
+        return Err(PdfError::Cancelled);
     }
 
     let mut cmd = Command::new(&bin.path);
@@ -55,7 +58,7 @@ pub async fn extract_text(
         .arg("--")
         .arg(input);
 
-    let mut child = cmd.spawn().map_err(PdfError::Io)?;
+    let mut child = cmd.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
     let _pid_guard = match (pids.as_ref(), job_id, child.id()) {
         (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
         _ => None,
@@ -73,7 +76,7 @@ pub async fn extract_text(
         _ = cancel.cancelled() => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return Err(PdfError::Mutool("cancelled".into()));
+            return Err(PdfError::Cancelled);
         }
     }
 
@@ -91,7 +94,7 @@ mod tests {
     use crate::test_fixture::write_blank_pdf;
 
     #[tokio::test]
-    async fn cancellation_before_start_returns_mutool_error() {
+    async fn cancellation_before_start_returns_cancelled() {
         let tmp = tempfile::tempdir().unwrap();
         let pdf = tmp.path().join("a.pdf");
         write_blank_pdf(&pdf, 1);
@@ -109,13 +112,7 @@ mod tests {
         let err = extract_text(&resolver, &pdf, &out, cancel, None, None)
             .await
             .unwrap_err();
-        match err {
-            // Pre-spawn cancel returns Mutool("cancelled before start"); when mutool
-            // isn't on this machine, MutoolMissing comes back instead. Either path
-            // exercises the early-return logic we care about for this test.
-            PdfError::Mutool(_) | PdfError::MutoolMissing(_) => {}
-            other => panic!("expected Mutool or MutoolMissing, got {other:?}"),
-        }
+        assert!(matches!(err, PdfError::Cancelled));
     }
 
     #[tokio::test]

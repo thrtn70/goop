@@ -336,7 +336,7 @@ describe("ConvertPage", () => {
     });
   });
 
-  it("drops the subtitle when switching to a target that can't carry one", async () => {
+  it("requires explicit removal of subtitles for an incompatible output", async () => {
     mockProbe.mockResolvedValue(mp4Probe);
     mockFromFile.mockResolvedValue("job-id-1");
     renderPage();
@@ -354,7 +354,10 @@ describe("ConvertPage", () => {
 
     // GIF has no video track to mux into and no burn-in support.
     await userEvent.click(screen.getByRole("button", { name: "GIF" }));
-    expect(screen.queryByText("movie.srt")).toBeNull();
+    expect(screen.getByText("movie.srt")).toBeDefined();
+    expect(screen.getByRole("button", {name:/convert 1 file/i})).toHaveProperty("disabled", true);
+    expect(mockFromFile).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", {name:/remove subtitle/i}));
 
     await userEvent.click(
       screen.getByRole("button", { name: /convert 1 file/i }),
@@ -366,7 +369,7 @@ describe("ConvertPage", () => {
     });
   });
 
-  it("switches a soft track to burn-in for a container without subtitle tracks", async () => {
+  it("requires an explicit subtitle mode change for AVI", async () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();
 
@@ -383,17 +386,20 @@ describe("ConvertPage", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "AVI" }));
 
-    // The file is kept, but the only supported mode is now selected.
+    // The saved intent remains visible until the user chooses a supported mode.
     expect(screen.getByText("movie.srt")).toBeDefined();
     expect(
       screen
         .getByRole("button", { name: /burn in/i })
         .getAttribute("aria-pressed"),
-    ).toBe("true");
+    ).toBe("false");
     expect(screen.getByRole("button", { name: /soft track/i })).toHaveProperty(
       "disabled",
       true,
     );
+    expect(screen.getByRole("button", {name:/convert 1 file/i})).toHaveProperty("disabled", true);
+    await userEvent.click(screen.getByRole("button", {name:/burn in/i}));
+    expect(screen.getByRole("button", {name:/convert 1 file/i})).toHaveProperty("disabled", false);
   });
 
   it("keeps a subtitle through a detour via an incompatible target", async () => {

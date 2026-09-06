@@ -3,12 +3,14 @@ import type { Job, SourceKind } from "@/types";
 import { useThumbnail } from "@/hooks/useThumbnail";
 import { jobIdKey } from "@/store/appStore";
 import DeleteMenu from "./DeleteMenu";
+import { outputSummary } from "./outputSummary";
 
 interface PreviewContentProps {
   job: Job;
   /** "panel" keeps the preview compact for the slide-out; "modal" stretches for Quick View. */
   variant: "panel" | "modal";
   onConvertAgain: (job: Job) => void;
+  onCompress?: (job: Job) => void;
   onReveal: (path: string) => void;
   onClose?: () => void;
 }
@@ -18,8 +20,8 @@ function basename(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
-function formatBytes(b: number): string {
-  if (!Number.isFinite(b) || b <= 0) return "-";
+function formatBytes(b: number | null): string {
+  if (b == null || !Number.isFinite(b) || b < 0) return "-";
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
@@ -38,6 +40,7 @@ export default function PreviewContent({
   job,
   variant,
   onConvertAgain,
+  onCompress,
   onReveal,
   onClose,
 }: PreviewContentProps) {
@@ -47,7 +50,7 @@ export default function PreviewContent({
   // below when the waveform isn't ready or generation failed.
   const thumbState = useThumbnail(job.id, false);
 
-  const bytes = job.result?.bytes != null ? Number(job.result.bytes) : 0;
+  const bytes = job.result?.bytes != null ? Number(job.result.bytes) : null;
   // Both variants currently want the same aspect; the variant prop is
   // still meaningful elsewhere (e.g. controlling which surfaces claim
   // the view-transition-name).
@@ -119,6 +122,7 @@ export default function PreviewContent({
         </div>
       )}
 
+      {outputSummary(job.result) && <p className="text-xs text-fg-secondary" role="status">{outputSummary(job.result)}</p>}
       <div
         className={
           variant === "modal"
@@ -154,15 +158,16 @@ export default function PreviewContent({
               {job.result?.result_kind === "folder" ? "Open folder" : "Reveal in Finder"}
             </button>
           )}
-          {job.kind === "convert" && (
+          {job.state === "done" && outputPath && job.result?.result_kind !== "folder" && (
             <button
               type="button"
               onClick={() => onConvertAgain(job)}
               className={`btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:text-fg ${variant === "panel" ? "w-full" : ""}`}
             >
-              Convert again
+              Convert…
             </button>
           )}
+          {onCompress && job.state === "done" && outputPath && job.result?.result_kind !== "folder" && <button type="button" onClick={() => onCompress(job)} className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary hover:text-fg">Compress…</button>}
           <DeleteMenu job={job} fullWidth={variant === "panel"} />
         </div>
       </div>

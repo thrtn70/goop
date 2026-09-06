@@ -14,6 +14,9 @@ pub struct CompressionCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TargetCapability {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub compression: Option<CompressionCapabilities>,
     pub target: TargetFormat,
     pub available: bool,
     pub reason: Option<String>,

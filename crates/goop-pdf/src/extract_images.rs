@@ -43,7 +43,7 @@ pub async fn extract_images(
         .await
         .map_err(PdfError::Io)?;
     if cancel.is_cancelled() {
-        return Err(PdfError::Mutool("cancelled before start".into()));
+        return Err(PdfError::Cancelled);
     }
 
     let ext = format.file_extension();
@@ -60,7 +60,7 @@ pub async fn extract_images(
         .arg("--")
         .arg(input);
 
-    let mut child = cmd.spawn().map_err(PdfError::Io)?;
+    let mut child = cmd.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
     let _pid_guard = match (pids.as_ref(), job_id, child.id()) {
         (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
         _ => None,
@@ -78,7 +78,7 @@ pub async fn extract_images(
         _ = cancel.cancelled() => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return Err(PdfError::Mutool("cancelled".into()));
+            return Err(PdfError::Cancelled);
         }
     }
 

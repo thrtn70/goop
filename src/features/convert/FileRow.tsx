@@ -29,13 +29,7 @@ export interface FileRowOptions {
   resolutionCap?: ResolutionCap | null;
 }
 
-/** Reconcile a picked subtitle with a target format.
- *
- * Returns null when the target can't carry subtitles at all, and switches
- * mode when only the other one is available (AVI has no subtitle track but
- * can still be burned into). Exported so the send path can apply the same
- * rule — a target set from outside this row, by a preset or "apply to all",
- * never passes through here. */
+/** Return supported subtitle intent unchanged; unsupported modes need correction. */
 export function subtitleForTarget(
   subtitle: SubtitleOptions | null,
   target: TargetFormat,
@@ -44,9 +38,9 @@ export function subtitleForTarget(
   const support = subtitleSupport(target);
   if (!support.soft && !support.burn) return null;
   if (subtitle.mode === "soft" && !support.soft)
-    return { ...subtitle, mode: "burn_in" };
+    return null;
   if (subtitle.mode === "burn_in" && !support.burn)
-    return { ...subtitle, mode: "soft" };
+    return null;
   return subtitle;
 }
 
@@ -107,7 +101,7 @@ export function ConvertSettingsPanel({
   const showMetadataPolicy = p.source_kind === "image";
   const subSupport = subtitleSupport(target);
   const showSubtitle =
-    p.source_kind === "video" && (subSupport.soft || subSupport.burn);
+    subtitle != null || (p.source_kind === "video" && (subSupport.soft || subSupport.burn));
 
   return (
     <div className="space-y-4">

@@ -22,8 +22,10 @@ function basename(p: string | null): string {
 }
 
 function formatBytes(b: bigint | null | undefined): string {
-  const n = b != null ? Number(b) : 0;
-  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (b == null) return "—";
+  const n = Number(b);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return String(n) + " B";
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;

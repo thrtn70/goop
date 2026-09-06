@@ -252,3 +252,16 @@ async fn admission_expands_home_relative_source_paths() {
     );
     assert!(validate_request_source(&resolver, &req).await.is_ok());
 }
+
+#[test]
+fn output_compression_capabilities_do_not_inherit_source_format() {
+    let caps = serde_json::to_value(capabilities_for(&probe("png"))).unwrap();
+    let jpeg = caps["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["target"] == "jpeg")
+        .unwrap();
+    assert_eq!(jpeg["compression"]["quality"], true);
+    assert_eq!(jpeg["compression"]["lossless"], false);
+}

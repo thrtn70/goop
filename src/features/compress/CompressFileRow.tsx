@@ -1,5 +1,5 @@
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
-import type { CompressMode, CompressionCapabilities } from "@/types";
+import type { TargetFormat, CompressMode, CompressionCapabilities } from "@/types";
 import CompressControls from "./CompressControls";
 
 /**
@@ -23,17 +23,19 @@ export interface CompressRowOptions {
 export function CompressSettingsPanel({
   state,
   mode,
+  target,
   onChange,
   onDraftEdit,
 }: {
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   mode: CompressMode;
+  target?: TargetFormat;
   onChange: (mode: CompressMode) => void;
   onDraftEdit?: () => void;
 }) {
   return (
     <CompressControls
-      capabilities={state.capabilities.compression}
+      capabilities={state.capabilities.targets.find(c => c.target === target)?.compression ?? state.capabilities.compression}
       probe={state.probe}
       mode={mode}
       onChange={onChange}

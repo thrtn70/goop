@@ -55,7 +55,7 @@ pub async fn ocr_image(
     let mut produced: Vec<PathBuf> = Vec::with_capacity(inputs.len());
     for (idx, image) in inputs.iter().enumerate() {
         if cancel.is_cancelled() {
-            return Err(PdfError::Ocr("cancelled during ocr".into()));
+            return Err(PdfError::Cancelled);
         }
         let out_stem = work.join(format!("image-{}", idx + 1));
         let mut tess = Command::new(&tesseract_bin.path);
@@ -71,7 +71,7 @@ pub async fn ocr_image(
         if matches!(output_kind, ImageOcrOutput::SearchablePdf) {
             tess.arg("-c").arg("tessedit_create_pdf=1");
         }
-        let mut tess_child = tess.spawn().map_err(PdfError::Io)?;
+        let mut tess_child = tess.kill_on_drop(true).spawn().map_err(PdfError::Io)?;
         let _tess_guard = match (pids.as_ref(), job_id, tess_child.id()) {
             (Some(reg), Some(id), Some(pid)) => Some(PidGuard::new(reg.clone(), id, pid)),
             _ => None,
@@ -89,7 +89,7 @@ pub async fn ocr_image(
             _ = cancel.cancelled() => {
                 let _ = tess_child.start_kill();
                 let _ = tess_child.wait().await;
-                return Err(PdfError::Ocr("cancelled during ocr".into()));
+                return Err(PdfError::Cancelled);
             }
         }
         let written = match output_kind {

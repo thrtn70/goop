@@ -29,6 +29,24 @@ pub fn recompress(
     output_dir: &Path,
     quality: u8,
 ) -> Result<Vec<PathBuf>, GoopError> {
+    recompress_cancellable(
+        inputs,
+        output_dir,
+        quality,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+pub(crate) fn recompress_cancellable(
+    inputs: &[&Path],
+    output_dir: &Path,
+    quality: u8,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<PathBuf>, GoopError> {
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+
     if inputs.is_empty() {
         return Err(GoopError::SubprocessFailed {
             binary: "image".into(),
@@ -45,6 +63,9 @@ pub fn recompress(
 
     let mut outputs = Vec::with_capacity(inputs.len());
     for input in inputs {
+        if cancel.is_cancelled() {
+            return Err(GoopError::Cancelled);
+        }
         let file_name = input
             .file_name()
             .ok_or_else(|| GoopError::SubprocessFailed {
@@ -175,6 +196,20 @@ mod tests {
         img.save(path).unwrap();
     }
 
+    #[test]
+    fn cancelled_batch_does_not_start() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            recompress_cancellable(
+                &[Path::new("missing.png")],
+                Path::new("unused"),
+                50,
+                &cancel
+            ),
+            Err(GoopError::Cancelled)
+        ));
+    }
     #[test]
     fn recompress_jpeg_at_low_quality_shrinks() {
         let dir = tmp_dir("jpeg");

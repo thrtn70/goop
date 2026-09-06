@@ -20,6 +20,7 @@ it("requires current inspection even for previously initialized drafts", () => {
         optionsReady: true,
         qualityPreset: null,
         resolutionCap: null,
+        subtitle: null,
       },
       { phase: "probing" },
     ),
@@ -31,6 +32,7 @@ it("requires current inspection even for previously initialized drafts", () => {
         optionsReady: true,
         qualityPreset: null,
         resolutionCap: null,
+        subtitle: null,
       },
       ready,
     ),
@@ -45,8 +47,21 @@ it("requires current inspection even for previously initialized drafts", () => {
         optionsReady: true,
         qualityPreset: "small",
         resolutionCap: null,
+        subtitle: null,
       },
       ready,
     ),
   ).toBeTruthy();
+});
+
+it("uses the selected output compression capabilities for changed presets", () => {
+  const state = {phase:"ready", probe:{source_kind:"image"}, capabilities:{
+    compression:{quality:false,target_size:false,lossless:true},
+    targets:[{target:"jpeg",available:true,compression:{quality:true,target_size:true,lossless:false}},
+      {target:"png",available:true,compression:{quality:false,target_size:false,lossless:true}}],
+  }} as unknown as ProbeState;
+  expect(compressionProblem({kind:"quality",value:75},state,"jpeg")).toBeNull();
+  expect(compressionProblem({kind:"quality",value:75},state,"png")).toBeTruthy();
+  expect(compressionProblem({kind:"lossless_reoptimize"},state,"png")).toBeNull();
+  expect(compressionProblem({kind:"quality",value:75},state,"mp4")).toBeTruthy();
 });

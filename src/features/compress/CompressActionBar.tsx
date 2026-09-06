@@ -16,15 +16,16 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, type IpcCompressMode } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
-import type { CompressMode, TargetFormat } from "@/types";
+import type { CompressMode, MetadataPolicy, TargetFormat } from "@/types";
 
 export interface CompressFileEntry extends EntryIdentity {
   optionsReady?: boolean;
   path: string;
-  /** Target format = source format (Compress keeps the container). */
+  /** Defaults to source format; an explicitly selected preset can choose another. */
   target: TargetFormat;
   sourceDir: string;
   mode: CompressMode;
+  metadataPolicy?: MetadataPolicy;
 }
 
 interface CompressActionBarProps {
@@ -171,7 +172,7 @@ export default function CompressActionBar({
             gif_options: null,
             compress_mode: normalizeCompressMode(f.mode),
             batch_id: batchId,
-            metadata_policy: "preserve",
+            metadata_policy: f.metadataPolicy ?? "preserve",
             subtitle: null,
           });
         }),
@@ -249,6 +250,7 @@ export default function CompressActionBar({
         snapshot={{
           target: files[0]?.target ?? "mp4",
           compress_mode: files[0]?.mode ?? null,
+          metadata_policy: files[0]?.metadataPolicy ?? null,
         }}
       />
     </div>

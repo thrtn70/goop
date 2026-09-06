@@ -556,3 +556,22 @@ fn available_encoders(ffmpeg: &Path) -> HashSet<String> {
     );
     names
 }
+
+#[tokio::test]
+#[ignore = "requires bundled FFmpeg"]
+async fn strict_target_compression_withholds_oversized_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let resolver = bundled_resolver(links.path());
+    let input = tmp.path().join("source.mp4");
+    make_source(&ffmpeg_path(&resolver), &input);
+    let original = std::fs::read(&input).unwrap();
+    let output = tmp.path().join("target.mp4");
+    let mut req = request(&input, &output, TargetFormat::Mp4, None);
+    req.compress_mode = Some(CompressMode::TargetSizeBytes(1024));
+    let error = convert(&resolver, &req).await.unwrap_err();
+    assert!(error.to_string().contains("Target size"), "{error}");
+    assert!(!output.exists());
+    assert_eq!(std::fs::read(input).unwrap(), original);
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+}

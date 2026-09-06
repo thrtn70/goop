@@ -51,6 +51,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             });
         }
 
+        let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
         let output_path = resolve_output_path(&req.input_path, &req.output_path, req)?;
 
         self.sink.emit_progress(ProgressEvent {
@@ -87,6 +88,8 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
+            source_bytes: Some(source_bytes),
+            target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),
             bytes: published.bytes,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -125,61 +128,18 @@ struct PublishedImage {
 /// Private same-filesystem workspace. Dropping a cancelled worker's result
 /// removes staging; the blocking worker never publishes the destination.
 struct StagedImage {
-    directory: PathBuf,
+    _staging: goop_core::output::StagedOutput,
     path: PathBuf,
     bytes: u64,
 }
-
 impl StagedImage {
     fn new(destination: &Path) -> Result<Self, GoopError> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let filename = destination
-            .file_name()
-            .ok_or_else(|| image_error("output must have a filename"))?;
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        for _ in 0..100 {
-            let directory = parent.join(format!(
-                ".goop-image-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            let builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            let builder = {
-                use std::os::unix::fs::DirBuilderExt;
-                let mut builder = builder;
-                builder.mode(0o700);
-                builder
-            };
-            match builder.create(&directory) {
-                Ok(()) => {
-                    let path = directory.join(filename);
-                    return Ok(Self {
-                        directory,
-                        path,
-                        bytes: 0,
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => {
-                    return Err(image_error(format!(
-                        "cannot create image staging directory: {e}"
-                    )))
-                }
-            }
-        }
-        Err(image_error("cannot allocate image staging directory"))
-    }
-}
-
-impl Drop for StagedImage {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_dir(&self.directory);
+        let staging = goop_core::output::StagedOutput::new(destination)?;
+        Ok(Self {
+            path: staging.path().to_path_buf(),
+            _staging: staging,
+            bytes: 0,
+        })
     }
 }
 
@@ -200,7 +160,7 @@ where
     if cancel.is_cancelled() {
         return Err(GoopError::Cancelled);
     }
-    staged.bytes = std::fs::metadata(&staged.path)?.len();
+    staged.bytes = staged._staging.validate(None, false)?.bytes;
     if staged.bytes == 0 {
         return Err(image_error("image encoder produced an empty output"));
     }
@@ -212,53 +172,7 @@ where
     Ok(staged)
 }
 
-/// Move completed staging without replacing any destination entry. Native
-/// no-replace moves work on removable filesystems that do not support hard links.
-#[cfg(target_os = "macos")]
-fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let source = CString::new(source.as_os_str().as_bytes())?;
-    let destination = CString::new(destination.as_os_str().as_bytes())?;
-    // SAFETY: both pointers are valid NUL-terminated path buffers for this call.
-    // RENAME_EXCL fails if any destination directory entry already exists.
-    if unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-    fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
-        let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path contains NUL",
-            ));
-        }
-        wide.push(0);
-        Ok(wide)
-    }
-    let source = wide_path(source)?;
-    let destination = wide_path(destination)?;
-    // SAFETY: both paths are valid NUL-terminated UTF-16 buffers. Zero flags
-    // prohibit both replacement and a non-atomic cross-volume copy fallback.
-    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn publish_image(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(source, destination)
-}
+use goop_core::output::publish_no_replace as publish_image;
 
 async fn finish_image_output(
     mut worker: tokio::task::JoinHandle<Result<StagedImage, GoopError>>,

@@ -302,6 +302,13 @@ pub struct ProbeResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertResult {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub target_bytes: Option<u64>,
+
     pub output_path: String,
     pub bytes: u64,
     pub duration_ms: u64,

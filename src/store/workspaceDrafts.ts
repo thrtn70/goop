@@ -1,11 +1,23 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, type ComponentType, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { create } from "zustand";
+import { loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistence";
 
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number> };
-const useDraftStore = create<DraftState>(() => ({ entries: {}, epochs: {}, scopeEpochs: {}, resetEpoch: 0, revisions: {} }));
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean };
+const useDraftStore = create<DraftState>(() => ({ entries: loadBrowserDraftEntries(), epochs: {}, scopeEpochs: {}, resetEpoch: 0, revisions: {}, persistenceFailed: false }));
+useDraftStore.subscribe((state, previous) => {
+  if (state.entries === previous.entries || typeof window === "undefined") return;
+  let ok = false;
+  try { ok = saveDraftEntries(window.localStorage, state.entries); } catch { /* Storage may be disabled. */ }
+  if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
+});
+export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
+export function retryDraftPersistence() {
+  try { useDraftStore.setState({ persistenceFailed: !saveDraftEntries(window.localStorage, useDraftStore.getState().entries) }); }
+  catch { useDraftStore.setState({ persistenceFailed: true }); }
+}
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
 const matches = (key: string, prefix: readonly string[]) => {
   const parts = JSON.parse(key) as string[];
@@ -20,7 +32,7 @@ function scopeLifetime(state: DraftState, path: readonly string[]) {
   return `${state.resetEpoch}:${epoch}`;
 }
 
-/** Session only: source bytes, probes, previews and platform handles never belong here. */
+/** Editable intent only: source bytes, probes, previews and platform handles never belong here. */
 export function WorkspaceDraftProvider({ tool, scope = [], sourcePaths = [], children }: { tool?: WorkspaceTool; scope?: readonly string[]; sourcePaths?: readonly string[]; children?: ReactNode }) {
   const parent = useContext(ScopeContext);
   const selectedTool = tool ?? parent.tool;

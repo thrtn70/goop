@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import type { Job } from "@/types";
 import { api } from "@/ipc/commands";
+import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
 import PreviewContent from "./PreviewContent";
 
 interface QuickViewModalProps {
@@ -16,10 +17,10 @@ export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
   const nav = useNavigate();
   if (!job) return null;
 
-  function handleConvertAgain(j: Job) {
-    const outputPath = j.result?.output_path;
-    if (!outputPath) return;
-    nav("/convert", { state: { prefill: { path: outputPath } } });
+  function handleHandoff(j: Job, destination: HandoffDestination) {
+    const handoff = createHandoff(j, destination);
+    if (!handoff) return;
+    nav("/" + destination, { state: { handoff } });
     onClose();
   }
   function handleReveal(path: string) {
@@ -40,7 +41,8 @@ export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
         <PreviewContent
           job={job}
           variant="modal"
-          onConvertAgain={handleConvertAgain}
+          onConvertAgain={job => handleHandoff(job, "convert")}
+        onCompress={job => handleHandoff(job, "compress")}
           onReveal={handleReveal}
           onClose={onClose}
         />

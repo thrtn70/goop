@@ -170,3 +170,12 @@ it("omits the recommendation legend when that output is unavailable", async () =
   );
   expect(screen.queryByText(/recommended for this file/)).toBeNull();
 });
+
+it("does not coerce unsupported subtitle intent to another mode", async () => {
+  const { subtitleForTarget } = await import("../FileRow");
+  expect(subtitleForTarget({source_path:"/captions.srt",mode:"soft"},"avi")).toBeNull();
+});
+it("keeps subtitle removal available for an incompatible output", () => {
+  render(<FileRow path="/in.jpg" state={state} options={{target:"png",gifOptions:null,metadataPolicy:"preserve",subtitle:{source_path:"/captions.srt",mode:"soft"}}} onOptionsChange={vi.fn()} />);
+  expect(screen.getByRole("button", {name:/remove subtitle/i})).toBeTruthy();
+});

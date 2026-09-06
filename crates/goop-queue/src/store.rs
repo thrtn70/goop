@@ -1455,6 +1455,9 @@ mod tests {
         j.state = JobState::Done;
         j.finished_at = Some(j.created_at + 1000);
         j.result = Some(JobResult {
+            source_bytes: None,
+            target_bytes: None,
+            reencoded: None,
             output_path: Some(match &j.payload {
                 serde_json::Value::Object(m) => m
                     .get("output_path")

@@ -13,6 +13,7 @@ import type {
   ImageOperation,
   Job,
   JobId,
+  GifOptions,
   LanguagePack,
   MetadataOperation,
   MetadataView,
@@ -26,6 +27,8 @@ import type {
   PdfQuality,
   Preset,
   ProbeResult,
+  PreviewRequest,
+  PreviewResult,
   ResizeMode,
   RotationDegrees,
   Settings,
@@ -74,7 +77,20 @@ export type AboutLinkTarget =
 
 // Same bigint-at-boundary story as IpcCompressMode: Preset.created_at is i64
 // in Rust (bigint in generated TS) but flows through JSON as a plain number.
-export type IpcPreset = Omit<Preset, "created_at" | "compress_mode"> & {
+export type IpcGifOptions = Omit<GifOptions, "trim_start_ms" | "trim_end_ms"> & {
+  trim_start_ms: number | null;
+  trim_end_ms: number | null;
+};
+
+function gifToIpc(options: GifOptions | null | undefined): IpcGifOptions | null {
+  return options ? { ...options,
+    trim_start_ms: options.trim_start_ms == null ? null : Number(options.trim_start_ms),
+    trim_end_ms: options.trim_end_ms == null ? null : Number(options.trim_end_ms),
+  } : null;
+}
+
+export type IpcPreset = Omit<Preset, "created_at" | "compress_mode" | "gif_options"> & {
+  gif_options: IpcGifOptions | null;
   created_at: number;
   compress_mode: IpcCompressMode | null;
 };
@@ -83,6 +99,7 @@ function presetToIpc(p: Preset): IpcPreset {
   return {
     ...p,
     created_at: Number(p.created_at),
+    gif_options: gifToIpc(p.gif_options),
     compress_mode:
       p.compress_mode === null
         ? null
@@ -102,12 +119,20 @@ export type IpcLanguagePack = Omit<LanguagePack, "size_bytes"> & {
 };
 
 export const api = {
+  preview: {
+    generate: (request: PreviewRequest) => invoke<PreviewResult>("generate_preview", {request: {
+      ...request,
+      gif_options: gifToIpc(request.gif_options),
+      compress_mode: request.compress_mode?.kind === "target_size_bytes" ? {kind:"target_size_bytes",value:Number(request.compress_mode.value)} : request.compress_mode,
+    }}),
+    cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
+  },
   convert: {
     inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
     capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
     fromFile: (req: IpcConvertRequest) =>
-      invoke<JobId>("convert_from_file", { req }),
+      invoke<JobId>("convert_from_file", { req: { ...req, gif_options: gifToIpc(req.gif_options) } }),
   },
   extract: {
     probe: (url: string) => invoke<UrlProbe>("extract_probe", { url }),
