@@ -159,10 +159,16 @@ jobs:
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "$TARGET"
-      - name: Extractor process lifecycle
+      - name: Extractor process lifecycle (macOS)
+        if: matrix.os == 'macos-14'
         shell: bash
         run: |
           CARGO_INCREMENTAL=0 cargo test -p goop-extractor --lib process:: -- --test-threads=1
+      - name: Extractor process lifecycle and alias integrity (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          CARGO_INCREMENTAL=0 cargo test -p goop-extractor --lib windows_ -- --test-threads=1 --nocapture
       - name: Smoke test
         shell: bash
         run: |
