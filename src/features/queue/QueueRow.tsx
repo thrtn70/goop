@@ -311,8 +311,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
     setMenuOpen(false);
     try {
       await api.queue.moveToTop(job.id);
-      const jobs = await api.queue.list();
-      useAppStore.setState({ jobs });
+      await useAppStore.getState().refreshJobs();
     } catch (err) {
       enqueueToast({
         variant: "error",

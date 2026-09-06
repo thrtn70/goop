@@ -275,11 +275,17 @@ impl QueueStore {
             .as_object_mut()
             .ok_or_else(|| GoopError::Queue("extract payload is not an object".into()))?
             .insert(key.into(), value);
-        tx.execute(
-            "UPDATE jobs SET payload = ?2 WHERE id = ?1",
-            params![id.0.to_string(), payload.to_string()],
-        )
-        .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let updated = tx
+            .execute(
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+                params![id.0.to_string(), payload.to_string()],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if updated != 1 {
+            return Err(GoopError::Queue(format!(
+                "cannot persist payload field {key} for job {id:?}: update affected {updated} rows"
+            )));
+        }
         tx.commit().map_err(|e| GoopError::Queue(e.to_string()))
     }
 
@@ -1082,6 +1088,44 @@ mod tests {
         store.reconcile().unwrap();
         store.retry_errored(job.id).unwrap();
         assert_eq!(store.get_by_id(job.id).unwrap().unwrap().payload, payload);
+    }
+
+    #[test]
+    fn payload_field_patch_rejects_ignored_update_without_advancing_durable_state() {
+        let (store, tmp) = temp_store();
+        let job = Job::new(
+            JobKind::Extract,
+            serde_json::json!({
+                "url": "original", "_extract_recovery": {"phase": "allocated"}
+            }),
+        );
+        store.insert(&job).unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER refuse_payload BEFORE UPDATE OF payload ON jobs
+             BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        let error = store
+            .patch_payload_field(
+                job.id,
+                "_extract_recovery",
+                serde_json::json!({"phase": "sources_complete"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot persist payload field"));
+        assert_eq!(
+            store.get_by_id(job.id).unwrap().unwrap().payload,
+            job.payload
+        );
+        drop(store);
+        let reopened = QueueStore::open(&tmp.path().join("q.db")).unwrap();
+        assert_eq!(
+            reopened.get_by_id(job.id).unwrap().unwrap().payload,
+            job.payload
+        );
     }
 
     #[test]

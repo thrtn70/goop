@@ -1828,6 +1828,96 @@ exit 0
     }
 
     #[tokio::test]
+    async fn normalized_edge_dot_titles_publish_on_first_attempt_and_resumed_retry() {
+        for raw in ["... hello ...", " . . hello . . "] {
+            for retry in [false, true] {
+                let bins = TempDir::new().unwrap();
+                let out = TempDir::new().unwrap();
+                let counter = out.path().join("counter");
+                let script = if retry {
+                    recovery_fake(&counter)
+                } else {
+                    yt_dlp_succeeds(out.path())
+                };
+                write_fake(
+                    bins.path(),
+                    "yt-dlp",
+                    &script.replace(
+                        "\"title\":\"video\"",
+                        &format!("\"title\":{}", serde_json::to_string(raw).unwrap()),
+                    ),
+                );
+                let resolver = resolver_at(bins.path());
+                let req = request("https://youtube.com/watch?v=test", out.path());
+                let id = JobId::new();
+                let recovery = ExtractRecovery::ephemeral();
+                let first = dispatch_with_recovery(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    id,
+                    &req,
+                    JobSignals::new(),
+                    None,
+                    None,
+                    recovery.clone(),
+                )
+                .await;
+                let checkpoint = recovery.checkpoint().unwrap();
+                assert_eq!(
+                    checkpoint.owned_directory().unwrap(),
+                    checkpoint.root.join(&checkpoint.workspace)
+                );
+                assert_eq!(checkpoint.title, "hello");
+                let result = if retry {
+                    assert!(first.is_err());
+                    assert_eq!(checkpoint.sources.len(), 1);
+                    let resumed = ExtractRecovery::new(
+                        Some(serde_json::to_value(checkpoint).unwrap()),
+                        Arc::new(|_| Ok(())),
+                    )
+                    .unwrap();
+                    let result = dispatch_with_recovery(
+                        &resolver,
+                        Arc::new(RecordingSink::default()),
+                        id,
+                        &req,
+                        JobSignals::new(),
+                        None,
+                        None,
+                        resumed,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        std::fs::read_to_string(counter)
+                            .unwrap()
+                            .matches("acquisition")
+                            .count(),
+                        1
+                    );
+                    result
+                } else {
+                    first.unwrap()
+                };
+                assert_eq!(
+                    std::path::Path::new(&result.output_path)
+                        .file_name()
+                        .unwrap(),
+                    "hello.mp4"
+                );
+                assert_eq!(
+                    std::fs::read(result.output_path).unwrap(),
+                    if retry {
+                        b"completed original".as_slice()
+                    } else {
+                        b"x".as_slice()
+                    }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn publication_budgets_long_utf8_and_composed_names_with_collisions() {
         for (title, extractor, template) in [
             ("界".repeat(100), "site".into(), None),
@@ -2040,20 +2130,28 @@ exit 0
 
     #[tokio::test]
     async fn checkpoint_write_failure_prevents_spawn_or_publication() {
-        use crate::recovery::ExtractRecovery;
-        for fail_at_source in [false, true] {
+        use crate::recovery::{ExtractRecovery, RecoveryCheckpoint, RecoveryPhase};
+        for fail_at in ["allocation", "writer", "source"] {
             let bins = TempDir::new().unwrap();
             let out = TempDir::new().unwrap();
             let counter = out.path().join("counter");
             write_fake(bins.path(), "yt-dlp", &recovery_fake(&counter));
             let resolver = resolver_at(bins.path());
-            let persisted = Arc::new(std::sync::Mutex::new(None));
+            let persisted = Arc::new(std::sync::Mutex::new(None::<RecoveryCheckpoint>));
             let durable = persisted.clone();
             let recovery = ExtractRecovery::new(
                 None,
                 Arc::new(move |cp| {
-                    if !fail_at_source || !cp.sources.is_empty() {
-                        return Err(GoopError::Queue("injected database failure".into()));
+                    let refused = match fail_at {
+                        "allocation" => true,
+                        "writer" => cp.writer_active,
+                        "source" => !cp.sources.is_empty(),
+                        _ => unreachable!(),
+                    };
+                    if refused {
+                        return Err(GoopError::Queue(
+                            "injected database failure: payload update affected 0 rows".into(),
+                        ));
                     }
                     *durable.lock().unwrap() = Some(cp.clone());
                     Ok(())
@@ -2069,26 +2167,49 @@ exit 0
                 JobSignals::new(),
                 None,
                 None,
-                recovery,
+                recovery.clone(),
             )
             .await
             .unwrap_err();
             assert!(error.to_string().contains("injected database failure"));
-            if !fail_at_source {
-                assert!(!counter.exists(), "allocation must be durable before spawn");
+            let durable = persisted.lock().unwrap().clone();
+            assert_eq!(
+                serde_json::to_value(recovery.checkpoint()).unwrap(),
+                serde_json::to_value(&durable).unwrap(),
+                "refused writes must not advance the in-memory checkpoint"
+            );
+            if fail_at == "allocation" {
+                assert!(durable.is_none());
             } else {
+                let checkpoint = durable.unwrap();
+                assert_eq!(checkpoint.phase, RecoveryPhase::Allocated);
+                assert!(checkpoint.sources.is_empty());
+                assert!(!checkpoint.writer_active);
+                assert!(checkpoint.published_path.is_none());
+            }
+            if fail_at != "source" {
                 assert!(
-                    persisted
-                        .lock()
+                    !counter.exists(),
+                    "allocation and writer state must be durable before spawn"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(counter)
                         .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .sources
-                        .is_empty(),
-                    "failed checkpoint never becomes durable"
+                        .matches("acquisition")
+                        .count(),
+                    1
                 );
             }
             assert!(!out.path().join("video.mp4").exists());
+            assert!(
+                !std::fs::read_dir(out.path()).unwrap().any(|entry| {
+                    let name = entry.unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with(".goop-extract-") && name != "counter"
+                }),
+                "failed persistence must not publish an output"
+            );
         }
     }
 

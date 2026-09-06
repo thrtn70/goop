@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import QueueRow from "@/features/queue/QueueRow";
+import { useRecognizeSession } from "@/store/recognizeSession";
 import RecognizePage from "@/pages/RecognizePage";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
 import RecognizeResultPane from "@/features/recognize/RecognizeResultPane";
@@ -21,7 +23,7 @@ vi.mock("@/ipc/commands", () => ({
   api: {
     sidecar: { tessdataInstalled: () => mockTessInstalled() },
     pdf: { run: vi.fn(), recognizePeekText: vi.fn() },
-    queue: { list: vi.fn().mockResolvedValue([]), reveal: (p: string) => mockReveal(p) },
+    queue: { moveToTop: vi.fn().mockResolvedValue(undefined), list: vi.fn().mockResolvedValue([]), reveal: (p: string) => mockReveal(p) },
   },
   pdfRecognizeText: (
     input: string,
@@ -308,4 +310,35 @@ for (const outcome of ["acknowledged", "rejected"] as const) it(`enqueues the ca
  expect(api.pdf.recognizePeekText).not.toHaveBeenCalled();
  expect(screen.queryByText("Retired enqueue error")).toBeNull();
  expect(screen.queryByText("Retired text")).toBeNull();
+});
+
+it("keeps the accepted Recognize snapshot when an older Move to top list resolves last", async () => {
+  const oldSnapshot = deferred<Job[]>();
+  const newSnapshot = deferred<Job[]>();
+  const request = deferred<string>();
+  const queued = job("queued", "queued");
+  const recognizing = job("recognizing", "running");
+  vi.mocked(api.queue.list).mockReturnValueOnce(oldSnapshot.promise).mockReturnValueOnce(newSnapshot.promise);
+  vi.mocked(api.pdf.run).mockReturnValueOnce(request.promise);
+  useAppStore.setState({ jobs: [queued] });
+  const row = render(<QueueRow job={queued} index={0} />);
+  fireEvent.contextMenu(row.container.firstElementChild!);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move to top" }));
+  await waitFor(() => expect(api.queue.list).toHaveBeenCalledTimes(1));
+  expect(api.queue.moveToTop).toHaveBeenCalledWith(queued.id);
+  render(view());
+  await pick();
+  await start();
+  await act(async () => request.resolve("recognizing"));
+  await waitFor(() => expect(api.queue.list).toHaveBeenCalledTimes(2));
+  await act(async () => newSnapshot.resolve([queued, recognizing]));
+  const acceptedGeneration = useAppStore.getState().queueSnapshotGeneration;
+  expect(acceptedGeneration).toBeGreaterThan(useRecognizeSession.getState().acknowledgedGeneration);
+  expect(useRecognizeSession.getState().phase).toBe("running");
+  await act(async () => oldSnapshot.resolve([queued]));
+  expect(useAppStore.getState().jobs).toEqual([queued, recognizing]);
+  expect(useAppStore.getState().queueSnapshotGeneration).toBe(acceptedGeneration);
+  expect(useRecognizeSession.getState()).toMatchObject({ phase: "running", jobId: "recognizing", error: null, recovery: null });
+  expect(screen.getByRole("button", { name: "Recognizing…" })).toBeTruthy();
+  expect(screen.queryByText(/no longer in the queue/)).toBeNull();
 });

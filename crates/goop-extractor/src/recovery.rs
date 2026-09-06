@@ -430,6 +430,11 @@ impl RecoveryCheckpoint {
         let mut path = PathBuf::new();
         for component in self.root.components() {
             path.push(component);
+            // A Windows drive prefix alone is not an ancestor directory.
+            // Inspect it once RootDir completes the absolute root instead.
+            if matches!(component, Component::Prefix(_)) {
+                continue;
+            }
             if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
                 return Err(invalid("linked Extract output ancestor"));
             }
@@ -585,10 +590,123 @@ fn display_name(raw: &str) -> String {
         .filter(|c| !c.is_control() && !"/\\:*?\"<>|%".contains(*c))
         .take(150)
         .collect();
-    let name = name.trim().trim_matches('.');
+    let name = name.trim_matches(|c: char| c == '.' || c.is_whitespace());
     if name.is_empty() {
         "Download".into()
     } else {
         name.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(root: &Path) -> ExtractRequest {
+        serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/video", "output_dir": root, "audio_only": false
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn display_name_checkpoint_roundtrip_accepts_alternating_edge_dots_and_whitespace() {
+        for (raw, expected) in [
+            ("... hello ...", "hello"),
+            (" . . hello . . ", "hello"),
+            (" . . ", "Download"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let req = request(root.path());
+            let id = JobId::new();
+            let recovery = ExtractRecovery::ephemeral();
+            let directory = recovery
+                .allocate(id, &req)
+                .unwrap()
+                .owned_directory()
+                .unwrap();
+            let source = directory.join("source.mp4");
+            std::fs::write(&source, b"completed source").unwrap();
+            recovery
+                .capture(
+                    serde_json::json!({
+                        "title": raw, "extractor": raw, "upload_date": raw,
+                        "format_id": "18", "ext": "mp4", "filepath": source,
+                        "vcodec": "h264", "acodec": "aac"
+                    }),
+                    JobSignals::new(),
+                )
+                .await
+                .unwrap();
+            let checkpoint = recovery.checkpoint().unwrap();
+            assert_eq!(checkpoint.owned_directory().unwrap(), directory);
+            assert_eq!(checkpoint.title, expected);
+            assert_eq!(checkpoint.extractor, expected);
+            assert_eq!(checkpoint.upload_date, expected);
+            let resumed = ExtractRecovery::new(
+                Some(serde_json::to_value(checkpoint).unwrap()),
+                Arc::new(|_| Ok(())),
+            )
+            .unwrap();
+            let restored = resumed.allocate(id, &req).unwrap();
+            assert_eq!(restored.owned_directory().unwrap(), directory);
+            restored.validate_sources(&JobSignals::new()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_replaced_output_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let ancestor = base.join("ancestor");
+        let root = ancestor.join("outputs");
+        std::fs::create_dir_all(&root).unwrap();
+        let checkpoint = ExtractRecovery::ephemeral()
+            .allocate(JobId::new(), &request(&root))
+            .unwrap();
+        checkpoint.owned_directory().unwrap();
+        let moved = base.join("moved");
+        std::fs::rename(&ancestor, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &ancestor).unwrap();
+        let error = checkpoint.owned_directory().unwrap_err();
+        assert!(error.to_string().contains("linked Extract output ancestor"));
+        assert!(moved
+            .join("outputs")
+            .join(checkpoint.workspace)
+            .join("owner.json")
+            .is_file());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_recovery_allocation_and_reload() {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(|| {
+                let temp = tempfile::tempdir().unwrap();
+                let root = std::fs::canonicalize(temp.path()).unwrap();
+                assert!(matches!(
+                    root.components().next(),
+                    Some(Component::Prefix(_))
+                ));
+                let req = request(&root);
+                let id = JobId::new();
+                let recovery = ExtractRecovery::ephemeral();
+                let checkpoint = recovery.allocate(id, &req).unwrap();
+                let directory = checkpoint.owned_directory().unwrap();
+                let resumed = ExtractRecovery::new(
+                    Some(serde_json::to_value(checkpoint).unwrap()),
+                    Arc::new(|_| Ok(())),
+                )
+                .unwrap();
+                let restored = resumed.allocate(id, &req).unwrap();
+                assert_eq!(restored.root, root);
+                assert_eq!(restored.owned_directory().unwrap(), directory);
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 }
