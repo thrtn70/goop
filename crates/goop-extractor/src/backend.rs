@@ -683,8 +683,11 @@ exit 1
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let barrier = out.path().join("barrier");
+        // Keep this pipe-EOF fixture to one leader. External touch or a
+        // non-exec sleep can race cancellation before the shell reaps them;
+        // descendant termination has its own writer and native ffmpeg tests.
         write_fake(bins.path(), "yt-dlp", &format!(
-            "echo '__GOOP_PP__{{\"status\":\"started\",\"postprocessor\":\"Merger\"}}' >&2\nexec 1>&- 2>&-\ntouch '{}'\nsleep 20\n", barrier.display()));
+            "echo '__GOOP_PP__{{\"status\":\"started\",\"postprocessor\":\"Merger\"}}' >&2\nexec 1>&- 2>&-\n: > '{}'\nexec sleep 20\n", barrier.display()));
         let req: ExtractRequest = serde_json::from_value(serde_json::json!({
             "url":"https://youtube.com/watch?v=test", "output_dir":out.path(),
             "format":null,"audio_only":false
@@ -706,7 +709,13 @@ exit 1
             result = &mut future => panic!("unexpected completion: {result:?}"),
             _ = async {
                 tokio::time::timeout(Duration::from_secs(3), async {
-                    while !barrier.exists() { tokio::task::yield_now().await; }
+                    loop {
+                        let merging = sink.progress.lock().iter().any(|p| {
+                            p.stage == "merging" && p.eta_secs.is_none() && p.speed_hr.is_none()
+                        });
+                        if barrier.exists() && merging { break; }
+                        tokio::task::yield_now().await;
+                    }
                 }).await.unwrap();
             } => {}
         }
@@ -718,7 +727,8 @@ exit 1
         signals.cancel.cancel();
         let stopped = tokio::time::timeout(Duration::from_secs(3), &mut future).await;
         assert!(stopped.is_ok(), "cancel must interrupt wait after pipe EOF");
-        assert!(matches!(stopped.unwrap(), Err(GoopError::Cancelled)));
+        let stopped = stopped.unwrap();
+        assert!(matches!(stopped, Err(GoopError::Cancelled)), "{stopped:?}");
         assert!(
             merging,
             "observed postprocessor must report indeterminate merging"
