@@ -29,3 +29,9 @@ test('bundled font bytes match the retained upstream provenance', () => {
     }
   }
 });
+test('desktop bundles carry the full copyright and font license notices', () => {
+  const config = JSON.parse(readFileSync(new URL('src-tauri/tauri.conf.json', root), 'utf8'));
+  for (const family of ['bricolage-grotesque', 'figtree']) {
+    assert.equal(config.bundle.resources[`../src/assets/fonts/${family}-OFL.txt`], `licenses/fonts/${family}-OFL.txt`);
+  }
+});

@@ -55,7 +55,9 @@
       "bin/gs-resources/Resource": "gs-resources/Resource",
       "bin/gs-resources/lib": "gs-resources/lib",
       "bin/gs-resources/iccprofiles": "gs-resources/iccprofiles",
-      "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata"
+      "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata",
+      "../src/assets/fonts/bricolage-grotesque-OFL.txt": "licenses/fonts/bricolage-grotesque-OFL.txt",
+      "../src/assets/fonts/figtree-OFL.txt": "licenses/fonts/figtree-OFL.txt"
     },
     "macOS": {
       "signingIdentity": "-",
