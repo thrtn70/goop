@@ -109,6 +109,7 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
 }
 
 export function clearWorkspaceDrafts(tool: WorkspaceTool, scope: readonly string[] = []) {
+  notifyRetirement({ tool, scope });
   const scopeKey = JSON.stringify([tool, ...scope]);
   useDraftStore.setState(s => ({
     scopeEpochs: { ...s.scopeEpochs, [scopeKey]: (s.scopeEpochs[scopeKey] ?? 0) + 1 },
@@ -131,12 +132,16 @@ export function claimWorkspaceFilePicker(token: number) {
 }
 
 export function resetWorkspaceDrafts() {
+  notifyRetirement({});
   consumedPickerToken = 0;
   useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1 }));
 }
 
 /** Explicit source removal retires its forms, including source-set batch scopes. */
 export function forgetWorkspaceSource(tool: WorkspaceTool, source: string) {
+  notifyRetirement({ tool, source });
+  const sourceKey = JSON.stringify(["source", tool, source]);
+  useDraftStore.setState(state => ({scopeEpochs: {...state.scopeEpochs, [sourceKey]: (state.scopeEpochs[sourceKey] ?? 0) + 1}}));
   const keys = Object.keys(useDraftStore.getState().entries);
   for (const key of keys) {
     const parts = JSON.parse(key) as string[];
@@ -154,3 +159,24 @@ export function retireWorkspaceCompletion(tool: WorkspaceTool) {
   const key = JSON.stringify([tool]);
   useDraftStore.setState(state => ({ scopeEpochs: {...state.scopeEpochs, [key]: (state.scopeEpochs[key] ?? 0) + 1} }));
 }
+
+export type WorkspaceRetirement = { tool?: WorkspaceTool; scope?: readonly string[]; source?: string };
+const retirementListeners = new Set<(event: WorkspaceRetirement) => void>();
+export function subscribeWorkspaceRetirement(listener: (event: WorkspaceRetirement) => void) {
+  retirementListeners.add(listener);
+  return () => { retirementListeners.delete(listener); };
+}
+function notifyRetirement(event: WorkspaceRetirement) {
+  retirementListeners.forEach(listener => listener(event));
+}
+function runtimeScopeLifetime(state: DraftState, scope: DraftScope) {
+  return scopeLifetime(state, [scope.tool, ...scope.path]) + ":" + scope.sources.map(source => state.scopeEpochs[JSON.stringify(["source", scope.tool, source])] ?? 0).join(":");
+}
+export function getWorkspaceScopeLifetime(scope: DraftScope) {
+  return runtimeScopeLifetime(useDraftStore.getState(), scope);
+}
+export function useWorkspaceScopeLifetime(scope: DraftScope) {
+  return useDraftStore(state => runtimeScopeLifetime(state, scope));
+}
+/** Runtime callbacks share removal authority, but never edit persisted intent. */
+export function useWorkspaceScope() { return useContext(ScopeContext); }

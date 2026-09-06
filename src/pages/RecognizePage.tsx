@@ -1,7 +1,8 @@
+import { beginRecognizeSession, cancelRecognizeSubmission, clearRecognizeSession, enqueueRecognize, failRecognizeSubmission, refreshRecognizeQueue, retryRecognizePreview, useRecognizeSession } from "@/store/recognizeSession";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -11,11 +12,11 @@ import {
   isRecognizable,
   RECOGNIZE_EXTENSIONS,
 } from "@/features/recognize/recognizable";
-import { api, pdfRecognizeText } from "@/ipc/commands";
+import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useAppStore } from "@/store/appStore";
 import type { IpcLanguagePack } from "@/ipc/commands";
-import type { ImageOcrOutput, JobId } from "@/types";
+import type { ImageOcrOutput } from "@/types";
 
 // Keep in lockstep with RECOGNIZE_PREVIEW_CHAR_CAP in
 // src-tauri/src/commands/pdf.rs. Used only to show a "preview truncated"
@@ -24,13 +25,6 @@ const PREVIEW_CHAR_CAP = 100_000;
 
 function basename(p: string): string {
   return p.replace(/\\/g, "/").split("/").pop() ?? p;
-}
-
-type Phase = "idle" | "running" | "done" | "error";
-
-interface RecognizeResult {
-  text: string;
-  outputPath: string;
 }
 
 /**
@@ -47,7 +41,6 @@ interface RecognizeResult {
  */
 function RecognizePage() {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const jobs = useAppStore((s) => s.jobs);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -56,14 +49,10 @@ function RecognizePage() {
   const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [lang, setLang] = useWorkspaceDraftState<string>("RecognizePage.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
-  const [phase, setPhase] = useState<Phase>("idle");
+  const {phase, result, error, recovery} = useRecognizeSession();
   const { busy: submitting, begin } = useWorkspaceOperation();
-  const [jobId, setJobId] = useState<JobId | null>(null);
-  const [result, setResult] = useState<RecognizeResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Guards the completion effect against firing the async peek twice if a
-  // second `jobs` update lands before `setJobId(null)` flushes.
-  const peekingRef = useRef(false);
+  const processing = phase === "running" || phase === "peeking";
+  const [languageError, setLanguageError] = useState<string | null>(null);
 
   // Preload a file when navigated here from a "Recognize text?" chip on
   // another page (it passes the path via router state).
@@ -71,6 +60,7 @@ function RecognizePage() {
     const preloaded = (location.state as { recognizeInput?: string } | null)
       ?.recognizeInput;
     if (typeof preloaded === "string" && isRecognizable(preloaded)) {
+      clearRecognizeSession();
       setInput(preloaded);
       // Clear the router state so a later back/forward doesn't re-load it.
       navigate(location.pathname, { replace: true, state: null });
@@ -91,7 +81,7 @@ function RecognizePage() {
         }
       })
       .catch((e) => {
-        if (!cancelled) setError(formatError(e));
+        if (!cancelled) setLanguageError(formatError(e));
       })
       .finally(() => {
         if (!cancelled) setLoadingLangs(false);
@@ -102,43 +92,11 @@ function RecognizePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Watch the queue for our recognize job; when it finishes, peek the
-  // recognized text for the preview pane.
-  useEffect(() => {
-    if (!jobId || peekingRef.current) return;
-    const job = jobs.find((j) => jobIdKey(j.id) === jobIdKey(jobId));
-    if (!job) return;
-    if (job.state === "done" && job.result?.output_path) {
-      const out = job.result.output_path;
-      peekingRef.current = true;
-      setJobId(null);
-      api.pdf
-        .recognizePeekText(out)
-        .then((text) => {
-          setResult({ text, outputPath: out });
-          setPhase("done");
-        })
-        .catch((e) => {
-          setError(formatError(e));
-          setPhase("error");
-        })
-        .finally(() => {
-          peekingRef.current = false;
-        });
-    } else if (typeof job.state === "object" && "error" in job.state) {
-      setError(job.state.error.message);
-      setPhase("error");
-      setJobId(null);
-    }
-  }, [jobs, jobId]);
-
   const addFromPaths = useCallback((paths: string[]) => {
     const first = paths.find(isRecognizable);
     if (!first) return;
     setInput(first);
-    setResult(null);
-    setError(null);
-    setPhase("idle");
+    clearRecognizeSession();
   }, [setInput]);
 
   const handleBrowse = useCallback(async () => {
@@ -160,10 +118,10 @@ function RecognizePage() {
   }, [addFromPaths, enqueueToast]);
 
   async function handleRecognize() {
-    if (!input || phase === "running") return;
+    if (!input || processing) return;
     const finish = begin();
     if (!finish) return;
-    setError(null);
+    const attempt = beginRecognizeSession({input, outputKind, lang});
     const isText = outputKind === "text";
     const stem = basename(input).replace(/\.[^.]+$/, "");
     try {
@@ -176,22 +134,17 @@ function RecognizePage() {
             : { name: "PDF", extensions: ["pdf"] },
         ],
       });
-      if (!dest) return;
-      const id = await api.pdf.run(pdfRecognizeText(input, dest, outputKind, lang));
-      peekingRef.current = false;
-      setResult(null);
-      setPhase("running");
-      setJobId(id);
+      if (!dest) { cancelRecognizeSubmission(attempt); return; }
+      await enqueueRecognize(attempt, dest);
     } catch (e) {
-      setError(formatError(e));
-      setPhase("error");
+      failRecognizeSubmission(attempt, e);
     } finally {
       finish();
     }
   }
 
   const canRecognize =
-    !!input && !submitting && phase !== "running" && installed.length > 0 && !!lang;
+    !!input && !submitting && !processing && installed.length > 0 && !!lang;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -231,8 +184,7 @@ function RecognizePage() {
             type="button"
             onClick={() => {
               setInput(null);
-              setResult(null);
-              setPhase("idle");
+              clearRecognizeSession();
             }}
             className="btn-press rounded p-1 text-xs text-fg-muted hover:bg-surface-3 hover:text-error"
           >
@@ -254,7 +206,7 @@ function RecognizePage() {
                   key={kind}
                   type="button"
                   aria-pressed={outputKind === kind}
-                  onClick={() => setOutputKind(kind)}
+                  onClick={() => { if (kind !== outputKind) clearRecognizeSession(); setOutputKind(kind); }}
                   className={`btn-press flex-1 rounded-md border px-3 py-1.5 text-sm transition duration-fast ease-out ${
                     outputKind === kind
                       ? "border-accent bg-accent-subtle text-fg"
@@ -286,7 +238,7 @@ function RecognizePage() {
             ) : (
               <select
                 value={lang}
-                onChange={(e) => setLang(e.target.value)}
+                onChange={(e) => { clearRecognizeSession(); setLang(e.target.value); }}
                 className="rounded-md border border-subtle bg-surface-2 px-3 py-1.5 text-sm text-fg"
               >
                 {installed
@@ -309,9 +261,11 @@ function RecognizePage() {
               onClick={() => void handleRecognize()}
               className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {submitting ? "Starting…" : phase === "running" ? "Recognizing…" : "Recognize text"}
+              {submitting ? "Starting…" : processing ? "Recognizing…" : "Recognize text"}
             </button>
-            {error && <span className="text-xs text-error">{error}</span>}
+            {(error || languageError) && <span className="text-xs text-error">{error || languageError}</span>}
+            {recovery === "preview" && <button type="button" onClick={retryRecognizePreview} className="text-sm text-accent">Retry preview</button>}
+            {(processing || recovery === "queue") && <button type="button" onClick={() => void refreshRecognizeQueue()} className="text-sm text-accent">Refresh queue</button>}
           </div>
         </>
       )}

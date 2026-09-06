@@ -1,7 +1,8 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { api, metadataWrite } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -47,7 +48,7 @@ function AudioTagForm({ view, onDone }: AudioTagFormProps) {
   const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioTagForm.cover", { kind: "keep" });
   const [backup, setBackup] = useWorkspaceDraftState("AudioTagForm.backup", false);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("AudioTagForm.error", null);
 
   const audio = useMemo<AudioTags>(
     () => ({

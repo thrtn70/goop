@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
@@ -27,12 +28,12 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
   const { pages, setPages, loadPages } = usePdfPageDrafts("PdfDeleteFlow.pages");
   const [loading, setLoading] = useState(true);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfDeleteFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
+
     void Promise.all([api.pdf.probe(file), api.pdf.pageThumbs(file).catch(() => [] as string[])])
       .then(([probe, thumbs]) => {
         if (cancelled) return;
@@ -55,7 +56,7 @@ export default function PdfDeleteFlow({ file, onDone }: PdfDeleteFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file, loadPages]);
+  }, [file, loadPages, setError]);
 
   const toDelete = pages.filter((p) => p.deleted).map((p) => p.originalPage);
   const wouldEmpty = toDelete.length > 0 && toDelete.length === pages.length;

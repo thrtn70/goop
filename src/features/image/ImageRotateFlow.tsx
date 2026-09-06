@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageRotate } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -40,7 +40,7 @@ function ImageRotateFlow({ file, onDone }: ImageRotateFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [degrees, setDegrees] = useWorkspaceDraftState<RotationDegrees>("ImageRotateFlow.degrees", "cw90");
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageRotateFlow.error", null);
 
   async function handleApply() {
     if (busy) return;

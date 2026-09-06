@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, imageWatermark } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -58,7 +58,7 @@ function ImageWatermarkFlow({ file, onDone }: ImageWatermarkFlowProps) {
   const [position, setPosition] = useWorkspaceDraftState<WatermarkPosition>("ImageWatermarkFlow.position", DEFAULT_POSITION);
   const [opacity, setOpacity] = useWorkspaceDraftState<number>("ImageWatermarkFlow.opacity", DEFAULT_OPACITY);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageWatermarkFlow.error", null);
 
   const canApply = !busy && text.trim().length > 0;
 

@@ -1,6 +1,7 @@
+import type { Dispatch, SetStateAction } from "react";
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
-import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
+import { WorkspaceDraftProvider, forgetWorkspaceSource, useWorkspaceTool, useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { api, pdfImagesToPdf } from "@/ipc/commands";
@@ -28,10 +29,15 @@ function basename(p: string): string {
  * Workshop scope).
  */
 export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
-  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [images, setImages] = useWorkspaceDraftState<string[]>("ImagesToPdfFlow.images", []);
+  return <WorkspaceDraftProvider scope={["ImagesToPdfFlow", ...images.slice().sort()]} sourcePaths={images}><ImagesToPdfFlowOperation {...{onDone, images, setImages}} /></WorkspaceDraftProvider>;
+}
+
+function ImagesToPdfFlowOperation({onDone, images, setImages}: ImagesToPdfFlowProps & {images: string[]; setImages: Dispatch<SetStateAction<string[]>>;}) {
+  const tool = useWorkspaceTool();
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImagesToPdfFlow.error", null);
 
   async function handlePick() {
     setError(null);
@@ -95,6 +101,7 @@ export default function ImagesToPdfFlow({ onDone }: ImagesToPdfFlowProps) {
   }
 
   function remove(idx: number) {
+    forgetWorkspaceSource(tool, images[idx]);
     setImages((prev) => prev.filter((_, i) => i !== idx));
   }
 

@@ -100,6 +100,10 @@ export interface HistoryState {
 type AppStoreState = {
   settings: Settings | null;
   jobs: Job[];
+  /** Issued list requests, including requests still pending or failed. */
+  queueRequestGeneration: number;
+  /** Request generation that produced the latest accepted successful list. */
+  queueSnapshotGeneration: number;
   progressById: Record<string, ProgressEntry>;
   toasts: Toast[];
   /** Jobs finished while user was on a different page — clears on queue-focus. */
@@ -320,6 +324,8 @@ let versionsInFlight: Promise<AppVersionInfo> | null = null;
 export const useAppStore = create<AppStoreState>((set, get) => ({
   settings: null,
   jobs: [],
+  queueRequestGeneration: 0,
+  queueSnapshotGeneration: 0,
   progressById: {},
   toasts: [],
   unseenCompletions: 0,
@@ -334,15 +340,19 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   pendingFocusUrlInput: 0,
   pendingFilePicker: 0,
   async loadAll() {
+    const generation = get().queueRequestGeneration + 1;
+    set({queueRequestGeneration: generation});
     const [settings, jobs] = await Promise.all([
       api.settings.get(),
       api.queue.list(),
     ]);
-    set({ settings, jobs });
+    set(state => generation >= state.queueSnapshotGeneration ? { settings, jobs, queueSnapshotGeneration: generation } : {settings});
   },
   async refreshJobs() {
+    const generation = get().queueRequestGeneration + 1;
+    set({queueRequestGeneration: generation});
     const jobs = await api.queue.list();
-    set({ jobs });
+    set(state => generation >= state.queueSnapshotGeneration ? { jobs, queueSnapshotGeneration: generation } : {});
   },
   applyProgress(e) {
     const key = jobIdKey(e.job_id);
@@ -656,8 +666,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   async reorderQueue(orderedIds) {
     if (orderedIds.length === 0) return;
     await api.queue.reorder(orderedIds);
-    const jobs = await api.queue.list();
-    set({ jobs });
+    await get().refreshJobs();
   },
   async cancelSelectedQueue() {
     const selected = get().ui.queueSelectedIds;
@@ -801,8 +810,7 @@ export async function bootstrapStoreSubscriptions(): Promise<UnlistenFn> {
 
   const refresh = async (): Promise<void> => {
     try {
-      const jobs = await api.queue.list();
-      useAppStore.setState({ jobs });
+      await useAppStore.getState().refreshJobs();
     } catch {
       /* ignore transient errors */
     }

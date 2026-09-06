@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import CropEditor, { type EditorRect } from "./CropEditor";
 import { api, imageCrop } from "@/ipc/commands";
@@ -39,7 +39,7 @@ function ImageCropFlow({ file, onDone }: ImageCropFlowProps) {
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [rect, setRect] = useWorkspaceDraftState<EditorRect | null>("ImageCropFlow.rect", null);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageCropFlow.error", null);
 
   const canApply = rect !== null && !busy;
 

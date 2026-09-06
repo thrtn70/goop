@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { usePdfPageDrafts } from "./usePdfPageDrafts";
 import { useEffect, useState } from "react";
@@ -29,12 +30,12 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
   const { pages, setPages, loadPages } = usePdfPageDrafts("PdfRotateFlow.pages");
   const [loading, setLoading] = useState(true);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfRotateFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
+
     void Promise.all([api.pdf.probe(file), api.pdf.pageThumbs(file).catch(() => [] as string[])])
       .then(([probe, thumbs]) => {
         if (cancelled) return;
@@ -57,7 +58,7 @@ export default function PdfRotateFlow({ file, onDone }: PdfRotateFlowProps) {
     return () => {
       cancelled = true;
     };
-  }, [file, loadPages]);
+  }, [file, loadPages, setError]);
 
   function rotateAll(deg: RotationDegrees) {
     setPages((prev) =>

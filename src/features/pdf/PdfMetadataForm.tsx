@@ -1,6 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useId, useState } from "react";
+import { useId } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, pdfSetMetadata } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -29,7 +30,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
   const [subject, setSubject] = useWorkspaceDraftState<string>("PdfMetadataForm.subject", "");
   const [keywords, setKeywords] = useWorkspaceDraftState<string>("PdfMetadataForm.keywords", "");
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfMetadataForm.error", null);
 
   const titleId = useId();
   const authorId = useId();

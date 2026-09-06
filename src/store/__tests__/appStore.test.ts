@@ -412,3 +412,20 @@ describe("Extract progress authority", () => {
     expect(useAppStore.getState().progressById[id]).toBeUndefined();
   });
 });
+
+it("publishes only successful queue snapshot request generations and ignores older responses", async () => {
+ let resolve!: (jobs: Job[]) => void;
+ vi.mocked(api.queue.list).mockReturnValueOnce(new Promise(done => {resolve = done;}));
+ const older = useAppStore.getState().refreshJobs();
+ const started = useAppStore.getState().queueRequestGeneration;
+ vi.mocked(api.queue.list).mockResolvedValueOnce([makeJob("new")]);
+ await useAppStore.getState().refreshJobs();
+ const successful = useAppStore.getState().queueSnapshotGeneration;
+ expect(successful).toBeGreaterThan(started);
+ resolve([]); await older;
+ expect(useAppStore.getState().jobs.map(job => job.id)).toEqual(["new"]);
+ expect(useAppStore.getState().queueSnapshotGeneration).toBe(successful);
+ vi.mocked(api.queue.list).mockRejectedValueOnce(new Error("offline"));
+ await expect(useAppStore.getState().refreshJobs()).rejects.toThrow("offline");
+ expect(useAppStore.getState().queueSnapshotGeneration).toBe(successful);
+});

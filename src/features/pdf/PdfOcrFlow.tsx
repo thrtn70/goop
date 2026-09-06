@@ -1,3 +1,4 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
@@ -39,7 +40,7 @@ export default function PdfOcrFlow({ file, onDone }: PdfOcrFlowProps) {
   const [lang, setLang] = useWorkspaceDraftState<string>("PdfOcrFlow.lang", "eng");
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("PdfOcrFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;

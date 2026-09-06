@@ -1,7 +1,7 @@
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
 import { api, metadataWrite } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
@@ -55,7 +55,7 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
   const [cover, setCover] = useWorkspaceDraftState<CoverArtOp>("AudioBatchEditor.cover", { kind: "keep" });
   const [backup, setBackup] = useWorkspaceDraftState("AudioBatchEditor.backup", false);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("AudioBatchEditor.error", null);
 
   const shared = (s: string): string | null => (s.trim() === "" ? null : s);
 

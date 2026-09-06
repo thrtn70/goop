@@ -1,5 +1,7 @@
+import type { Dispatch, SetStateAction } from "react";
+import { useWorkspaceOutcomeState } from "@/store/workspaceOutcomes";
 import { useWorkspaceOperation } from "@/store/workspaceOperations";
-import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { WorkspaceDraftProvider, forgetWorkspaceSource, useWorkspaceTool, useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -24,15 +26,20 @@ function basename(p: string): string {
  * pattern + PdfOcrFlow's language picker.
  */
 export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
-  const enqueueToast = useAppStore((s) => s.enqueueToast);
-  const navigate = useNavigate();
   const [images, setImages] = useWorkspaceDraftState<string[]>("ImageOcrFlow.images", []);
   const [outputKind, setOutputKind] = useWorkspaceDraftState<ImageOcrOutput>("ImageOcrFlow.outputKind", "text");
-  const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [lang, setLang] = useWorkspaceDraftState<string>("ImageOcrFlow.lang", "eng");
+  return <WorkspaceDraftProvider scope={["ImageOcrFlow", ...images.slice().sort()]} sourcePaths={images}><ImageOcrFlowOperation {...{onDone, images, setImages, outputKind, setOutputKind, lang, setLang}} /></WorkspaceDraftProvider>;
+}
+
+function ImageOcrFlowOperation({onDone, images, setImages, outputKind, setOutputKind, lang, setLang}: ImageOcrFlowProps & {images: string[]; setImages: Dispatch<SetStateAction<string[]>>; outputKind: ImageOcrOutput; setOutputKind: Dispatch<SetStateAction<ImageOcrOutput>>; lang: string; setLang: Dispatch<SetStateAction<string>>;}) {
+  const tool = useWorkspaceTool();
+  const enqueueToast = useAppStore((s) => s.enqueueToast);
+  const navigate = useNavigate();
+  const [installed, setInstalled] = useState<IpcLanguagePack[]>([]);
   const [loadingLangs, setLoadingLangs] = useState<boolean>(true);
   const { busy, begin } = useWorkspaceOperation();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useWorkspaceOutcomeState<string | null>("ImageOcrFlow.error", null);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +81,7 @@ export default function ImageOcrFlow({ onDone }: ImageOcrFlowProps) {
   }
 
   function remove(idx: number) {
+    forgetWorkspaceSource(tool, images[idx]);
     setImages((prev) => prev.filter((_, i) => i !== idx));
   }
 

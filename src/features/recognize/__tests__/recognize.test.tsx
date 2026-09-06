@@ -1,5 +1,9 @@
+import { api } from "@/ipc/commands";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { useAppStore } from "@/store/appStore";
+import type { Job } from "@/types";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { act, render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import RecognizePage from "@/pages/RecognizePage";
@@ -138,4 +142,136 @@ describe("RecognizeResultPane", () => {
     );
     expect(screen.getByText(/No text was found/i)).toBeDefined();
   });
+});
+
+function deferred<T>() {
+ let resolve!: (value: T) => void;
+ let reject!: (error: Error) => void;
+ const promise = new Promise<T>((yes, no) => {resolve = yes; reject = no;});
+ return {promise, resolve, reject};
+}
+
+const view = () => <MemoryRouter><RecognizePage /></MemoryRouter>;
+const job = (id: string, state: Job["state"] = "done"): Job => ({id, kind: "pdf", state, payload: {}, result: {output_path: "/out/result.txt", bytes: null, duration_ms: 0n, result_kind: "file", file_count: 1}, priority: 0, attempts: 1, created_at: 0n, started_at: null, finished_at: null});
+async function pick(path = "/a.png") {
+ vi.mocked(open).mockResolvedValue(path);
+ fireEvent.click(screen.getByRole("button", {name: "Pick a file…"}));
+ await screen.findByText(path.slice(1));
+ await waitFor(() => expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false));
+}
+async function start() {
+ vi.mocked(save).mockResolvedValue("/out/result.txt");
+ fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
+ await waitFor(() => expect(api.pdf.run).toHaveBeenCalled());
+}
+beforeEach(() => {useAppStore.setState({jobs: []});});
+it("restores acknowledgement and completion received off-route", async () => {
+ const request = deferred<string>(); vi.mocked(api.pdf.run).mockReturnValue(request.promise);
+ vi.mocked(api.pdf.recognizePeekText).mockResolvedValue("Retained text");
+ const first = render(view()); await pick(); await start(); first.unmount();
+ await act(async () => request.resolve("a"));
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ render(view());
+ expect(await screen.findByText("Retained text")).toBeTruthy();
+});
+it("does not publish an old peek after selecting a newer source", async () => {
+ const peek = deferred<string>(); vi.mocked(api.pdf.run).mockResolvedValue("a");
+ vi.mocked(api.pdf.recognizePeekText).mockReturnValue(peek.promise);
+ render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ await waitFor(() => expect(api.pdf.recognizePeekText).toHaveBeenCalledTimes(1));
+ await pick("/b.png");
+ await act(async () => peek.resolve("Old text"));
+ expect(screen.queryByText("Old text")).toBeNull();
+});
+it("retries a failed preview once without re-enqueueing", async () => {
+ vi.mocked(api.pdf.run).mockResolvedValue("a");
+ vi.mocked(api.pdf.recognizePeekText).mockRejectedValueOnce(new Error("Preview unavailable")).mockResolvedValue("Recovered");
+ render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ expect(await screen.findByText("Preview unavailable")).toBeTruthy();
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ expect(api.pdf.recognizePeekText).toHaveBeenCalledTimes(1);
+ fireEvent.click(screen.getByRole("button", {name: "Retry preview"}));
+ expect(await screen.findByText("Recovered")).toBeTruthy();
+ expect(api.pdf.run).toHaveBeenCalledTimes(1);
+});
+it("ends a cancelled session", async () => {
+ vi.mocked(api.pdf.run).mockResolvedValue("a");
+ render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a", "cancelled")]}));
+ expect(await screen.findByText(/Recognition cancelled/)).toBeTruthy();
+ expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("requires a successful snapshot requested after acknowledgement before reporting a missing job", async () => {
+ const oldSnapshot = deferred<Job[]>(); const newSnapshot = deferred<Job[]>(); const request = deferred<string>();
+ vi.mocked(api.queue.list).mockReturnValueOnce(oldSnapshot.promise).mockReturnValueOnce(newSnapshot.promise);
+ const refreshing = useAppStore.getState().refreshJobs();
+ vi.mocked(api.pdf.run).mockReturnValue(request.promise);
+ render(view()); await pick(); await start();
+ await act(async () => request.resolve("a"));
+ await act(async () => {oldSnapshot.resolve([]); await refreshing;});
+ expect(screen.getByRole("button", {name: "Recognizing…"})).toBeTruthy();
+ await act(async () => newSnapshot.reject(new Error("offline")));
+ expect(screen.getByRole("button", {name: "Recognizing…"})).toBeTruthy();
+ vi.mocked(api.queue.list).mockResolvedValueOnce([]);
+ fireEvent.click(screen.getByRole("button", {name: "Refresh queue"}));
+ expect(await screen.findByText(/no longer in the queue/)).toBeTruthy();
+ expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false);
+});
+it("accepts empty text from a searchable PDF and deduplicates pending peeks", async () => {
+ const peek = deferred<string>();
+ vi.mocked(api.pdf.run).mockResolvedValue("a");
+ vi.mocked(api.pdf.recognizePeekText).mockReturnValue(peek.promise);
+ render(view()); await pick();
+ fireEvent.click(screen.getByRole("button", {name: "Searchable PDF"})); await start();
+ expect(api.pdf.run).toHaveBeenCalledWith(expect.objectContaining({output_kind: "searchable_pdf"}));
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ await waitFor(() => expect(api.pdf.recognizePeekText).toHaveBeenCalledTimes(1));
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ await act(async () => peek.resolve(""));
+ expect(await screen.findByText(/No text was found/)).toBeTruthy();
+ expect(api.pdf.recognizePeekText).toHaveBeenCalledTimes(1);
+});
+it("keeps a newer attempt when an old preview resolves", async () => {
+ const oldPeek = deferred<string>();
+ vi.mocked(api.pdf.run).mockResolvedValueOnce("a").mockResolvedValueOnce("b");
+ vi.mocked(api.pdf.recognizePeekText).mockReturnValueOnce(oldPeek.promise).mockResolvedValueOnce("New result");
+ render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ await waitFor(() => expect(api.pdf.recognizePeekText).toHaveBeenCalledTimes(1));
+ await pick("/b.png"); await start();
+ act(() => useAppStore.setState({jobs: [job("b")]}));
+ expect(await screen.findByText("New result")).toBeTruthy();
+ await act(async () => oldPeek.resolve("Old result"));
+ expect(screen.queryByText("Old result")).toBeNull();
+ expect(screen.getByText("New result")).toBeTruthy();
+});
+it("retains an off-route enqueue error and releases a cancelled Save without changing newer fields", async () => {
+ const request = deferred<string>(); vi.mocked(api.pdf.run).mockReturnValue(request.promise);
+ const first = render(view()); await pick(); await start(); first.unmount();
+ await act(async () => request.reject(new Error("Disk unavailable")));
+ const second = render(view()); expect(await screen.findByText("Disk unavailable")).toBeTruthy();
+ const dialog = deferred<string | null>(); vi.mocked(save).mockReturnValue(dialog.promise);
+ fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
+ second.unmount(); render(view());
+ fireEvent.click(screen.getByRole("button", {name: "Searchable PDF"}));
+ await act(async () => dialog.resolve(null));
+ expect(screen.getByRole("button", {name: "Searchable PDF"}).getAttribute("aria-pressed")).toBe("true");
+ expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false);
+});
+it("ends an errored job and caps retained preview text at 100000 characters", async () => {
+ vi.mocked(api.pdf.run).mockResolvedValueOnce("a").mockResolvedValueOnce("b");
+ vi.mocked(api.pdf.recognizePeekText).mockResolvedValue("x".repeat(100_005));
+ const first = render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a", {error: {message: "OCR failed", detail: null}})]}));
+ expect(await screen.findByText("OCR failed")).toBeTruthy();
+ expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false);
+ await start();
+ act(() => useAppStore.setState({jobs: [job("b")]}));
+ await screen.findByText(/Preview truncated/); first.unmount();
+ const restored = render(view());
+ expect(restored.container.querySelector("pre")?.textContent?.trim().length).toBe(100_000);
+ expect(api.pdf.run).toHaveBeenCalledTimes(2);
 });
