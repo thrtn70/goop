@@ -21,23 +21,19 @@ export default function PresetChips({ kind, onApply }: PresetChipsProps) {
   if (filtered.length === 0) return null;
 
   return (
-    <div
-      role="list"
-      aria-label="Saved presets"
-      className="flex gap-2 overflow-x-auto pb-2"
-    >
+    <ul aria-label="Saved presets" className="flex gap-2 overflow-x-auto pb-2">
       {filtered.map((p) => (
-        <button
-          key={p.id}
-          type="button"
-          role="listitem"
-          onClick={() => onApply(p)}
-          title={p.name}
-          className="btn-press shrink-0 rounded-full border border-subtle bg-surface-1 px-3 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:border-accent hover:text-accent"
-        >
-          {p.name}
-        </button>
+        <li key={p.id} className="shrink-0">
+          <button
+            type="button"
+            onClick={() => onApply(p)}
+            title={p.name}
+            className="btn-press rounded-full border border-subtle bg-surface-1 px-3 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:border-accent hover:text-accent"
+          >
+            {p.name}
+          </button>
+        </li>
       ))}
-    </div>
+    </ul>
   );
 }
