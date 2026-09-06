@@ -1582,6 +1582,71 @@ exit 0
     }
 
     #[tokio::test]
+    async fn publication_budgets_long_utf8_and_composed_names_with_collisions() {
+        for (title, extractor, template) in [
+            ("界".repeat(100), "site".into(), None),
+            (
+                "a".repeat(150),
+                "b".repeat(150),
+                Some("%(title)s — %(extractor)s.%(ext)s"),
+            ),
+            ("CON".into(), "site".into(), None),
+            ("aux.backup".into(), "site".into(), None),
+            ("COM1".into(), "site".into(), None),
+            ("LPT9".into(), "site".into(), None),
+        ] {
+            let bins = TempDir::new().unwrap();
+            let out = TempDir::new().unwrap();
+            let resolver = resolver_at(bins.path());
+            let script = yt_dlp_succeeds(out.path()).replace(
+                "\"title\":\"video\"",
+                &format!(
+                    "\"title\":{},\"extractor\":{}",
+                    serde_json::to_string(&title).unwrap(),
+                    serde_json::to_string(&extractor).unwrap()
+                ),
+            );
+            write_fake(bins.path(), "yt-dlp", &script);
+            let mut req = request("https://youtube.com/watch?v=test", out.path());
+            req.output_template = template.map(str::to_owned);
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let result = dispatch(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    JobId::new(),
+                    &req,
+                    JobSignals::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let path = std::path::PathBuf::from(result.output_path);
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(
+                    name.len() <= 255,
+                    "filename exceeds portable byte budget: {}",
+                    name.len()
+                );
+                assert!(name.ends_with(".mp4"));
+                let device = name.split('.').next().unwrap().to_ascii_uppercase();
+                assert!(
+                    !["CON", "AUX", "COM1", "LPT9"].contains(&device.as_str()),
+                    "reserved device basename: {name}"
+                );
+                if !paths.is_empty() {
+                    assert!(name.ends_with(" (1).mp4"));
+                }
+                paths.push(path);
+            }
+            assert_ne!(paths[0], paths[1]);
+            for path in paths {
+                assert_eq!(std::fs::read(path).unwrap(), b"x");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn publication_collision_preserves_symlink_and_concurrent_same_title_jobs() {
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();

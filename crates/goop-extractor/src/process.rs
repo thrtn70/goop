@@ -145,10 +145,16 @@ impl ProcessTree {
         {
             use windows_sys::Win32::System::JobObjects::*;
             // SAFETY: this guard owns the job, assigned before the child resumed.
-            unsafe {
-                TerminateJobObject(self.job, 1);
+            if unsafe { TerminateJobObject(self.job, 1) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
             }
-            let status = child.wait().await?;
+            let status = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+                .await
+                .map_err(|_| {
+                    GoopError::Queue(
+                        "Extract leader did not stop; recovery files have been retained".into(),
+                    )
+                })??;
             for _ in 0..200 {
                 let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
                     unsafe { std::mem::zeroed() };
@@ -199,6 +205,30 @@ unsafe impl Sync for ProcessTree {}
 mod windows_tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn windows_job_termination_failure_returns_without_waiting_for_leader() {
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 60",
+        ]);
+        command.kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let tree = ProcessTree {
+            job: std::ptr::null_mut(),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        };
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(500), tree.finish(&mut child)).await;
+        child.kill().await.unwrap();
+        assert!(outcome
+            .expect("termination API failure must not await the running leader")
+            .is_err());
+        assert!(!tree.finished.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[tokio::test]
     async fn windows_job_object_owns_suspended_child_before_any_write() {

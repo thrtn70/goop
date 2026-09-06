@@ -726,6 +726,43 @@ impl<'a> YtDlp<'a> {
             }
             _ => cp.title.clone(),
         };
+        // Reserve the longest collision suffix up front so retries retain the
+        // same stem. UTF-8 bytes also conservatively bound Windows UTF-16 units.
+        let budget = 255usize
+            .checked_sub(ext.len() + 1 + " (9999)".len())
+            .ok_or_else(|| GoopError::Queue("Extract output extension is too long".into()))?;
+        let mut stem = stem;
+        let device = stem
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_ascii_uppercase();
+        let numbered_device = ["COM", "LPT"].iter().any(|prefix| {
+            device.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        });
+        if matches!(
+            device.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || numbered_device
+        {
+            stem.insert(0, '_');
+        }
+        let mut end = stem.len().min(budget);
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+        if stem.is_empty() {
+            return Err(GoopError::Queue(
+                "Extract output filename has no available stem".into(),
+            ));
+        }
         for suffix in 0..10_000 {
             cp.owned_directory()?;
             if let Some(int) = signals.check() {
