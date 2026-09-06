@@ -130,10 +130,38 @@ fn spawn_paused_partial_cleanup(
         .get_by_id(job_id)
         .ok()
         .flatten()
-        .is_some_and(|j| j.state == JobState::Cancelled);
-    if finalized {
+        .filter(|job| job.state == JobState::Cancelled);
+    if let Some(job) = finalized {
         tauri::async_runtime::spawn_blocking(move || {
-            goop_extractor::cleanup_partials_for(&req);
+            if let Some(raw) = job
+                .payload
+                .get(goop_extractor::recovery::RECOVERY_PAYLOAD_KEY)
+            {
+                let cleanup = goop_extractor::recovery::ExtractRecovery::new(
+                    Some(raw.clone()),
+                    std::sync::Arc::new(|_| Ok(())),
+                )
+                .and_then(|recovery| {
+                    let checkpoint = recovery.checkpoint().ok_or_else(|| {
+                        goop_core::GoopError::Queue("missing extraction ownership".into())
+                    })?;
+                    if checkpoint.job_id != job_id {
+                        return Err(goop_core::GoopError::Queue(
+                            "extraction ownership mismatch".into(),
+                        ));
+                    }
+                    goop_extractor::backend::cleanup_partials_for_recovery(
+                        &req,
+                        job_id,
+                        &checkpoint,
+                    )
+                });
+                if let Err(error) = cleanup {
+                    tracing::warn!(?job_id, %error, "retaining uncertain extraction workspace");
+                }
+            } else {
+                goop_extractor::cleanup_partials_for(&req);
+            }
         });
     }
 }
@@ -146,7 +174,7 @@ fn paused_extract_request(
     job_id: JobId,
 ) -> Option<goop_extractor::ytdlp::ExtractRequest> {
     let job = state.store.get_by_id(job_id).ok().flatten()?;
-    if job.kind != JobKind::Extract || job.state != JobState::Paused {
+    if job.kind != JobKind::Extract || !matches!(job.state, JobState::Paused | JobState::Queued) {
         return None;
     }
     serde_json::from_value(job.payload).ok()

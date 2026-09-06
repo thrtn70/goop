@@ -244,6 +244,39 @@ impl QueueStore {
         }
     }
 
+    /// Patch one internal field while holding the same write transaction used
+    /// to read it, so independent recovery callbacks cannot erase each other.
+    pub fn patch_payload_field(
+        &self,
+        id: JobId,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), GoopError> {
+        let mut connection = self.conn.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        let raw: String = tx
+            .query_row(
+                "SELECT payload FROM jobs WHERE id = ?1",
+                params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| GoopError::Queue(format!("cannot read job {id:?}: {e}")))?;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| GoopError::Queue(e.to_string()))?;
+        payload
+            .as_object_mut()
+            .ok_or_else(|| GoopError::Queue("extract payload is not an object".into()))?
+            .insert(key.into(), value);
+        tx.execute(
+            "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+            params![id.0.to_string(), payload.to_string()],
+        )
+        .map_err(|e| GoopError::Queue(e.to_string()))?;
+        tx.commit().map_err(|e| GoopError::Queue(e.to_string()))
+    }
+
     /// Yield a running job back to the queue with a wake-up deadline: the
     /// worker found its external dependency (TorBox fetch) not ready and
     /// released its concurrency permit instead of blocking on it. Guarded
@@ -1008,6 +1041,33 @@ mod tests {
         s.insert(&b).unwrap();
         let n = s.next_queued(&JobKind::Extract, 0).unwrap().unwrap();
         assert_eq!(n.id, b.id);
+    }
+
+    #[test]
+    fn payload_field_patches_preserve_concurrent_fields_and_reopened_retry() {
+        let (store, tmp) = temp_store();
+        let mut job = Job::new(JobKind::Extract, serde_json::json!({"url":"original"}));
+        job.state = JobState::Running;
+        store.insert(&job).unwrap();
+        std::thread::scope(|scope| {
+            for index in 0..16 {
+                let store = &store;
+                let id = job.id;
+                scope.spawn(move || {
+                    store
+                        .patch_payload_field(id, &format!("field{index}"), serde_json::json!(index))
+                        .unwrap()
+                });
+            }
+        });
+        let payload = store.get_by_id(job.id).unwrap().unwrap().payload;
+        assert_eq!(payload.as_object().unwrap().len(), 17);
+        let path = tmp.path().join("q.db");
+        drop(store);
+        let store = QueueStore::open(&path).unwrap();
+        store.reconcile().unwrap();
+        store.retry_errored(job.id).unwrap();
+        assert_eq!(store.get_by_id(job.id).unwrap().unwrap().payload, payload);
     }
 
     #[test]

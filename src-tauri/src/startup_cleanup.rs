@@ -132,15 +132,7 @@ pub(crate) fn persist_job_payload_field(
     key: &str,
     value: serde_json::Value,
 ) -> Result<(), GoopError> {
-    let mut job = store
-        .get_by_id(id)?
-        .ok_or_else(|| GoopError::Queue(format!("job {id:?} disappeared while persisting")))?;
-    let payload = job
-        .payload
-        .as_object_mut()
-        .ok_or_else(|| GoopError::Queue("extract payload is not an object".into()))?;
-    payload.insert(key.to_string(), value);
-    store.update_payload(id, &job.payload)
+    store.patch_payload_field(id, key, value)
 }
 
 pub(crate) fn cleanup_orphaned_downloads(store: &QueueStore, settings: &cfg::Settings) {

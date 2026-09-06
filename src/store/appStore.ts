@@ -346,24 +346,30 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   applyProgress(e) {
     const key = jobIdKey(e.job_id);
-    set((s) => ({
-      progressById: {
-        ...s.progressById,
-        [key]: {
-          // Retry-status events ("retrying (attempt N/M)") carry percent 0
-          // — the retry layer doesn't know the transfer offset. Hold the
-          // last rendered percent so the bar doesn't collapse during the
-          // backoff wait; the next real downloading event overwrites it.
-          percent: e.stage.startsWith("retrying")
-            ? (s.progressById[key]?.percent ?? e.percent)
-            : e.percent,
-          eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
-          speed_hr: e.speed_hr ?? null,
-          encoder: e.encoder ?? null,
-          stage: e.stage,
+    set((s) => {
+      const job = s.jobs.find((job) => jobIdKey(job.id) === key);
+      if (job && (job.state === "done" || job.state === "cancelled" || typeof job.state === "object")) {
+        return {};
+      }
+      return {
+        progressById: {
+          ...s.progressById,
+          [key]: {
+            // Retry-status events ("retrying (attempt N/M)") carry percent 0
+            // — the retry layer doesn't know the transfer offset. Hold the
+            // last rendered percent so the bar doesn't collapse during the
+            // backoff wait; the next real downloading event overwrites it.
+            percent: e.stage.startsWith("retrying")
+              ? (s.progressById[key]?.percent ?? e.percent)
+              : e.percent,
+            eta_secs: e.eta_secs != null ? Number(e.eta_secs) : null,
+            speed_hr: e.speed_hr ?? null,
+            encoder: e.encoder ?? null,
+            stage: e.stage,
+          },
         },
-      },
-    }));
+      };
+    });
   },
   applyQueue(e) {
     set((s) => {
@@ -376,7 +382,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         state: e.state,
         result: e.result ?? next[idx].result,
       };
-      return { jobs: next };
+      const progressById = { ...s.progressById };
+      if (e.state === "queued" && !progressById[targetKey]?.stage.startsWith("waiting on TorBox")) {
+        delete progressById[targetKey];
+      }
+      return { jobs: next, progressById };
     });
   },
   async cancel(id) {

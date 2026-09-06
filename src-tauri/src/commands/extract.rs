@@ -178,6 +178,17 @@ fn path_to_string(path: PathBuf) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_extract_request_cannot_retain_injected_recovery_metadata() {
+        let raw = serde_json::json!({ "url":"https://example.com/video", "output_dir":"/tmp", "audio_only":false,
+            "_extract_recovery": { "root":"/", "workspace":"unowned" } });
+        let request: goop_extractor::ytdlp::ExtractRequest = serde_json::from_value(raw).unwrap();
+        let persisted = serde_json::to_value(request).unwrap();
+        assert!(persisted
+            .get(goop_extractor::recovery::RECOVERY_PAYLOAD_KEY)
+            .is_none());
+    }
+
     use goop_config::ExtractNamingScheme;
 
     /// Drift guard: every variant of `ExtractNamingScheme::to_yt_dlp_template`

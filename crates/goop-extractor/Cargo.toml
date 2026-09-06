@@ -25,6 +25,7 @@ percent-encoding = "2"
 sha2 = "0.10"
 
 [dev-dependencies]
+goop-queue = { path = "../goop-queue" }
 tempfile = "3"
 # start_paused time control for the retry-backoff tests (the workspace
 # tokio "full" feature set does not include test-util).
@@ -34,3 +35,9 @@ tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
 # Enables goop-core's RecordingSink for asserting emitted progress events.
 goop-core = { path = "../goop-core", features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

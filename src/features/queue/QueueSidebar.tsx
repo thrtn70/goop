@@ -201,7 +201,9 @@ export default function QueueSidebar() {
   // they're excluded; queued unknowns also not included.
   const totalEtaSecs = active.reduce((sum, j) => {
     if (j.state === "paused") return sum;
-    const e = progressById[jobIdKey(j.id)]?.eta_secs ?? 0;
+    const progress = progressById[jobIdKey(j.id)];
+    if (j.kind === "extract" && /^(merging|converting|processing|validating|saving)$/.test(progress?.stage ?? "")) return sum;
+    const e = progress?.eta_secs ?? 0;
     return sum + (e > 0 ? e : 0);
   }, 0);
 
@@ -212,7 +214,8 @@ export default function QueueSidebar() {
     : queued.length ? `${queued.length} waiting` : "No active jobs";
   const percent = currentProgress?.percent;
   const showPercent = current?.state === "running" && percent != null && Number.isFinite(percent)
-    && percent > 0 && !/^(downloaded |retrying)/.test(summary);
+    && percent > 0 && !/^(downloaded |retrying)/.test(summary)
+    && !(current?.kind === "extract" && /^(merging|converting|processing|validating|saving)$/.test(summary));
 
   return (
     <aside ref={panelRef} className="workspace-queue" style={{ height: collapsed ? 40 : height }} aria-label="Job queue">

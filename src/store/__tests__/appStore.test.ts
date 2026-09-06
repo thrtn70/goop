@@ -397,3 +397,18 @@ describe("refreshJobs", () => {
     expect(jobs[0].state).toBe("queued");
   });
 });
+
+describe("Extract progress authority", () => {
+  it("ignores late terminal progress and clears the old attempt on requeue", () => {
+    const id = "00000000-0000-7000-8000-000000000001";
+    const job = makeJob(id, "running");
+    useAppStore.setState({ jobs: [job], progressById: {} });
+    const event = { job_id: id, percent: 100, stage: "downloading", eta_secs: 3n, speed_hr: "1 MiB/s", encoder: null };
+    useAppStore.getState().applyProgress(event);
+    useAppStore.getState().applyQueue({ job_id: id, state: "done", result: null });
+    useAppStore.getState().applyProgress({ ...event, stage: "merging" });
+    expect(useAppStore.getState().progressById[id]?.stage).not.toBe("merging");
+    useAppStore.getState().applyQueue({ job_id: id, state: "queued", result: null });
+    expect(useAppStore.getState().progressById[id]).toBeUndefined();
+  });
+});

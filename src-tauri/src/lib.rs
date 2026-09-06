@@ -278,6 +278,13 @@ pub fn run() {
                 let store = store_for_extract.clone();
                 let updates = updates_for_extract.clone();
                 Box::pin(async move {
+                    let recovery_store = store.clone();
+                    let recovery = goop_extractor::recovery::ExtractRecovery::new(
+                        payload.get(goop_extractor::recovery::RECOVERY_PAYLOAD_KEY).cloned(),
+                        Arc::new(move |checkpoint| {
+                            persist_job_payload_field(&recovery_store, id, goop_extractor::recovery::RECOVERY_PAYLOAD_KEY, serde_json::to_value(checkpoint)?)
+                        }),
+                    )?;
                     let req: ExtractRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     // Debrid context rides along only when a key is set.
@@ -336,7 +343,7 @@ pub fn run() {
                     // network failures with backoff. Downloads honor both
                     // signals: cancel deletes partials, pause keeps them
                     // for resume.
-                    let outcome = goop_extractor::dispatch_with_update_hook(
+                    let outcome = goop_extractor::dispatch_with_recovery(
                         &r,
                         s,
                         id,
@@ -344,6 +351,7 @@ pub fn run() {
                         signals,
                         debrid,
                         Some(hook),
+                        recovery,
                     )
                     .await?;
                     Ok(JobResult {

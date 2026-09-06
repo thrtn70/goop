@@ -807,3 +807,19 @@ describe("QueueRow debrid waiting stage", () => {
     expect(screen.queryByText(/waiting on TorBox/)).toBeNull();
   });
 });
+
+describe("Extract finishing stages", () => {
+  it.each(["merging", "converting", "processing", "validating", "saving"])("shows %s as indeterminate until Ready", (stage) => {
+    const job = makeJob({ kind: "extract", payload: { url: "https://example.com/video" } });
+    useAppStore.setState({ progressById: { [String(job.id)]: { percent: 100, stage, speed_hr: "old speed", eta_secs: 10, encoder: null } } });
+    const view = render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText(stage)).toBeTruthy();
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBeNull();
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toBe(stage);
+    expect(screen.queryByText("old speed")).toBeNull();
+    expect(screen.queryByText("Ready")).toBeNull();
+    expect(screen.getByRole("button", { name: /^Cancel/ })).toBeTruthy();
+    view.rerender(<QueueRow job={{ ...job, state: "done", result: { output_path: "/tmp/video.mp4", bytes: 1n, duration_ms: 1n, result_kind: "file", file_count: 1, source_bytes: null, target_bytes: null, reencoded: null } }} index={0} />);
+    expect(screen.getByText("Ready")).toBeTruthy();
+  });
+});
