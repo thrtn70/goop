@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import QueueSidebar from "../QueueSidebar";
+import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { useAppStore } from "@/store/appStore";
 import { api } from "@/ipc/commands";
 import type { Job } from "@/types";
@@ -21,6 +22,12 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("bottom queue", () => {
   it("starts collapsed in a new app session", () => {
     expect(useAppStore.getInitialState().ui.queueCollapsed).toBe(true);
+  });
+  it("shows the native queue shortcut on the toggle", () => {
+    render(<QueueSidebar />);
+    expect(screen.getByRole("button", {name: "Expand queue"}).title).toBe(
+      `Expand queue (${QUEUE_SHORTCUT.label()})`,
+    );
   });
   it("keeps the summary visible and returns focus when content is collapsed", () => {
     render(<QueueSidebar />);

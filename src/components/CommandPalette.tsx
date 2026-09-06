@@ -5,6 +5,7 @@ import { formatError } from "@/ipc/error";
 import { useAppStore } from "@/store/appStore";
 import { NAV_ITEMS } from "@/lib/navItems";
 import { isFilePickerRoute, isMacPlatform, modKeyLabel } from "@/lib/platform";
+import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 
 interface ActionItem {
   id: string;
@@ -82,7 +83,7 @@ export default function CommandPalette() {
     {
       id: "queue-toggle",
       label: "Toggle queue sidebar",
-      shortcut: `${mod}⇧Q`,
+      shortcut: QUEUE_SHORTCUT.label(),
       group: "Queue",
       run: () => toggleQueueCollapsed(),
     },

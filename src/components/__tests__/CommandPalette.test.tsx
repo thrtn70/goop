@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import CommandPalette from "@/components/CommandPalette";
+import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { useAppStore } from "@/store/appStore";
 
 const navigateMock = vi.hoisted(() => vi.fn());
@@ -71,6 +72,7 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Navigate")).toBeTruthy();
     expect(screen.getByText("Actions")).toBeTruthy();
     expect(screen.getByText("Queue")).toBeTruthy();
+    expect(screen.getByText(QUEUE_SHORTCUT.label())).toBeTruthy();
   });
 
   it("navigates and closes when a Navigate item is selected", async () => {

@@ -16,8 +16,8 @@ import {
 import type { JobId, JobState } from "@/types";
 import { api } from "@/ipc/commands";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
-import { modKeyLabel } from "@/lib/platform";
 import { formatError } from "@/ipc/error";
+import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
 import SortableQueueRow from "./SortableQueueRow";
@@ -228,7 +228,7 @@ export default function QueueSidebar() {
       <div className="workspace-queue-header">
         <button ref={toggleRef} type="button" onClick={toggleCollapsed}
           aria-label={collapsed ? "Expand queue" : "Collapse queue"} aria-expanded={!collapsed} aria-controls={contentId}
-          title={`${collapsed ? "Expand" : "Collapse"} queue (${modKeyLabel()}Shift+Q)`}
+          title={`${collapsed ? "Expand" : "Collapse"} queue (${QUEUE_SHORTCUT.label()})`}
           className="workspace-queue-toggle">
           {collapsed ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
           <span>Queue</span><span className="text-fg-muted tabular-nums">({activeCount})</span>
