@@ -7,7 +7,8 @@ import { act, render, screen, waitFor, cleanup, fireEvent } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import QueueRow from "@/features/queue/QueueRow";
-import { useRecognizeSession } from "@/store/recognizeSession";
+import { beginRecognizeSession, cancelRecognizeSubmission, clearRecognizeSession, useRecognizeSession } from "@/store/recognizeSession";
+import { clearWorkspaceDrafts } from "@/store/workspaceDrafts";
 import RecognizePage from "@/pages/RecognizePage";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
 import RecognizeResultPane from "@/features/recognize/RecognizeResultPane";
@@ -166,6 +167,14 @@ async function start() {
  fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
  await waitFor(() => expect(api.pdf.run).toHaveBeenCalled());
 }
+async function complete(text = "Retained text") {
+ vi.mocked(api.pdf.run).mockResolvedValue("a");
+ vi.mocked(api.pdf.recognizePeekText).mockResolvedValue(text);
+ const page = render(view()); await pick(); await start();
+ act(() => useAppStore.setState({jobs: [job("a")]}));
+ await screen.findByText(text);
+ return page;
+}
 beforeEach(() => {useAppStore.setState({jobs: []});});
 it("restores acknowledgement and completion received off-route", async () => {
  const request = deferred<string>(); vi.mocked(api.pdf.run).mockReturnValue(request.promise);
@@ -249,6 +258,46 @@ it("keeps a newer attempt when an old preview resolves", async () => {
  await act(async () => oldPeek.resolve("Old result"));
  expect(screen.queryByText("Old result")).toBeNull();
  expect(screen.getByText("New result")).toBeTruthy();
+});
+it("restores a completed result when its next Save is cancelled after a route remount", async () => {
+ const first = await complete();
+ const completedAttempt = useRecognizeSession.getState().attempt;
+ const dialog = deferred<string | null>(); vi.mocked(save).mockReturnValueOnce(dialog.promise);
+ fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
+ await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+ const pendingAttempt = useRecognizeSession.getState().attempt;
+ expect(pendingAttempt).toBeGreaterThan(completedAttempt);
+ first.unmount(); render(view());
+ await act(async () => dialog.resolve(null));
+ expect(screen.getByText("Retained text")).toBeTruthy();
+ expect(screen.getByText(/Saved to result\.txt/)).toBeTruthy();
+ expect(useRecognizeSession.getState().phase).toBe("done");
+ expect(useRecognizeSession.getState().attempt).toBe(pendingAttempt);
+ expect(api.pdf.run).toHaveBeenCalledTimes(1);
+});
+
+for (const [retirement, retire] of [
+ ["an output edit", () => { fireEvent.click(screen.getByRole("button", {name: "Searchable PDF"})); }],
+ ["an explicit session clear", () => clearRecognizeSession()],
+ ["workspace retirement", () => clearWorkspaceDrafts("recognize")],
+] as const) it(`does not restore a completed result after ${retirement} while Save is pending`, async () => {
+ await complete();
+ const dialog = deferred<string | null>(); vi.mocked(save).mockReturnValueOnce(dialog.promise);
+ fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
+ await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+ act(retire);
+ await act(async () => dialog.resolve(null));
+ expect(screen.queryByText("Retained text")).toBeNull();
+ expect(useRecognizeSession.getState().phase).toBe("idle");
+ expect(api.pdf.run).toHaveBeenCalledTimes(1);
+});
+
+for (const phase of ["idle", "running", "error"] as const) it(`does not fabricate a completed result when cancelling after ${phase}`, () => {
+ clearRecognizeSession();
+ useRecognizeSession.setState({phase});
+ const attempt = beginRecognizeSession({input: "/a.png", outputKind: "text", lang: "eng"});
+ cancelRecognizeSubmission(attempt);
+ expect(useRecognizeSession.getState()).toMatchObject({phase: "idle", result: null});
 });
 it("retains an off-route enqueue error and releases a cancelled Save without changing newer fields", async () => {
  const request = deferred<string>(); vi.mocked(api.pdf.run).mockReturnValue(request.promise);
