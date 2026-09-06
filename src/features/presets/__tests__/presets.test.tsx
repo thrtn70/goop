@@ -140,6 +140,7 @@ describe("PresetChips", () => {
     render(<PresetChips kind="convert" onApply={onApply} />);
 
     const list = screen.getByRole("list", { name: "Saved presets" });
+    expect(list.getAttribute("role")).toBe("list");
     const items = within(list).getAllByRole("listitem");
     expect(items).toHaveLength(1);
     const button = within(items[0]).getByRole("button", { name: preset.name });

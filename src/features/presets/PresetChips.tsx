@@ -21,7 +21,7 @@ export default function PresetChips({ kind, onApply }: PresetChipsProps) {
   if (filtered.length === 0) return null;
 
   return (
-    <ul aria-label="Saved presets" className="flex gap-2 overflow-x-auto pb-2">
+    <ul role="list" aria-label="Saved presets" className="flex gap-2 overflow-x-auto pb-2">
       {filtered.map((p) => (
         <li key={p.id} className="shrink-0">
           <button
