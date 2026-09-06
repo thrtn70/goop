@@ -36,12 +36,11 @@ export function cancelRecognizeSubmission(attempt: number) {
 export function failRecognizeSubmission(attempt: number, error: unknown) {
   if (current(attempt)) useRecognizeSession.setState({phase: "error", error: formatError(error).slice(0, 8192)});
 }
-export async function enqueueRecognize(attempt: number, outputPath: string) {
-  const state = useRecognizeSession.getState();
-  if (!current(attempt) || !state.submitted) return;
-  const {input, outputKind, lang} = state.submitted;
+export async function enqueueRecognize(attempt: number, outputPath: string, submitted: Readonly<Submission>) {
+  // Save approval submits the captured request even if newer edits retired its display.
+  const {input, outputKind, lang} = submitted;
   const jobId = await api.pdf.run(pdfRecognizeText(input, outputPath, outputKind, lang));
-  if (!current(attempt)) return;
+  if (!current(attempt)) { void refreshRecognizeQueue(); return; }
   // A list started before acknowledgement cannot establish job absence.
   useRecognizeSession.setState({jobId, phase: "running", acknowledgedGeneration: useAppStore.getState().queueRequestGeneration});
   reconcileRecognize();

@@ -275,3 +275,37 @@ it("ends an errored job and caps retained preview text at 100000 characters", as
  expect(restored.container.querySelector("pre")?.textContent?.trim().length).toBe(100_000);
  expect(api.pdf.run).toHaveBeenCalledTimes(2);
 });
+
+for (const outcome of ["acknowledged", "rejected"] as const) it(`enqueues the captured approved Save after newer visible edits (${outcome})`, async () => {
+ mockTessInstalled.mockResolvedValue([
+  {code: "eng", display_name: "English"}, {code: "spa", display_name: "Spanish"},
+ ]);
+ const dialog = deferred<string | null>(); const request = deferred<string>();
+ vi.mocked(save).mockReturnValue(dialog.promise);
+ vi.mocked(api.pdf.run).mockReturnValue(request.promise);
+ vi.mocked(api.pdf.recognizePeekText).mockResolvedValue("Retired text");
+ const first = render(view()); await pick();
+ fireEvent.click(screen.getByRole("button", {name: "Recognize text"}));
+ await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+ first.unmount(); render(view());
+ vi.mocked(open).mockResolvedValue("/b.png");
+ fireEvent.click(screen.getByRole("button", {name: "Pick a file…"}));
+ await screen.findByText("b.png");
+ fireEvent.click(screen.getByRole("button", {name: "Searchable PDF"}));
+ fireEvent.change(await screen.findByRole("combobox"), {target: {value: "spa"}});
+ await act(async () => dialog.resolve("/out/original.txt"));
+ await waitFor(() => expect(api.pdf.run).toHaveBeenCalledTimes(1));
+ expect(api.pdf.run).toHaveBeenCalledWith({kind: "recognize_text", input: "/a.png", output_path: "/out/original.txt", output_kind: "text", lang: "eng"});
+ if (outcome === "acknowledged") {
+  await act(async () => request.resolve("retired"));
+  act(() => useAppStore.setState({jobs: [job("retired")]}));
+ } else await act(async () => request.reject(new Error("Retired enqueue error")));
+ expect(screen.getByText("b.png")).toBeTruthy();
+ expect(screen.getByRole("button", {name: "Searchable PDF"}).getAttribute("aria-pressed")).toBe("true");
+ expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("spa");
+ expect((screen.getByRole("button", {name: "Recognize text"}) as HTMLButtonElement).disabled).toBe(false);
+ expect(api.pdf.run).toHaveBeenCalledTimes(1);
+ expect(api.pdf.recognizePeekText).not.toHaveBeenCalled();
+ expect(screen.queryByText("Retired enqueue error")).toBeNull();
+ expect(screen.queryByText("Retired text")).toBeNull();
+});

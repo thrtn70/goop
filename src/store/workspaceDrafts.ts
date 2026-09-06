@@ -5,8 +5,8 @@ import { loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistenc
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean };
-const useDraftStore = create<DraftState>(() => ({ entries: loadBrowserDraftEntries(), epochs: {}, scopeEpochs: {}, resetEpoch: 0, revisions: {}, persistenceFailed: false }));
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean };
+const useDraftStore = create<DraftState>(() => ({ entries: loadBrowserDraftEntries(), epochs: {}, scopeEpochs: {}, completionEpochs: {}, resetEpoch: 0, revisions: {}, persistenceFailed: false }));
 useDraftStore.subscribe((state, previous) => {
   if (state.entries === previous.entries || typeof window === "undefined") return;
   let ok = false;
@@ -24,10 +24,12 @@ const matches = (key: string, prefix: readonly string[]) => {
   return prefix.every((part, i) => parts[i] === part);
 };
 
-function scopeLifetime(state: DraftState, path: readonly string[]) {
+function scopeLifetime(state: DraftState, path: readonly string[], includeCompletion = true) {
   let epoch = 0;
   for (let length = 1; length <= path.length; length++) {
-    epoch += state.scopeEpochs[JSON.stringify(path.slice(0, length))] ?? 0;
+    const key = JSON.stringify(path.slice(0, length));
+    epoch += state.scopeEpochs[key] ?? 0;
+    if (includeCompletion) epoch += state.completionEpochs[key] ?? 0;
   }
   return `${state.resetEpoch}:${epoch}`;
 }
@@ -134,7 +136,7 @@ export function claimWorkspaceFilePicker(token: number) {
 export function resetWorkspaceDrafts() {
   notifyRetirement({});
   consumedPickerToken = 0;
-  useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1 }));
+  useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, completionEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1 }));
 }
 
 /** Explicit source removal retires its forms, including source-set batch scopes. */
@@ -157,7 +159,7 @@ export function useWorkspaceTool() { return useContext(ScopeContext).tool; }
 /** A new operation choice retires cleanup while keeping every editable value. */
 export function retireWorkspaceCompletion(tool: WorkspaceTool) {
   const key = JSON.stringify([tool]);
-  useDraftStore.setState(state => ({ scopeEpochs: {...state.scopeEpochs, [key]: (state.scopeEpochs[key] ?? 0) + 1} }));
+  useDraftStore.setState(state => ({ completionEpochs: {...state.completionEpochs, [key]: (state.completionEpochs[key] ?? 0) + 1} }));
 }
 
 export type WorkspaceRetirement = { tool?: WorkspaceTool; scope?: readonly string[]; source?: string };
@@ -170,7 +172,7 @@ function notifyRetirement(event: WorkspaceRetirement) {
   retirementListeners.forEach(listener => listener(event));
 }
 function runtimeScopeLifetime(state: DraftState, scope: DraftScope) {
-  return scopeLifetime(state, [scope.tool, ...scope.path]) + ":" + scope.sources.map(source => state.scopeEpochs[JSON.stringify(["source", scope.tool, source])] ?? 0).join(":");
+  return scopeLifetime(state, [scope.tool, ...scope.path], false) + ":" + scope.sources.map(source => state.scopeEpochs[JSON.stringify(["source", scope.tool, source])] ?? 0).join(":");
 }
 export function getWorkspaceScopeLifetime(scope: DraftScope) {
   return runtimeScopeLifetime(useDraftStore.getState(), scope);

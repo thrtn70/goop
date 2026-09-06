@@ -225,3 +225,23 @@ it("batch metadata retains an off-route error", async () => {
  first.unmount(); await act(async () => reject(new Error("Batch unavailable")));
  render(page("metadata")); expect(await screen.findByText("Batch unavailable")).toBeTruthy();
 });
+
+it("retains Resize failure through the actual Watermark selection and route remount", async () => {
+ let reject!: (error: Error) => void;
+ mocks.image.mockReturnValue(new Promise((_, fail) => {reject = fail;}));
+ mocks.open.mockResolvedValue(["/a.png"]);
+ const first = render(page("image")); fireEvent.click(screen.getByRole("button", {name: "Pick images…"}));
+ fireEvent.click(await screen.findByRole("button", {name: /^Resize/}));
+ fireEvent.click(screen.getByRole("button", {name: "Resize image"}));
+ await waitFor(() => expect(mocks.image).toHaveBeenCalledTimes(1));
+ fireEvent.click(screen.getByRole("button", {name: /^Watermark/}));
+ first.unmount(); await act(async () => reject(new Error("Resize unavailable")));
+ render(page("image"));
+ expect(screen.queryByText("Resize unavailable")).toBeNull();
+ fireEvent.click(screen.getByRole("button", {name: /^Resize/}));
+ expect(await screen.findByText("Resize unavailable")).toBeTruthy();
+ fireEvent.click(screen.getByRole("button", {name: /^Watermark/}));
+ expect(screen.queryByText("Resize unavailable")).toBeNull();
+ fireEvent.click(screen.getByRole("button", {name: /^Resize/}));
+ expect(screen.getByText("Resize unavailable")).toBeTruthy();
+});

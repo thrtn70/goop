@@ -121,7 +121,8 @@ function RecognizePage() {
     if (!input || processing) return;
     const finish = begin();
     if (!finish) return;
-    const attempt = beginRecognizeSession({input, outputKind, lang});
+    const submitted = {input, outputKind, lang};
+    const attempt = beginRecognizeSession(submitted);
     const isText = outputKind === "text";
     const stem = basename(input).replace(/\.[^.]+$/, "");
     try {
@@ -135,7 +136,7 @@ function RecognizePage() {
         ],
       });
       if (!dest) { cancelRecognizeSubmission(attempt); return; }
-      await enqueueRecognize(attempt, dest);
+      await enqueueRecognize(attempt, dest, submitted);
     } catch (e) {
       failRecognizeSubmission(attempt, e);
     } finally {
