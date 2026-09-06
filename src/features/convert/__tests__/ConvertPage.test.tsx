@@ -586,7 +586,7 @@ describe("ConvertPage applies what a preset chip promises", () => {
       expect(screen.getByText("test-video.mp4")).toBeDefined(),
     );
     await userEvent.click(
-      screen.getByRole("listitem", { name: "YouTube Upload" }),
+      screen.getByRole("button", { name: "YouTube Upload" }),
     );
   }
 
@@ -730,7 +730,7 @@ describe("ConvertPage applies what a preset chip promises", () => {
     await userEvent.click(screen.getByText(/pick from your computer/i));
     await waitFor(() => expect(screen.getByText("a.mp4")).toBeDefined());
     await userEvent.click(
-      screen.getByRole("listitem", { name: "YouTube Upload" }),
+      screen.getByRole("button", { name: "YouTube Upload" }),
     );
     await userEvent.click(
       screen.getByRole("button", { name: /convert 2 files/i }),
