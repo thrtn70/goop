@@ -516,7 +516,7 @@ pub fn run() {
             // can land later if user feedback suggests image ops need a
             // distinct budget (e.g. RAW decoding is heavier than typical
             // convert jobs).
-            let scheduler = Scheduler::with_pids(
+            let scheduler = Scheduler::with_pids_and_completion(
                 store.clone(),
                 sink.clone(),
                 settings.extract_concurrency,
@@ -530,6 +530,10 @@ pub fn run() {
                 image_worker,
                 metadata_worker,
                 pid_registry,
+                Some(Arc::new(|job| Box::pin(async move {
+                    tokio::task::spawn_blocking(move || goop_extractor::recovery::cleanup_completed_recovery(&job))
+                        .await.map_err(|e| goop_core::GoopError::Queue(e.to_string()))?
+                }))),
             );
             // Tauri's setup closure runs synchronously outside a Tokio context,
             // so spawn the worker loops on Tauri's own async runtime.

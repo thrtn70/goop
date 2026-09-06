@@ -2,7 +2,8 @@ use crate::process_control::{self, ProcessControlError};
 use crate::store::QueueStore;
 use dashmap::DashMap;
 use goop_core::{
-    EventSink, GoopError, JobId, JobKind, JobResult, JobSignals, JobState, PidRegistry, QueueEvent,
+    EventSink, GoopError, Job, JobId, JobKind, JobResult, JobSignals, JobState, PidRegistry,
+    QueueEvent,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -36,6 +37,10 @@ pub type WorkerFn = Arc<
         + Sync,
 >;
 
+/// Runs after a durable Done write, with the freshly loaded persisted row.
+pub type CompletionHook =
+    Arc<dyn Fn(Job) -> Pin<Box<dyn Future<Output = Result<(), GoopError>> + Send>> + Send + Sync>;
+
 /// Job kinds whose workers poll `JobSignals::pause` and stop gracefully,
 /// keeping resumable state on disk (partial files + validators). Everything
 /// else either pauses via the PID registry (external children suspended in
@@ -53,6 +58,7 @@ fn log_terminal_outcome(id: JobId, kind: Option<&JobKind>, state: &JobState) {
 }
 
 pub struct Scheduler {
+    completion_hook: Option<CompletionHook>,
     store: QueueStore,
     sink: Arc<dyn EventSink>,
     extract_sem: Arc<Semaphore>,
@@ -133,7 +139,44 @@ impl Scheduler {
         metadata_worker: WorkerFn,
         pids: Arc<dyn PidRegistry>,
     ) -> Arc<Self> {
+        Self::with_pids_and_completion(
+            store,
+            sink,
+            extract_concurrency,
+            convert_concurrency,
+            pdf_concurrency,
+            image_concurrency,
+            metadata_concurrency,
+            extract_worker,
+            convert_worker,
+            pdf_worker,
+            image_worker,
+            metadata_worker,
+            pids,
+            None,
+        )
+    }
+
+    /// Construct with an optional durable completion hook before workers start.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_pids_and_completion(
+        store: QueueStore,
+        sink: Arc<dyn EventSink>,
+        extract_concurrency: usize,
+        convert_concurrency: usize,
+        pdf_concurrency: usize,
+        image_concurrency: usize,
+        metadata_concurrency: usize,
+        extract_worker: WorkerFn,
+        convert_worker: WorkerFn,
+        pdf_worker: WorkerFn,
+        image_worker: WorkerFn,
+        metadata_worker: WorkerFn,
+        pids: Arc<dyn PidRegistry>,
+        completion_hook: Option<CompletionHook>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            completion_hook,
             store,
             sink,
             extract_sem: Arc::new(Semaphore::new(extract_concurrency.max(1))),
@@ -242,6 +285,7 @@ impl Scheduler {
             let sink = self.sink.clone();
             let signals = self.signals.clone();
             let w = worker.clone();
+            let completion_hook = self.completion_hook.clone();
             tokio::spawn(async move {
                 let res = (w)(job.id, job.payload.clone(), sig.clone()).await;
                 // External-wait yield is handled BEFORE the signals entry
@@ -308,7 +352,7 @@ impl Scheduler {
                 // reports honestly), and cancel's inactive-row branch
                 // no-ops on running/terminal states so this is safe.
                 signals.remove(&job.id);
-                let (state, result) = match &res {
+                let (mut state, mut result) = match &res {
                     Ok(r) => (JobState::Done, Some(r.clone())),
                     Err(GoopError::Cancelled) => (JobState::Cancelled, None),
                     // Cancel wins when both tokens fired: a job the user
@@ -354,9 +398,35 @@ impl Scheduler {
                         )
                     }
                 };
-                log_terminal_outcome(job.id, Some(&job.kind), &state);
-                if let Err(e) = store.update_state(job.id, &state, result.as_ref(), now_ms()) {
-                    tracing::warn!(?job.id, ?state, error = %e, "failed to persist terminal state; in-memory event still emitted");
+                match store.update_state(job.id, &state, result.as_ref(), now_ms()) {
+                    Ok(()) => {
+                        log_terminal_outcome(job.id, Some(&job.kind), &state);
+                        if state == JobState::Done {
+                            if let Some(hook) = completion_hook {
+                                match store.get_by_id(job.id) {
+                                    Ok(Some(fresh)) if fresh.state == JobState::Done => {
+                                        if let Err(error) = hook(fresh).await {
+                                            tracing::warn!(?job.id, %error, "completed job cleanup failed; durable result retained");
+                                        }
+                                    }
+                                    _ => {
+                                        tracing::warn!(?job.id, "completed row unavailable; cleanup skipped")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?job.id, ?state, %error, "failed to persist terminal state");
+                        state = JobState::Error {
+                            message: "Processing finished, but the job status could not be saved. Output and recovery files were retained.".into(),
+                            detail: Some(error.to_string()),
+                        };
+                        result = None;
+                        if let Err(error) = store.update_state(job.id, &state, None, now_ms()) {
+                            tracing::warn!(?job.id, %error, "could not persist status failure; restart reconciliation required");
+                        }
+                    }
                 }
                 sink.emit_queue(QueueEvent {
                     job_id: job.id,
@@ -625,6 +695,79 @@ mod tests {
             result_kind: ResultKind::File,
             file_count: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_done_never_emits_success_even_when_error_write_also_fails() {
+        for reject_error in [false, true] {
+            let (mut scheduler, sink, store, dir) = make_scheduler();
+            let calls = Arc::new(AtomicU32::new(0));
+            let seen = calls.clone();
+            Arc::get_mut(&mut scheduler).unwrap().completion_hook = Some(Arc::new(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            }));
+            let conn = rusqlite::Connection::open(dir.path().join("q.db")).unwrap();
+            conn.execute_batch(&format!("CREATE TRIGGER reject_terminal BEFORE UPDATE ON jobs WHEN NEW.state = 'done' {} BEGIN SELECT RAISE(FAIL, 'injected terminal failure'); END;", if reject_error { "OR NEW.state LIKE 'error:%'" } else { "" })).unwrap();
+            let job = Job::new(JobKind::Extract, serde_json::json!({}));
+            store.insert(&job).unwrap();
+            let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+            assert!(wait_until(|| sink.queue.lock().len() >= 2, 2000).await);
+            task.abort();
+            let events = sink.queue.lock();
+            assert!(!events.iter().any(|e| e.state == JobState::Done));
+            assert!(events
+                .iter()
+                .any(|e| matches!(e.state, JobState::Error { .. })));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let row = store.get_by_id(job.id).unwrap().unwrap();
+            if reject_error {
+                assert_eq!(row.state, JobState::Running);
+            } else {
+                assert!(matches!(row.state, JobState::Error { .. }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_hook_sees_fresh_payload_and_failure_keeps_durable_done() {
+        let (mut scheduler, sink, store, _dir) = make_scheduler();
+        let worker_store = store.clone();
+        Arc::get_mut(&mut scheduler).unwrap().extract_worker = Arc::new(move |id, _, _| {
+            let store = worker_store.clone();
+            Box::pin(async move {
+                store.patch_payload_field(id, "receipt", serde_json::json!("fresh"))?;
+                Ok(done_result())
+            })
+        });
+        let calls = Arc::new(AtomicU32::new(0));
+        let seen = calls.clone();
+        let hook_store = store.clone();
+        Arc::get_mut(&mut scheduler).unwrap().completion_hook = Some(Arc::new(move |fresh| {
+            assert_eq!(fresh.payload["receipt"], "fresh");
+            assert_eq!(
+                hook_store.get_by_id(fresh.id).unwrap().unwrap().state,
+                JobState::Done
+            );
+            seen.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(GoopError::Queue("injected cleanup failure".into())) })
+        }));
+        let job = Job::new(JobKind::Extract, serde_json::json!({}));
+        store.insert(&job).unwrap();
+        let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+        assert!(
+            wait_until(
+                || sink.queue.lock().iter().any(|e| e.state == JobState::Done),
+                2000
+            )
+            .await
+        );
+        task.abort();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get_by_id(job.id).unwrap().unwrap().state,
+            JobState::Done
+        );
     }
 
     #[test]

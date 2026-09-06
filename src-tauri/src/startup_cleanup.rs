@@ -135,6 +135,14 @@ pub(crate) fn persist_job_payload_field(
     store.patch_payload_field(id, key, value)
 }
 
+fn cleanup_completed_downloads(jobs: &[Job]) {
+    for job in jobs {
+        if let Err(error) = goop_extractor::recovery::cleanup_completed_recovery(job) {
+            tracing::warn!(?job.id, %error, "completed Extract cleanup retained uncertain artifacts");
+        }
+    }
+}
+
 pub(crate) fn cleanup_orphaned_downloads(store: &QueueStore, settings: &cfg::Settings) {
     let jobs = match store.list_extract_jobs() {
         Ok(jobs) => jobs,
@@ -143,6 +151,20 @@ pub(crate) fn cleanup_orphaned_downloads(store: &QueueStore, settings: &cfg::Set
             return;
         }
     };
+    // Serial background catch-up: no media hashing or traversal of output roots.
+    // Each candidate is an exact persisted Done row already loaded for this pass.
+    let completed: Vec<_> = jobs
+        .iter()
+        .filter(|job| {
+            job.state == JobState::Done
+                && job
+                    .payload
+                    .get(goop_extractor::recovery::RECOVERY_PAYLOAD_KEY)
+                    .is_some()
+        })
+        .cloned()
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || cleanup_completed_downloads(&completed));
     let inputs = partial_sweep_inputs(settings, &jobs);
     if inputs.malformed_jobs > 0 {
         tracing::warn!(
@@ -208,6 +230,65 @@ mod tests {
         let mut job = Job::new(JobKind::Extract, serde_json::to_value(request).unwrap());
         job.state = state;
         job
+    }
+
+    #[test]
+    fn completed_catchup_cleans_only_exact_safe_done_rows() {
+        use goop_extractor::recovery::{ExtractRecovery, RECOVERY_PAYLOAD_KEY};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let store = QueueStore::open(&root.join("queue.db")).unwrap();
+        let mut directories = Vec::new();
+        for (index, state) in [
+            JobState::Done,
+            JobState::Paused,
+            JobState::Done,
+            JobState::Done,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut job = extract_job("https://example.test/video", root.to_str().unwrap(), state);
+            let req: ExtractRequest = serde_json::from_value(job.payload.clone()).unwrap();
+            let recovery = ExtractRecovery::ephemeral();
+            let cp = recovery.allocate(job.id, &req).unwrap();
+            let workspace = cp.root.join(cp.workspace);
+            std::fs::write(workspace.join("source.mp4"), b"source").unwrap();
+            let output = root.join(format!("output-{index}.mp4"));
+            std::fs::write(&output, b"public").unwrap();
+            recovery.receipt(output.clone()).unwrap();
+            if index == 2 {
+                recovery.set_writer(true).unwrap();
+            }
+            let mut cp = recovery.checkpoint().unwrap();
+            if index == 3 {
+                cp.fingerprint = "forged".into();
+            }
+            job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(cp).unwrap();
+            job.result = Some(goop_core::JobResult {
+                output_path: Some(output.to_string_lossy().into()),
+                bytes: Some(6),
+                duration_ms: 0,
+                result_kind: goop_core::ResultKind::File,
+                file_count: 1,
+                source_bytes: None,
+                target_bytes: None,
+                reencoded: None,
+            });
+            store.insert(&job).unwrap();
+            directories.push(workspace);
+        }
+        let jobs = store.list_extract_jobs().unwrap();
+        cleanup_completed_downloads(&jobs);
+        cleanup_completed_downloads(&jobs);
+        assert!(!directories[0].exists());
+        assert!(directories[1..].iter().all(|path| path.exists()));
+        for index in 0..4 {
+            assert_eq!(
+                std::fs::read(root.join(format!("output-{index}.mp4"))).unwrap(),
+                b"public"
+            );
+        }
     }
 
     #[test]

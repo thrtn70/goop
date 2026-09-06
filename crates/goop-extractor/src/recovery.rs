@@ -342,6 +342,60 @@ impl ExtractRecovery {
         Ok(())
     }
 }
+/// Release only the private workspace belonging to an authoritative completed row.
+/// Callers must supply a freshly persisted row; this function never changes outputs.
+pub fn cleanup_completed_recovery(job: &goop_core::Job) -> Result<(), GoopError> {
+    if job.kind != goop_core::JobKind::Extract || job.state != goop_core::JobState::Done {
+        return Ok(());
+    }
+    let Some(raw) = job.payload.get(RECOVERY_PAYLOAD_KEY) else {
+        return Ok(());
+    };
+    let cp: RecoveryCheckpoint = serde_json::from_value(raw.clone())?;
+    let req: ExtractRequest = serde_json::from_value(job.payload.clone())?;
+    let root = std::fs::canonicalize(goop_core::path::expand(&req.output_dir))?;
+    cp.validate_identity(job.id, &root, &fingerprint(&req)?)?;
+    if cp.writer_active || cp.phase != RecoveryPhase::Published {
+        return Err(invalid("completed Extract has no safe publication receipt"));
+    }
+    let result = job
+        .result
+        .as_ref()
+        .ok_or_else(|| invalid("completed Extract result missing"))?;
+    let path = result
+        .output_path
+        .as_ref()
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid("completed Extract output missing"))?;
+    if result.result_kind != goop_core::ResultKind::File
+        || result.file_count != 1
+        || cp.published_path.as_ref() != Some(&path)
+        || path.parent() != Some(root.as_path())
+        || !path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .is_some_and(safe_public_component)
+    {
+        return Err(invalid(
+            "completed Extract receipt does not match its result",
+        ));
+    }
+    if std::fs::symlink_metadata(root.join(&cp.workspace))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(&path)?;
+    if !meta.is_file()
+        || meta.len() == 0
+        || result.bytes != Some(meta.len())
+        || std::fs::canonicalize(&path)? != path
+    {
+        return Err(invalid("completed Extract output identity changed"));
+    }
+    cp.cleanup()
+}
+
 impl RecoveryCheckpoint {
     fn validate_identity(
         &self,

@@ -1582,6 +1582,219 @@ exit 0
     }
 
     #[tokio::test]
+    async fn completed_cleanup_rejects_uncertain_or_forged_rows_and_preserves_neighbors() {
+        use crate::recovery::{cleanup_completed_recovery, RecoveryPhase, RECOVERY_PAYLOAD_KEY};
+        use goop_core::{Job, JobKind, JobState, ResultKind};
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let resolver = resolver_at(bins.path());
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let mut job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+        let recovery = ExtractRecovery::ephemeral();
+        let result = dispatch_with_recovery(
+            &resolver,
+            Arc::new(RecordingSink::default()),
+            job.id,
+            &req,
+            JobSignals::new(),
+            None,
+            None,
+            recovery.clone(),
+        )
+        .await
+        .unwrap();
+        let cp = recovery.checkpoint().unwrap();
+        let directory = cp.root.join(&cp.workspace);
+        job.state = JobState::Done;
+        job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(&cp).unwrap();
+        job.result = Some(goop_core::JobResult {
+            output_path: Some(result.output_path.clone()),
+            bytes: Some(result.bytes),
+            duration_ms: 0,
+            result_kind: ResultKind::File,
+            file_count: 1,
+            source_bytes: None,
+            target_bytes: None,
+            reencoded: None,
+        });
+        for state in [
+            JobState::Paused,
+            JobState::Queued,
+            JobState::Running,
+            JobState::Error {
+                message: "failed".into(),
+                detail: None,
+            },
+        ] {
+            let mut row = job.clone();
+            row.state = state;
+            cleanup_completed_recovery(&row).unwrap();
+            assert!(directory.exists());
+        }
+        let mut non_extract = job.clone();
+        non_extract.kind = JobKind::Convert;
+        cleanup_completed_recovery(&non_extract).unwrap();
+        assert!(directory.exists());
+        for field in [
+            "writer",
+            "receipt",
+            "job",
+            "root",
+            "fingerprint",
+            "workspace",
+            "output",
+            "result",
+            "schema",
+        ] {
+            let mut row = job.clone();
+            let mut forged = cp.clone();
+            match field {
+                "writer" => forged.writer_active = true,
+                "receipt" => forged.phase = RecoveryPhase::OutputVerified,
+                "job" => forged.job_id = JobId::new(),
+                "root" => forged.root = bins.path().to_path_buf(),
+                "fingerprint" => forged.fingerprint = "wrong".into(),
+                "workspace" => forged.workspace = "../unrelated".into(),
+                "output" => forged.published_path = Some(directory.join("source.mp4")),
+                "result" => {
+                    row.result.as_mut().unwrap().output_path = Some("/unrelated.mp4".into())
+                }
+                "schema" => forged.version = 99,
+                _ => unreachable!(),
+            }
+            row.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(forged).unwrap();
+            assert!(
+                cleanup_completed_recovery(&row).is_err(),
+                "accepted forged {field}"
+            );
+            assert!(directory.exists());
+        }
+        let sibling = cp.root.join(".goop-extract-unrelated");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("keep"), b"sibling").unwrap();
+        let unrelated = cp.root.join("unrelated.part");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        std::os::unix::fs::symlink(&unrelated, directory.join("linked-artifact")).unwrap();
+        let held = cp.root.join("held-workspace");
+        std::fs::rename(&directory, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &directory).unwrap();
+        assert!(cleanup_completed_recovery(&job).is_err());
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&held, &directory).unwrap();
+        cleanup_completed_recovery(&job).unwrap();
+        cleanup_completed_recovery(&job).unwrap();
+        assert!(!directory.exists());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep");
+        assert_eq!(std::fs::read(sibling.join("keep")).unwrap(), b"sibling");
+        assert_eq!(std::fs::read(result.output_path).unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn durable_done_cleans_exact_workspace_after_real_dispatch() {
+        use goop_core::{Job, JobKind, JobState, ResultKind};
+        use goop_queue::{QueueStore, Scheduler, WorkerFn};
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let db = TempDir::new().unwrap();
+        let resolver = Arc::new(resolver_at(bins.path()));
+        write_fake(bins.path(), "yt-dlp", &yt_dlp_succeeds(out.path()));
+        let store = QueueStore::open(&db.path().join("queue.db")).unwrap();
+        let req = request("https://youtube.com/watch?v=test", out.path());
+        let job = Job::new(JobKind::Extract, serde_json::to_value(&req).unwrap());
+        store.insert(&job).unwrap();
+        let persist_store = store.clone();
+        let worker: WorkerFn = Arc::new(move |id, payload, signals| {
+            let store = persist_store.clone();
+            let resolver = resolver.clone();
+            Box::pin(async move {
+                let recovery = ExtractRecovery::new(
+                    None,
+                    Arc::new(move |cp| {
+                        store.patch_payload_field(
+                            id,
+                            crate::recovery::RECOVERY_PAYLOAD_KEY,
+                            serde_json::to_value(cp).unwrap(),
+                        )
+                    }),
+                )?;
+                let result = dispatch_with_recovery(
+                    &resolver,
+                    Arc::new(RecordingSink::default()),
+                    id,
+                    &serde_json::from_value(payload)?,
+                    signals,
+                    None,
+                    None,
+                    recovery,
+                )
+                .await?;
+                Ok(goop_core::JobResult {
+                    output_path: Some(result.output_path),
+                    bytes: Some(result.bytes),
+                    duration_ms: result.duration_ms,
+                    result_kind: ResultKind::File,
+                    file_count: 1,
+                    source_bytes: None,
+                    target_bytes: None,
+                    reencoded: None,
+                })
+            })
+        });
+        let sink = Arc::new(RecordingSink::default());
+        let hook: goop_queue::CompletionHook = Arc::new(|job| {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::recovery::cleanup_completed_recovery(&job)
+                })
+                .await
+                .unwrap()
+            })
+        });
+        let scheduler = Scheduler::with_pids_and_completion(
+            store.clone(),
+            sink.clone(),
+            1,
+            1,
+            1,
+            1,
+            1,
+            worker.clone(),
+            worker.clone(),
+            worker.clone(),
+            worker.clone(),
+            worker,
+            Arc::new(goop_queue::SchedulerPidRegistry::new()),
+            Some(hook),
+        );
+        let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sink.queue.lock().iter().any(|e| e.state == JobState::Done) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let row = store.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(row.state, JobState::Done);
+        let cp: crate::recovery::RecoveryCheckpoint =
+            serde_json::from_value(row.payload[crate::recovery::RECOVERY_PAYLOAD_KEY].clone())
+                .unwrap();
+        assert!(
+            !cp.root.join(&cp.workspace).exists(),
+            "durable success must release its private media copies"
+        );
+        assert_eq!(
+            std::fs::read(row.result.unwrap().output_path.unwrap()).unwrap(),
+            b"x"
+        );
+    }
+
+    #[tokio::test]
     async fn publication_budgets_long_utf8_and_composed_names_with_collisions() {
         for (title, extractor, template) in [
             ("界".repeat(100), "site".into(), None),
