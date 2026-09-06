@@ -103,22 +103,28 @@ impl QueueStore {
             JobState::Error { detail, .. } => detail.as_ref(),
             _ => None,
         };
-        c.execute(
-            "UPDATE jobs SET state = ?2, result = ?3,
+        let updated = c
+            .execute(
+                "UPDATE jobs SET state = ?2, result = ?3,
                 started_at = COALESCE(?4, started_at),
                 finished_at = COALESCE(?5, finished_at),
                 error_detail = ?6
              WHERE id = ?1",
-            params![
-                id.0.to_string(),
-                state_to_str(state),
-                result.and_then(|r| serde_json::to_string(r).ok()),
-                started_at,
-                finished_at,
-                error_detail,
-            ],
-        )
-        .map_err(|e| GoopError::Queue(e.to_string()))?;
+                params![
+                    id.0.to_string(),
+                    state_to_str(state),
+                    result.and_then(|r| serde_json::to_string(r).ok()),
+                    started_at,
+                    finished_at,
+                    error_detail,
+                ],
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if updated != 1 {
+            return Err(GoopError::Queue(
+                "job state was not persisted: expected exactly one row".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -794,6 +800,14 @@ mod tests {
         let d = tempdir().unwrap();
         let s = QueueStore::open(&d.path().join("q.db")).unwrap();
         (s, d)
+    }
+
+    #[test]
+    fn missing_job_state_update_cannot_claim_persistence() {
+        let (store, _dir) = temp_store();
+        assert!(store
+            .update_state(JobId::new(), &JobState::Done, None, 1)
+            .is_err());
     }
 
     /// Persisting a failure keeps the raw detail alongside the friendly

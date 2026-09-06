@@ -1682,6 +1682,39 @@ exit 0
         assert!(cleanup_completed_recovery(&job).is_err());
         std::fs::remove_file(&directory).unwrap();
         std::fs::rename(&held, &directory).unwrap();
+        // Simulate interruption at an unlink boundary. Ownership must outlive
+        // every private media entry so the durable row can retry cleanup.
+        let mut entries: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        // Directory enumeration order is unspecified; exercise marker-first.
+        entries.sort_by_key(|path| match path.file_name().unwrap().to_str().unwrap() {
+            "owner.json" => 0,
+            "source.mp4" => 2,
+            _ => 1,
+        });
+        let interrupted = crate::recovery::unlink_owned_entries(&directory, entries, |path| {
+            if path.file_name().unwrap() == "owner.json" {
+                assert_eq!(
+                    std::fs::read_dir(&directory)?.count(),
+                    1,
+                    "ownership marker must be the last private entry removed"
+                );
+            }
+            if path.file_name().unwrap() == "source.mp4" {
+                return Err(std::io::Error::other("injected cleanup interruption"));
+            }
+            std::fs::remove_file(path)
+        });
+        assert!(interrupted.is_err());
+        assert!(directory.join("owner.json").is_file());
+        assert!(directory.join("source.mp4").is_file());
+        assert_eq!(
+            std::fs::read_dir(&directory).unwrap().count(),
+            2,
+            "earlier private entries were removed before the interruption"
+        );
         cleanup_completed_recovery(&job).unwrap();
         cleanup_completed_recovery(&job).unwrap();
         assert!(!directory.exists());

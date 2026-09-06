@@ -526,12 +526,29 @@ impl RecoveryCheckpoint {
                 return Err(invalid("uncertain Extract workspace contents retained"));
             }
         }
-        for entry in std::fs::read_dir(&dir)? {
-            std::fs::remove_file(entry?.path())?;
-        }
-        std::fs::remove_dir(dir)?;
-        Ok(())
+        let entries = std::fs::read_dir(&dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        unlink_owned_entries(&dir, entries, |path| std::fs::remove_file(path))
     }
+}
+
+pub(crate) fn unlink_owned_entries(
+    dir: &Path,
+    entries: Vec<PathBuf>,
+    mut unlink: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), GoopError> {
+    let owner = dir.join("owner.json");
+    // Keep ownership until all media and supporting files are gone. An
+    // interrupted unlink can then be retried from the same durable row.
+    for path in entries {
+        if path != owner {
+            unlink(&path)?;
+        }
+    }
+    unlink(&owner)?;
+    std::fs::remove_dir(dir)?;
+    Ok(())
 }
 pub(crate) fn hash(path: &Path, signals: &JobSignals) -> Result<(u64, String), GoopError> {
     let mut f = std::fs::File::open(path)?;

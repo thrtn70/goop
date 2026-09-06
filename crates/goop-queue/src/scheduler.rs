@@ -699,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_done_never_emits_success_even_when_error_write_also_fails() {
-        for reject_error in [false, true] {
+        for (reject_error, ignore) in [(false, false), (true, false), (false, true), (true, true)] {
             let (mut scheduler, sink, store, dir) = make_scheduler();
             let calls = Arc::new(AtomicU32::new(0));
             let seen = calls.clone();
@@ -708,7 +708,7 @@ mod tests {
                 Box::pin(async { Ok(()) })
             }));
             let conn = rusqlite::Connection::open(dir.path().join("q.db")).unwrap();
-            conn.execute_batch(&format!("CREATE TRIGGER reject_terminal BEFORE UPDATE ON jobs WHEN NEW.state = 'done' {} BEGIN SELECT RAISE(FAIL, 'injected terminal failure'); END;", if reject_error { "OR NEW.state LIKE 'error:%'" } else { "" })).unwrap();
+            conn.execute_batch(&format!("CREATE TRIGGER reject_terminal BEFORE UPDATE ON jobs WHEN NEW.state = 'done' {} BEGIN SELECT RAISE({}); END;", if reject_error { "OR NEW.state LIKE 'error:%'" } else { "" }, if ignore { "IGNORE" } else { "FAIL, 'injected terminal failure'" })).unwrap();
             let job = Job::new(JobKind::Extract, serde_json::json!({}));
             store.insert(&job).unwrap();
             let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
