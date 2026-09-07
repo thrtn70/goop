@@ -232,7 +232,7 @@ export function ConvertSettingsPanel({
           </button>
         </p>
       )}
-      {opts.imageOptions && target === "jpeg" && metadataPolicy === "preserve" && p.image_format === "jpeg" && (
+      {opts.imageOptions && target === "jpeg" && metadataPolicy === "preserve" && p.image_format?.toLowerCase() === "jpeg" && (
         <p className="text-xs text-fg-muted">
           JPEG preservation removes the EXIF thumbnail reference; camera-specific embedded data is not rewritten.
         </p>

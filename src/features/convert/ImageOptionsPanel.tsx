@@ -50,8 +50,18 @@ export default function ImageOptionsPanel({ value, capability, sourceSize, onCha
     else if (effective.resize.kind === "fit_within") onChange({ ...effective, resize: { ...effective.resize, [field]: number } });
   }
   const fit = effective.resize.kind === "fit_within" ? effective.resize : null;
-  const scale = fit ? Math.min(1, fit.width / sourceSize.width, fit.height / sourceSize.height) : 1;
-  const output = { width: Math.max(1, Math.round(sourceSize.width * scale)), height: Math.max(1, Math.round(sourceSize.height * scale)) };
+  let output = sourceSize;
+  if (value && !problem && fit && (sourceSize.width > fit.width || sourceSize.height > fit.height)) {
+    // Match engine limiting-axis and integer half-up rounding. Advertised axis
+    // bounds keep the cross-products and sums within safe integer precision.
+    if (fit.width * sourceSize.height <= fit.height * sourceSize.width) {
+      const height = Math.floor((sourceSize.height * fit.width + Math.floor(sourceSize.width / 2)) / sourceSize.width);
+      output = { width: fit.width, height: Math.max(1, Math.min(fit.height, height)) };
+    } else {
+      const width = Math.floor((sourceSize.width * fit.height + Math.floor(sourceSize.height / 2)) / sourceSize.height);
+      output = { width: Math.max(1, Math.min(fit.width, width)), height: fit.height };
+    }
+  }
   const inputClass = "w-24 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums focus:outline-none focus:ring-2 focus:ring-accent";
   return <section aria-label="Image settings" className="space-y-3 rounded-md bg-surface-0 p-3 text-xs">
     <h3 className="font-medium text-fg">Image</h3>
@@ -79,6 +89,6 @@ export default function ImageOptionsPanel({ value, capability, sourceSize, onCha
     </div>}
     <p id={`${id}-fit`} className="text-fg-muted">Fits within these dimensions; smaller images stay their original size. Aspect ratio is preserved.</p>
     <p id={`${id}-error`} className="text-warning">{problem}</p>
-    {!problem && <p className="text-fg-secondary">JPEG · Quality {effective.jpeg_quality} · {output.width} × {output.height} px upright</p>}
+    {value && !problem && <p className="text-fg-secondary">JPEG · Quality {effective.jpeg_quality} · {output.width} × {output.height} px upright</p>}
   </section>;
 }

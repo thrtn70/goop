@@ -173,6 +173,88 @@ fn explicit_request(path: &std::path::Path, id: &str, quality: u8) -> PreviewReq
     });
     req
 }
+
+#[tokio::test]
+async fn explicit_grayscale_sample_preserves_channels_and_encoded_byte_count() {
+    use img_parts::{jpeg::Jpeg, ImageEXIF, ImageICC};
+    let dir = tempfile::tempdir().unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    for (index, (grayscale, explicit, size)) in [
+        (true, true, (64, 48)),
+        (true, true, (1600, 800)),
+        (true, false, (64, 48)),
+        (false, true, (64, 48)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = dir.path().join(format!("source-{index}.jpg"));
+        if grayscale {
+            image::GrayImage::from_fn(size.0, size.1, |x, y| {
+                image::Luma([((x * 7 + y * 13) % 256) as u8])
+            })
+            .save(&input)
+            .unwrap();
+        } else {
+            image::RgbImage::from_fn(size.0, size.1, |x, y| image::Rgb([x as u8, y as u8, 80]))
+                .save(&input)
+                .unwrap();
+        }
+        let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        jpeg.set_exif(Some(
+            b"II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0"
+                .to_vec()
+                .into(),
+        ));
+        let mut profile = vec![0; 128];
+        profile[16..20].copy_from_slice(if grayscale { b"GRAY" } else { b"RGB " });
+        jpeg.set_icc_profile(Some(profile.into()));
+        jpeg.encoder()
+            .write_to(std::fs::File::create(&input).unwrap())
+            .unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let id = format!("channels-{index}");
+        let req = if explicit {
+            explicit_request(&input, &id, 75)
+        } else {
+            request(&input, &id)
+        };
+        let result = service.generate(&resolver, req).await.unwrap();
+        assert_eq!(
+            (result.width, result.height),
+            bounded_dimensions(size.1, size.0, 1280)
+        );
+        let before = image::open(result.before_path.as_ref().unwrap()).unwrap();
+        let mut encoded = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 75);
+        if explicit && grayscale {
+            encoder.encode_image(before.as_luma8().unwrap()).unwrap();
+        } else {
+            encoder.encode_image(&before.to_rgb8()).unwrap();
+        }
+        assert_eq!(result.sample_bytes as usize, encoded.len());
+        let after = image::open(&result.after_path).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap();
+        assert_eq!(
+            after.color(),
+            if explicit && grayscale {
+                image::ColorType::L8
+            } else {
+                image::ColorType::Rgb8
+            }
+        );
+        assert_eq!(after.as_bytes(), decoded.as_bytes());
+        for path in [result.before_path.unwrap(), result.after_path] {
+            assert_eq!(
+                goop_converter::metadata::read(std::path::Path::new(&path)).unwrap(),
+                (None, None)
+            );
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        service.cancel(&id);
+    }
+}
 fn textured_jpeg(path: &std::path::Path) {
     image::RgbImage::from_fn(160, 100, |x, y| {
         image::Rgb([

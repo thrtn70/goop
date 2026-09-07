@@ -389,9 +389,16 @@ fn image_sample(
                 },
                 |options| options.jpeg_quality,
             );
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, q)
-                .encode_image(&sample.to_rgb8())
-                .map_err(|e| invalid(e.to_string()))?;
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, q);
+            if let Some(gray) = sample
+                .as_luma8()
+                .filter(|_| request.image_options.is_some())
+            {
+                encoder.encode_image(gray)
+            } else {
+                encoder.encode_image(&sample.to_rgb8())
+            }
+            .map_err(|e| invalid(e.to_string()))?;
         }
         TargetFormat::Png => sample
             .write_to(&mut encoded, ImageFormat::Png)

@@ -248,3 +248,49 @@ it("retires an in-flight preview on a raw invalid edit and ignores its late resp
   expect(screen.queryByAltText("Output sample")).toBeNull();
   expect(disabled("Preview sample")).toBe(false);
 });
+
+it.each([
+  ["preserve", fit, true],
+  ["strip_all", fit, false],
+  ["preserve", null, false],
+] as const)("gates the real producer Jpeg preservation notice for %s and %j", async (policy, options, visible) => {
+  const inspected = inspect(); inspected.probe.image_format = "Jpeg";
+  mocks.inspect.mockResolvedValue(inspected);
+  mocks.preset = { ...preset(options), metadata_policy: policy };
+  render(page()); await add();
+  fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+  expect(screen.queryByText(/JPEG preservation removes the EXIF thumbnail reference/) !== null).toBe(visible);
+});
+
+it.each([
+  [2200, 583, 1500, 1500, 1500, 398],
+  [22, 11, 15, 15, 15, 8],
+  [583, 2200, 1500, 1500, 398, 1500],
+  [11, 22, 15, 15, 8, 15],
+  [90, 120, 2048, 2048, 90, 120],
+  [400, 300, 101, 101, 101, 76],
+  [32768, 3051, 16384, 32768, 16384, 1526],
+])("shows engine fit geometry for %i × %i into %i × %i", async (sw, sh, width, height, ow, oh) => {
+  const inspected = inspect(); inspected.probe.width = sw; inspected.probe.height = sh;
+  mocks.inspect.mockResolvedValue(inspected);
+  mocks.preset = preset({ jpeg_quality: 90, resize: { kind: "fit_within", width, height } });
+  render(page()); await add();
+  fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+  expect(screen.getByText(`JPEG · Quality 90 · ${ow} × ${oh} px upright`)).toBeTruthy();
+});
+
+it("describes legacy null StripAll without promising upright output geometry from an oriented Jpeg probe", async () => {
+  // The orientation-6 producer reports upright 1600 × 2400 for stored 2400 × 1600.
+  const inspected = inspect();
+  Object.assign(inspected.probe, { image_format: "Jpeg", width: 1600, height: 2400 });
+  mocks.inspect.mockResolvedValue(inspected);
+  mocks.preset = { ...preset(null), metadata_policy: "strip_all" };
+  render(page()); await add();
+  expect(screen.getByText("JPEG · Quality 75 · 1600 × 2400 px upright")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+  expect(screen.getByText("Default (75), Original size")).toBeTruthy();
+  expect(screen.queryByText(/px upright/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({ image_options: null, metadata_policy: "strip_all" });
+});

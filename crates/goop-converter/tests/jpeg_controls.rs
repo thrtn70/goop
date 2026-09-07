@@ -58,6 +58,103 @@ async fn explicit_jpeg_settings_change_dimensions_and_encoded_output() {
     assert!(outputs[0].len() < outputs[1].len());
     assert_eq!(std::fs::read(input).unwrap(), original);
 }
+
+async fn verify_retained_jpeg_channel_layout(resize: ImageResize, expected: (u32, u32)) {
+    use image::ImageDecoder;
+    let dir = tempfile::tempdir().unwrap();
+    for grayscale in [true, false] {
+        let input = dir.path().join(format!("source-{grayscale}.jpg"));
+        if grayscale {
+            image::GrayImage::from_fn(160, 120, |x, y| {
+                image::Luma([if x < 80 {
+                    if y < 60 {
+                        20
+                    } else {
+                        150
+                    }
+                } else if y < 60 {
+                    80
+                } else {
+                    230
+                }])
+            })
+            .save(&input)
+            .unwrap();
+        } else {
+            source(&input, 160, 120);
+        }
+        // Synthetic opaque profile bytes exercise preservation without a system fixture.
+        let mut profile = vec![0; 128];
+        profile[..4].copy_from_slice(&128u32.to_be_bytes());
+        profile[16..20].copy_from_slice(if grayscale { b"GRAY" } else { b"RGB " });
+        profile[36..40].copy_from_slice(b"acsp");
+        let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        jpeg.set_icc_profile(Some(profile.clone().into()));
+        jpeg.set_exif(Some(orientation_exif().into()));
+        jpeg.encoder()
+            .write_to(std::fs::File::create(&input).unwrap())
+            .unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let mut req = request(
+            &input,
+            &dir.path().join(format!("out-{grayscale}.jpg")),
+            90,
+            resize.clone(),
+        );
+        req.metadata_policy = Some(MetadataPolicy::Preserve);
+        let out = convert(&req).await.unwrap();
+        let decoder = image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(
+            std::fs::File::open(&out.output_path).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            decoder.color_type(),
+            if grayscale {
+                image::ColorType::L8
+            } else {
+                image::ColorType::Rgb8
+            }
+        );
+        assert_eq!(decoder.dimensions(), expected);
+        let (exif, icc) = goop_converter::metadata::read(Path::new(&out.output_path)).unwrap();
+        assert_eq!(icc.unwrap(), profile);
+        let exif = exif.unwrap();
+        assert_eq!(exif[18], 1);
+        for (offset, value) in [
+            (30, expected.0),
+            (42, expected.1),
+            (72, expected.0),
+            (84, expected.1),
+        ] {
+            assert_eq!(&exif[offset..offset + 4], &value.to_le_bytes());
+        }
+        if grayscale {
+            let pixels = image::open(&out.output_path).unwrap().into_luma8();
+            for (x, y, value) in [(1, 1, 150), (3, 1, 20), (1, 3, 230), (3, 3, 80)] {
+                let actual = pixels.get_pixel(expected.0 * x / 4, expected.1 * y / 4)[0];
+                assert!((i32::from(actual) - value).abs() < 10);
+            }
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+    }
+}
+
+#[tokio::test]
+async fn explicit_original_preserves_grayscale_icc_and_channel_layout() {
+    verify_retained_jpeg_channel_layout(ImageResize::Original, (120, 160)).await;
+}
+
+#[tokio::test]
+async fn explicit_fit_preserves_grayscale_icc_and_channel_layout() {
+    verify_retained_jpeg_channel_layout(
+        ImageResize::FitWithin {
+            width: 80,
+            height: 80,
+        },
+        (60, 80),
+    )
+    .await;
+}
 fn orientation_exif() -> Vec<u8> {
     let mut bytes = b"II\x2a\0\x08\0\0\0".to_vec();
     bytes.extend(4u16.to_le_bytes());

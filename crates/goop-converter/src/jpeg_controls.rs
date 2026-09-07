@@ -211,11 +211,16 @@ pub(crate) fn render_prepared(
     if (width, height) != (pixels.width(), pixels.height()) {
         pixels = pixels.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
     }
-    let rgb = pixels.into_rgb8();
     let mut output_file = BufWriter::new(File::create(output)?);
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output_file, options.jpeg_quality)
-        .encode_image(&rgb)
-        .map_err(|e| error(format!("JPEG encode: {e}")))?;
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output_file, options.jpeg_quality);
+    // Keep grayscale pixels compatible with a retained GRAY ICC profile.
+    if let Some(gray) = pixels.as_luma8() {
+        encoder.encode_image(gray)
+    } else {
+        encoder.encode_image(&pixels.into_rgb8())
+    }
+    .map_err(|e| error(format!("JPEG encode: {e}")))?;
     std::io::Write::flush(&mut output_file)?;
     drop(output_file);
     crate::metadata::apply_rendered_jpeg(source, output, width, height, policy)
