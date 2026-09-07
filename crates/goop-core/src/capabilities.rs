@@ -33,6 +33,9 @@ pub struct ImageSettingsCapabilities {
 pub struct TargetCapability {
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub video_settings: Option<crate::video::VideoSettingsCapabilities>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub compression: Option<CompressionCapabilities>,
     #[serde(default)]
     #[ts(optional = nullable)]

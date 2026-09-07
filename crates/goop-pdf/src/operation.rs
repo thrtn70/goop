@@ -135,6 +135,7 @@ pub async fn run(
     };
     let output = staged.publish(&destination, None, allow_empty, &cancel)?;
     Ok(JobResult {
+        video_execution: None,
         output_path: Some(output.path.to_string_lossy().into_owned()),
         bytes: Some(output.bytes),
         duration_ms: started.elapsed().as_millis() as u64,

@@ -1659,6 +1659,7 @@ mod tests {
         j.state = JobState::Done;
         j.finished_at = Some(j.created_at + 1000);
         j.result = Some(JobResult {
+            video_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,

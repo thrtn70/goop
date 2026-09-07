@@ -2,5 +2,6 @@
 import type { CompressionCapabilities } from "./CompressionCapabilities";
 import type { ImageSettingsCapabilities } from "./ImageSettingsCapabilities";
 import type { TargetFormat } from "./TargetFormat";
+import type { VideoSettingsCapabilities } from "./VideoSettingsCapabilities";
 
-export type TargetCapability = { compression?: CompressionCapabilities | null, image_settings?: ImageSettingsCapabilities | null, target: TargetFormat, available: boolean, reason: string | null, preserves_metadata: boolean, metadata_warning: string | null, };
+export type TargetCapability = { video_settings?: VideoSettingsCapabilities | null, compression?: CompressionCapabilities | null, image_settings?: ImageSettingsCapabilities | null, target: TargetFormat, available: boolean, reason: string | null, preserves_metadata: boolean, metadata_warning: string | null, };

@@ -8,6 +8,9 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct PreviewRequest {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_options: Option<crate::video::VideoConvertOptions>,
     pub request_id: String,
     pub input_path: String,
     pub source_revision: String,

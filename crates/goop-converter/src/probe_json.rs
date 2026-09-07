@@ -80,6 +80,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
     };
 
     Ok(ProbeResult {
+        video_details: None,
         duration_ms,
         width: video.and_then(|s| s.width),
         height: video.and_then(|s| s.height),

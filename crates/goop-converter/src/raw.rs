@@ -41,6 +41,7 @@ pub fn probe_raw(path: &Path) -> Result<ProbeResult, GoopError> {
         use goop_core::SourceKind;
         let result = macos::read(path, false)?;
         Ok(ProbeResult {
+            video_details: None,
             duration_ms: 0,
             width: Some(result.width),
             height: Some(result.height),

@@ -355,6 +355,7 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
                         reencoded: None,
@@ -405,6 +406,7 @@ pub fn run() {
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
+                        video_execution: None,
                         source_bytes: res.source_bytes,
                         target_bytes: res.target_bytes,
                         reencoded: Some(res.reencoded),
@@ -498,6 +500,7 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
                         reencoded: None,

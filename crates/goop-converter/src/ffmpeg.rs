@@ -200,6 +200,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         let reencoded = result?;
         let published = staged.publish(&destination, target_bytes, false, &cancel)?;
         Ok(ConvertResult {
+            video_execution: None,
             source_bytes: Some(source_bytes),
             target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),
@@ -667,6 +668,7 @@ mod tests {
 
     fn req_with(target: TargetFormat, subtitle: Option<SubtitleOptions>) -> ConvertRequest {
         ConvertRequest {
+            video_options: None,
             input_path: "/in.mp4".into(),
             output_path: "/out".into(),
             target,
@@ -683,6 +685,7 @@ mod tests {
 
     fn probe_h264_aac() -> ProbeResult {
         ProbeResult {
+            video_details: None,
             duration_ms: 1000,
             width: Some(1920),
             height: Some(1080),

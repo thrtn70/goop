@@ -67,6 +67,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         .unwrap_or(0);
     vec![
         Preset {
+            video_options: None,
             id: "builtin-youtube-upload".into(),
             name: "YouTube Upload".into(),
             target: TargetFormat::Mp4,
@@ -81,6 +82,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            video_options: None,
             id: "builtin-twitter-video".into(),
             name: "Twitter/X Video".into(),
             target: TargetFormat::Mp4,
@@ -95,6 +97,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            video_options: None,
             id: "builtin-podcast-mp3".into(),
             name: "Podcast MP3".into(),
             target: TargetFormat::Mp3,
@@ -109,6 +112,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            video_options: None,
             id: "builtin-web-image".into(),
             name: "Web Image".into(),
             target: TargetFormat::Webp,
@@ -144,6 +148,7 @@ mod tests {
 
     fn sample(id: &str, name: &str) -> Preset {
         Preset {
+            video_options: None,
             id: id.into(),
             name: name.into(),
             target: TargetFormat::Mp4,

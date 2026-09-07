@@ -67,6 +67,7 @@ pub(crate) fn image_probe_result(
     file_size: u64,
 ) -> ProbeResult {
     ProbeResult {
+        video_details: None,
         duration_ms: 0,
         width: Some(width),
         height: Some(height),
