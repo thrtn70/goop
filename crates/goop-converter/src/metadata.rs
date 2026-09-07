@@ -164,6 +164,51 @@ pub fn apply(input: &Path, output: &Path, policy: MetadataPolicy) -> Result<bool
     Ok(true)
 }
 
+/// Copy JPEG metadata after a pixel transform, normalizing only known geometry.
+/// Non-JPEG transfer remains unsupported and is described by source capabilities.
+pub(crate) fn apply_rendered_jpeg(
+    input: &Path,
+    output: &Path,
+    width: u32,
+    height: u32,
+    policy: MetadataPolicy,
+) -> Result<(), GoopError> {
+    if policy == MetadataPolicy::StripAll {
+        return Ok(());
+    }
+    // Detect the container from bytes; a valid JPEG may have a different suffix.
+    let mut file = std::fs::File::open(input)?;
+    let mut signature = [0; 3];
+    if std::io::Read::read_exact(&mut file, &mut signature).is_err()
+        || signature != [0xff, 0xd8, 0xff]
+    {
+        return Ok(());
+    }
+    let source = Jpeg::from_bytes(std::fs::read(input)?.into())
+        .map_err(|e| GoopError::InvalidRequest(format!("JPEG metadata: {e}")))?;
+    if source
+        .segments()
+        .iter()
+        .filter(|segment| segment.marker() == 0xe1 && segment.contents().starts_with(b"Exif\0\0"))
+        .count()
+        > 1
+    {
+        return Err(GoopError::InvalidRequest(
+            "Cannot safely preserve multiple EXIF segments; choose Strip all metadata.".into(),
+        ));
+    }
+    let exif = source
+        .exif()
+        .map(|bytes| crate::exif_geometry::normalize(&bytes, width, height))
+        .transpose()?;
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(output)?.into())
+        .map_err(|e| GoopError::InvalidRequest(format!("JPEG output metadata: {e}")))?;
+    jpeg.set_exif(exif.map(Into::into));
+    jpeg.set_icc_profile(source.icc_profile());
+    jpeg.encoder().write_to(std::fs::File::create(output)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

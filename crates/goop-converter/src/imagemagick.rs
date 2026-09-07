@@ -71,9 +71,18 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             Some(CompressMode::TargetSizeBytes(bytes)) => Some(bytes),
             _ => None,
         };
+        let explicit_request = req.image_options.as_ref().map(|_| req.clone());
         let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
-            process_image(&input, out, target, compress_mode)?;
-            metadata::apply(&input, out, metadata_policy)?;
+            if let Some(request) = &explicit_request {
+                let probe = probe_image(&input)?;
+                crate::capabilities::validate_request(request, &probe)?;
+                if let Some(options) = &request.image_options {
+                    crate::jpeg_controls::render(&input, out, options, metadata_policy)?;
+                }
+            } else {
+                process_image(&input, out, target, compress_mode)?;
+                metadata::apply(&input, out, metadata_policy)?;
+            }
             Ok(())
         })
         .await?;
@@ -326,6 +335,14 @@ pub(crate) fn decode_any(input: &Path) -> Result<image::DynamicImage, GoopError>
 
 /// Decode a HEIC/HEIF file via libheif-rs into an RGB DynamicImage.
 fn decode_heic(input: &Path) -> Result<image::DynamicImage, GoopError> {
+    decode_heic_with_limits(input, false)
+}
+
+pub(crate) fn decode_heic_explicit(input: &Path) -> Result<image::DynamicImage, GoopError> {
+    decode_heic_with_limits(input, true)
+}
+
+fn decode_heic_with_limits(input: &Path, explicit: bool) -> Result<image::DynamicImage, GoopError> {
     use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
 
     let lib = LibHeif::new();
@@ -345,6 +362,19 @@ fn decode_heic(input: &Path) -> Result<image::DynamicImage, GoopError> {
         })?;
     let width = handle.width();
     let height = handle.height();
+    if explicit {
+        crate::jpeg_controls::check_raster(width, height, 3)?;
+        if handle.has_alpha_channel() {
+            return Err(image_error(
+                "JPEG settings are unavailable for HEIC transparency",
+            ));
+        }
+        if crate::heif_header::primary_item_format(input, handle.item_id())? != "HEIC" {
+            return Err(image_error(
+                "Explicit JPEG settings require HEIC image data",
+            ));
+        }
+    }
     let heif_image = lib
         .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)
         .map_err(|e| GoopError::SubprocessFailed {
@@ -977,6 +1007,62 @@ mod tests {
         done_rx.await.unwrap();
         assert!(!output.exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_explicit_jpeg_encode_never_publishes_and_preserves_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.jpg");
+        let input = dir.path().join("in.jpg");
+        image::RgbImage::new(160, 120).save(&input).unwrap();
+        std::fs::write(&output, b"original destination").unwrap();
+        let cancel = CancellationToken::new();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let worker_output = output.clone();
+        let worker_cancel = cancel.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let result = prepare_image_output(&worker_output, None, &worker_cancel, |path| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                crate::jpeg_controls::render(
+                    &input,
+                    path,
+                    &goop_core::ImageConvertOptions {
+                        jpeg_quality: 90,
+                        resize: goop_core::ImageResize::FitWithin {
+                            width: 80,
+                            height: 80,
+                        },
+                    },
+                    goop_core::MetadataPolicy::StripAll,
+                )?;
+                assert_eq!(image::image_dimensions(path).unwrap(), (80, 60));
+                Ok(())
+            });
+            // Cancellation makes prepare return Err after dropping staging.
+            assert!(matches!(result, Err(GoopError::Cancelled)));
+            done_tx.send(()).unwrap();
+            result
+        });
+        let task = tokio::spawn(finish_image_output(
+            worker,
+            output.clone().into(),
+            cancel.clone(),
+        ));
+        entered_rx.await.unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(GoopError::Cancelled)));
+        assert_eq!(std::fs::read(&output).unwrap(), b"original destination");
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"original destination");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[tokio::test]
