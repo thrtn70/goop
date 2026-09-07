@@ -24,4 +24,4 @@ subtitle_codecs: Array<string>,
  * lands in the output untouched, so each has to be checked against
  * what the target container can actually describe.
  */
-audio_codecs: Array<string>, };
+audio_codecs: Array<string>, image_has_alpha?: boolean | null, };

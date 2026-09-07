@@ -15,14 +15,15 @@ use std::{
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 const EDGE: u32 = 1280;
-const PIXELS: u64 = 4_000_000;
+pub(crate) const MAX_SOURCE_PIXELS: u64 = 4_000_000;
+pub(crate) const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const BYTES: u64 = 16 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(20);
 fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 pub fn validate_pixels(width: u32, height: u32) -> Result<(), GoopError> {
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > PIXELS {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
         Err(invalid(
             "Sample preview unavailable: source exceeds the 4 million decoded-pixel limit",
         ))
@@ -298,7 +299,7 @@ fn image_sample(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
-    if std::fs::metadata(input)?.len() > 64 * 1024 * 1024 {
+    if std::fs::metadata(input)?.len() > MAX_INPUT_BYTES {
         return Err(invalid("Image preview source exceeds 64 MiB input limit"));
     }
     let mut reader = image::ImageReader::open(input)?.with_guessed_format()?;
@@ -316,7 +317,7 @@ fn image_sample(
     let mut decoder = reader.into_decoder().map_err(|e| invalid(e.to_string()))?;
     let (width, height) = decoder.dimensions();
     validate_pixels(width, height)?;
-    if decoder.total_bytes() > PIXELS * 16 {
+    if decoder.total_bytes() > MAX_SOURCE_PIXELS * 16 {
         return Err(invalid("Decoded image exceeds preview memory limit"));
     }
     let orientation = decoder.orientation().map_err(|e| invalid(e.to_string()))?;

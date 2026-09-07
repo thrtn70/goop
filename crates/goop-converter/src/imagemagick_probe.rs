@@ -1,4 +1,5 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
+use image::ImageDecoder;
 use std::path::Path;
 
 /// Probe supported images with the same format dispatch as conversion.
@@ -16,7 +17,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let (width, height, image_format) = match ext.as_str() {
+    let (width, height, image_format, image_has_alpha) = match ext.as_str() {
         "heic" | "heif" => {
             let path_str = path
                 .to_str()
@@ -26,13 +27,18 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
             let handle = context
                 .primary_image_handle()
                 .map_err(|e| probe_error(format!("failed to get primary HEIC dimensions: {e}")))?;
-            (handle.width(), handle.height(), Some("HEIC".into()))
+            (
+                handle.width(),
+                handle.height(),
+                Some("HEIC".into()),
+                Some(handle.has_alpha_channel()),
+            )
         }
         "jxl" => {
             // jpegxl-rs currently has no header-only API. Reuse the existing
             // decoder for consistent orientation and supported channel behavior.
             let image = crate::imagemagick::decode_any(path)?;
-            (image.width(), image.height(), Some("JXL".into()))
+            (image.width(), image.height(), Some("JXL".into()), None)
         }
         _ => raster_dimensions(path)?,
     };
@@ -54,6 +60,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         has_subtitles: false,
         subtitle_codecs: vec![],
         audio_codecs: vec![],
+        image_has_alpha,
     })
 }
 
@@ -64,7 +71,7 @@ fn probe_error(message: impl Into<String>) -> GoopError {
     }
 }
 
-fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>), GoopError> {
+fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>, Option<bool>), GoopError> {
     let reader = image::ImageReader::open(path)
         .map_err(|e| GoopError::SubprocessFailed {
             binary: "image".into(),
@@ -76,20 +83,44 @@ fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>), GoopErro
             stderr: format!("failed to detect image format: {e}"),
         })?;
 
-    let format = reader.format().map(|f| format!("{f:?}"));
-    let (width, height) = reader
-        .into_dimensions()
+    let detected_format = reader.format();
+    let format = detected_format.map(|value| format!("{value:?}"));
+    let mut decoder = reader
+        .into_decoder()
         .map_err(|e| GoopError::SubprocessFailed {
             binary: "image".into(),
             stderr: format!("failed to read image dimensions: {e}"),
         })?;
+    let (mut width, mut height) = decoder.dimensions();
+    let image_has_alpha = if detected_format == Some(image::ImageFormat::Jpeg) {
+        let orientation = decoder
+            .orientation()
+            .map_err(|e| GoopError::SubprocessFailed {
+                binary: "image".into(),
+                stderr: format!("failed to read JPEG orientation: {e}"),
+            })?;
+        if matches!(
+            orientation,
+            image::metadata::Orientation::Rotate90
+                | image::metadata::Orientation::Rotate270
+                | image::metadata::Orientation::Rotate90FlipH
+                | image::metadata::Orientation::Rotate270FlipH
+        ) {
+            std::mem::swap(&mut width, &mut height);
+        }
+        Some(false)
+    } else {
+        None
+    };
 
-    Ok((width, height, format))
+    Ok((width, height, format, image_has_alpha))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use img_parts::jpeg::Jpeg;
+    use img_parts::{Bytes, ImageEXIF};
     use std::fs;
 
     fn write_test_png(path: &Path) {
@@ -140,8 +171,75 @@ mod tests {
         let result = probe_image(&path).unwrap();
         assert_eq!(result.width, Some(16));
         assert_eq!(result.height, Some(16));
+        assert_eq!(result.image_has_alpha, Some(false));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn jpeg_probe_uses_header_format_and_upright_orientation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("portrait.png");
+        for orientation in 1..=8 {
+            let img = image::RgbImage::new(16, 8);
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+            let mut jpeg = Jpeg::from_bytes(fs::read(&path).unwrap().into()).unwrap();
+            let exif = vec![
+                b'I',
+                b'I',
+                42,
+                0,
+                8,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0x12,
+                0x01,
+                3,
+                0,
+                1,
+                0,
+                0,
+                0,
+                orientation,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
+            jpeg.set_exif(Some(Bytes::from(exif)));
+            let mut bytes = Vec::new();
+            jpeg.encoder().write_to(&mut bytes).unwrap();
+            fs::write(&path, bytes).unwrap();
+
+            let result = probe_image(&path).unwrap();
+            assert_eq!(result.image_format.as_deref(), Some("Jpeg"));
+            let expected = if (5..=8).contains(&orientation) {
+                (Some(8), Some(16))
+            } else {
+                (Some(16), Some(8))
+            };
+            assert_eq!(
+                (result.width, result.height),
+                expected,
+                "orientation {orientation}"
+            );
+            assert_eq!(result.image_has_alpha, Some(false));
+        }
+    }
+
+    #[test]
+    fn heic_probe_reports_primary_image_opacity() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.heic");
+        let result = probe_image(&path).unwrap();
+        assert_eq!(result.image_format.as_deref(), Some("HEIC"));
+        assert_eq!(result.image_has_alpha, Some(false));
     }
 
     #[test]

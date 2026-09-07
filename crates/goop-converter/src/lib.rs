@@ -6,6 +6,7 @@ pub mod ffmpeg;
 pub mod image_app_icon;
 pub mod image_crop;
 pub mod image_operation;
+pub mod image_options;
 pub mod image_recompress;
 pub mod image_resize;
 pub mod image_rotate;

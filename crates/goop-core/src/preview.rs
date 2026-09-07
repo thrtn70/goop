@@ -1,6 +1,6 @@
 use crate::{
-    CompressMode, GifOptions, MetadataPolicy, QualityPreset, ResolutionCap, SubtitleOptions,
-    TargetFormat,
+    CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, QualityPreset, ResolutionCap,
+    SubtitleOptions, TargetFormat,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -18,6 +18,9 @@ pub struct PreviewRequest {
     pub metadata_policy: Option<MetadataPolicy>,
     pub subtitle: Option<SubtitleOptions>,
     pub gif_options: Option<GifOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_options: Option<ImageConvertOptions>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
