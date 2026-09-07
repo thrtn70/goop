@@ -2,12 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { PreviewRequest, PreviewResult } from "@/types";
+import type { ImageSettingsCapabilities, PreviewRequest, PreviewResult } from "@/types";
 
 type Settings = Omit<PreviewRequest, "request_id" | "source_revision">;
 
 /** Samples are ephemeral and never enter the queue or the persisted draft. */
-export default function SettingsPreview({ request }: { request: Settings }) {
+export default function SettingsPreview({ request, imageSettings }: { request: Settings; imageSettings?: ImageSettingsCapabilities | null }) {
+  const supported = !request.image_options || (imageSettings?.available && (
+    request.image_options.resize.kind === "original" ? imageSettings.preview_original_available : imageSettings.preview_fit_within
+  ));
+  const unavailableReason = supported ? null : imageSettings?.preview_unavailable_reason ?? "Image settings preview is unavailable.";
   const revision = JSON.stringify(request, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value);
   const active = useRef<string | null>(null);
   const displayed = useRef<string | null>(null);
@@ -27,9 +31,10 @@ export default function SettingsPreview({ request }: { request: Settings }) {
     setError(null);
     setBusy(false);
     return release;
-  }, [revision]);
+  }, [revision, unavailableReason]);
 
   async function generate() {
+    if (!supported) return;
     const pending = active.current;
     if (pending && pending !== displayed.current) void api.preview.cancel(pending).catch(() => {});
     const id = crypto.randomUUID();
@@ -58,12 +63,13 @@ export default function SettingsPreview({ request }: { request: Settings }) {
 
   return <section className="mt-5 border-t border-subtle pt-4" aria-label="Settings preview">
     <div className="flex items-center gap-2">
-      <button type="button" disabled={busy} onClick={() => void generate()} className="btn-press rounded-md bg-surface-2 px-3 py-2 text-xs text-fg-secondary disabled:opacity-50">{busy ? "Preparing sample…" : "Preview sample"}</button>
+      <button type="button" disabled={busy || !supported} onClick={() => void generate()} className="btn-press rounded-md bg-surface-2 px-3 py-2 text-xs text-fg-secondary disabled:opacity-50">{busy ? "Preparing sample…" : "Preview sample"}</button>
       {(busy || result || error) && <button type="button" onClick={close} className="rounded-md px-2 py-2 text-xs text-fg-secondary">{busy ? "Cancel preview" : "Close preview"}</button>}
     </div>
     <p className="mt-2 text-xs text-fg-muted">A bounded sample, not an output-size estimate. Originals stay unchanged.</p>
+    {unavailableReason && <p className="mt-2 text-xs text-fg-muted">{unavailableReason}</p>}
     {error && <p role="alert" className="mt-2 text-xs text-warning">{error}</p>}
-    {result && <div className="mt-3 space-y-3">
+    {result && supported && result.source_revision === revision && <div className="mt-3 space-y-3">
       <p className="text-xs text-fg-muted">{result.kind === "video" ? "Muted H.264 viewing sample. Stream-copy jobs are re-encoded for this preview." : "Sample images omit metadata."}</p>
       {result.before_path && <figure><img src={convertFileSrc(result.before_path)} alt="Source sample" className="max-h-52 w-full rounded-md object-contain"/><figcaption className="mt-1 text-xs text-fg-muted">Source sample</figcaption></figure>}
       {result.kind === "image" ? <figure><img src={convertFileSrc(result.after_path)} alt="Output sample" className="max-h-52 w-full rounded-md object-contain"/><figcaption className="mt-1 text-xs text-fg-muted">Output sample</figcaption></figure> : <video src={convertFileSrc(result.after_path)} aria-label="Output video sample" controls muted preload="metadata" className="w-full rounded-md"/>}

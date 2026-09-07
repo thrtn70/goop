@@ -182,3 +182,17 @@ export function useWorkspaceScopeLifetime(scope: DraftScope) {
 }
 /** Runtime callbacks share removal authority, but never edit persisted intent. */
 export function useWorkspaceScope() { return useContext(ScopeContext); }
+
+/** Parent readiness also observes forms whose inspector is currently unmounted. */
+export function useWorkspaceDraftEntries() { return useDraftStore(state => state.entries); }
+
+/** An intentional settings replacement retires only its raw editor slots. */
+export function clearWorkspaceDraftSlots(tool: WorkspaceTool, scope: readonly string[], slots: readonly string[]) {
+  const keys = slots.map(slot => JSON.stringify([tool, ...scope, slot]));
+  useDraftStore.setState(state => {
+    const entries = { ...state.entries };
+    const epochs = { ...state.epochs };
+    for (const key of keys) { delete entries[key]; epochs[key] = (epochs[key] ?? 0) + 1; }
+    return { entries, epochs };
+  });
+}

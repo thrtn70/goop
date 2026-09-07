@@ -14,7 +14,7 @@ import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -224,9 +224,12 @@ function CompressPage() {
     [files, selectedId, setSelectedId, setFiles],
   );
 
+  const [applicationError, setApplicationError] = useState<string | null>(null);
   const applyPreset = useCallback(
     (preset: Preset) => {
+      if (preset.image_options) { setApplicationError("Image settings cannot be applied in Compress. Use Convert for JPEG quality and dimensions."); return; }
       if (!preset.compress_mode) return;
+      setApplicationError(null);
       const mode = preset.compress_mode;
       setFiles((prev) =>
         prev.map((f) => ({
@@ -288,7 +291,7 @@ function CompressPage() {
   }, [pickerToken, handleBrowse, location.pathname]);
 
   const problems = files.map((f) =>
-    compressionProblem(f.mode, byId[f.id ?? ""] ?? PROBING, f.target),
+    f.imageOptions ? "Image settings cannot be used in Compress." : compressionProblem(f.mode, byId[f.id ?? ""] ?? PROBING, f.target),
   );
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
@@ -362,6 +365,7 @@ function CompressPage() {
                   : "Add files or drop them into the source list."}
             </p>
           )}
+          {applicationError && <p role="alert" className="mt-4 text-xs text-warning">{applicationError}</p>}
           {blocked && files.length > 0 && (
             <p className="mt-4 text-xs text-warning">
               Review the source list before starting. Every file needs supported

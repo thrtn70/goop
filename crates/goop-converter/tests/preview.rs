@@ -164,3 +164,308 @@ fn stale_cleanup_never_follows_symlinks() {
     goop_converter::preview::cleanup_stale_sessions(dir.path()).unwrap();
     assert!(outside.path().join(".goop-preview-session").exists());
 }
+
+fn explicit_request(path: &std::path::Path, id: &str, quality: u8) -> PreviewRequest {
+    let mut req = request(path, id);
+    req.image_options = Some(goop_core::ImageConvertOptions {
+        jpeg_quality: quality,
+        resize: goop_core::ImageResize::Original,
+    });
+    req
+}
+
+#[tokio::test]
+async fn explicit_grayscale_sample_preserves_channels_and_encoded_byte_count() {
+    use img_parts::{jpeg::Jpeg, ImageEXIF, ImageICC};
+    let dir = tempfile::tempdir().unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    for (index, (grayscale, explicit, size)) in [
+        (true, true, (64, 48)),
+        (true, true, (1600, 800)),
+        (true, false, (64, 48)),
+        (false, true, (64, 48)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = dir.path().join(format!("source-{index}.jpg"));
+        if grayscale {
+            image::GrayImage::from_fn(size.0, size.1, |x, y| {
+                image::Luma([((x * 7 + y * 13) % 256) as u8])
+            })
+            .save(&input)
+            .unwrap();
+        } else {
+            image::RgbImage::from_fn(size.0, size.1, |x, y| image::Rgb([x as u8, y as u8, 80]))
+                .save(&input)
+                .unwrap();
+        }
+        let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        jpeg.set_exif(Some(
+            b"II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0"
+                .to_vec()
+                .into(),
+        ));
+        let mut profile = vec![0; 128];
+        profile[16..20].copy_from_slice(if grayscale { b"GRAY" } else { b"RGB " });
+        jpeg.set_icc_profile(Some(profile.into()));
+        jpeg.encoder()
+            .write_to(std::fs::File::create(&input).unwrap())
+            .unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let id = format!("channels-{index}");
+        let req = if explicit {
+            explicit_request(&input, &id, 75)
+        } else {
+            request(&input, &id)
+        };
+        let result = service.generate(&resolver, req).await.unwrap();
+        assert_eq!(
+            (result.width, result.height),
+            bounded_dimensions(size.1, size.0, 1280)
+        );
+        let before = image::open(result.before_path.as_ref().unwrap()).unwrap();
+        let mut encoded = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 75);
+        if explicit && grayscale {
+            encoder.encode_image(before.as_luma8().unwrap()).unwrap();
+        } else {
+            encoder.encode_image(&before.to_rgb8()).unwrap();
+        }
+        assert_eq!(result.sample_bytes as usize, encoded.len());
+        let after = image::open(&result.after_path).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap();
+        assert_eq!(
+            after.color(),
+            if explicit && grayscale {
+                image::ColorType::L8
+            } else {
+                image::ColorType::Rgb8
+            }
+        );
+        assert_eq!(after.as_bytes(), decoded.as_bytes());
+        for path in [result.before_path.unwrap(), result.after_path] {
+            assert_eq!(
+                goop_converter::metadata::read(std::path::Path::new(&path)).unwrap(),
+                (None, None)
+            );
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        service.cancel(&id);
+    }
+}
+fn textured_jpeg(path: &std::path::Path) {
+    image::RgbImage::from_fn(160, 100, |x, y| {
+        image::Rgb([
+            (x * 17 + y * 31) as u8,
+            (x * 7 + y * 11) as u8,
+            (x * y) as u8,
+        ])
+    })
+    .save(path)
+    .unwrap();
+}
+#[tokio::test]
+async fn explicit_quality_changes_encoded_sample_and_default_matches_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("textured.jpg");
+    textured_jpeg(&input);
+    let original = std::fs::read(&input).unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    let low = service
+        .generate(&resolver, explicit_request(&input, "low", 30))
+        .await
+        .unwrap();
+    let low_pixels = std::fs::read(&low.after_path).unwrap();
+    let high = service
+        .generate(&resolver, explicit_request(&input, "high", 90))
+        .await
+        .unwrap();
+    assert!(low.sample_bytes < high.sample_bytes);
+    assert_ne!(low_pixels, std::fs::read(&high.after_path).unwrap());
+    let legacy = service
+        .generate(&resolver, request(&input, "legacy"))
+        .await
+        .unwrap();
+    let legacy_pixels = std::fs::read(&legacy.after_path).unwrap();
+    let explicit = service
+        .generate(&resolver, explicit_request(&input, "default", 75))
+        .await
+        .unwrap();
+    assert_eq!(legacy.sample_bytes, explicit.sample_bytes);
+    assert_eq!(legacy_pixels, std::fs::read(&explicit.after_path).unwrap());
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+}
+#[tokio::test]
+async fn explicit_fit_is_refused_before_decoding_or_creating_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("not-decoded.jpg");
+    std::fs::write(&input, b"invalid jpeg").unwrap();
+    let root = dir.path().join("previews");
+    let service = PreviewService::new(root.clone());
+    let mut req = explicit_request(&input, "fit", 90);
+    req.image_options.as_mut().unwrap().resize = goop_core::ImageResize::FitWithin {
+        width: 64,
+        height: 64,
+    };
+    let error = service
+        .generate(&BinaryResolver::new(dir.path().into()), req)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Fit within"), "{error}");
+    assert!(!root.exists());
+}
+#[tokio::test]
+async fn explicit_requests_revalidate_quality_target_compression_and_actual_codec() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.jpg");
+    textured_jpeg(&input);
+    let resolver = BinaryResolver::new(dir.path().into());
+    for case in 0..8 {
+        let root = dir.path().join(format!("previews-{case}"));
+        let service = PreviewService::new(root.clone());
+        let mut req = explicit_request(&input, "invalid", 75);
+        match case {
+            0 => req.image_options.as_mut().unwrap().jpeg_quality = 0,
+            1 => req.image_options.as_mut().unwrap().jpeg_quality = 101,
+            2 => req.target = TargetFormat::Png,
+            3 => req.compress_mode = Some(goop_core::CompressMode::Quality(80)),
+            4 => req.quality_preset = Some(goop_core::QualityPreset::Balanced),
+            5 => req.resolution_cap = Some(goop_core::ResolutionCap::R720p),
+            6 => req.target = TargetFormat::Mp4,
+            _ => {
+                // A JPEG extension does not grant execution authority to PNG pixels.
+                image::RgbImage::new(10, 10)
+                    .save_with_format(&input, image::ImageFormat::Png)
+                    .unwrap();
+            }
+        }
+        assert!(
+            service.generate(&resolver, req).await.is_err(),
+            "case {case}"
+        );
+        if root.exists() {
+            for session in std::fs::read_dir(&root).unwrap() {
+                assert_eq!(
+                    std::fs::read_dir(session.unwrap().path()).unwrap().count(),
+                    1
+                );
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn explicit_preview_uses_short_and_long_orientation_in_both_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("oriented.jpg");
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    for kind in [3u16, 4] {
+        for orientation in 1u32..=8 {
+            textured_jpeg(&input);
+            let jpeg = std::fs::read(&input).unwrap();
+            let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01".to_vec();
+            exif.extend(kind.to_le_bytes());
+            exif.extend(1u32.to_le_bytes());
+            exif.extend(orientation.to_le_bytes());
+            exif.extend(0u32.to_le_bytes());
+            let mut bytes = jpeg[..2].to_vec();
+            bytes.extend([255, 225]);
+            bytes.extend(((exif.len() + 2) as u16).to_be_bytes());
+            bytes.extend(exif);
+            bytes.extend(&jpeg[2..]);
+            std::fs::write(&input, bytes).unwrap();
+            let mut expected = image::load_from_memory(&jpeg).unwrap();
+            expected.apply_orientation(
+                image::metadata::Orientation::from_exif(orientation as u8).unwrap(),
+            );
+            let result = service
+                .generate(&resolver, explicit_request(&input, "oriented", 75))
+                .await
+                .unwrap();
+            assert_eq!(
+                (result.width, result.height),
+                (expected.width(), expected.height()),
+                "kind {kind}, orientation {orientation}"
+            );
+            assert!(
+                image::open(result.before_path.unwrap()).unwrap().to_rgb8() == expected.to_rgb8(),
+                "kind {kind}, orientation {orientation}"
+            );
+            let after = image::open(result.after_path).unwrap();
+            assert_eq!(
+                (after.width(), after.height()),
+                (expected.width(), expected.height())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_raw_heic_and_oversized_sources_stay_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = BinaryResolver::new(dir.path().into());
+    for ext in ["dng", "heic", "heif"] {
+        let input = dir.path().join(format!("source.{ext}"));
+        std::fs::write(&input, b"unsupported source").unwrap();
+        let root = dir.path().join(format!("previews-{ext}"));
+        let service = PreviewService::new(root.clone());
+        let error = service
+            .generate(&resolver, explicit_request(&input, "unsupported", 75))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable"), "{error}");
+        assert!(!root.exists());
+    }
+    for dimensions in [(2001, 2000), (40_000, 1)] {
+        let input = dir.path().join("oversized.jpg");
+        image::RgbImage::new(dimensions.0, dimensions.1)
+            .save(&input)
+            .unwrap();
+        let service = PreviewService::new(dir.path().join("previews-large"));
+        assert!(
+            service
+                .generate(&resolver, explicit_request(&input, "large", 75))
+                .await
+                .is_err(),
+            "{dimensions:?}"
+        );
+    }
+    let input = dir.path().join("encoded-large.jpg");
+    let file = std::fs::File::create(&input).unwrap();
+    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    let service = PreviewService::new(dir.path().join("previews-bytes"));
+    let error = service
+        .generate(&resolver, explicit_request(&input, "bytes", 75))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("64 MiB"), "{error}");
+}
+#[tokio::test]
+async fn explicit_malformed_orientation_fails_preserve_but_strip_can_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("malformed.jpg");
+    textured_jpeg(&input);
+    let jpeg = std::fs::read(&input).unwrap();
+    let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x04\0\x01\0\0\0\x09\0\0\0\0\0\0\0";
+    let mut bytes = jpeg[..2].to_vec();
+    bytes.extend([255, 225]);
+    bytes.extend(((exif.len() + 2) as u16).to_be_bytes());
+    bytes.extend(exif);
+    bytes.extend(&jpeg[2..]);
+    std::fs::write(&input, bytes).unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    let mut req = explicit_request(&input, "metadata", 75);
+    assert!(service
+        .generate(&resolver, req.clone())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("EXIF"));
+    req.metadata_policy = Some(goop_core::MetadataPolicy::StripAll);
+    let sample = service.generate(&resolver, req).await.unwrap();
+    assert_eq!((sample.width, sample.height), (160, 100));
+}

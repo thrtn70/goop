@@ -200,6 +200,7 @@ pub fn request(
         batch_id: None,
         metadata_policy: None,
         subtitle: sub,
+        image_options: None,
     }
 }
 

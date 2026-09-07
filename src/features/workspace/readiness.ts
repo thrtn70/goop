@@ -1,12 +1,13 @@
 import type { ProbeState } from "@/hooks/useProbe";
+import { imageOptionsProblem } from "@/features/convert/imageOptions";
 import { subtitleForTarget } from "@/features/convert/FileRow";
 import type { TargetFormat, CompressMode } from "@/types";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 export function conversionProblem(
   entry: Pick<
     FileEntry,
-    "target" | "optionsReady" | "qualityPreset" | "resolutionCap" | "subtitle"
-  >,
+    "target" | "optionsReady" | "qualityPreset" | "resolutionCap" | "subtitle" | "imageOptions"
+  > & Partial<Pick<FileEntry, "gifOptions">>,
   state: ProbeState,
 ): string | null {
   if (state.phase === "probing") return "Inspecting source…";
@@ -17,6 +18,10 @@ export function conversionProblem(
   );
   if (!target?.available)
     return target?.reason ?? "Choose an available output format.";
+  const imageProblem = imageOptionsProblem(entry.imageOptions, target.image_settings);
+  if (imageProblem) return imageProblem;
+  if (entry.imageOptions && entry.gifOptions) return "Remove GIF settings before using image settings.";
+  if (entry.imageOptions && entry.subtitle) return "Remove subtitles before using image settings.";
   if (entry.subtitle && !subtitleForTarget(entry.subtitle, entry.target))
     return "Choose a supported subtitle mode or remove the subtitle before starting.";
   const quality =

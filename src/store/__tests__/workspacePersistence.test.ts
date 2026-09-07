@@ -33,3 +33,31 @@ describe("durable editable drafts", () => {
     expect(saveDraftEntries(storage,{})).toBe(false);
   });
 });
+
+describe("JPEG draft persistence", () => {
+  const fileKey = JSON.stringify(["convert", "ConvertPage.files"]);
+  const file = { id: "photo-1", revision: 2, path: "/photo.jpg", sourceDir: "/", target: "jpeg",
+    qualityPreset: "original", resolutionCap: "original", imageOptions: {
+      jpeg_quality: 90, resize: { kind: "fit_within", width: 2048, height: 2048 } } };
+  it("restores full options and partial numeric text under each file identity", () => {
+    const entries = { [fileKey]: { value: [file] },
+      [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.widthDraft"])]: { value: "-" },
+      [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.heightDraft"])]: { value: "" },
+      [JSON.stringify(["convert", "file", "photo-2", "ImageOptionsPanel.qualityDraft"])]: { value: "1e" },
+      [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.appliedWidth"])]: { value: "2048" } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+  });
+  it("drops malformed options instead of restoring an ineffective draft", () => {
+    const entries = { [fileKey]: { value: [{ ...file, imageOptions: { jpeg_quality: -1, resize: { kind: "original" } } }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
+  });
+  it("continues restoring legacy drafts without image options", () => {
+    const entries = { [fileKey]: { value: [{ ...file, imageOptions: undefined }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))[fileKey]).toEqual(entries[fileKey]);
+  });
+  it("rejects compression drafts carrying meaningful image options", () => {
+    const entries = { [JSON.stringify(["compress", "CompressPage.files"])]: {
+      value: [{ ...file, mode: { kind: "quality", value: 75 } }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
+  });
+});

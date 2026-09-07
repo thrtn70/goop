@@ -1064,6 +1064,92 @@ mod tests {
     }
 
     #[test]
+    fn convert_image_options_survive_reopen_and_retry_after_draft_changes() {
+        let (store, tmp) = temp_store();
+        let mut draft: goop_core::ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": "portrait.jpg",
+            "output_path": "converted.jpg",
+            "target": "jpeg",
+            "metadata_policy": "preserve",
+            "image_options": {
+                "jpeg_quality": 90,
+                "resize": {"kind": "fit_within", "width": 2048, "height": 2048}
+            }
+        }))
+        .unwrap();
+        let submitted = draft.clone();
+        let job = Job::new(JobKind::Convert, serde_json::to_value(&draft).unwrap());
+        store.insert(&job).unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let store = QueueStore::open(&path).unwrap();
+        let restored = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        let request: goop_core::ConvertRequest =
+            serde_json::from_value(restored.payload.clone()).unwrap();
+        assert_eq!(request, submitted);
+        assert_eq!(
+            restored.payload["image_options"],
+            job.payload["image_options"]
+        );
+
+        // Later UI defaults or edits must not replace the submitted request.
+        draft.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 75,
+            resize: goop_core::ImageResize::Original,
+        });
+        assert_ne!(draft.image_options, submitted.image_options);
+        assert_eq!(store.claim_queued(job.id, 1000).unwrap(), 1);
+        drop(store);
+
+        let store = QueueStore::open(&path).unwrap();
+        store.reconcile().unwrap();
+        assert_eq!(store.retry_errored(job.id).unwrap(), 1);
+        let retry = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.id, job.id);
+        assert_eq!(retry.attempts, 1);
+        assert_eq!(retry.payload, job.payload);
+        let retried_request: goop_core::ConvertRequest =
+            serde_json::from_value(retry.payload).unwrap();
+        assert_eq!(retried_request, submitted);
+    }
+
+    #[test]
+    fn convert_legacy_image_options_stay_absent_or_null_after_reopen_and_retry() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let mut payload = serde_json::json!({
+                "input_path": "legacy.jpg",
+                "output_path": "converted.jpg",
+                "target": "jpeg"
+            });
+            if explicit_null {
+                payload["image_options"] = serde_json::Value::Null;
+            }
+            let mut job = Job::new(JobKind::Convert, payload);
+            job.state = JobState::Running;
+            store.insert(&job).unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let store = QueueStore::open(&path).unwrap();
+            let restored = store.get_by_id(job.id).unwrap().unwrap();
+            let request: goop_core::ConvertRequest =
+                serde_json::from_value(restored.payload).unwrap();
+            assert_eq!(request.image_options, None);
+            store.reconcile().unwrap();
+            assert_eq!(store.retry_errored(job.id).unwrap(), 1);
+            let retry = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+            assert_eq!(retry.id, job.id);
+            assert_eq!(retry.payload, job.payload);
+            let retried_request: goop_core::ConvertRequest =
+                serde_json::from_value(retry.payload).unwrap();
+            assert_eq!(retried_request.image_options, None);
+            assert_eq!(retried_request, request);
+        }
+    }
+
+    #[test]
     fn payload_field_patches_preserve_concurrent_fields_and_reopened_retry() {
         let (store, tmp) = temp_store();
         let mut job = Job::new(JobKind::Extract, serde_json::json!({"url":"original"}));

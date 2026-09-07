@@ -131,3 +131,32 @@ async fn large_stderr_is_bounded_and_drained() {
         other => panic!("unexpected {other}"),
     }
 }
+
+#[tokio::test]
+async fn explicit_jpeg_collision_and_input_destination_preserve_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.jpg");
+    image::RgbImage::new(160, 120).save(&input).unwrap();
+    let original = std::fs::read(&input).unwrap();
+    let output = dir.path().join("out.jpg");
+    std::fs::write(&output, b"destination").unwrap();
+    let resolver = BinaryResolver::new(dir.path().to_owned());
+    let backend = goop_converter::ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+    for destination in [&output, &input] {
+        let mut req = request(&input, destination, TargetFormat::Jpeg, None);
+        req.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 90,
+            resize: goop_core::ImageResize::FitWithin {
+                width: 80,
+                height: 80,
+            },
+        });
+        assert!(backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(std::fs::read(&output).unwrap(), b"destination");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}

@@ -6,10 +6,12 @@
  * across machines.
  */
 
-import type { CompressMode, GifOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+
+import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 1 as const;
+export const PRESET_BUNDLE_VERSION = 2 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -79,6 +81,7 @@ interface PresetEntry {
   metadata_policy: MetadataPolicy | null;
   gif_options: GifOptions | null;
   subtitle: SubtitleOptions | null;
+  image_options: ImageConvertOptions | null;
 }
 
 function compressModeForWire(m: CompressMode | null): WireCompressMode | null {
@@ -110,6 +113,7 @@ interface PresetBundleWire {
     metadata_policy: MetadataPolicy | null;
     gif_options: GifOptions | null;
     subtitle: SubtitleOptions | null;
+    image_options: ImageConvertOptions | null;
   }>;
 }
 
@@ -128,6 +132,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       metadata_policy: p.metadata_policy ?? null,
       gif_options: p.gif_options ?? null,
       subtitle: p.subtitle ?? null,
+      image_options: cloneImageOptions(p.image_options),
     })),
   };
   return JSON.stringify(bundle, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value, 2);
@@ -187,7 +192,7 @@ function validateSubtitle(value: unknown): SubtitleOptions | null {
   return { source_path: value.source_path, mode: value.mode } as SubtitleOptions;
 }
 
-function validateEntry(v: unknown, index: number): PresetEntry {
+function validateEntry(v: unknown, index: number, version: number): PresetEntry {
   if (!isObject(v)) {
     throw new PresetParseError(`preset[${index}] must be an object`);
   }
@@ -217,6 +222,18 @@ function validateEntry(v: unknown, index: number): PresetEntry {
       `preset[${index}].resolution_cap is not a recognised ResolutionCap`,
     );
   }
+  let imageOptions: ImageConvertOptions | null;
+  try {
+    if (version === 1 && v.image_options != null) {
+      throw new Error("image_options is not allowed in schema 1");
+    }
+    imageOptions = validateImageOptions(v.image_options);
+    if (imageOptions !== null && v.compress_mode != null) {
+      throw new Error("compression and image settings cannot be combined");
+    }
+  } catch (error) {
+    throw new PresetParseError(`Preset "${v.name.trim()}": ${error instanceof Error ? error.message : String(error)}`);
+  }
   return {
     name: v.name.trim(),
     target: v.target as TargetFormat,
@@ -226,14 +243,14 @@ function validateEntry(v: unknown, index: number): PresetEntry {
     metadata_policy: validateMetadata(v.metadata_policy),
     gif_options: validateGif(v.gif_options),
     subtitle: validateSubtitle(v.subtitle),
+    image_options: imageOptions,
   };
 }
 
 /**
  * Parse a JSON string into a bundle of preset entries. Throws
  * `PresetParseError` for malformed JSON, unknown versions, or invalid
- * field shapes. Validation is shallow but covers the user-visible
- * error cases — bad version, empty file, junk payload.
+ * field shapes, including complete nested image settings.
  */
 export function parsePresetBundle(raw: string): PresetEntry[] {
   let parsed: unknown;
@@ -247,15 +264,16 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== PRESET_BUNDLE_VERSION) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1 or ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {
     throw new PresetParseError("file is missing the `presets` array");
   }
-  return parsed.presets.map((entry, idx) => validateEntry(entry, idx));
+  const version = parsed.version;
+  return parsed.presets.map((entry, idx) => validateEntry(entry, idx, version));
 }
 
 /**
@@ -279,10 +297,11 @@ export function entriesToPresets(
       target: entry.target,
       quality_preset: entry.quality_preset,
       resolution_cap: entry.resolution_cap,
-      compress_mode: entry.compress_mode,
+      compress_mode: entry.compress_mode ? { ...entry.compress_mode } : null,
       metadata_policy: entry.metadata_policy,
-      gif_options: entry.gif_options,
-      subtitle: entry.subtitle,
+      gif_options: entry.gif_options ? { ...entry.gif_options } : null,
+      subtitle: entry.subtitle ? { ...entry.subtitle } : null,
+      image_options: cloneImageOptions(entry.image_options),
       is_builtin: false,
       // i64 in Rust ↔ bigint in TS; the IPC layer converts to a wire number.
       created_at: BigInt(Date.now()),

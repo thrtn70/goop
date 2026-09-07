@@ -235,6 +235,21 @@ pub enum MetadataPolicy {
     StripAll,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ImageResize {
+    Original,
+    FitWithin { width: u32, height: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub struct ImageConvertOptions {
+    pub jpeg_quality: u8,
+    pub resize: ImageResize,
+}
+
 // ---------------------------------------------------------------------------
 // Request / Result / Probe
 // ---------------------------------------------------------------------------
@@ -260,6 +275,9 @@ pub struct ConvertRequest {
     /// payloads keep deserializing unchanged.
     #[serde(default)]
     pub subtitle: Option<SubtitleOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_options: Option<ImageConvertOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -297,6 +315,9 @@ pub struct ProbeResult {
     /// what the target container can actually describe.
     #[serde(default)]
     pub audio_codecs: Vec<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_has_alpha: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

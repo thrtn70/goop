@@ -1,6 +1,6 @@
 use crate::convert::{
-    CompressMode, GifOptions, MetadataPolicy, QualityPreset, ResolutionCap, SubtitleOptions,
-    TargetFormat,
+    CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, QualityPreset, ResolutionCap,
+    SubtitleOptions, TargetFormat,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -31,6 +31,9 @@ pub struct Preset {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub subtitle: Option<SubtitleOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_options: Option<ImageConvertOptions>,
     pub is_builtin: bool,
     pub created_at: i64,
 }
@@ -50,5 +53,6 @@ mod tests {
         assert_eq!(preset.metadata_policy, None);
         assert_eq!(preset.gif_options, None);
         assert_eq!(preset.subtitle, None);
+        assert_eq!(preset.image_options, None);
     }
 }

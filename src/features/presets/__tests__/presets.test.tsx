@@ -281,3 +281,23 @@ describe("UpdateBanner", () => {
     expect(useAppStore.getState().updateDownload).toBeNull();
   });
 });
+
+describe("JPEG preset save snapshot", () => {
+  afterEach(cleanup);
+  beforeEach(() => { vi.clearAllMocks(); resetStore(); });
+
+  it("captures a deep copy when opened, including nested resize settings", async () => {
+    const { default: PresetSaveDialog } = await import("@/features/presets/PresetSaveDialog");
+    const options = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 2048, height: 2048 } };
+    const snapshot = { target: "jpeg" as const, image_options: options };
+    const { rerender } = render(<PresetSaveDialog open onClose={() => {}} snapshot={snapshot} />);
+    options.resize.width = 1;
+    rerender(<PresetSaveDialog open onClose={() => {}} snapshot={snapshot} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Preset name" }), "Portrait");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(api.preset.save).toHaveBeenCalledWith(expect.objectContaining({ image_options: {
+      jpeg_quality: 90, resize: { kind: "fit_within", width: 2048, height: 2048 } } }));
+    options.resize.height = 1;
+    expect(vi.mocked(api.preset.save).mock.calls[0][0].image_options?.resize).toEqual({ kind: "fit_within", width: 2048, height: 2048 });
+  });
+});

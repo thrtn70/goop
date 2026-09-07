@@ -677,6 +677,7 @@ mod tests {
             batch_id: None,
             metadata_policy: None,
             subtitle,
+            image_options: None,
         }
     }
 
@@ -699,6 +700,7 @@ mod tests {
             // One stream, matching `audio_codec` above. Multi-track cases
             // build on this through `probe_with_audio`.
             audio_codecs: vec!["aac".into()],
+            image_has_alpha: None,
         }
     }
 

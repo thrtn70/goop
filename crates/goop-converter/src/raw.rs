@@ -67,6 +67,7 @@ pub fn probe_raw(path: &Path) -> Result<ProbeResult, GoopError> {
             has_subtitles: false,
             subtitle_codecs: vec![],
             audio_codecs: vec![],
+            image_has_alpha: Some(false),
         })
     }
     #[cfg(not(target_os = "macos"))]

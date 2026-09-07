@@ -95,6 +95,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         has_subtitles,
         subtitle_codecs,
         audio_codecs,
+        image_has_alpha: None,
     })
 }
 
