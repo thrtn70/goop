@@ -371,7 +371,7 @@ function ConvertPage() {
                   selected.id && handleOptionsChange(selected.id, opts)
                 }
               />
-              {!problems[files.indexOf(selected)] && <SettingsPreview request={{input_path:selected.path,target:selected.target,
+              {!problems[files.indexOf(selected)] && <SettingsPreview imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.qualityPreset,resolution_cap:selected.resolutionCap,
                 compress_mode:null,metadata_policy:selected.metadataPolicy,
                 subtitle:selected.subtitle,gif_options:selected.gifOptions,image_options:cloneImageOptions(selected.imageOptions)}}/>}

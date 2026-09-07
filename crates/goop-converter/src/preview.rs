@@ -1,7 +1,7 @@
 //! Explicit, isolated sample generation. Never schedules jobs or writes source files.
 use goop_core::{
-    CompressMode, GoopError, JobId, PreviewKind, PreviewRequest, PreviewResult, QualityPreset,
-    ResolutionCap, TargetFormat,
+    CompressMode, GoopError, ImageResize, JobId, MetadataPolicy, PreviewKind, PreviewRequest,
+    PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use image::{ImageDecoder, ImageFormat};
@@ -123,6 +123,20 @@ impl PreviewService {
         if request.request_id.is_empty() || request.request_id.len() > 200 {
             return Err(invalid("Invalid preview request identity"));
         }
+        if let Some(options) = &request.image_options {
+            crate::image_options::validate_options(options)?;
+            if request.compress_mode.is_some() {
+                return Err(invalid(
+                    "Image settings cannot be combined with compression",
+                ));
+            }
+            if request.target != TargetFormat::Jpeg {
+                return Err(invalid("Explicit image samples require a JPEG target"));
+            }
+            if !matches!(options.resize, ImageResize::Original) {
+                return Err(invalid("Fit within image samples are not available yet"));
+            }
+        }
         if matches!(
             request.compress_mode,
             Some(CompressMode::TargetSizeBytes(_))
@@ -201,6 +215,11 @@ impl PreviewService {
             )
         {
             return Err(invalid("Lossless video sample preview is unavailable"));
+        }
+        if request.image_options.is_some() && !is_image {
+            return Err(invalid(
+                "Explicit image samples are available for JPEG sources only",
+            ));
         }
         let cancel = CancellationToken::new();
         {
@@ -311,16 +330,43 @@ fn image_sample(
             "Sample preview unavailable for this image encoding",
         ));
     }
+    if request.image_options.is_some() && reader.format() != Some(ImageFormat::Jpeg) {
+        return Err(invalid(
+            "Explicit image samples are available for JPEG sources only",
+        ));
+    }
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().map_err(|e| invalid(e.to_string()))?;
     let (width, height) = decoder.dimensions();
     validate_pixels(width, height)?;
+    if let Some(options) = &request.image_options {
+        crate::image_options::output_dimensions((width, height), &options.resize)?;
+    }
     if decoder.total_bytes() > MAX_SOURCE_PIXELS * 16 {
         return Err(invalid("Decoded image exceeds preview memory limit"));
     }
-    let orientation = decoder.orientation().map_err(|e| invalid(e.to_string()))?;
+    let orientation = if request.image_options.is_some() {
+        let orientation = decoder
+            .exif_metadata()
+            .map_err(|e| invalid(e.to_string()))
+            .and_then(|bytes| {
+                bytes
+                    .as_deref()
+                    .map(crate::exif_geometry::orientation)
+                    .transpose()
+            });
+        match orientation {
+            Ok(value) => value.unwrap_or(image::metadata::Orientation::NoTransforms),
+            Err(_) if request.metadata_policy == Some(MetadataPolicy::StripAll) => {
+                image::metadata::Orientation::NoTransforms
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        decoder.orientation().map_err(|e| invalid(e.to_string()))?
+    };
     checkpoint(cancel, deadline)?;
     let mut image =
         image::DynamicImage::from_decoder(decoder).map_err(|e| invalid(e.to_string()))?;
@@ -336,10 +382,13 @@ fn image_sample(
     let mut encoded = Cursor::new(Vec::new());
     match request.target {
         TargetFormat::Jpeg => {
-            let q = match request.compress_mode {
-                Some(CompressMode::Quality(q)) => q.max(1),
-                _ => 75,
-            };
+            let q = request.image_options.as_ref().map_or_else(
+                || match request.compress_mode {
+                    Some(CompressMode::Quality(q)) => q.max(1),
+                    _ => 75,
+                },
+                |options| options.jpeg_quality,
+            );
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, q)
                 .encode_image(&sample.to_rgb8())
                 .map_err(|e| invalid(e.to_string()))?;

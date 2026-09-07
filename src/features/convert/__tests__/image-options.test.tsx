@@ -12,6 +12,7 @@ vi.mock("@/ipc/commands", () => ({ api: {
   preview: { generate: mocks.preview, cancel: vi.fn().mockResolvedValue(null) },
   preset: { save: mocks.presetSave, list: vi.fn().mockResolvedValue([]) },
 } }));
+vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => "asset://" + path }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open, save: mocks.save }));
 vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/features/presets/PresetChips", () => ({ default: ({ onApply }: { onApply: (p: Preset) => void }) => mocks.preset && <button onClick={() => onApply(mocks.preset!)}>Apply test preset</button> }));
@@ -219,4 +220,31 @@ it("raw-only edits made during a Save dialog retain their newer revision after e
   expect(mocks.enqueue.mock.calls[0][0].image_options).toEqual(fit);
   expect((screen.getByRole("textbox", { name: "Image width" }) as HTMLInputElement).value).toBe("");
   expect(disabled("Convert 1 file")).toBe(true);
+});
+
+it("forwards selected JPEG quality to preview and disables Fit within with the engine reason", async () => {
+  mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
+  render(page()); await add();
+  fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "30" } });
+  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  await screen.findByAltText("Output sample");
+  expect(mocks.preview.mock.calls[0][0].image_options).toEqual({jpeg_quality:30,resize:{kind:"original"}});
+  await userEvent.setup().selectOptions(screen.getByRole("combobox", { name: "Image dimensions" }), "fit_within");
+  expect(disabled("Preview sample")).toBe(true);
+  expect(screen.getByText(imageCapability.preview_unavailable_reason)).toBeTruthy();
+  expect(screen.queryByAltText("Output sample")).toBeNull();
+  expect(mocks.preview).toHaveBeenCalledTimes(1);
+});
+it("retires an in-flight preview on a raw invalid edit and ignores its late response after correction", async () => {
+  let resolve!: (value:unknown) => void;
+  mocks.preview.mockImplementationOnce(() => new Promise(r => {resolve = r;}));
+  render(page()); await add();
+  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  const request = mocks.preview.mock.calls[0][0];
+  fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "" } });
+  expect(screen.queryByRole("button", { name: "Preview sample" })).toBeNull();
+  fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "90" } });
+  await act(async () => resolve({...request,kind:"image",before_path:"/before.png",after_path:"/stale.png",width:160,height:100,sample_bytes:100}));
+  expect(screen.queryByAltText("Output sample")).toBeNull();
+  expect(disabled("Preview sample")).toBe(false);
 });
