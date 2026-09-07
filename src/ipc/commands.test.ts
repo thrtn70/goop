@@ -372,3 +372,15 @@ it("normalizes GIF trim integers at the conversion IPC boundary", async () => {
   expect(() => JSON.stringify(payload)).not.toThrow();
   expect(payload.req.gif_options).toEqual({size_preset:"medium",trim_start_ms:1000,trim_end_ms:2500});
 });
+
+it("sends JPEG preset quality and dimensions as JSON numbers", async () => {
+  invokeMock.mockClear();
+  const image_options = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 2048, height: 2048 } };
+  await api.preset.save({ id: "portrait", name: "Portrait", target: "jpeg", quality_preset: null,
+    resolution_cap: null, compress_mode: null, image_options, is_builtin: false, created_at: 123n });
+  const payload = invokeMock.mock.calls[0][1];
+  expect(invokeMock.mock.calls[0][0]).toBe("preset_save");
+  expect(JSON.parse(JSON.stringify(payload)).preset.image_options).toEqual(image_options);
+  expect(payload.preset.image_options.jpeg_quality).toBe(90);
+  expect(payload.preset.image_options.resize.width).toBe(2048);
+});

@@ -96,7 +96,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
-      metadata_policy: null, gif_options: null, subtitle: null,
+      metadata_policy: null, gif_options: null, subtitle: null, image_options: null,
     }]);
   });
 
@@ -256,4 +256,64 @@ it.each([
   { subtitle: { source_path: "", mode: "soft" } },
 ])("rejects invalid supported preset settings: %j", fields => {
   expect(() => parsePresetBundle(JSON.stringify({ version: 1, presets: [{ name: "Invalid", target: "mp4", ...fields }] }))).toThrow(PresetParseError);
+});
+
+describe("JPEG preset persistence", () => {
+  const settings = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 2048, height: 2048 } };
+  const bundle = (image_options: unknown, version = 2, extra = {}) => JSON.stringify({ version,
+    presets: [{ name: "Portrait JPEG", target: "jpeg", image_options, ...extra }] });
+
+  it("exports complete JPEG settings in schema 2 and imports them unchanged", () => {
+    const json = serializePresets([makePreset({ target: "jpeg", quality_preset: null,
+      resolution_cap: null, image_options: settings })]);
+    expect(JSON.parse(json).version).toBe(2);
+    const entries = parsePresetBundle(json);
+    expect(entries[0].image_options).toEqual(settings);
+    const presets = entriesToPresets(entries, []);
+    expect(presets[0].image_options).toEqual(settings);
+    if (entries[0].image_options?.resize.kind === "fit_within") entries[0].image_options.resize.width = 1;
+    expect(presets[0].image_options).toEqual(settings);
+  });
+
+  it("restores old schema 1 with null options and retains modern null fields", () => {
+    expect(parsePresetBundle(bundle(undefined, 1))[0]).toMatchObject({ image_options: null,
+      metadata_policy: null, gif_options: null, subtitle: null });
+    expect(parsePresetBundle(serializePresets([makePreset({ image_options: null })]))[0].image_options).toBeNull();
+  });
+
+  it("rejects meaningful options hidden in schema 1", () => {
+    expect(() => parsePresetBundle(bundle(settings, 1))).toThrow(/Portrait JPEG.*schema 1/);
+    expect(parsePresetBundle(bundle(null, 1))[0].image_options).toBeNull();
+  });
+
+  it.each([
+    {}, [], { jpeg_quality: 90 }, { ...settings, jpeg_quality: 1.5 },
+    { ...settings, jpeg_quality: -1 }, { ...settings, jpeg_quality: 256 },
+    { ...settings, jpeg_quality: Infinity }, { ...settings, jpeg_quality: "90" },
+    { ...settings, resize: { kind: "fit_within", width: 1.2, height: 2 } },
+    { ...settings, resize: { kind: "fit_within", width: -1, height: 2 } },
+    { ...settings, resize: { kind: "fit_within", width: 4294967296, height: 2 } },
+    { ...settings, resize: { kind: "original", source_path: "/private/photo.jpg" } },
+    { ...settings, source_path: "/private/photo.jpg" },
+  ])("rejects malformed image options with the preset name: %j", options => {
+    expect(() => parsePresetBundle(bundle(options))).toThrow(/Portrait JPEG.*image_options/);
+  });
+
+  it("retains structurally valid settings beyond current runtime support", () => {
+    const options = { jpeg_quality: 255, resize: { kind: "fit_within", width: 4294967295, height: 0 } };
+    expect(parsePresetBundle(bundle(options))[0].image_options).toEqual(options);
+  });
+
+  it("rejects compression plus image options with the preset name", () => {
+    expect(() => parsePresetBundle(bundle(settings, 2, { compress_mode: { kind: "quality", value: 75 } })))
+      .toThrow(/Portrait JPEG.*compression.*image/i);
+  });
+
+  it("exports only image setting fields, never incidental source paths", () => {
+    const options = { ...settings, source_path: "/private/photo.jpg",
+      resize: { ...settings.resize, source_path: "/private/other.jpg" } };
+    const json = serializePresets([makePreset({ image_options: options })]);
+    expect(json).not.toContain("/private");
+    expect(JSON.parse(json).presets[0].image_options).toEqual(settings);
+  });
 });

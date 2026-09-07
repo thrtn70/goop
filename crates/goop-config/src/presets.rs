@@ -15,6 +15,9 @@ pub fn load(path: &Path) -> Result<Vec<Preset>, GoopError> {
 /// Atomic save via tempfile + rename so a crash mid-write can't leave a
 /// half-written presets file behind.
 pub fn save(path: &Path, presets: &[Preset]) -> Result<(), GoopError> {
+    for preset in presets {
+        validate(preset)?;
+    }
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -22,6 +25,18 @@ pub fn save(path: &Path, presets: &[Preset]) -> Result<(), GoopError> {
     let body = serde_json::to_string_pretty(presets)?;
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Source-dependent applicability is checked when applying a preset. Reject only
+/// combinations that cannot represent a single conversion intent here.
+pub fn validate(preset: &Preset) -> Result<(), GoopError> {
+    if preset.image_options.is_some() && preset.compress_mode.is_some() {
+        return Err(GoopError::Config(format!(
+            "Preset \"{}\": compression and image settings cannot be combined",
+            preset.name
+        )));
+    }
     Ok(())
 }
 
@@ -142,6 +157,44 @@ mod tests {
             is_builtin: false,
             created_at: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn presets_image_settings_roundtrip_and_legacy_fixture() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("jpeg", "Portrait");
+        preset.target = TargetFormat::Jpeg;
+        preset.quality_preset = None;
+        preset.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 90,
+            resize: goop_core::ImageResize::FitWithin {
+                width: 2048,
+                height: 2048,
+            },
+        });
+        save(&path, std::slice::from_ref(&preset)).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![preset]);
+        std::fs::write(&path, r#"[{"id":"old","name":"Old","target":"jpeg","quality_preset":null,"resolution_cap":null,"compress_mode":null,"is_builtin":false,"created_at":0}]"#).unwrap();
+        assert_eq!(load(&path).unwrap()[0].image_options, None);
+    }
+
+    #[test]
+    fn presets_reject_mixed_compression_and_image_settings_before_writing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        save(&path, &[sample("old", "Keep")]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut preset = sample("jpeg", "Portrait");
+        preset.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 90,
+            resize: goop_core::ImageResize::Original,
+        });
+        preset.compress_mode = Some(CompressMode::Quality(75));
+        let error = save(&path, &[preset]).unwrap_err().to_string();
+        assert!(error.contains("Portrait"), "{error}");
+        assert!(error.contains("compression"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

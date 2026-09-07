@@ -13,6 +13,7 @@ pub async fn preset_list() -> Result<Vec<Preset>, IpcError> {
 
 #[tauri::command]
 pub async fn preset_save(preset: Preset) -> Result<Preset, IpcError> {
+    presets::validate(&preset)?;
     let path = presets_path();
     let current = presets::load_or_seed(&path)?;
     let next = presets::upsert(current, preset.clone());

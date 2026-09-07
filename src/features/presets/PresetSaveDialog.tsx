@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, GifOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 import { useAppStore } from "@/store/appStore";
+import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
 
 interface PresetSaveDialogProps {
@@ -19,6 +20,7 @@ interface PresetSaveDialogProps {
     metadata_policy?: MetadataPolicy | null;
     gif_options?: GifOptions | null;
     subtitle?: SubtitleOptions | null;
+    image_options?: ImageConvertOptions | null;
   };
 }
 
@@ -36,6 +38,19 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const captured = useRef<PresetSaveDialogProps["snapshot"] | null>(null);
+  useEffect(() => {
+    if (!open) captured.current = null;
+    else if (captured.current === null) {
+      captured.current = { ...snapshot,
+        compress_mode: snapshot.compress_mode ? { ...snapshot.compress_mode } : null,
+        gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
+        subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
+        image_options: cloneImageOptions(snapshot.image_options),
+      };
+    }
+  }, [open, snapshot]);
 
   useEffect(() => {
     if (open) {
@@ -58,16 +73,21 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
     setBusy(true);
     setError(null);
     try {
+      const saved = captured.current;
+      if (!saved) return;
+      const imageOptions = validateImageOptions(saved.image_options);
+      if (imageOptions && saved.compress_mode) throw new Error("Compression and image settings cannot be combined");
       const preset: Preset = {
         id: newId(),
         name: trimmed,
-        target: snapshot.target,
-        quality_preset: snapshot.quality_preset ?? null,
-        resolution_cap: snapshot.resolution_cap ?? null,
-        compress_mode: snapshot.compress_mode ?? null,
-        metadata_policy: snapshot.metadata_policy ?? null,
-        gif_options: snapshot.gif_options ?? null,
-        subtitle: snapshot.subtitle ?? null,
+        target: saved.target,
+        quality_preset: saved.quality_preset ?? null,
+        resolution_cap: saved.resolution_cap ?? null,
+        compress_mode: saved.compress_mode ?? null,
+        metadata_policy: saved.metadata_policy ?? null,
+        gif_options: saved.gif_options ?? null,
+        subtitle: saved.subtitle ?? null,
+        image_options: cloneImageOptions(imageOptions),
         is_builtin: false,
         // Rust side ignores client created_at for ordering; the wire IPC
         // boundary converts this Number to i64.
