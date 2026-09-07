@@ -17,39 +17,24 @@ pub(crate) struct JpegSource {
     pub(crate) bytes: Bytes,
 }
 
-fn read_snapshot(mut reader: impl Read, limit: u64) -> Result<Bytes, GoopError> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 64 * 1024];
-    loop {
-        let remaining = limit.saturating_sub(bytes.len() as u64);
-        let request = (remaining.min((chunk.len() - 1) as u64) + 1) as usize;
-        let count = match reader.read(&mut chunk[..request]) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            result => result?,
-        };
-        if count == 0 {
-            return Ok(bytes.into());
+fn read_snapshot(reader: impl Read, limit: u64) -> Result<Bytes, GoopError> {
+    crate::image_read::read_snapshot(
+        reader,
+        limit,
+        "Encoded JPEG input exceeds the 512 MiB limit",
+        || Ok(()),
+    )
+    .map_err(|failure| match failure {
+        GoopError::InvalidRequest(message) if message == "Image input size overflow" => {
+            error("JPEG input size overflow")
         }
-        if count as u64 > remaining {
-            return Err(error("Encoded JPEG input exceeds the 512 MiB limit"));
+        GoopError::InvalidRequest(message)
+            if message == "Insufficient memory for bounded image input" =>
+        {
+            error("Insufficient memory for bounded JPEG input")
         }
-        let required = bytes
-            .len()
-            .checked_add(count)
-            .ok_or_else(|| error("JPEG input size overflow"))?;
-        if required > bytes.capacity() {
-            let capacity = bytes
-                .capacity()
-                .max(chunk.len())
-                .saturating_mul(2)
-                .min(usize::try_from(limit).unwrap_or(usize::MAX))
-                .max(required);
-            bytes
-                .try_reserve_exact(capacity - bytes.len())
-                .map_err(|_| error("Insufficient memory for bounded JPEG input"))?;
-        }
-        bytes.extend_from_slice(&chunk[..count]);
-    }
+        other => other,
+    })
 }
 
 pub(crate) fn prepare(input: &Path, limit: u64) -> Result<Option<JpegSource>, GoopError> {

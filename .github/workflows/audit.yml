@@ -288,9 +288,10 @@ jobs:
       - name: Image conversion correctness
         shell: bash
         run: |
-          for suite in imagemagick::tests raw jpeg_controls::tests exif_geometry::tests heif_header::tests; do
+          for suite in imagemagick::tests imagemagick_probe::tests raw jpeg_controls::tests exif_geometry::tests heif_header::tests image_read::tests preview::tests; do
             CARGO_INCREMENTAL=0 cargo test -p goop-converter --lib "$suite"
           done
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --example image_read_baseline
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test capabilities --test image_probe --test jpeg_controls --test preview
       - name: Image settings persistence contracts
         shell: bash
