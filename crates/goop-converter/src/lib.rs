@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod compat;
 pub mod encoders;
 pub mod ffmpeg;
+mod heif_header;
 pub mod image_app_icon;
 pub mod image_crop;
 pub mod image_operation;

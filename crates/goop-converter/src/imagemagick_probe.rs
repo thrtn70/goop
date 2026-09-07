@@ -1,6 +1,6 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
 use image::ImageDecoder;
-use std::{io::Read, path::Path};
+use std::path::Path;
 
 /// Probe supported images with the same format dispatch as conversion.
 /// Common rasters and HEIC only read headers; JXL currently decodes pixels.
@@ -30,7 +30,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
             (
                 handle.width(),
                 handle.height(),
-                Some(heif_header_format(path)?.into()),
+                Some(crate::heif_header::primary_item_format(path, handle.item_id())?.into()),
                 Some(handle.has_alpha_channel()),
             )
         }
@@ -69,75 +69,6 @@ fn probe_error(message: impl Into<String>) -> GoopError {
         binary: "image".into(),
         stderr: message.into(),
     }
-}
-
-fn heif_header_format(path: &Path) -> Result<&'static str, GoopError> {
-    const MAX_HEADER_BYTES: u64 = 64 * 1024;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(MAX_HEADER_BYTES)
-        .read_to_end(&mut bytes)?;
-    let brands = file_type_brands(&bytes)?;
-    let has_hevc = brands.iter().any(|brand| {
-        matches!(
-            *brand,
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
-        )
-    });
-    let has_av1 = brands
-        .iter()
-        .any(|brand| matches!(*brand, b"avif" | b"avis"));
-    Ok(match (has_hevc, has_av1) {
-        (true, false) => "HEIC",
-        (false, true) => "Avif",
-        (false, false) | (true, true) => "HEIF",
-    })
-}
-
-fn file_type_brands(bytes: &[u8]) -> Result<Vec<&[u8; 4]>, GoopError> {
-    let mut offset = 0usize;
-    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
-        let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u64;
-        let kind = &bytes[offset + 4..offset + 8];
-        let (header_len, box_len) = if size == 1 {
-            if offset + 16 > bytes.len() {
-                return Err(probe_error("truncated HEIF extended box header"));
-            }
-            (
-                16usize,
-                u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().unwrap()),
-            )
-        } else if size == 0 {
-            (8usize, (bytes.len() - offset) as u64)
-        } else {
-            (8usize, size)
-        };
-        if box_len < header_len as u64 {
-            return Err(probe_error("invalid HEIF box length"));
-        }
-        let end = u64::try_from(offset)
-            .ok()
-            .and_then(|start| start.checked_add(box_len))
-            .and_then(|end| usize::try_from(end).ok())
-            .ok_or_else(|| probe_error("HEIF box length overflow"))?;
-        if end > bytes.len() {
-            return Err(probe_error("HEIF file type box exceeds the header limit"));
-        }
-        if kind == b"ftyp" {
-            let payload = &bytes[offset + header_len..end];
-            if payload.len() < 8 || !payload[8..].chunks_exact(4).remainder().is_empty() {
-                return Err(probe_error("invalid HEIF file type box"));
-            }
-            let mut brands = Vec::with_capacity(1 + (payload.len() - 8) / 4);
-            brands.push(payload[0..4].try_into().unwrap());
-            for brand in payload[8..].chunks_exact(4) {
-                brands.push(brand.try_into().unwrap());
-            }
-            return Ok(brands);
-        }
-        offset = end;
-    }
-    Err(probe_error("HEIF file type box is missing"))
 }
 
 fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>, Option<bool>), GoopError> {
@@ -347,6 +278,48 @@ mod tests {
             legacy.image_options = None;
             assert!(crate::capabilities::validate_request(&legacy, &probe).is_ok());
         }
+    }
+
+    #[test]
+    fn heic_brand_never_overrides_av1_primary_codec() {
+        let dir = tempfile::tempdir().unwrap();
+        let avif = dir.path().join("source.avif");
+        image::RgbImage::new(16, 8)
+            .save_with_format(&avif, image::ImageFormat::Avif)
+            .unwrap();
+        let mut bytes = fs::read(&avif).unwrap();
+        assert_eq!(&bytes[4..12], b"ftypavif");
+        bytes[8..12].copy_from_slice(b"heic");
+        let disguised = dir.path().join("av1-primary.heic");
+        fs::write(&disguised, bytes).unwrap();
+
+        // The mutated container remains valid to libheif, but its primary item
+        // is still AV1 and cannot authorize HEIC-only controls.
+        let probe = probe_image(&disguised).unwrap();
+        assert_eq!(probe.image_format.as_deref(), Some("Avif"));
+        let settings = crate::capabilities::capabilities_for(&probe)
+            .targets
+            .into_iter()
+            .find(|capability| capability.target == goop_core::TargetFormat::Jpeg)
+            .unwrap()
+            .image_settings
+            .unwrap();
+        assert!(!settings.available);
+
+        let request: goop_core::ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": disguised,
+            "output_path": dir.path().join("out.jpg"),
+            "target": "jpeg",
+            "image_options": {
+                "jpeg_quality": 75,
+                "resize": {"kind": "original"}
+            }
+        }))
+        .unwrap();
+        assert!(crate::capabilities::validate_request(&request, &probe).is_err());
+        let mut legacy = request;
+        legacy.image_options = None;
+        assert!(crate::capabilities::validate_request(&legacy, &probe).is_ok());
     }
 
     #[test]
