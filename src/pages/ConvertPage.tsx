@@ -15,7 +15,7 @@ import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -27,6 +27,8 @@ import {
 import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
+import { cloneImageOptions, imageDraftProblem, imageDraftSlots, type ImageDraftText } from "@/features/convert/imageOptions";
+import { useWorkspaceDraftEntries, clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { smartDefault } from "@/features/convert/TargetPicker";
 import { conversionProblem } from "@/features/workspace/readiness";
 import PresetChips from "@/features/presets/PresetChips";
@@ -61,6 +63,18 @@ function ConvertPage() {
     null,
   );
   const { byId, retry } = useSourceInspections(files);
+  const draftEntries = useWorkspaceDraftEntries();
+  const [applicationError, setApplicationError] = useState<string | null>(null);
+  const imageProblems = files.map(file => {
+    const state = byId[file.id ?? ""];
+    if (state?.phase !== "ready") return null;
+    const raw: ImageDraftText = {};
+    for (const slot of imageDraftSlots) {
+      const value = draftEntries[JSON.stringify(["convert", "source", file.path, file.id, slot])]?.value;
+      if (typeof value === "string") raw[slot.slice("ImageOptionsPanel.".length) as keyof ImageDraftText] = value;
+    }
+    return imageDraftProblem(file.imageOptions, state.capabilities.targets.find(c => c.target === file.target)?.image_settings, raw);
+  });
   useEffect(() => {
     if (files.some((f) => !f.id))
       setFiles((previous) =>
@@ -82,11 +96,13 @@ function ConvertPage() {
         if (f.optionsReady || state?.phase !== "ready") return f;
         changed = true;
         const target = smartDefault(state.probe);
+        const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
         return {
           ...f,
           revision: (f.revision ?? 0) + 1,
           optionsReady: true,
           target,
+          imageOptions: imageCapability?.available ? { jpeg_quality: imageCapability.default_quality, resize: { kind: "original" as const } } : null,
           gifOptions: target === "gif" ? defaultGifOptions() : null,
           metadataPolicy: policy,
         };
@@ -193,6 +209,8 @@ function ConvertPage() {
 
   const handleOptionsChange = useCallback(
     (id: string, opts: FileRowOptions) => {
+      const current = files.find(file => file.id === id);
+      if (current?.imageOptions && opts.imageOptions == null) clearWorkspaceDraftSlots("convert", ["source", current.path, id], imageDraftSlots);
       setFiles((prev) =>
         prev.map((f) =>
           f.id === id
@@ -201,9 +219,10 @@ function ConvertPage() {
                 revision: (f.revision ?? 0) + 1,
                 optionsReady: true,
                 target: opts.target,
-                gifOptions: opts.gifOptions,
+                gifOptions: opts.gifOptions ? { ...opts.gifOptions } : null,
+                imageOptions: cloneImageOptions(opts.imageOptions),
                 metadataPolicy: opts.metadataPolicy,
-                subtitle: opts.subtitle,
+                subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
                 resolutionCap: opts.resolutionCap ?? null,
               }
@@ -211,7 +230,7 @@ function ConvertPage() {
         ),
       );
     },
-    [setFiles],
+    [files, setFiles],
   );
 
   const handleRemove = useCallback(
@@ -225,52 +244,49 @@ function ConvertPage() {
     [files, selectedId, setSelectedId, setFiles],
   );
 
-  const applyPreset = useCallback(
-    (preset: Preset) => {
-      setFiles((prev) =>
-        prev.map((f) => ({
-          ...f,
-          revision: (f.revision ?? 0) + 1,
-          optionsReady: true,
-          target: preset.target,
-          gifOptions:
-            preset.target === "gif"
-              ? (preset.gif_options ?? defaultGifOptions())
-              : null,
-          // Both are Convert-register fields on the preset, and both used to
-          // be dropped here — so a chip named "YouTube Upload" changed the
-          // container and nothing else, leaving a 4K source 4K.
-          metadataPolicy: preset.metadata_policy ?? "preserve",
-          subtitle: preset.subtitle ?? null,
-          qualityPreset: preset.quality_preset,
-          resolutionCap: preset.resolution_cap,
-        })),
-      );
-    },
-    [setFiles],
-  );
-
-  const applyFirstToAll = useCallback(() => {
-    setFiles((prev) => {
-      if (prev.length < 2) return prev;
-      const head = prev[0];
-      return prev.map((f, i) =>
-        i === 0
-          ? f
-          : {
-              ...f,
-              revision: (f.revision ?? 0) + 1,
-              optionsReady: true,
-              target: head.target,
-              gifOptions: head.gifOptions,
-              subtitle: head.subtitle,
-              metadataPolicy: head.metadataPolicy,
-              qualityPreset: head.qualityPreset,
-              resolutionCap: head.resolutionCap,
-            },
-      );
+  // Validate the whole proposed batch before changing any entry or raw editor.
+  const applySettings = (settings: FileRowOptions) => {
+    const next = files.map(file => ({
+      ...file,
+      target: settings.target, metadataPolicy: settings.metadataPolicy,
+      qualityPreset: settings.qualityPreset ?? null,
+      resolutionCap: settings.resolutionCap ?? null,
+      optionsReady: true,
+      revision: (file.revision ?? 0) + 1,
+      imageOptions: cloneImageOptions(settings.imageOptions),
+      gifOptions: settings.gifOptions ? { ...settings.gifOptions } : null,
+      subtitle: settings.subtitle ? { ...settings.subtitle } : null,
+    }));
+    const incompatible = next.flatMap(file => {
+      const problem = conversionProblem(file, byId[file.id ?? ""] ?? PROBING);
+      return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
     });
-  }, [setFiles]);
+    if (incompatible.length) {
+      setApplicationError(`Settings were not applied. ${incompatible.join(" ")}`);
+      return;
+    }
+    setApplicationError(null);
+    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], imageDraftSlots));
+    setFiles(next);
+  };
+
+  const applyPreset = (preset: Preset) => {
+    if (preset.compress_mode) { setApplicationError("Compression settings cannot be applied in Convert."); return; }
+    applySettings({
+      target: preset.target,
+      imageOptions: cloneImageOptions(preset.image_options),
+      gifOptions: preset.gif_options ?? (preset.target === "gif" ? defaultGifOptions() : null),
+      metadataPolicy: preset.metadata_policy ?? "preserve",
+      subtitle: preset.subtitle ?? null,
+      qualityPreset: preset.quality_preset,
+      resolutionCap: preset.resolution_cap,
+    });
+  };
+
+  const applyFirstToAll = () => {
+    if (files.length < 2 || imageProblems.some(Boolean)) return;
+    applySettings(files[0]);
+  };
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -298,8 +314,8 @@ function ConvertPage() {
     }
   }, [pickerToken, handleBrowse, location.pathname]);
 
-  const problems = files.map((f) =>
-    conversionProblem(f, byId[f.id ?? ""] ?? PROBING),
+  const problems = files.map((f, i) =>
+    conversionProblem(f, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
   );
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
@@ -344,20 +360,21 @@ function ConvertPage() {
           {selected &&
           selectedState.phase === "ready" &&
           selected.optionsReady ? (
-            <WorkspaceDraftProvider scope={["source", selected.path]}>
+            <WorkspaceDraftProvider key={selected.id} scope={["source", selected.path]} sourcePaths={[selected.path]}>
               <ConvertSettingsPanel
                 onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 path={selected.path}
+                draftIdentity={selected.id}
                 options={selected}
                 state={selectedState}
                 onOptionsChange={(_, opts) =>
                   selected.id && handleOptionsChange(selected.id, opts)
                 }
               />
-              <SettingsPreview request={{input_path:selected.path,target:selected.target,
+              {!problems[files.indexOf(selected)] && <SettingsPreview request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.qualityPreset,resolution_cap:selected.resolutionCap,
                 compress_mode:null,metadata_policy:selected.metadataPolicy,
-                subtitle:selected.subtitle,gif_options:selected.gifOptions}}/>
+                subtitle:selected.subtitle,gif_options:selected.gifOptions,image_options:cloneImageOptions(selected.imageOptions)}}/>}
             </WorkspaceDraftProvider>
           ) : (
             <p className="text-sm text-fg-secondary">
@@ -368,6 +385,7 @@ function ConvertPage() {
                   : "Add files or drop them into the source list."}
             </p>
           )}
+          {applicationError && <p role="alert" className="mt-4 text-xs text-warning">{applicationError}</p>}
           {blocked && files.length > 0 && (
             <p className="mt-4 text-xs text-warning">
               Review the source list before starting. Every file needs supported

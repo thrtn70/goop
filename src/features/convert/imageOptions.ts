@@ -56,3 +56,28 @@ export function imageOptionsProblem(
   // fewer pixels. The engine validates max_output_pixels against actual dimensions.
   return null;
 }
+
+export const imageDraftSlots = ["qualityDraft", "widthDraft", "heightDraft", "appliedQuality", "appliedWidth", "appliedHeight"].map(slot => `ImageOptionsPanel.${slot}`);
+export type ImageDraftText = Partial<Record<"qualityDraft" | "widthDraft" | "heightDraft" | "appliedQuality" | "appliedWidth" | "appliedHeight", string>>;
+export function imageDraftValues(options: ImageConvertOptions | null | undefined, capability: ImageSettingsCapabilities) {
+  return {
+    quality: String(options?.jpeg_quality ?? capability.default_quality),
+    width: String(options?.resize.kind === "fit_within" ? options.resize.width : Math.min(2048, capability.max_dimension)),
+    height: String(options?.resize.kind === "fit_within" ? options.resize.height : Math.min(2048, capability.max_dimension)),
+  };
+}
+export function imageDraftProblem(options: ImageConvertOptions | null | undefined, capability: ImageSettingsCapabilities | null | undefined, raw: ImageDraftText): string | null {
+  const effectiveProblem = imageOptionsProblem(options, capability);
+  if (effectiveProblem || !capability?.available) return effectiveProblem;
+  const values = imageDraftValues(options, capability);
+  const integer = (value: string, min: number, max: number) => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= min && Number(value) <= max;
+  // A changed applied value belongs to an external replacement, not this draft.
+  const quality = raw.appliedQuality === values.quality ? raw.qualityDraft ?? values.quality : values.quality;
+  if (!integer(quality, capability.quality_min, capability.quality_max)) return `JPEG quality must be a whole number between ${capability.quality_min} and ${capability.quality_max}.`;
+  if (options?.resize.kind === "fit_within") {
+    const width = raw.appliedWidth === values.width ? raw.widthDraft ?? values.width : values.width;
+    const height = raw.appliedHeight === values.height ? raw.heightDraft ?? values.height : values.height;
+    if (!integer(width, 1, capability.max_dimension) || !integer(height, 1, capability.max_dimension)) return `Image width and height must be whole numbers between 1 and ${capability.max_dimension} pixels.`;
+  }
+  return null;
+}

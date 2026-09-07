@@ -1,6 +1,7 @@
-import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
+import { WorkspaceDraftProvider, withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import type {
   GifOptions,
+  ImageConvertOptions,
   MetadataPolicy,
   SubtitleOptions,
   TargetFormat,
@@ -8,12 +9,15 @@ import type {
   ResolutionCap,
 } from "@/types";
 import TargetPicker from "./TargetPicker";
+import ImageOptionsPanel from "./ImageOptionsPanel";
+import { cloneImageOptions, imageOptionsProblem } from "./imageOptions";
 import GifOptionsPanel from "./GifOptionsPanel";
 import SubtitleField, { subtitleSupport } from "./SubtitleField";
 
 interface RowOptionsState {
   target: TargetFormat;
   gifOptions: GifOptions | null;
+  imageOptions?: ImageConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -23,6 +27,7 @@ interface RowOptionsState {
 export interface FileRowOptions {
   target: TargetFormat;
   gifOptions: GifOptions | null;
+  imageOptions?: ImageConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -54,12 +59,14 @@ export function ConvertSettingsPanel({
   state,
   onOptionsChange,
   onDraftEdit,
+  draftIdentity,
 }: {
   path: string;
   options: FileRowOptions;
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onDraftEdit?: () => void;
+  draftIdentity?: string;
 }) {
   const p = state.probe;
   const { target, gifOptions, metadataPolicy, subtitle } = opts;
@@ -67,6 +74,7 @@ export function ConvertSettingsPanel({
   const update = (partial: Partial<RowOptionsState>) => {
     const next: RowOptionsState = {
       target: partial.target ?? target,
+      imageOptions: cloneImageOptions(partial.imageOptions !== undefined ? partial.imageOptions : opts.imageOptions),
       gifOptions:
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
       metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
@@ -83,6 +91,8 @@ export function ConvertSettingsPanel({
     onOptionsChange(path, next);
   };
 
+  const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
+  const imageProblem = imageOptionsProblem(opts.imageOptions, imageCapability);
   const showGifOpts = target === "gif" && p.source_kind === "video";
   // These selectors configure video encoding. GIF has its own size control,
   // and AVI uses a fixed encoder quality rather than these preset levels.
@@ -110,17 +120,21 @@ export function ConvertSettingsPanel({
           probe={p}
           capabilities={state.capabilities}
           selected={target}
-          onChange={(t) =>
+          onChange={(t) => {
+            const nextImageCapability = state.capabilities.targets.find(c => c.target === t)?.image_settings;
             update({
               target: t,
+              imageOptions: opts.imageOptions ?? (t !== target && nextImageCapability?.available
+                ? { jpeg_quality: nextImageCapability.default_quality, resize: { kind: "original" } }
+                : null),
               gifOptions:
                 t === "gif" ? (gifOptions ?? defaultGifOptions()) : null,
               // Keep the picked file when the new target can't use it (the
               // control just hides) so flipping through formats doesn't
               // make the user re-pick it. The send path drops it.
               subtitle: subtitleForTarget(subtitle, t) ?? subtitle,
-            })
-          }
+            });
+          }}
         />
       </div>
       {state.capabilities &&
@@ -198,6 +212,30 @@ export function ConvertSettingsPanel({
             </label>
           )}
         </div>
+      )}
+      {imageCapability?.available && (
+        <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
+          <ImageOptionsPanel
+            value={opts.imageOptions ?? null}
+            capability={imageCapability}
+            sourceSize={{ width: p.width ?? 0, height: p.height ?? 0 }}
+            onDraftEdit={onDraftEdit}
+            onChange={imageOptions => update({ imageOptions })}
+          />
+        </WorkspaceDraftProvider>
+      )}
+      {imageProblem && (
+        <p role="alert" className="text-xs text-warning">
+          {imageProblem}{" "}
+          <button type="button" className="underline" onClick={() => update({ imageOptions: null })}>
+            Clear image settings
+          </button>
+        </p>
+      )}
+      {opts.imageOptions && target === "jpeg" && metadataPolicy === "preserve" && p.image_format === "jpeg" && (
+        <p className="text-xs text-fg-muted">
+          JPEG preservation removes the EXIF thumbnail reference; camera-specific embedded data is not rewritten.
+        </p>
       )}
       {showSubtitle && (
         <SubtitleField

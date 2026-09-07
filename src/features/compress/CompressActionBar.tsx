@@ -16,10 +16,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, type IpcCompressMode } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
-import type { CompressMode, MetadataPolicy, TargetFormat } from "@/types";
+import type { ImageConvertOptions, CompressMode, MetadataPolicy, TargetFormat } from "@/types";
 
 export interface CompressFileEntry extends EntryIdentity {
   optionsReady?: boolean;
+  imageOptions?: ImageConvertOptions | null;
   path: string;
   /** Defaults to source format; an explicitly selected preset can choose another. */
   target: TargetFormat;
@@ -144,6 +145,7 @@ export default function CompressActionBar({
     if (token === null) return;
     let failure: string | null = null;
     try {
+      if (files.some(file => file.imageOptions)) throw new Error("Image settings cannot be used in Compress. Use Convert for JPEG quality and dimensions.");
       const snapshot = files.map((file) => ({
         ...file,
         mode: { ...file.mode },
@@ -233,6 +235,7 @@ export default function CompressActionBar({
       {count > 0 && (
         <button
           type="button"
+          disabled={disabled || files.some(file => file.imageOptions != null)}
           onClick={() => setSaveOpen(true)}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >

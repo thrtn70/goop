@@ -16,9 +16,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
+import { cloneImageOptions } from "./imageOptions";
 import { subtitleForTarget } from "./FileRow";
 import type {
   GifOptions,
+  ImageConvertOptions,
   MetadataPolicy,
   QualityPreset,
   ResolutionCap,
@@ -32,6 +34,7 @@ export interface FileEntry extends EntryIdentity {
   target: TargetFormat;
   sourceDir: string;
   gifOptions: GifOptions | null;
+  imageOptions?: ImageConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   /** Set by an applied preset. `null` leaves the backend's own default in
@@ -108,6 +111,7 @@ export default function ConvertActionBar({
     try {
       const snapshot = files.map((file) => ({
         ...file,
+        imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
         subtitle: file.subtitle ? { ...file.subtitle } : null,
       }));
@@ -136,6 +140,7 @@ export default function ConvertActionBar({
             quality_preset: f.qualityPreset,
             resolution_cap: f.resolutionCap,
             gif_options: f.gifOptions,
+            image_options: cloneImageOptions(f.imageOptions),
             compress_mode: null,
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
@@ -189,6 +194,7 @@ export default function ConvertActionBar({
       {count > 1 && onApplyToAll && (
         <button
           type="button"
+          disabled={disabled}
           onClick={onApplyToAll}
           title="Copy the first file's settings to every other file"
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
@@ -199,6 +205,7 @@ export default function ConvertActionBar({
       {count > 0 && (
         <button
           type="button"
+          disabled={disabled}
           onClick={() => setSaveOpen(true)}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
@@ -219,8 +226,9 @@ export default function ConvertActionBar({
           // pass, and now that a preset actually applies them, omitting
           // them here would save the fork with both cleared.
           metadata_policy: files[0]?.metadataPolicy ?? null,
-          gif_options: files[0]?.gifOptions ?? null,
-          subtitle: files[0]?.subtitle ?? null,
+          gif_options: files[0]?.gifOptions ? { ...files[0].gifOptions } : null,
+          image_options: cloneImageOptions(files[0]?.imageOptions),
+          subtitle: files[0]?.subtitle ? { ...files[0].subtitle } : null,
           quality_preset: files[0]?.qualityPreset ?? null,
           resolution_cap: files[0]?.resolutionCap ?? null,
         }}
