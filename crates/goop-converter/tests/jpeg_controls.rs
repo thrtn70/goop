@@ -486,3 +486,149 @@ async fn absent_options_keep_legacy_jpeg_behavior_and_default_quality() {
         orientation_exif()
     );
 }
+
+fn scalar_orientation(little: bool, kind: u16, value: u32) -> Vec<u8> {
+    let mut bytes = if little {
+        b"II".to_vec()
+    } else {
+        b"MM".to_vec()
+    };
+    let short = |v: u16| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let long = |v: u32| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    bytes.extend(short(42));
+    bytes.extend(long(8));
+    bytes.extend(short(1));
+    bytes.extend(short(0x0112));
+    bytes.extend(short(kind));
+    bytes.extend(long(1));
+    if kind == 3 {
+        bytes.extend(short(value as u16));
+        bytes.extend([0, 0]);
+    } else {
+        bytes.extend(long(value));
+    }
+    bytes.extend(long(0));
+    bytes
+}
+#[tokio::test]
+async fn long_orientation_matches_upright_probe_and_encoded_quadrants_in_both_endiannesses() {
+    for little in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        let input = d.path().join("long.png");
+        image::RgbImage::from_fn(160, 120, |x, y| {
+            image::Rgb(match (x < 80, y < 60) {
+                (true, true) => [255u8, 0, 0],
+                (false, true) => [0, 255, 0],
+                (true, false) => [0, 0, 255],
+                _ => [255, 255, 0],
+            })
+        })
+        .save_with_format(&input, image::ImageFormat::Jpeg)
+        .unwrap();
+        let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        jpeg.set_exif(Some(scalar_orientation(little, 4, 6).into()));
+        jpeg.encoder()
+            .write_to(std::fs::File::create(&input).unwrap())
+            .unwrap();
+        let probe = goop_converter::imagemagick_probe::probe_image(&input).unwrap();
+        assert_eq!(probe.width.zip(probe.height), Some((120, 160)));
+        let mut req = request(
+            &input,
+            &d.path().join("out.jpg"),
+            90,
+            ImageResize::FitWithin {
+                width: 120,
+                height: 120,
+            },
+        );
+        req.metadata_policy = Some(MetadataPolicy::Preserve);
+        let out = convert(&req).await.unwrap();
+        let pixels = image::open(&out.output_path).unwrap().to_rgb8();
+        assert_eq!(pixels.dimensions(), (90, 120));
+        for (x, y, expected) in [
+            (20, 20, [0, 0, 255]),
+            (70, 20, [255, 0, 0]),
+            (20, 100, [255, 255, 0]),
+            (70, 100, [0, 255, 0]),
+        ] {
+            for (actual, expected) in pixels.get_pixel(x, y).0.into_iter().zip(expected) {
+                assert!((i32::from(actual) - expected).abs() < 25);
+            }
+        }
+        assert_eq!(
+            goop_converter::metadata::read(Path::new(&out.output_path))
+                .unwrap()
+                .0
+                .unwrap(),
+            scalar_orientation(little, 4, 1)
+        );
+    }
+}
+#[tokio::test]
+async fn invalid_orientation_refuses_preserve_but_strip_all_still_decodes() {
+    for little in [true, false] {
+        for kind in [3, 4] {
+            for orientation in [0, 9, 255] {
+                let d = tempfile::tempdir().unwrap();
+                let input = d.path().join("in.jpg");
+                source(&input, 32, 24);
+                let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+                jpeg.set_exif(Some(scalar_orientation(little, kind, orientation).into()));
+                jpeg.encoder()
+                    .write_to(std::fs::File::create(&input).unwrap())
+                    .unwrap();
+                let mut req = request(
+                    &input,
+                    &d.path().join("preserve.jpg"),
+                    75,
+                    ImageResize::Original,
+                );
+                req.metadata_policy = Some(MetadataPolicy::Preserve);
+                assert!(convert(&req).await.is_err());
+                assert!(!Path::new(&req.output_path).exists());
+                req.output_path = d.path().join("strip.jpg").to_string_lossy().into_owned();
+                req.metadata_policy = Some(MetadataPolicy::StripAll);
+                assert!(convert(&req).await.is_ok());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_admission_preserves_backend_routing_and_checks_actual_image_header() {
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("jpeg.png");
+    source(&input, 32, 24);
+    let resolver = goop_sidecar::BinaryResolver::new(d.path().to_owned());
+    let mut req = request(&input, &d.path().join("out.jpg"), 75, ImageResize::Original);
+    goop_converter::capabilities::validate_request_source(&resolver, &req)
+        .await
+        .unwrap();
+    let video_path = d.path().join("jpeg.mp4");
+    std::fs::rename(&input, &video_path).unwrap();
+    req.input_path = video_path.to_string_lossy().into_owned();
+    assert!(
+        goop_converter::capabilities::validate_request_source(&resolver, &req)
+            .await
+            .is_err()
+    );
+    req.input_path = input.to_string_lossy().into_owned();
+    image::RgbImage::new(32, 24).save(&input).unwrap();
+    assert!(
+        goop_converter::capabilities::validate_request_source(&resolver, &req)
+            .await
+            .is_err()
+    );
+}

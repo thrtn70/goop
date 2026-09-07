@@ -303,10 +303,26 @@ pub async fn validate_request_source(
     resolver: &BinaryResolver,
     req: &ConvertRequest,
 ) -> Result<(), GoopError> {
-    validate_request(
-        req,
-        &probe_source(resolver, &goop_core::path::expand(&req.input_path)).await?,
-    )
+    let path = goop_core::path::expand(&req.input_path);
+    let probe = if req.image_options.is_some() {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if backend_for_extension(extension) != BackendKind::ImageMagick {
+            return Err(GoopError::InvalidRequest(
+                "Image settings require a source routed to the image converter.".into(),
+            ));
+        }
+        tokio::task::spawn_blocking(move || {
+            crate::jpeg_controls::probe_explicit(&path, crate::jpeg_controls::MAX_INPUT_BYTES)
+        })
+        .await
+        .map_err(|e| GoopError::InvalidRequest(format!("Image admission task failed: {e}")))??
+    } else {
+        probe_source(resolver, &path).await?
+    };
+    validate_request(req, &probe)
 }
 
 /// Inspect once so dimensions and available operations describe the same source read.

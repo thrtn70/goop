@@ -3,7 +3,9 @@ use image::ImageDecoder;
 use std::path::Path;
 
 /// Probe supported images with the same format dispatch as conversion.
-/// Common rasters and HEIC only read headers; JXL currently decodes pixels.
+/// HEIC reads headers; the JPEG library buffers encoded input while reading
+/// headers. Explicit requests use their separate bounded snapshot admission.
+/// JXL currently decodes pixels.
 pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
     if path
         .extension()
@@ -44,7 +46,21 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
     };
     let file_size = std::fs::metadata(path)?.len();
 
-    Ok(ProbeResult {
+    Ok(image_probe_result(
+        (width, height),
+        image_format,
+        image_has_alpha,
+        file_size,
+    ))
+}
+
+pub(crate) fn image_probe_result(
+    (width, height): (u32, u32),
+    image_format: Option<String>,
+    image_has_alpha: Option<bool>,
+    file_size: u64,
+) -> ProbeResult {
+    ProbeResult {
         duration_ms: 0,
         width: Some(width),
         height: Some(height),
@@ -61,7 +77,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
         subtitle_codecs: vec![],
         audio_codecs: vec![],
         image_has_alpha,
-    })
+    }
 }
 
 fn probe_error(message: impl Into<String>) -> GoopError {
@@ -94,11 +110,10 @@ fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>, Option<bo
     let (mut width, mut height) = decoder.dimensions();
     let image_has_alpha = if detected_format == Some(image::ImageFormat::Jpeg) {
         let orientation = decoder
-            .orientation()
-            .map_err(|e| GoopError::SubprocessFailed {
-                binary: "image".into(),
-                stderr: format!("failed to read JPEG orientation: {e}"),
-            })?;
+            .exif_metadata()
+            .map_err(|e| probe_error(format!("failed to read JPEG metadata: {e}")))?
+            .and_then(|bytes| crate::exif_geometry::orientation(&bytes).ok())
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
         if matches!(
             orientation,
             image::metadata::Orientation::Rotate90

@@ -41,6 +41,64 @@ impl Tiff<'_> {
         })
     }
 }
+fn header(exif: &[u8]) -> Result<Tiff<'_>, GoopError> {
+    let bytes = exif.strip_prefix(b"Exif\0\0").unwrap_or(exif);
+    let little = match bytes.get(..2) {
+        Some(b"II") => true,
+        Some(b"MM") => false,
+        _ => return Err(invalid()),
+    };
+    let tiff = Tiff { bytes, little };
+    if tiff.u16(2)? != 42 {
+        return Err(invalid());
+    }
+    Ok(tiff)
+}
+
+fn scalar_orientation(
+    tiff: Tiff<'_>,
+    entry: usize,
+) -> Result<image::metadata::Orientation, GoopError> {
+    if tiff.u32(entry + 4)? != 1 {
+        return Err(invalid());
+    }
+    let value = match tiff.u16(entry + 2)? {
+        3 => u32::from(tiff.u16(entry + 8)?),
+        4 => tiff.u32(entry + 8)?,
+        _ => return Err(invalid()),
+    };
+    u8::try_from(value)
+        .ok()
+        .and_then(image::metadata::Orientation::from_exif)
+        .ok_or_else(invalid)
+}
+
+/// Read only the bounded IFD0 scalar Orientation, with the same accepted
+/// representation and value checks used when normalizing preserved metadata.
+pub(crate) fn orientation(exif: &[u8]) -> Result<image::metadata::Orientation, GoopError> {
+    let tiff = header(exif)?;
+    let offset = tiff.u32(4)? as usize;
+    if offset < 8 {
+        return Err(invalid());
+    }
+    let count = usize::from(tiff.u16(offset)?);
+    if count > 4096 {
+        return Err(invalid());
+    }
+    tiff.range(offset, count * 12 + 6)?;
+    let mut orientation = None;
+    for i in 0..count {
+        let entry = offset + 2 + i * 12;
+        if tiff.u16(entry)? == 0x0112 {
+            if orientation.is_some() {
+                return Err(invalid());
+            }
+            orientation = Some(scalar_orientation(tiff, entry)?);
+        }
+    }
+    Ok(orientation.unwrap_or(image::metadata::Orientation::NoTransforms))
+}
+
 struct Patch {
     range: Range<usize>,
     value: u32,
@@ -51,14 +109,9 @@ fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
 
 pub(crate) fn normalize(exif: &[u8], width: u32, height: u32) -> Result<Vec<u8>, GoopError> {
     let prefix = if exif.starts_with(b"Exif\0\0") { 6 } else { 0 };
-    let bytes = exif.get(prefix..).ok_or_else(invalid)?;
-    let little = match bytes.get(..2) {
-        Some(b"II") => true,
-        Some(b"MM") => false,
-        _ => return Err(invalid()),
-    };
-    let tiff = Tiff { bytes, little };
-    if tiff.u16(2)? != 42 || width == 0 || height == 0 {
+    let tiff = header(exif)?;
+    let little = tiff.little;
+    if width == 0 || height == 0 {
         return Err(invalid());
     }
     let first = tiff.u32(4)? as usize;
@@ -112,7 +165,10 @@ pub(crate) fn normalize(exif: &[u8], width: u32, height: u32) -> Result<Vec<u8>,
                 external.push(tiff.range(value_offset, length)?);
             }
             let value = match tag {
-                0x0112 => Some(1),
+                0x0112 => {
+                    scalar_orientation(tiff, entry)?;
+                    Some(1)
+                }
                 0x0100 | 0xa002 => Some(width),
                 0x0101 | 0xa003 => Some(height),
                 _ => None,

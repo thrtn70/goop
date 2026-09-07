@@ -74,10 +74,18 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         let explicit_request = req.image_options.as_ref().map(|_| req.clone());
         let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
             if let Some(request) = &explicit_request {
-                let probe = probe_image(&input)?;
+                let source =
+                    crate::jpeg_controls::prepare(&input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
+                let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
                 crate::capabilities::validate_request(request, &probe)?;
                 if let Some(options) = &request.image_options {
-                    crate::jpeg_controls::render(&input, out, options, metadata_policy)?;
+                    crate::jpeg_controls::render_prepared(
+                        &input,
+                        out,
+                        options,
+                        metadata_policy,
+                        source.as_ref(),
+                    )?;
                 }
             } else {
                 process_image(&input, out, target, compress_mode)?;

@@ -167,7 +167,7 @@ pub fn apply(input: &Path, output: &Path, policy: MetadataPolicy) -> Result<bool
 /// Copy JPEG metadata after a pixel transform, normalizing only known geometry.
 /// Non-JPEG transfer remains unsupported and is described by source capabilities.
 pub(crate) fn apply_rendered_jpeg(
-    input: &Path,
+    source: Option<&crate::jpeg_controls::JpegSource>,
     output: &Path,
     width: u32,
     height: u32,
@@ -176,15 +176,10 @@ pub(crate) fn apply_rendered_jpeg(
     if policy == MetadataPolicy::StripAll {
         return Ok(());
     }
-    // Detect the container from bytes; a valid JPEG may have a different suffix.
-    let mut file = std::fs::File::open(input)?;
-    let mut signature = [0; 3];
-    if std::io::Read::read_exact(&mut file, &mut signature).is_err()
-        || signature != [0xff, 0xd8, 0xff]
-    {
+    let Some(source) = source else {
         return Ok(());
-    }
-    let source = Jpeg::from_bytes(std::fs::read(input)?.into())
+    };
+    let source = Jpeg::from_bytes(source.bytes.clone())
         .map_err(|e| GoopError::InvalidRequest(format!("JPEG metadata: {e}")))?;
     if source
         .segments()
