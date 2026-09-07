@@ -53,6 +53,14 @@ fn probe_record(input: &Path, index: usize) -> Value {
         Err(error) => json!({"index":index,"elapsed_ms":elapsed,"error":error.to_string()}),
     }
 }
+fn measurement_status(records: &[Value], expected: usize) -> (usize, bool) {
+    let successes = records.iter().filter(|r| r.get("error").is_none()).count();
+    (
+        successes,
+        successes == expected && records.len() == expected,
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let args = Args::parse(&std::env::args().collect::<Vec<_>>())?;
@@ -106,14 +114,14 @@ async fn main() -> Result<(), AnyError> {
             service.cancel(&id);
         }
     }
-    let successes = records.iter().filter(|r| r.get("error").is_none()).count();
+    let (successes, all_succeeded) = measurement_status(&records, args.count);
     let report = json!({"mode":args.mode,"input":args.input,"count":args.count,
         "concurrency":args.concurrency,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
         "successes":successes,"records":records});
     let bytes = serde_json::to_vec_pretty(&report)?;
     std::fs::write(args.output.join("metrics.json"), &bytes)?;
     println!("{}", String::from_utf8(bytes)?);
-    if successes != args.count {
+    if !all_succeeded {
         return Err("one or more measurements failed; see metrics".into());
     }
     Ok(())
@@ -136,6 +144,24 @@ mod tests {
         .map(str::to_owned)
         .collect()
     }
+    #[test]
+    fn aggregate_status_rejects_errors_and_missing_records() {
+        let ok = json!({"index": 0, "probe": {}});
+        let error = json!({"index": 1, "error": "invalid image"});
+        assert_eq!(measurement_status(&[ok.clone()], 1), (1, true));
+        assert_eq!(
+            measurement_status(&[ok.clone(), error.clone()], 2),
+            (1, false)
+        );
+        assert_eq!(
+            measurement_status(&[ok.clone(), error.clone()], 1),
+            (1, false)
+        );
+        assert_eq!(measurement_status(&[ok.clone(), ok.clone()], 1), (2, false));
+        assert_eq!(measurement_status(&[error], 1), (0, false));
+        assert_eq!(measurement_status(&[ok], 2), (1, false));
+    }
+
     #[test]
     fn rejects_bad_workload_arguments() {
         assert!(Args::parse(&args("probe", "20", "4")).is_ok());
