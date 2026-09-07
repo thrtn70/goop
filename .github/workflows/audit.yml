@@ -288,9 +288,16 @@ jobs:
       - name: Image conversion correctness
         shell: bash
         run: |
-          cargo test -p goop-converter --lib imagemagick::tests
-          cargo test -p goop-converter --lib raw
-          cargo test -p goop-converter --test capabilities --test image_probe
+          for suite in imagemagick::tests raw jpeg_controls::tests exif_geometry::tests heif_header::tests; do
+            CARGO_INCREMENTAL=0 cargo test -p goop-converter --lib "$suite"
+          done
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test capabilities --test image_probe --test jpeg_controls --test preview
+      - name: Image settings persistence contracts
+        shell: bash
+        run: |
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test image_options_contract
+          CARGO_INCREMENTAL=0 cargo test -p goop-config --lib presets::tests
+          CARGO_INCREMENTAL=0 cargo test -p goop-queue --lib store::tests
       # The capability check earlier proves the ffmpeg features exist; this
       # runs the conversion pipeline against them, and is the only place the
       # `#[ignore]`d tests act as a standing gate rather than a manual one.
