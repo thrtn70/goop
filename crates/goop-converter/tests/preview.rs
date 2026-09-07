@@ -469,3 +469,87 @@ async fn explicit_malformed_orientation_fails_preserve_but_strip_can_sample() {
     let sample = service.generate(&resolver, req).await.unwrap();
     assert_eq!((sample.width, sample.height), (160, 100));
 }
+
+#[tokio::test]
+async fn repeated_image_formats_preserve_sources_and_retain_only_latest_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("previews");
+    let service = PreviewService::new(root.clone());
+    let resolver = BinaryResolver::new(dir.path().into());
+    let mut previous: Option<String> = None;
+    for extension in ["jpg", "png", "webp", "jpg"] {
+        let input = dir.path().join(format!("source.{extension}"));
+        image::RgbImage::from_pixel(32, 16, image::Rgb([170, 50, 20]))
+            .save(&input)
+            .unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let result = service
+            .generate(&resolver, request(&input, extension))
+            .await
+            .unwrap();
+        assert_eq!((result.width, result.height), (32, 16));
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        if let Some(old) = previous.take() {
+            assert!(!std::path::Path::new(&old).exists());
+        }
+        for session in std::fs::read_dir(&root).unwrap() {
+            let session = session.unwrap();
+            assert_eq!(
+                std::fs::read_dir(session.path())
+                    .unwrap()
+                    .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+                    .count(),
+                1
+            );
+        }
+        previous = Some(result.after_path);
+    }
+    service.cancel("jpg");
+    assert!(!std::path::Path::new(&previous.unwrap()).exists());
+    drop(service);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn invalid_captures_leave_no_artifacts_and_do_not_block_next_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.jpg");
+    let root = dir.path().join("previews");
+    let service = PreviewService::new(root.clone());
+    let resolver = BinaryResolver::new(dir.path().into());
+    for oversized in [true, false] {
+        image::RgbImage::new(32, 16).save(&input).unwrap();
+        if oversized {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&input)
+                .unwrap()
+                .set_len(64 * 1024 * 1024 + 1)
+                .unwrap();
+        } else {
+            std::fs::write(&input, [255, 216, 255, 225, 0, 1]).unwrap();
+        }
+        let error = service
+            .generate(&resolver, request(&input, "invalid"))
+            .await
+            .unwrap_err();
+        if oversized {
+            assert!(error.to_string().contains("64 MiB"));
+        }
+        for session in std::fs::read_dir(&root).unwrap() {
+            assert_eq!(
+                std::fs::read_dir(session.unwrap().path()).unwrap().count(),
+                1
+            );
+        }
+        image::RgbImage::new(32, 16).save(&input).unwrap();
+        let (cancelled, success) = tokio::join!(
+            service.generate(&resolver, request(&input, "old")),
+            service.generate(&resolver, request(&input, "new"))
+        );
+        assert!(matches!(cancelled, Err(goop_core::GoopError::Cancelled)));
+        let result = success.unwrap();
+        service.cancel("new");
+        assert!(!std::path::Path::new(&result.after_path).exists());
+    }
+}

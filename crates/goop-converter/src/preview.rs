@@ -5,6 +5,7 @@ use goop_core::{
 };
 use goop_sidecar::BinaryResolver;
 use image::{ImageDecoder, ImageFormat};
+use img_parts::Bytes;
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
@@ -318,10 +319,44 @@ fn image_sample(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
-    if std::fs::metadata(input)?.len() > MAX_INPUT_BYTES {
+    let bytes = capture_image(input, MAX_INPUT_BYTES, cancel, deadline)?;
+    image_sample_bytes(bytes, dir, request, cancel, deadline)
+}
+
+fn capture_image(
+    input: &Path,
+    limit: u64,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<Bytes, GoopError> {
+    checkpoint(cancel, deadline)?;
+    let file = std::fs::File::open(input)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(invalid("Sample preview requires a file"));
+    }
+    if metadata.len() > limit {
         return Err(invalid("Image preview source exceeds 64 MiB input limit"));
     }
-    let mut reader = image::ImageReader::open(input)?.with_guessed_format()?;
+    let bytes = crate::image_read::read_snapshot(
+        file,
+        limit,
+        "Image preview source exceeds 64 MiB input limit",
+        || checkpoint(cancel, deadline),
+    )?;
+    checkpoint(cancel, deadline)?;
+    Ok(bytes)
+}
+
+fn image_sample_bytes(
+    bytes: Bytes,
+    dir: &Path,
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewResult, GoopError> {
+    checkpoint(cancel, deadline)?;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     if !matches!(
         reader.format(),
         Some(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP)
@@ -657,5 +692,112 @@ mod process_tests {
         .to_string()
         .contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn explicit_request(input: &Path) -> PreviewRequest {
+        serde_json::from_value(serde_json::json!({
+            "request_id":"captured", "input_path":input, "source_revision":"1",
+            "target":"jpeg", "metadata_policy":"preserve",
+            "image_options":{"jpeg_quality":75,"resize":{"kind":"original"}}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn captured_preview_ignores_a_later_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        let output = tmp.path().join("sample");
+        std::fs::create_dir(&output).unwrap();
+        image::RgbImage::from_pixel(16, 8, image::Rgb([240, 10, 20]))
+            .save(&input)
+            .unwrap();
+        let request = explicit_request(&input);
+        let deadline = Instant::now() + TIMEOUT;
+        let token = CancellationToken::new();
+        let bytes = capture_image(&input, MAX_INPUT_BYTES, &token, deadline).unwrap();
+        std::fs::remove_file(&input).unwrap();
+        image::RgbImage::from_pixel(8, 16, image::Rgb([10, 20, 240]))
+            .save_with_format(&input, ImageFormat::Png)
+            .unwrap();
+        let result = image_sample_bytes(bytes, &output, &request, &token, deadline).unwrap();
+        assert_eq!((result.width, result.height), (16, 8));
+        for path in [result.before_path.unwrap(), result.after_path] {
+            let pixel = image::open(path).unwrap().to_rgb8().get_pixel(3, 3).0;
+            assert!(pixel[0] > 200 && pixel[2] < 60);
+        }
+        assert_eq!(
+            image::ImageReader::open(input)
+                .unwrap()
+                .with_guessed_format()
+                .unwrap()
+                .into_dimensions()
+                .unwrap(),
+            (8, 16)
+        );
+    }
+
+    #[test]
+    fn captured_format_controls_explicit_preview_admission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.png");
+        image::RgbImage::new(16, 8).save(&input).unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+        let bytes = capture_image(&input, MAX_INPUT_BYTES, &token, deadline).unwrap();
+        std::fs::remove_file(&input).unwrap();
+        image::RgbImage::new(8, 16)
+            .save_with_format(&input, ImageFormat::Jpeg)
+            .unwrap();
+        let output = tmp.path().join("sample");
+        std::fs::create_dir(&output).unwrap();
+        let error = image_sample_bytes(bytes, &output, &explicit_request(&input), &token, deadline)
+            .unwrap_err();
+        assert!(error.to_string().contains("JPEG sources only"));
+        assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn capture_rejects_over_limit_and_cancelled_or_expired_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        std::fs::write(&input, [0; 33]).unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+        assert!(capture_image(&input, 32, &token, deadline)
+            .unwrap_err()
+            .to_string()
+            .contains("64 MiB"));
+        assert_eq!(
+            capture_image(&input, 33, &token, deadline).unwrap().len(),
+            33
+        );
+        let missing = tmp.path().join("missing");
+        assert!(capture_image(&missing, 33, &token, Instant::now())
+            .unwrap_err()
+            .to_string()
+            .contains("timed out"));
+        token.cancel();
+        assert!(matches!(
+            capture_image(&missing, 33, &token, deadline),
+            Err(GoopError::Cancelled)
+        ));
+        let output = tmp.path().join("uncreated");
+        assert!(matches!(
+            image_sample_bytes(
+                img_parts::Bytes::new(),
+                &output,
+                &explicit_request(&input),
+                &token,
+                deadline
+            ),
+            Err(GoopError::Cancelled)
+        ));
+        assert!(!output.exists());
     }
 }
