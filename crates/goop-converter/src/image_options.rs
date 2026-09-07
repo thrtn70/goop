@@ -7,6 +7,7 @@ fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 
+/// Rejects explicit values outside the engine's JPEG and raster limits.
 pub fn validate_options(options: &ImageConvertOptions) -> Result<(), GoopError> {
     if !(1..=100).contains(&options.jpeg_quality) {
         return Err(invalid("JPEG quality must be 1–100"));
@@ -19,6 +20,10 @@ pub fn validate_options(options: &ImageConvertOptions) -> Result<(), GoopError> 
     Ok(())
 }
 
+/// Calculates upright output dimensions without enlarging the source.
+///
+/// FitWithin uses checked integer cross-products and nearest-integer rounding.
+/// Both source and result must satisfy the axis and 100-million-pixel limits.
 pub fn output_dimensions(
     source: (u32, u32),
     resize: &ImageResize,

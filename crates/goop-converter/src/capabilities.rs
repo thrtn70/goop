@@ -134,7 +134,7 @@ fn image_settings_for(
         .unwrap_or("")
         .to_ascii_lowercase();
     let jpeg = matches!(format.as_str(), "jpg" | "jpeg");
-    let heic = matches!(format.as_str(), "heic" | "heif");
+    let heic = format == "heic";
     let raw = format == "raw" || crate::raw::is_raw_extension(&format);
     let dimensions = probe.width.zip(probe.height);
     let dimension_error = dimensions
