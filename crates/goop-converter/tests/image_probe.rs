@@ -23,3 +23,19 @@ fn probes_jxl_dimensions_with_existing_decoder() {
     assert_eq!((result.width, result.height), (Some(16), Some(8)));
     assert_eq!(result.image_format.as_deref(), Some("JXL"));
 }
+
+#[test]
+fn probes_large_trailing_jpeg_without_requiring_a_complete_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.jpg");
+    image::RgbImage::new(16, 8).save(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    let result = probe_image(&path).unwrap();
+    assert_eq!((result.width, result.height), (Some(16), Some(8)));
+    assert_eq!(result.file_size, 64 * 1024 * 1024);
+}

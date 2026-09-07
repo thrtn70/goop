@@ -1,10 +1,16 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
 use image::ImageDecoder;
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Read, Seek},
+    path::Path,
+};
+
+const JPEG_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Probe supported images with the same format dispatch as conversion.
-/// HEIC reads headers; the JPEG library buffers encoded input while reading
-/// headers. Explicit requests use their separate bounded snapshot admission.
+/// HEIC reads headers; JPEG inspection captures at most an 8 MiB prefix.
+/// Explicit requests use their separate bounded snapshot admission.
 /// JXL currently decodes pixels.
 pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
     if path
@@ -42,7 +48,7 @@ pub fn probe_image(path: &Path) -> Result<ProbeResult, GoopError> {
             let image = crate::imagemagick::decode_any(path)?;
             (image.width(), image.height(), Some("JXL".into()), None)
         }
-        _ => raster_dimensions(path)?,
+        _ => return raster_probe(path),
     };
     let file_size = std::fs::metadata(path)?.len();
 
@@ -87,48 +93,65 @@ fn probe_error(message: impl Into<String>) -> GoopError {
     }
 }
 
-fn raster_dimensions(path: &Path) -> Result<(u32, u32, Option<String>, Option<bool>), GoopError> {
-    let reader = image::ImageReader::open(path)
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to open image: {e}"),
-        })?
-        .with_guessed_format()
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to detect image format: {e}"),
-        })?;
-
-    let detected_format = reader.format();
-    let format = detected_format.map(|value| format!("{value:?}"));
-    let mut decoder = reader
+fn raster_probe(path: &Path) -> Result<ProbeResult, GoopError> {
+    let mut file =
+        File::open(path).map_err(|e| probe_error(format!("failed to open image: {e}")))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(probe_error("Image input must be a regular file"));
+    }
+    let mut signature = Vec::with_capacity(16);
+    (&mut file).take(16).read_to_end(&mut signature)?;
+    let detected = image::guess_format(&signature)
+        .ok()
+        .or_else(|| image::ImageFormat::from_path(path).ok());
+    if detected == Some(image::ImageFormat::Jpeg) {
+        return probe_jpeg_reader(
+            Cursor::new(signature).chain(file),
+            metadata.len(),
+            JPEG_HEADER_BYTES,
+        );
+    }
+    file.rewind()?;
+    let mut reader = image::ImageReader::new(BufReader::new(file));
+    if let Some(format) = detected {
+        reader.set_format(format);
+    }
+    let decoder = reader
         .into_decoder()
-        .map_err(|e| GoopError::SubprocessFailed {
-            binary: "image".into(),
-            stderr: format!("failed to read image dimensions: {e}"),
-        })?;
-    let (mut width, mut height) = decoder.dimensions();
-    let image_has_alpha = if detected_format == Some(image::ImageFormat::Jpeg) {
-        let orientation = decoder
-            .exif_metadata()
-            .map_err(|e| probe_error(format!("failed to read JPEG metadata: {e}")))?
-            .and_then(|bytes| crate::exif_geometry::orientation(&bytes).ok())
-            .unwrap_or(image::metadata::Orientation::NoTransforms);
-        if matches!(
-            orientation,
-            image::metadata::Orientation::Rotate90
-                | image::metadata::Orientation::Rotate270
-                | image::metadata::Orientation::Rotate90FlipH
-                | image::metadata::Orientation::Rotate270FlipH
-        ) {
-            std::mem::swap(&mut width, &mut height);
-        }
-        Some(false)
-    } else {
-        None
-    };
+        .map_err(|e| probe_error(format!("failed to read image dimensions: {e}")))?;
+    Ok(image_probe_result(
+        decoder.dimensions(),
+        detected.map(|f| format!("{f:?}")),
+        None,
+        metadata.len(),
+    ))
+}
 
-    Ok((width, height, format, image_has_alpha))
+fn probe_jpeg_reader(
+    reader: impl Read,
+    file_size: u64,
+    header_limit: u64,
+) -> Result<ProbeResult, GoopError> {
+    let bytes = crate::image_read::read_prefix(reader, header_limit, || Ok(()))?;
+    let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes)).map_err(|_| {
+        probe_error("JPEG headers are invalid, incomplete, or exceed the 8 MiB inspection limit")
+    })?;
+    let (mut width, mut height) = decoder.dimensions();
+    let orientation = decoder
+        .exif_metadata()
+        .map_err(|e| probe_error(format!("failed to read JPEG metadata: {e}")))?
+        .and_then(|bytes| crate::exif_geometry::orientation(&bytes).ok())
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    if orientation.to_exif() >= 5 {
+        std::mem::swap(&mut width, &mut height);
+    }
+    Ok(image_probe_result(
+        (width, height),
+        Some("Jpeg".into()),
+        Some(false),
+        file_size,
+    ))
 }
 
 #[cfg(test)]
@@ -137,6 +160,115 @@ mod tests {
     use img_parts::jpeg::Jpeg;
     use img_parts::{Bytes, ImageEXIF};
     use std::fs;
+
+    struct Count<R> {
+        inner: R,
+        consumed: u64,
+    }
+    impl<R: std::io::Read> std::io::Read for Count<R> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(output)?;
+            self.consumed += count as u64;
+            Ok(count)
+        }
+    }
+    impl<R: std::io::BufRead> std::io::BufRead for Count<R> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.inner.fill_buf()
+        }
+        fn consume(&mut self, amount: usize) {
+            self.consumed += amount as u64;
+            self.inner.consume(amount);
+        }
+    }
+    impl<R: std::io::Seek> std::io::Seek for Count<R> {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+    fn jpeg_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode_image(&image::RgbImage::new(16, 8))
+            .unwrap();
+        bytes
+    }
+    #[test]
+    fn current_jpeg_decoder_eagerly_reads_a_valid_trailing_stream() {
+        let mut bytes = jpeg_bytes();
+        bytes.extend_from_slice(&[0; 65536]);
+        let length = bytes.len() as u64;
+        let mut reader = Count {
+            inner: std::io::Cursor::new(bytes),
+            consumed: 0,
+        };
+        let decoder = image::codecs::jpeg::JpegDecoder::new(&mut reader).unwrap();
+        assert_eq!(decoder.dimensions(), (16, 8));
+        assert_eq!(reader.consumed, length);
+    }
+    #[test]
+    fn jpeg_probe_does_not_consume_trailing_stream() {
+        use std::io::{Cursor, Read};
+        let bytes = jpeg_bytes();
+        assert!(bytes.len() < 4096);
+        let file_size = bytes.len() as u64 + 65536;
+        let mut reader = Count {
+            inner: Cursor::new(bytes).chain(std::io::repeat(0).take(65536)),
+            consumed: 0,
+        };
+        let probe = probe_jpeg_reader(&mut reader, file_size, 4096).unwrap();
+        assert_eq!(probe.width.zip(probe.height), Some((16, 8)));
+        assert_eq!(probe.file_size, file_size);
+        assert_eq!(reader.consumed, 4096);
+    }
+    #[test]
+    fn jpeg_headers_over_budget_and_malformed_fail_without_fallback() {
+        let original = jpeg_bytes();
+        let mut delayed_header = vec![0xff, 0xd8, 0xff, 0xef, 0xff, 0xff];
+        delayed_header.extend_from_slice(&[0; 65533]);
+        delayed_header.extend_from_slice(&original[2..]);
+        for bytes in [
+            delayed_header,
+            vec![0xff, 0xd8, 0xff, 0xe1, 0, 1],
+            vec![0xff, 0xd8],
+        ] {
+            let file_size = bytes.len() as u64;
+            let mut reader = Count {
+                inner: std::io::Cursor::new(bytes),
+                consumed: 0,
+            };
+            let error = probe_jpeg_reader(&mut reader, file_size, 4096).unwrap_err();
+            assert!(error.to_string().contains("8 MiB inspection limit"));
+            assert!(reader.consumed <= 4096);
+        }
+    }
+    #[test]
+    fn missing_scan_header_fails_and_large_dimensions_remain_probeable() {
+        let mut bytes = jpeg_bytes();
+        let scan = bytes.windows(2).position(|b| b == [0xff, 0xda]).unwrap();
+        assert!(probe_jpeg_reader(&bytes[..scan], scan as u64, 4096).is_err());
+        let frame = bytes.windows(2).position(|b| b == [0xff, 0xc0]).unwrap();
+        bytes[frame + 7..frame + 9].copy_from_slice(&40000u16.to_be_bytes());
+        let result = probe_jpeg_reader(&bytes[..], bytes.len() as u64, 4096).unwrap();
+        assert_eq!(result.width, Some(40000));
+    }
+
+    #[test]
+    fn malformed_orientation_keeps_untransformed_generic_dimensions() {
+        let mut jpeg = Jpeg::from_bytes(jpeg_bytes().into()).unwrap();
+        jpeg.set_exif(Some(Bytes::from_static(b"invalid exif")));
+        let mut bytes = Vec::new();
+        jpeg.encoder().write_to(&mut bytes).unwrap();
+        let result = probe_jpeg_reader(&bytes[..], bytes.len() as u64, 4096).unwrap();
+        assert_eq!((result.width, result.height), (Some(16), Some(8)));
+    }
+
+    #[test]
+    fn progressive_jpeg_headers_need_no_pixel_decode() {
+        let bytes = include_bytes!("../tests/fixtures/progressive.jpg");
+        let result = probe_jpeg_reader(&bytes[..], bytes.len() as u64, 4096).unwrap();
+        assert_eq!(result.width.zip(result.height), Some((32, 16)));
+    }
 
     fn write_test_png(path: &Path) {
         use image::{ImageBuffer, Rgba};
@@ -195,7 +327,10 @@ mod tests {
     fn jpeg_probe_uses_header_format_and_upright_orientation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("portrait.png");
-        for orientation in 1..=8 {
+        for (kind, orientation) in [3, 4]
+            .into_iter()
+            .flat_map(|kind| (1..=8).map(move |o| (kind, o)))
+        {
             let img = image::RgbImage::new(16, 8);
             img.save_with_format(&path, image::ImageFormat::Jpeg)
                 .unwrap();
@@ -213,7 +348,7 @@ mod tests {
                 0,
                 0x12,
                 0x01,
-                3,
+                kind,
                 0,
                 1,
                 0,
