@@ -2,8 +2,37 @@
 import type { VideoCodec } from "./VideoCodec";
 import type { VideoConvertOptions } from "./VideoConvertOptions";
 
-export type VideoExecutionSummary = { requested: VideoConvertOptions, 
+/**
+ * Resolved video processing and per-stream outcomes. Requested rate, speed and
+ * processor are honored exactly; effective encoder, codec and audio facts are
+ * recorded separately. Execution results describe completed processing.
+ */
+export type VideoExecutionSummary = { 
+/**
+ * Immutable requested controls, honored without rate/speed/processor fallback.
+ */
+requested: VideoConvertOptions, 
 /**
  * The resolved software encoder; absent when video is copied.
  */
-encoder?: string | null, video_codec: VideoCodec, video_stream_index: number, audio_stream_index?: number | null, audio_codec?: string | null, audio_copied: boolean, width: number, height: number, notices: Array<string>, };
+encoder?: string | null, video_codec: VideoCodec, 
+/**
+ * Absolute admitted video stream index in the source.
+ */
+video_stream_index: number, 
+/**
+ * Absolute admitted audio stream index in the source; absent for silent input.
+ */
+audio_stream_index?: number | null, audio_codec?: string | null, 
+/**
+ * True only when an admitted audio stream is copied without encoding.
+ */
+audio_copied: boolean, 
+/**
+ * Expected upright output width after the admitted resolution cap.
+ */
+width: number, 
+/**
+ * Expected upright output height after the admitted resolution cap.
+ */
+height: number, notices: Array<string>, };

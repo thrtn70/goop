@@ -2,6 +2,7 @@ use crate::{ConvertRequest, GoopError, ResolutionCap, TargetFormat};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Video codecs admitted by explicit Copy and software Encode modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
@@ -10,6 +11,7 @@ pub enum VideoCodec {
     Hevc,
 }
 
+/// Software encoder preset names; speed is independent of rate control and audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +21,7 @@ pub enum VideoSpeed {
     Slow,
 }
 
+/// Explicit encoding processor policy, persisted independently of global preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +29,9 @@ pub enum VideoProcessor {
     Software,
 }
 
+/// One video rate-control mode. CRF admits 1..=51 (lower is higher quality);
+/// average bitrate admits 100..=200000 kbps and is not an exact output-size promise.
+/// Deserialization checks shape and integer types; callers must validate bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -35,6 +41,10 @@ pub enum VideoRateControl {
     AverageBitrate { kbps: u32 },
 }
 
+/// Opt-in video processing; absence on a request retains legacy behavior.
+/// Copy never encodes video. Encode honors the selected codec, rate, speed and
+/// processor without substitution. Deserialization checks strict payload shape;
+/// call validate_video_options or validate_video_request to check numeric bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -83,6 +93,8 @@ impl<'de> Deserialize<'de> for VideoConvertOptions {
     }
 }
 
+/// Validate CRF 1..=51 or average bitrate 100..=200000 kbps after deserialization.
+/// Copy has no numeric settings. Source and encoder admission are checked elsewhere.
 pub fn validate_video_options(options: &VideoConvertOptions) -> Result<(), GoopError> {
     match options {
         VideoConvertOptions::Encode {
@@ -101,7 +113,8 @@ pub fn validate_video_options(options: &VideoConvertOptions) -> Result<(), GoopE
     }
 }
 
-/// Structural validation only. Fresh source facts and encoder availability are
+/// Validate numeric bounds, target, conflicting fields and Copy resolution.
+/// Absent video options leave legacy validation unchanged. Fresh source facts and encoder availability are
 /// validated separately when resolving explicit video processing.
 pub fn validate_video_request(request: &ConvertRequest) -> Result<(), GoopError> {
     let Some(options) = &request.video_options else {
@@ -134,6 +147,8 @@ pub fn validate_video_request(request: &ConvertRequest) -> Result<(), GoopError>
     Ok(())
 }
 
+/// Complete source stream inventory used for explicit video admission.
+/// Stored details do not replace a fresh execution-time probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -141,10 +156,12 @@ pub struct VideoProbeDetails {
     pub streams: Vec<VideoStreamInfo>,
 }
 
+/// Source stream facts; missing optional values represent unknown probe facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
 pub struct VideoStreamInfo {
+    /// Absolute source stream index reported by the probe, not a video-only ordinal.
     pub index: u32,
     pub codec_type: String,
     #[serde(default)]
@@ -180,29 +197,39 @@ pub struct VideoStreamInfo {
     pub attached_pic: bool,
 }
 
+/// Resolved video processing and per-stream outcomes. Requested rate, speed and
+/// processor are honored exactly; effective encoder, codec and audio facts are
+/// recorded separately. Execution results describe completed processing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
 pub struct VideoExecutionSummary {
+    /// Immutable requested controls, honored without rate/speed/processor fallback.
     pub requested: VideoConvertOptions,
     /// The resolved software encoder; absent when video is copied.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub encoder: Option<String>,
     pub video_codec: VideoCodec,
+    /// Absolute admitted video stream index in the source.
     pub video_stream_index: u32,
     #[serde(default)]
     #[ts(optional = nullable)]
+    /// Absolute admitted audio stream index in the source; absent for silent input.
     pub audio_stream_index: Option<u32>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_codec: Option<String>,
+    /// True only when an admitted audio stream is copied without encoding.
     pub audio_copied: bool,
+    /// Expected upright output width after the admitted resolution cap.
     pub width: u32,
+    /// Expected upright output height after the admitted resolution cap.
     pub height: u32,
     pub notices: Vec<String>,
 }
 
+/// Engine-derived availability of a processing mode and its unavailable reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -213,6 +240,7 @@ pub struct VideoModeAvailability {
     pub reason: Option<String>,
 }
 
+/// Availability of one concrete software encoder for this source and target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -223,9 +251,12 @@ pub struct VideoCodecCapability {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub reason: Option<String>,
+    /// Codec-specific recommendation; does not imply equal quality across codecs.
     pub recommended_crf: u8,
 }
 
+/// Engine-owned mode availability and control bounds/defaults for a target.
+/// Defaults describe first-entry UI choices and never overwrite an explicit request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]

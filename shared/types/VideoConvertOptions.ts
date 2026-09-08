@@ -4,4 +4,10 @@ import type { VideoProcessor } from "./VideoProcessor";
 import type { VideoRateControl } from "./VideoRateControl";
 import type { VideoSpeed } from "./VideoSpeed";
 
+/**
+ * Opt-in video processing; absence on a request retains legacy behavior.
+ * Copy never encodes video. Encode honors the selected codec, rate, speed and
+ * processor without substitution. Deserialization checks strict payload shape;
+ * call validate_video_options or validate_video_request to check numeric bounds.
+ */
 export type VideoConvertOptions = { "kind": "copy" } | { "kind": "encode", codec: VideoCodec, rate_control: VideoRateControl, speed: VideoSpeed, processor: VideoProcessor, };

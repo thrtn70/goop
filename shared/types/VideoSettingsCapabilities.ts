@@ -4,4 +4,8 @@ import type { VideoModeAvailability } from "./VideoModeAvailability";
 import type { VideoProcessor } from "./VideoProcessor";
 import type { VideoSpeed } from "./VideoSpeed";
 
+/**
+ * Engine-owned mode availability and control bounds/defaults for a target.
+ * Defaults describe first-entry UI choices and never overwrite an explicit request.
+ */
 export type VideoSettingsCapabilities = { copy: VideoModeAvailability, encode: VideoModeAvailability, codecs: Array<VideoCodecCapability>, crf_min: number, crf_max: number, default_crf: number, bitrate_min_kbps: number, bitrate_max_kbps: number, default_bitrate_kbps: number, speeds: Array<VideoSpeed>, default_speed: VideoSpeed, processor: VideoProcessor, preview_available: boolean, preview_unavailable_reason?: string | null, };
