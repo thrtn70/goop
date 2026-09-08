@@ -21,9 +21,7 @@ export function directoryBytes(directory) {
 export function effectiveHardware(metrics,hardwareEnabled) {
  const summary=metrics.result?.video_execution;
  if(summary?.requested?.kind==='copy')return {effective_encoder:null,effective_hardware:'copy'};
- const observations=metrics.encoder_observations??[];
- const observed=observations.length?observations.at(-1)?.encoder:null;
- const effectiveEncoder=summary?.encoder??observed??null;
+ const effectiveEncoder=summary?.encoder??null;
  if(effectiveEncoder)return {effective_encoder:effectiveEncoder,effective_hardware:/(videotoolbox|nvenc|_qsv|_amf)$/.test(effectiveEncoder)?'hardware':'software'};
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }

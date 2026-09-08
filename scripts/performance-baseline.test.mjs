@@ -23,10 +23,11 @@ test('hardware intent reaches the driver and effective hardware stays evidence b
  assert.equal(result.hardware_intent,'true');
  assert.equal(result.effective_hardware,'unknown');
 });
-test('an observed hardware encoder is reported as effective hardware',async()=>{
+test('legacy hardware progress is retained but cannot prove completed hardware execution',async()=>{
  const result=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,encoder_observations:[{encoder:'h264_videotoolbox'}]}));",{hardwareEnabled:true});
- assert.equal(result.effective_hardware,'hardware');
- assert.equal(result.effective_encoder,'h264_videotoolbox');
+ assert.equal(result.effective_hardware,'unknown');
+ assert.equal(result.effective_encoder,null);
+ assert.deepEqual(result.encoder_observations,[{encoder:'h264_videotoolbox'}]);
 });
 test('final fallback observation cannot retain stale hardware evidence',async()=>{
  const result=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,encoder_observations:[{encoder:'h264_videotoolbox'},{encoder:null}]}));",{hardwareEnabled:true});
