@@ -1,3 +1,6 @@
+import { cloneVideoOptions, videoOptionsError, videoRequestOptions, videoDraftSlots, type VideoDraftText } from "@/features/convert/videoOptions";
+import { useVideoPlan } from "@/features/convert/useVideoPlan";
+import { videoExecutionText } from "@/features/preview/outputSummary";
 import SettingsPreview from "@/features/preview/SettingsPreview";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
@@ -75,6 +78,16 @@ function ConvertPage() {
     }
     return imageDraftProblem(file.imageOptions, state.capabilities.targets.find(c => c.target === file.target)?.image_settings, raw);
   });
+  const videoFiles = files.map(file => {
+    const state = byId[file.id ?? ""];
+    const raw: VideoDraftText = {};
+    for (const slot of videoDraftSlots) {
+      const value = draftEntries[JSON.stringify(["convert", "source", file.path, file.id, slot])]?.value;
+      if (typeof value === "string") raw[slot.slice("VideoOptionsPanel.".length) as keyof VideoDraftText] = value;
+    }
+    return { ...file, videoDraft: raw, videoCapability: state?.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null };
+  });
+  const videoProblems = videoFiles.map(videoOptionsError);
   useEffect(() => {
     if (files.some((f) => !f.id))
       setFiles((previous) =>
@@ -83,6 +96,15 @@ function ConvertPage() {
   }, [files, setFiles]);
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
+  const selectedVideo = videoFiles.find(file => file.id === selected?.id);
+  const selectedVideoOptions = selectedVideo && !videoOptionsError(selectedVideo) ? videoRequestOptions(selectedVideo) : null;
+  const videoPlan = useVideoPlan(selected && selectedVideoOptions ? {
+    input_path: selected.path, output_path: "", target: selected.target,
+    video_options: selectedVideoOptions, quality_preset: null, resolution_cap: selected.resolutionCap,
+    compress_mode: null, batch_id: null, metadata_policy: selected.metadataPolicy,
+    subtitle: selected.subtitle, gif_options: selected.gifOptions, image_options: cloneImageOptions(selected.imageOptions),
+  } : null, JSON.stringify([selected?.id, selected?.revision]));
+
   useEffect(() => {
     if (selected?.id !== selectedId) setSelectedId(selected?.id ?? null);
   }, [selected?.id, selectedId, setSelectedId]);
@@ -221,6 +243,7 @@ function ConvertPage() {
                 target: opts.target,
                 gifOptions: opts.gifOptions ? { ...opts.gifOptions } : null,
                 imageOptions: cloneImageOptions(opts.imageOptions),
+                videoOptions: cloneVideoOptions(opts.videoOptions),
                 metadataPolicy: opts.metadataPolicy,
                 subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
@@ -254,11 +277,14 @@ function ConvertPage() {
       optionsReady: true,
       revision: (file.revision ?? 0) + 1,
       imageOptions: cloneImageOptions(settings.imageOptions),
+      videoOptions: cloneVideoOptions(settings.videoOptions),
       gifOptions: settings.gifOptions ? { ...settings.gifOptions } : null,
       subtitle: settings.subtitle ? { ...settings.subtitle } : null,
     }));
     const incompatible = next.flatMap(file => {
-      const problem = conversionProblem(file, byId[file.id ?? ""] ?? PROBING);
+      const state = byId[file.id ?? ""] ?? PROBING;
+      const capability = state.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null;
+      const problem = videoOptionsError({...file, videoCapability:capability}) ?? conversionProblem({...file,qualityPreset:file.videoOptions ? null : file.qualityPreset}, state);
       return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
     });
     if (incompatible.length) {
@@ -266,7 +292,7 @@ function ConvertPage() {
       return;
     }
     setApplicationError(null);
-    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], imageDraftSlots));
+    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...videoDraftSlots]));
     setFiles(next);
   };
 
@@ -275,6 +301,7 @@ function ConvertPage() {
     applySettings({
       target: preset.target,
       imageOptions: cloneImageOptions(preset.image_options),
+      videoOptions: cloneVideoOptions(preset.video_options),
       gifOptions: preset.gif_options ?? (preset.target === "gif" ? defaultGifOptions() : null),
       metadataPolicy: preset.metadata_policy ?? "preserve",
       subtitle: preset.subtitle ?? null,
@@ -284,8 +311,8 @@ function ConvertPage() {
   };
 
   const applyFirstToAll = () => {
-    if (files.length < 2 || imageProblems.some(Boolean)) return;
-    applySettings(files[0]);
+    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean)) return;
+    applySettings({...files[0],videoOptions:videoRequestOptions(videoFiles[0])});
   };
 
   const handleBrowse = useCallback(async () => {
@@ -315,7 +342,7 @@ function ConvertPage() {
   }, [pickerToken, handleBrowse, location.pathname]);
 
   const problems = files.map((f, i) =>
-    conversionProblem(f, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
+    videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
   );
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
@@ -349,7 +376,7 @@ function ConvertPage() {
           }
           actions={
             <ConvertActionBar
-              files={files}
+              files={videoFiles}
               disabled={blocked}
               onEnqueued={() => {}}
               onSettled={onSettled}
@@ -371,8 +398,13 @@ function ConvertPage() {
                   selected.id && handleOptionsChange(selected.id, opts)
                 }
               />
-              {!problems[files.indexOf(selected)] && <SettingsPreview imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
-                quality_preset:selected.qualityPreset,resolution_cap:selected.resolutionCap,
+              {selected.videoOptions && <section aria-label="Video processing summary" className="mt-4 text-xs text-fg-secondary">
+                {videoPlan.busy && <p>Checking video processing…</p>}
+                {videoPlan.error && <p role="alert" className="text-warning">{videoPlan.error}</p>}
+                {videoPlan.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan.summary)}</p>}
+              </section>}
+              {(!problems[files.indexOf(selected)] || selected.videoOptions) && <SettingsPreview videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
+                quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
                 compress_mode:null,metadata_policy:selected.metadataPolicy,
                 subtitle:selected.subtitle,gif_options:selected.gifOptions,image_options:cloneImageOptions(selected.imageOptions)}}/>}
             </WorkspaceDraftProvider>

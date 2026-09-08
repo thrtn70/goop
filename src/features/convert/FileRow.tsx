@@ -10,6 +10,7 @@ import type {
   QualityPreset,
   ResolutionCap,
 } from "@/types";
+import VideoOptionsPanel from "./VideoOptionsPanel";
 import TargetPicker from "./TargetPicker";
 import ImageOptionsPanel from "./ImageOptionsPanel";
 import { cloneImageOptions, imageOptionsProblem } from "./imageOptions";
@@ -96,21 +97,23 @@ export function ConvertSettingsPanel({
     onOptionsChange(path, next);
   };
 
+  const videoCapability = state.capabilities.targets.find(c => c.target === target)?.video_settings;
+  const explicit = !!opts.videoOptions;
   const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
   const imageProblem = imageOptionsProblem(opts.imageOptions, imageCapability);
   const showGifOpts = target === "gif" && p.source_kind === "video";
   // These selectors configure video encoding. GIF has its own size control,
   // and AVI uses a fixed encoder quality rather than these preset levels.
   const showVideoQuality =
-    p.source_kind === "video" && ["mp4", "mkv", "webm", "mov"].includes(target);
+    !explicit && p.source_kind === "video" && ["mp4", "mkv", "webm", "mov"].includes(target);
   const showVideoResolution =
-    showVideoQuality || (p.source_kind === "video" && target === "avi");
+    opts.videoOptions?.kind !== "copy" && (showVideoQuality || (p.source_kind === "video" && ["mp4","mkv","mov","avi"].includes(target)));
   const ignoredQuality =
-    !showVideoQuality &&
+    !explicit && !showVideoQuality &&
     opts.qualityPreset != null &&
     opts.qualityPreset !== "original";
   const ignoredResolution =
-    !showVideoResolution &&
+    !explicit && !showVideoResolution &&
     opts.resolutionCap != null &&
     opts.resolutionCap !== "original";
   const showMetadataPolicy = p.source_kind === "image";
@@ -151,6 +154,9 @@ export function ConvertSettingsPanel({
             Choose an available format above.
           </p>
         )}
+      {(videoCapability || explicit) && <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
+        <VideoOptionsPanel file={opts} capability={videoCapability} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onDraftEdit={onDraftEdit}/>
+      </WorkspaceDraftProvider>}
       {(ignoredQuality || ignoredResolution) && (
         <p className="mt-2 text-xs text-warning" role="alert">
           Selected video settings do not apply to this output.

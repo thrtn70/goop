@@ -2,6 +2,7 @@ import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
+  VideoExecutionSummary,
   ConversionCapabilities,
   ConversionInspection,
   CropRect,
@@ -131,6 +132,7 @@ export const api = {
     cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
   },
   convert: {
+    videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
     inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
     capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),

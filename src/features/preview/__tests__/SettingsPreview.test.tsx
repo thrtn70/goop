@@ -94,3 +94,19 @@ it("cancels on descriptor invalidation without accepting the pending result", as
   await act(async()=>resolve(sample(sent)));
   expect(screen.queryByAltText("Output sample")).toBeNull();
 });
+
+it.each([{kind:"copy" as const},{kind:"encode" as const,codec:"hevc" as const,processor:"software" as const,speed:"slow" as const,rate_control:{kind:"constant_quality" as const,crf:31}}])("never requests a legacy sample for explicit video %o", options => {
+  render(<SettingsPreview request={{...request,target:"mp4",video_options:options}} videoSettings={{preview_unavailable_reason:"Engine says explicit samples are unavailable"}}/>);
+  const button=screen.getByRole("button",{name:"Preview sample"});
+  expect(button).toHaveProperty("disabled",true);
+  expect(screen.getByText("Engine says explicit samples are unavailable")).toBeTruthy();
+  fireEvent.click(button); expect(mocks.generate).not.toHaveBeenCalled();
+});
+it("keeps Automatic video samples available even when explicit previews are unavailable", async () => {
+  mocks.generate.mockImplementationOnce(async sent => ({...sent,kind:"video",before_path:null,after_path:"/video.mp4",width:640,height:360,sample_bytes:100,duration_ms:1000}));
+  render(<SettingsPreview request={{...request,input_path:"/source.mp4",target:"mp4",video_options:null}} videoSettings={{preview_unavailable_reason:"Custom unavailable"}}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Preview sample"}));
+  await screen.findByLabelText("Output video sample");
+  expect(mocks.generate).toHaveBeenCalledTimes(1);
+  expect(mocks.generate.mock.calls[0][0].video_options).toBeNull();
+});
