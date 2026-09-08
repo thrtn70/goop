@@ -33,6 +33,15 @@ test('final fallback observation cannot retain stale hardware evidence',async()=
  assert.equal(result.effective_hardware,'unknown');
  assert.equal(result.effective_encoder,null);
 });
+test('over-cap observation tail still classifies the final fallback',async()=>{
+ const observations=Array.from({length:65},(_,percent)=>({encoder:'h264_videotoolbox',percent}));
+ observations.push({encoder:null,percent:0});
+ const retained=observations.slice(-64);
+ const result=await fakeRunner(`const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,encoder_observations:${JSON.stringify(retained)}}));`,{hardwareEnabled:true});
+ assert.equal(retained.length,64);
+ assert.equal(result.effective_hardware,'unknown');
+ assert.equal(result.effective_encoder,null);
+});
 test('effective execution summary proves explicit software and copy',async()=>{
  const software=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{video_execution:{requested:{kind:'encode'},encoder:'libx264'}}}));",{hardwareEnabled:true});
  assert.equal(software.effective_hardware,'software');

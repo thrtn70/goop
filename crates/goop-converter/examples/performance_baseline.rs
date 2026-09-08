@@ -27,7 +27,10 @@ impl EventSink for Sink {
     fn emit_progress(&self, event: ProgressEvent) {
         let mut values = self.encoders.lock().unwrap();
         let value = json!({"percent":event.percent,"stage":event.stage,"encoder":event.encoder});
-        if values.len() < MAX_ENCODER_OBSERVATIONS && values.last() != Some(&value) {
+        if values.last() != Some(&value) {
+            if values.len() == MAX_ENCODER_OBSERVATIONS {
+                values.remove(0);
+            }
             values.push(value);
         }
     }
@@ -187,6 +190,29 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn progress(percent: f32, encoder: Option<&str>) -> ProgressEvent {
+        ProgressEvent {
+            job_id: JobId::new(),
+            percent,
+            eta_secs: None,
+            speed_hr: None,
+            stage: "converting".into(),
+            encoder: encoder.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn bounded_observations_retain_final_software_fallback() {
+        let sink = Sink::default();
+        for percent in 0..=MAX_ENCODER_OBSERVATIONS {
+            sink.emit_progress(progress(percent as f32, Some("h264_videotoolbox")));
+        }
+        sink.emit_progress(progress(0.0, None));
+        let observations = sink.observations();
+        assert!(observations.len() <= MAX_ENCODER_OBSERVATIONS);
+        assert_eq!(observations.last().unwrap()["encoder"], Value::Null);
+    }
+
     #[test]
     fn rejects_meaningful_fields_lost_by_an_older_typed_request() {
         assert!(meaningful_fields_survive(

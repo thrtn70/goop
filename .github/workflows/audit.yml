@@ -321,7 +321,10 @@ jobs:
         run: cargo test -p goop-converter --test video_ffmpeg -- --ignored
       - name: Video controls (real ffmpeg)
         shell: bash
-        run: CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --ignored
+        run: |
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test video_contracts
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --example performance_baseline
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --ignored
       # The PDF surface, against the real mutool / gs / tesseract. Until now
       # nothing ran these: the only `--ignored` jobs were goop-converter's, so
       # every shipped PDF path — compress, OCR, page thumbnails, text and image

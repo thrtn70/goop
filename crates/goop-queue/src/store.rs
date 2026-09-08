@@ -1269,6 +1269,53 @@ mod tests {
     }
 
     #[test]
+    fn legacy_absent_or_null_video_execution_results_survive_reopen() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let job = Job::new(
+                JobKind::Convert,
+                serde_json::json!({
+                    "input_path": "legacy.mp4",
+                    "output_path": "converted.mp4",
+                    "target": "mp4"
+                }),
+            );
+            store.insert(&job).unwrap();
+            let mut legacy_result = serde_json::json!({
+                "output_path": "converted.mp4",
+                "bytes": 4242,
+                "duration_ms": 2000,
+                "result_kind": "file",
+                "file_count": 1
+            });
+            if explicit_null {
+                legacy_result["video_execution"] = serde_json::Value::Null;
+            }
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE jobs SET state = 'done', result = ?2, finished_at = 2000 WHERE id = ?1",
+                    params![job.id.0.to_string(), legacy_result.to_string()],
+                )
+                .unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let restored = QueueStore::open(&path)
+                .unwrap()
+                .get_by_id(job.id)
+                .unwrap()
+                .unwrap();
+            let result = restored.result.unwrap();
+            assert_eq!(result.output_path.as_deref(), Some("converted.mp4"));
+            assert_eq!(result.bytes, Some(4242));
+            assert_eq!(result.duration_ms, 2000);
+            assert_eq!(result.video_execution, None);
+        }
+    }
+
+    #[test]
     fn payload_field_patches_preserve_concurrent_fields_and_reopened_retry() {
         let (store, tmp) = temp_store();
         let mut job = Job::new(JobKind::Extract, serde_json::json!({"url":"original"}));
