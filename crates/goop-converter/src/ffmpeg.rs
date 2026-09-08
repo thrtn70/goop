@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 pub struct FfmpegBackend<'a> {
     resolver: &'a BinaryResolver,
     sink: Arc<dyn EventSink>,
-    /// Detected GPU encoders. Pass via `with_encoders` when HW acceleration
-    /// is allowed at the application level. `None` means software-only.
+    /// Shared software/hardware inventory. Explicit callers without one run
+    /// bounded discovery; desktop callers reuse the startup snapshot.
     encoders: Option<Arc<DetectedEncoders>>,
     /// User's "Use hardware acceleration" toggle. Honoured only when
     /// `encoders` is also set.
@@ -41,6 +41,30 @@ impl<'a> FfmpegBackend<'a> {
             hw_enabled: false,
             pids: None,
         }
+    }
+
+    pub async fn probe_with_cancel(
+        resolver: &BinaryResolver,
+        path: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<ProbeResult, GoopError> {
+        let bin = resolver.resolve("ffprobe")?;
+        let out = crate::bounded_process::output(
+            Command::new(&bin.path)
+                .args([
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                ])
+                .arg(path),
+            "ffprobe",
+            cancel,
+        )
+        .await?;
+        parse_probe_output(out, path)
     }
 
     /// Enable HW encoding consideration. When called, plans for the h.264
@@ -76,19 +100,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             .kill_on_drop(true)
             .output()
             .await?;
-        if !out.status.success() {
-            return Err(GoopError::SubprocessFailed {
-                binary: "ffprobe".into(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            });
-        }
-        let mut probe = parse_probe_json(&out.stdout)?;
-        if probe.file_size == 0 {
-            if let Ok(meta) = std::fs::metadata(path) {
-                probe.file_size = meta.len();
-            }
-        }
-        Ok(probe)
+        parse_probe_output(out, path)
     }
 
     async fn convert(
@@ -100,6 +112,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         if cancel.is_cancelled() {
             return Err(GoopError::Cancelled);
         }
+        goop_core::validate_video_request(req)?;
         let bin = self.resolver.resolve("ffmpeg")?;
         let expanded_input = goop_core::path::expand(&req.input_path);
         let input = match std::fs::canonicalize(&expanded_input) {
@@ -112,12 +125,37 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             }
         };
         let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
-        let probe = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(GoopError::Cancelled),
-            probe = FfmpegBackend::probe(self.resolver, &input) => probe?,
+        let probe = if req.video_options.is_some() {
+            Self::probe_with_cancel(self.resolver, &input, &cancel).await?
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(GoopError::Cancelled),
+                probe = Self::probe(self.resolver, &input) => probe?,
+            }
         };
-        let (mut plan, subtitle_input) = build_plan(req, &probe)?;
+        let (mut plan, subtitle_input, video_execution) = if req.video_options.is_some() {
+            let detected;
+            let encoders = match self.encoders.as_deref() {
+                Some(encoders) => encoders,
+                None => {
+                    detected = crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
+                    &detected
+                }
+            };
+            if cancel.is_cancelled() {
+                return Err(GoopError::Cancelled);
+            }
+            let resolved = crate::video_options::resolve(req, &probe, encoders)?;
+            (
+                resolved.plan,
+                SubtitleInput::default(),
+                Some(resolved.summary),
+            )
+        } else {
+            let (plan, subtitle) = build_plan(req, &probe)?;
+            (plan, subtitle, None)
+        };
 
         let final_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
         let destination = if goop_core::path::expand(&req.output_path).is_dir() {
@@ -139,7 +177,11 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         // Same effective quality the plan was built with, so the GPU
         // encoder's quality args can't drift from the software ones.
         let quality = effective_quality(req.quality_preset, req.subtitle.as_ref().map(|s| s.mode));
-        let hw_encoder = self.maybe_apply_hw(&mut plan, quality);
+        let hw_encoder = if video_execution.is_some() {
+            None
+        } else {
+            self.maybe_apply_hw(&mut plan, quality)
+        };
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
 
@@ -198,9 +240,16 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         };
 
         let reencoded = result?;
+        if let Some(expected) = &video_execution {
+            let actual = Self::probe_with_cancel(self.resolver, &output_path, &cancel).await?;
+            crate::video_options::validate_output(expected, &actual)?;
+            if matches!(expected.requested, goop_core::VideoConvertOptions::Copy) {
+                crate::video_options::validate_copy_facts(&probe, &actual)?;
+            }
+        }
         let published = staged.publish(&destination, target_bytes, false, &cancel)?;
         Ok(ConvertResult {
-            video_execution: None,
+            video_execution,
             source_bytes: Some(source_bytes),
             target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),
@@ -658,6 +707,22 @@ fn append_stderr_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
     if tail.len() > 8192 {
         tail.drain(..tail.len() - 8192);
     }
+}
+
+fn parse_probe_output(out: std::process::Output, path: &Path) -> Result<ProbeResult, GoopError> {
+    if !out.status.success() {
+        return Err(GoopError::SubprocessFailed {
+            binary: "ffprobe".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let mut probe = parse_probe_json(&out.stdout)?;
+    if probe.file_size == 0 {
+        if let Ok(meta) = std::fs::metadata(path) {
+            probe.file_size = meta.len();
+        }
+    }
+    Ok(probe)
 }
 
 #[cfg(test)]

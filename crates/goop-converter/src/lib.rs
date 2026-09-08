@@ -34,3 +34,6 @@ pub use probe_json::parse_probe_json;
 pub use progress::{ProgressSnapshot, ProgressTracker};
 
 pub mod preview;
+
+mod bounded_process;
+pub mod video_options;

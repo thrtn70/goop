@@ -237,7 +237,7 @@ fn reencodes_audio(plan: &Plan) -> bool {
 /// `None` means the target never takes a wide audio map: audio-only, image
 /// and GIF targets hold exactly one audio stream by definition, and
 /// Matroska is handled ahead of this list because it accepts anything.
-fn copyable_audio_codecs(target: TargetFormat) -> Option<&'static [&'static str]> {
+pub(crate) fn copyable_audio_codecs(target: TargetFormat) -> Option<&'static [&'static str]> {
     match target {
         // flac -> fLaC and opus -> Opus are ISOBMFF-registered; both are
         // rejected outright by the MOV muxer, hence the two lists.

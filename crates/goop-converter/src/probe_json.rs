@@ -1,5 +1,6 @@
-use goop_core::{GoopError, ProbeResult};
+use goop_core::{GoopError, ProbeResult, VideoProbeDetails, VideoStreamInfo};
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 struct FfprobeRoot {
@@ -16,6 +17,8 @@ struct FfprobeFormat {
 
 #[derive(Debug, Deserialize)]
 struct FfprobeStream {
+    #[serde(flatten)]
+    facts: std::collections::HashMap<String, Value>,
     codec_type: Option<String>,
     codec_name: Option<String>,
     width: Option<u32>,
@@ -30,6 +33,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         .as_ref()
         .and_then(|f| f.duration.as_deref())
         .and_then(|s| s.parse::<f64>().ok())
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
         .map(|secs| (secs * 1000.0).round() as u64)
         .unwrap_or(0);
 
@@ -80,7 +84,11 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
     };
 
     Ok(ProbeResult {
-        video_details: None,
+        video_details: if has_video {
+            stream_details(&streams)
+        } else {
+            None
+        },
         duration_ms,
         width: video.and_then(|s| s.width),
         height: video.and_then(|s| s.height),
@@ -98,6 +106,115 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         audio_codecs,
         image_has_alpha: None,
     })
+}
+
+fn valid_display_matrix(matrix: &Value, rotation: &Value) -> bool {
+    let Some(text) = matrix.as_str() else {
+        return false;
+    };
+    let rows: Option<Vec<Vec<i64>>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (_, values) = line.split_once(':')?;
+            values.split_whitespace().map(|n| n.parse().ok()).collect()
+        })
+        .collect();
+    let Some(rows) = rows else {
+        return false;
+    };
+    if rows.len() != 3 || rows.iter().any(|r| r.len() != 3) {
+        return false;
+    }
+    let angle = rotation
+        .as_i64()
+        .or_else(|| rotation.as_str().and_then(|s| s.parse().ok()));
+    let (a, b, c, d) = match angle.map(|a| a.rem_euclid(360)) {
+        Some(0) => (65536, 0, 0, 65536),
+        Some(90) => (0, -65536, 65536, 0),
+        Some(180) => (-65536, 0, 0, -65536),
+        Some(270) => (0, 65536, -65536, 0),
+        _ => return false,
+    };
+    rows == vec![vec![a, b, 0], vec![c, d, 0], vec![0, 0, 1073741824]]
+}
+
+// Missing indices/dispositions leave the richer inventory unavailable while
+// preserving legacy first-video routing and basic probe behavior.
+fn stream_details(streams: &[FfprobeStream]) -> Option<VideoProbeDetails> {
+    let mut result = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let facts = &stream.facts;
+        let index = u32::try_from(facts.get("index")?.as_u64()?).ok()?;
+        let attached = facts.get("disposition")?.get("attached_pic")?.as_u64()?;
+        if attached > 1 {
+            return None;
+        }
+        let text = |key: &str| {
+            facts
+                .get(key)
+                .map(|v| v.as_str().unwrap_or("malformed").to_owned())
+        };
+        let mut rotations = Vec::new();
+        let mut ambiguous = false;
+        let mut record = |value: &Value| -> bool {
+            let angle = value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()));
+            match angle.and_then(|n| i32::try_from(n).ok()) {
+                Some(n) if n % 90 == 0 => {
+                    rotations.push(n.rem_euclid(360));
+                    false
+                }
+                _ => true,
+            }
+        };
+        if let Some(tags) = facts.get("tags") {
+            if let Some(rotate) = tags.get("rotate") {
+                ambiguous |= record(rotate);
+            } else if !tags.is_object() {
+                ambiguous = true;
+            }
+        }
+        if let Some(side) = facts.get("side_data_list") {
+            if let Some(items) = side.as_array() {
+                for item in items {
+                    if let Some(rotation) = item.get("rotation") {
+                        ambiguous |= record(rotation);
+                        if let Some(matrix) = item.get("displaymatrix") {
+                            ambiguous |= !valid_display_matrix(matrix, rotation);
+                        }
+                    } else if item.get("side_data_type").and_then(Value::as_str)
+                        == Some("Display Matrix")
+                    {
+                        ambiguous = true;
+                    }
+                }
+            } else {
+                ambiguous = true;
+            }
+        }
+        ambiguous |= rotations.windows(2).any(|pair| pair[0] != pair[1]);
+        result.push(VideoStreamInfo {
+            index,
+            codec_type: stream
+                .codec_type
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+            codec_name: stream.codec_name.clone(),
+            pixel_format: text("pix_fmt"),
+            color_transfer: text("color_transfer"),
+            color_primaries: text("color_primaries"),
+            color_space: text("color_space"),
+            color_range: text("color_range"),
+            field_order: text("field_order"),
+            sample_aspect_ratio: text("sample_aspect_ratio"),
+            rotation_degrees: rotations.first().copied(),
+            rotation_ambiguous: ambiguous,
+            attached_pic: attached == 1,
+        });
+    }
+    Some(VideoProbeDetails { streams: result })
 }
 
 #[cfg(test)]
