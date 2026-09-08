@@ -305,6 +305,21 @@ async fn run_explicit(
         .convert(JobId::new(), req, CancellationToken::new())
         .await
 }
+
+#[tokio::test]
+#[ignore]
+async fn bundled_required_video_encoders_are_available() {
+    let links = tempfile::tempdir().unwrap();
+    let resolver = common::bundled_resolver(links.path());
+    let encoders = goop_converter::detect_encoders(&resolver).await;
+    for encoder in ["libx264", "libx265"] {
+        assert!(
+            encoders.is_available(encoder),
+            "bundled ffmpeg must provide required encoder {encoder}"
+        );
+    }
+}
+
 fn payload(ffmpeg: &Path, path: &Path, codec: &str) -> Vec<u8> {
     let output = Command::new(ffmpeg)
         .args(["-v", "error", "-i"])

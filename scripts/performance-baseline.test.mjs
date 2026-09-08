@@ -17,6 +17,28 @@ test('success requires clean exit and finite nonnegative duration',()=>{
 async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),options);}finally{rmSync(dir,{recursive:true,force:true});}}
 test('timeout escalates for a process ignoring TERM',async()=>{const start=performance.now();const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:30});assert.equal(result.success,false);assert.equal(result.timed_out,true);assert.ok(performance.now()-start<3000);});
 test('contradictory metrics cannot count as success',async()=>{const result=await fakeRunner("require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));process.exitCode=1;");assert.equal(result.success,false);});
+test('hardware intent reaches the driver and effective hardware stays evidence based',async()=>{
+ const result=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,hardware_intent:process.argv[5],encoder_observations:[]}));",{hardwareEnabled:true});
+ assert.equal(result.success,true);
+ assert.equal(result.hardware_intent,'true');
+ assert.equal(result.effective_hardware,'unknown');
+});
+test('an observed hardware encoder is reported as effective hardware',async()=>{
+ const result=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,encoder_observations:[{encoder:'h264_videotoolbox'}]}));",{hardwareEnabled:true});
+ assert.equal(result.effective_hardware,'hardware');
+ assert.equal(result.effective_encoder,'h264_videotoolbox');
+});
+test('final fallback observation cannot retain stale hardware evidence',async()=>{
+ const result=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,encoder_observations:[{encoder:'h264_videotoolbox'},{encoder:null}]}));",{hardwareEnabled:true});
+ assert.equal(result.effective_hardware,'unknown');
+ assert.equal(result.effective_encoder,null);
+});
+test('effective execution summary proves explicit software and copy',async()=>{
+ const software=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{video_execution:{requested:{kind:'encode'},encoder:'libx264'}}}));",{hardwareEnabled:true});
+ assert.equal(software.effective_hardware,'software');
+ const copy=await fakeRunner("const fs=require('node:fs');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{video_execution:{requested:{kind:'copy'},encoder:null}}}));",{hardwareEnabled:true});
+ assert.equal(copy.effective_hardware,'copy');
+});
 test('storage budget stops oversized output and logs are bounded',async()=>{const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,Buffer.alloc(10000));process.stderr.write('x'.repeat(10000));setInterval(()=>{},10)",{budgetBytes:4096,logLimitBytes:100,killGraceMs:30});assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);assert.ok(result.log_bytes_retained<=200);});
 test('directory byte count includes only files in suite',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{writeFileSync(join(dir,'one'),'1234');assert.equal(directoryBytes(dir),4);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('child lifetime excludes subsequent output verification',async()=>{
