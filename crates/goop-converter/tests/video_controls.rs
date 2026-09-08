@@ -124,7 +124,7 @@ fn complete_inventory_required() {
 #[test]
 fn rotation_and_caps() {
     let mut v = source_json();
-    v["streams"][0]["side_data_list"] = json!([{"side_data_type":"Display Matrix","rotation":90}]);
+    v["streams"][0]["side_data_list"] = json!([{"side_data_type":"Display Matrix","rotation":90,"displaymatrix": "00000000: 0 -65536 0\n00000001: 65536 0 0\n00000002: 0 0 1073741824"}]);
     let mut req = request();
     req.resolution_cap = Some(ResolutionCap::R720p);
     let p = resolve(&req, &probe(v.clone()), &inventory()).unwrap();
@@ -136,6 +136,68 @@ fn rotation_and_caps() {
         v["streams"][0]["side_data_list"] =
             json!([{"side_data_type":"Display Matrix","rotation":angle}]);
         assert!(resolve(&req, &probe(v), &inventory()).is_err());
+    }
+}
+#[test]
+fn incomplete_display_matrix_disables_both_modes_but_rotate_tag_remains_supported() {
+    for side in [
+        json!({"side_data_type":"Display Matrix","rotation":90}),
+        json!({"side_data_type":"Display Matrix","displaymatrix":"00000000: 0 -65536 0\n00000001: 65536 0 0\n00000002: 0 0 1073741824"}),
+    ] {
+        let mut v = source_json();
+        v["streams"][0]["side_data_list"] = json!([side]);
+        // A standalone tag cannot repair incomplete declared matrix facts.
+        v["streams"][0]["tags"] = json!({"rotate":"90"});
+        let source = probe(v);
+        let caps = capabilities(&source, TargetFormat::Mp4, &inventory());
+        assert!(!caps.encode.available);
+        assert!(!caps.copy.available);
+        let mut req = request();
+        assert!(resolve(&req, &source, &inventory()).is_err());
+        req.video_options = Some(VideoConvertOptions::Copy);
+        assert!(resolve(&req, &source, &inventory()).is_err());
+    }
+    let mut v = source_json();
+    v["streams"][0]["tags"] = json!({"rotate":"90"});
+    assert_eq!(
+        resolve(&request(), &probe(v), &inventory())
+            .unwrap()
+            .summary
+            .width,
+        1080
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn incomplete_display_matrix_rejected_before_staging() {
+    for side in [
+        json!({"side_data_type":"Display Matrix","rotation":90}),
+        json!({"side_data_type":"Display Matrix","displaymatrix":"00000000: 0 -65536 0\n00000001: 65536 0 0\n00000002: 0 0 1073741824"}),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp4");
+        std::fs::write(&input, b"input").unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let mut source = source_json();
+        source["streams"][0]["side_data_list"] = json!([side]);
+        executable(&bin.join("ffprobe"), &format!("printf '%s' '{}'", source));
+        executable(&bin.join("ffmpeg"), "exit 99");
+        let r = goop_sidecar::BinaryResolver::new(bin);
+        for options in [request().video_options.unwrap(), VideoConvertOptions::Copy] {
+            let mut req = request();
+            req.input_path = input.to_string_lossy().into_owned();
+            req.output_path = tmp
+                .path()
+                .join("absent-parent/output.mp4")
+                .to_string_lossy()
+                .into_owned();
+            req.video_options = Some(options);
+            let error = run_explicit(&r, &req, &inventory()).await.unwrap_err();
+            assert!(error.user_message().contains("rotation"), "{error:?}");
+            assert!(!tmp.path().join("absent-parent").exists());
+        }
     }
 }
 #[test]
@@ -269,7 +331,7 @@ fn payload(ffmpeg: &Path, path: &Path, codec: &str) -> Vec<u8> {
 }
 #[tokio::test]
 #[ignore]
-async fn real_explicit_codec_rate_speed_copy_and_audio() {
+async fn real_explicit_speed_copy_and_audio() {
     let tmp = tempfile::tempdir().unwrap();
     let links = tempfile::tempdir().unwrap();
     let r = common::bundled_resolver(links.path());
@@ -288,22 +350,9 @@ async fn real_explicit_codec_rate_speed_copy_and_audio() {
             println!("UNAVAILABLE {name}");
             continue;
         }
-        for (n, (speed, rate)) in [
-            (
-                VideoSpeed::Fast,
-                VideoRateControl::ConstantQuality { crf: 18 },
-            ),
-            (
-                VideoSpeed::Medium,
-                VideoRateControl::ConstantQuality { crf: 35 },
-            ),
-            (
-                VideoSpeed::Slow,
-                VideoRateControl::AverageBitrate { kbps: 500 },
-            ),
-        ]
-        .into_iter()
-        .enumerate()
+        for (n, speed) in [VideoSpeed::Fast, VideoSpeed::Medium, VideoSpeed::Slow]
+            .into_iter()
+            .enumerate()
         {
             let mut req = request();
             req.input_path = source.to_string_lossy().into_owned();
@@ -314,7 +363,7 @@ async fn real_explicit_codec_rate_speed_copy_and_audio() {
                 .into_owned();
             req.video_options = Some(VideoConvertOptions::Encode {
                 codec,
-                rate_control: rate,
+                rate_control: VideoRateControl::ConstantQuality { crf: 23 },
                 speed,
                 processor: VideoProcessor::Software,
             });
@@ -377,14 +426,122 @@ async fn real_explicit_codec_rate_speed_copy_and_audio() {
                 }
             }
         }
-        assert_ne!(
-            outputs[outputs.len() - 3],
-            outputs[outputs.len() - 2],
-            "CRF pair must change output bytes"
-        );
     }
     assert!(
         !outputs.is_empty(),
+        "at least one bundled software encoder must be tested"
+    );
+}
+// Compare decoded samples against the same decoded input, without audio or
+// container overhead. These fixtures have identical geometry and frame cadence.
+fn decoded_video(ffmpeg: &Path, path: &Path) -> Vec<u8> {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-map", "0:v:0", "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    output.stdout
+}
+fn mean_squared_error(reference: &[u8], actual: &[u8]) -> f64 {
+    assert_eq!(reference.len(), actual.len());
+    reference
+        .iter()
+        .zip(actual)
+        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+        .sum::<f64>()
+        / reference.len() as f64
+}
+#[tokio::test]
+#[ignore]
+async fn real_explicit_rate_pairs_hold_other_settings_fixed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let r = common::bundled_resolver(links.path());
+    let ffmpeg = common::ffmpeg_path(&r);
+    let enc = goop_converter::detect_encoders(&r).await;
+    let source = tmp.path().join("rate-source.mkv");
+    make_explicit_source(&ffmpeg, &source, "libx264", "aac", 640, 360);
+    let reference = decoded_video(&ffmpeg, &source);
+    let mut tested = 0;
+    for (codec, encoder, stream_codec) in [
+        (VideoCodec::H264, "libx264", "h264"),
+        (VideoCodec::Hevc, "libx265", "hevc"),
+    ] {
+        if !enc.is_available(encoder) {
+            println!("UNAVAILABLE {encoder} rate pairs");
+            continue;
+        }
+        tested += 1;
+        for (mode, rates) in [
+            (
+                "crf",
+                [
+                    VideoRateControl::ConstantQuality { crf: 38 },
+                    VideoRateControl::ConstantQuality { crf: 16 },
+                ],
+            ),
+            (
+                "bitrate",
+                [
+                    VideoRateControl::AverageBitrate { kbps: 100 },
+                    VideoRateControl::AverageBitrate { kbps: 2000 },
+                ],
+            ),
+        ] {
+            let mut measurements = Vec::new();
+            for (index, rate) in rates.into_iter().enumerate() {
+                let mut req = request();
+                req.input_path = source.to_string_lossy().into_owned();
+                req.output_path = tmp
+                    .path()
+                    .join(format!("{encoder}-{mode}-{index}.mp4"))
+                    .to_string_lossy()
+                    .into_owned();
+                req.video_options = Some(VideoConvertOptions::Encode {
+                    codec,
+                    rate_control: rate,
+                    speed: VideoSpeed::Medium,
+                    processor: VideoProcessor::Software,
+                });
+                let result = run_explicit(&r, &req, &enc).await.unwrap();
+                let path = Path::new(&result.output_path);
+                let facts = FfmpegBackend::probe(&r, path).await.unwrap();
+                assert_eq!(facts.video_codec.as_deref(), Some(stream_codec));
+                assert_eq!((facts.width, facts.height), (Some(640), Some(360)));
+                let summary = result.video_execution.unwrap();
+                assert_eq!(summary.encoder.as_deref(), Some(encoder));
+                assert_eq!(summary.audio_codec.as_deref(), Some("aac"));
+                assert!(summary.audio_copied);
+                let bytes = payload(&ffmpeg, path, stream_codec).len();
+                let mse = mean_squared_error(&reference, &decoded_video(&ffmpeg, path));
+                println!("RATE {encoder} {mode} {index}: elementary_bytes={bytes} mse={mse:.4}");
+                measurements.push((bytes, mse));
+            }
+            let (low_bytes, low_fidelity_mse) = measurements[0];
+            let (high_bytes, high_fidelity_mse) = measurements[1];
+            // Wide rate separation on moving testsrc2 gives ample margin across
+            // encoder versions; no exact short-clip bitrate/size is promised.
+            assert!(
+                high_bytes as f64 > low_bytes as f64 * 1.5,
+                "{encoder} {mode}: {measurements:?}"
+            );
+            assert!(
+                low_fidelity_mse > high_fidelity_mse * 1.5,
+                "{encoder} {mode}: {measurements:?}"
+            );
+        }
+    }
+    assert!(
+        tested > 0,
         "at least one bundled software encoder must be tested"
     );
 }

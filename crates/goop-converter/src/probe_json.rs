@@ -183,6 +183,10 @@ fn stream_details(streams: &[FfprobeStream]) -> Option<VideoProbeDetails> {
                         ambiguous |= record(rotation);
                         if let Some(matrix) = item.get("displaymatrix") {
                             ambiguous |= !valid_display_matrix(matrix, rotation);
+                        } else if item.get("side_data_type").and_then(Value::as_str)
+                            == Some("Display Matrix")
+                        {
+                            ambiguous = true;
                         }
                     } else if item.get("side_data_type").and_then(Value::as_str)
                         == Some("Display Matrix")
