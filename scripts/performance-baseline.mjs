@@ -18,12 +18,19 @@ export function normalizeSuccess(metrics, code, timedOut) {
 export function directoryBytes(directory) {
  return readdirSync(directory,{withFileTypes:true}).reduce((sum,entry)=>sum+(entry.isDirectory()?directoryBytes(join(directory,entry.name)):statSync(join(directory,entry.name)).size),0);
 }
+export function effectiveHardware(metrics,hardwareEnabled) {
+ const summary=metrics.result?.video_execution;
+ if(summary?.requested?.kind==='copy')return {effective_encoder:null,effective_hardware:'copy'};
+ const effectiveEncoder=summary?.encoder??null;
+ if(effectiveEncoder)return {effective_encoder:effectiveEncoder,effective_hardware:/(videotoolbox|nvenc|_qsv|_amf)$/.test(effectiveEncoder)?'hardware':'software'};
+ return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
+}
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024}=options;
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false}=options;
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
  writeFileSync(`${stem}.request.json`,JSON.stringify(request,null,2));
- const child=spawn('/usr/bin/time',['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`],{stdio:['ignore','pipe','pipe'],detached:true});
+ const child=spawn('/usr/bin/time',['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)],{stdio:['ignore','pipe','pipe'],detached:true});
  let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),rssKiB=0,children=0,timedOut=false,budgetExceeded=false,killTimer;
  const retain=(current,chunk)=>Buffer.concat([current,chunk.subarray(0,Math.max(0,logLimitBytes-current.length))]);
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
@@ -59,7 +66,8 @@ export async function run(binary,sidecars,request,stem,options={}) {
    if(outputBytes!==Number(metrics.result?.bytes)||verification.target_met===false)metrics.success=false;
   } catch(error) {metrics.success=false;verification={checked:true,error:error.message};}
  }
- const sample={...metrics,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded),exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,log_bytes_retained:stdout.length+stderr.length,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:Number(stderr.toString().match(/(\d+)\s+maximum resident set size/)?.[1]??0)};
+ const effective=effectiveHardware(metrics,hardwareEnabled);
+ const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded),exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,log_bytes_retained:stdout.length+stderr.length,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:Number(stderr.toString().match(/(\d+)\s+maximum resident set size/)?.[1]??0)};
  writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
  // The request output is created uniquely inside this suite. Preserve measurements
  // before dropping only that owned media when it caused the storage limit.

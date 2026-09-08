@@ -7,5 +7,6 @@ import type { QualityPreset } from "./QualityPreset";
 import type { ResolutionCap } from "./ResolutionCap";
 import type { SubtitleOptions } from "./SubtitleOptions";
 import type { TargetFormat } from "./TargetFormat";
+import type { VideoConvertOptions } from "./VideoConvertOptions";
 
-export type PreviewRequest = { request_id: string, input_path: string, source_revision: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy: MetadataPolicy | null, subtitle: SubtitleOptions | null, gif_options: GifOptions | null, image_options?: ImageConvertOptions | null, };
+export type PreviewRequest = { video_options?: VideoConvertOptions | null, request_id: string, input_path: string, source_revision: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy: MetadataPolicy | null, subtitle: SubtitleOptions | null, gif_options: GifOptions | null, image_options?: ImageConvertOptions | null, };

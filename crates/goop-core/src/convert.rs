@@ -257,6 +257,9 @@ pub struct ImageConvertOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertRequest {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_options: Option<crate::video::VideoConvertOptions>,
     pub input_path: String,
     pub output_path: String,
     pub target: TargetFormat,
@@ -283,6 +286,9 @@ pub struct ConvertRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ProbeResult {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_details: Option<crate::video::VideoProbeDetails>,
     pub duration_ms: u64,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -323,6 +329,9 @@ pub struct ProbeResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertResult {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_execution: Option<crate::video::VideoExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,

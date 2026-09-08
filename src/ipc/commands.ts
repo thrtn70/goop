@@ -1,6 +1,8 @@
+import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
+  VideoExecutionSummary,
   ConversionCapabilities,
   ConversionInspection,
   CropRect,
@@ -98,6 +100,7 @@ export type IpcPreset = Omit<Preset, "created_at" | "compress_mode" | "gif_optio
 function presetToIpc(p: Preset): IpcPreset {
   return {
     ...p,
+    video_options: cloneVideoOptions(p.video_options),
     created_at: Number(p.created_at),
     gif_options: gifToIpc(p.gif_options),
     compress_mode:
@@ -122,17 +125,19 @@ export const api = {
   preview: {
     generate: (request: PreviewRequest) => invoke<PreviewResult>("generate_preview", {request: {
       ...request,
+      video_options: cloneVideoOptions(request.video_options),
       gif_options: gifToIpc(request.gif_options),
       compress_mode: request.compress_mode?.kind === "target_size_bytes" ? {kind:"target_size_bytes",value:Number(request.compress_mode.value)} : request.compress_mode,
     }}),
     cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
   },
   convert: {
+    videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
     inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
     capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
     fromFile: (req: IpcConvertRequest) =>
-      invoke<JobId>("convert_from_file", { req: { ...req, gif_options: gifToIpc(req.gif_options) } }),
+      invoke<JobId>("convert_from_file", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
   },
   extract: {
     probe: (url: string) => invoke<UrlProbe>("extract_probe", { url }),
@@ -180,6 +185,7 @@ export const api = {
     openLogsFolder: () => invoke<void>("open_logs_folder"),
   },
   preset: {
+    import: (presets: Preset[]) => invoke<Preset[]>("preset_import", {presets: presets.map(presetToIpc)}),
     list: () => invoke<Preset[]>("preset_list"),
     save: (preset: Preset) =>
       invoke<Preset>("preset_save", { preset: presetToIpc(preset) }),

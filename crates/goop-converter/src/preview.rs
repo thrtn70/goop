@@ -121,6 +121,9 @@ impl PreviewService {
         resolver: &BinaryResolver,
         request: PreviewRequest,
     ) -> Result<PreviewResult, GoopError> {
+        if request.video_options.is_some() {
+            return Err(invalid(crate::video_options::PREVIEW_REASON));
+        }
         if request.request_id.is_empty() || request.request_id.len() > 200 {
             return Err(invalid("Invalid preview request identity"));
         }

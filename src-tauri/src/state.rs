@@ -27,10 +27,10 @@ pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
     pub settings_path: PathBuf,
     pub thumbs: ThumbnailService,
-    /// HW encoders the bundled ffmpeg supports. Detected once at startup.
+    /// Software and HW encoders the bundled ffmpeg supports. Detected once at startup.
     pub encoders: Arc<DetectedEncoders>,
-    /// Live "use HW acceleration" toggle. Workers read this each convert
-    /// so toggling the setting takes effect without restarting jobs.
+    /// Live hardware preference for legacy conversions. Explicit video jobs
+    /// use their persisted processor policy without reading this toggle.
     pub hw_enabled: Arc<AtomicBool>,
     /// Writable user dir for downloaded Tesseract language packs.
     /// Located under the OS-specific app-data dir; first dir searched

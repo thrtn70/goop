@@ -1,8 +1,8 @@
-//! Hardware-accelerated encoder detection and selection.
+//! Software and hardware encoder detection and hardware preference selection.
 //!
 //! `ffmpeg -encoders` lists every codec compiled into the bundled binary.
 //! At app startup we shell out once, parse the names, and remember which
-//! GPU encoders are available. The conversion path can then swap a software
+//! hardware and explicit software encoders are available. The conversion path can then swap a software
 //! encoder (e.g. `libx264`) for the platform's preferred HW alternative
 //! when the user opts in.
 //!
@@ -40,7 +40,7 @@ const H264_PREFERENCE: &[&str] = &[
     "h264_amf",          // AMD
 ];
 
-/// Snapshot of HW encoder availability at the time of detection. Cheap to
+/// Snapshot of recognized software and hardware encoders at detection. Cheap to
 /// clone; safe to share across worker tasks.
 #[derive(Debug, Clone, Default)]
 pub struct DetectedEncoders {
@@ -79,7 +79,10 @@ impl DetectedEncoders {
 
     /// Number of recognised HW encoders found. Useful for telemetry / logs.
     pub fn count(&self) -> usize {
-        self.available.len()
+        self.available
+            .iter()
+            .filter(|name| is_hw_encoder(name))
+            .count()
     }
 }
 
@@ -88,15 +91,27 @@ pub fn is_hw_encoder(name: &str) -> bool {
     KNOWN_HW_ENCODERS.contains(&name)
 }
 
-/// Detect which HW encoders the bundled ffmpeg supports. Runs `ffmpeg -encoders`
+/// Detect the software and HW encoders the bundled ffmpeg supports. Runs `ffmpeg -encoders`
 /// once. On any error (binary missing, parse failure, timeout) returns an
 /// empty set so the caller falls back transparently to software encoding.
 pub async fn detect(resolver: &BinaryResolver) -> DetectedEncoders {
+    detect_with_cancel(resolver, &tokio_util::sync::CancellationToken::new()).await
+}
+pub(crate) async fn detect_with_cancel(
+    resolver: &BinaryResolver,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> DetectedEncoders {
     let bin = match resolver.resolve("ffmpeg") {
         Ok(b) => b,
         Err(_) => return DetectedEncoders::empty(),
     };
-    let out = match Command::new(&bin.path).arg("-encoders").output().await {
+    let out = match crate::bounded_process::output(
+        Command::new(&bin.path).args(["-hide_banner", "-encoders"]),
+        "ffmpeg",
+        cancel,
+    )
+    .await
+    {
         Ok(o) => o,
         Err(_) => return DetectedEncoders::empty(),
     };
@@ -108,7 +123,7 @@ pub async fn detect(resolver: &BinaryResolver) -> DetectedEncoders {
 }
 
 /// Parse the stdout of `ffmpeg -encoders` and pluck out the names matching
-/// `KNOWN_HW_ENCODERS`.
+/// the recognized hardware or explicit software encoder names.
 ///
 /// Each encoder line in ffmpeg's output looks like:
 /// ` V....D h264_videotoolbox    VideoToolbox H.264 Encoder`
@@ -130,12 +145,20 @@ pub fn parse_encoders(stdout: &str) -> DetectedEncoders {
         }
         // Split into [flags, name, ...description].
         let mut parts = trimmed.split_whitespace();
-        let _flags = parts.next();
+        let flags = parts.next().unwrap_or("");
+        if flags.len() != 6
+            || !flags
+                .bytes()
+                .skip(1)
+                .all(|c| matches!(c, b'.' | b'F' | b'S' | b'X' | b'B' | b'D'))
+        {
+            continue;
+        }
         let name = match parts.next() {
             Some(n) => n,
             None => continue,
         };
-        if KNOWN_HW_ENCODERS.contains(&name) {
+        if KNOWN_HW_ENCODERS.contains(&name) || ["libx264", "libx265", "aac"].contains(&name) {
             found.insert(name.to_string());
         }
     }
@@ -186,9 +209,9 @@ Encoders:
     }
 
     #[test]
-    fn ignores_software_encoders() {
+    fn software_inventory_preserves_hardware_count() {
         let det = parse_encoders("V..... libx264 libx264 H.264 / AVC encoder");
-        assert!(!det.is_available("libx264"));
+        assert!(det.is_available("libx264"));
         assert_eq!(det.count(), 0);
         assert_eq!(det.preferred_h264(), None);
     }

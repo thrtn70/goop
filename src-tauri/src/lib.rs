@@ -355,6 +355,7 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
                         reencoded: None,
@@ -384,7 +385,7 @@ pub fn run() {
                 let r = r_for_convert.clone();
                 let s = sink_for_convert.clone();
                 let enc = encoders_for_convert.clone();
-                let hw = hw_enabled_for_convert.load(Ordering::Relaxed);
+                let hw_preference = hw_enabled_for_convert.clone();
                 let pids = pids_for_convert.clone();
                 Box::pin(async move {
                     // Conversions pause via the PID registry (SIGSTOP on the
@@ -392,7 +393,13 @@ pub fn run() {
                     let cancel = signals.cancel;
                     let req: ConvertRequest = serde_json::from_value(payload)
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
-                    goop_converter::capabilities::validate_request_source(&r, &req).await?;
+                    let hw = if req.video_options.is_some() { false } else { hw_preference.load(Ordering::Relaxed) };
+                    // Explicit requests are freshly admitted by the FFmpeg worker
+                    // before staging; legacy source routing retains its validation.
+                    if req.video_options.is_none() {
+                        goop_converter::capabilities::validate_request_source(&r, &req).await?;
+                    }
+                    goop_core::validate_video_request(&req)?;
                     let res = if req.target.is_image() {
                         // ImageMagick runs in-process — no child PID, no
                         // pause/resume support (out of scope for Phase G).
@@ -405,6 +412,7 @@ pub fn run() {
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
+                        video_execution: res.video_execution,
                         source_bytes: res.source_bytes,
                         target_bytes: res.target_bytes,
                         reencoded: Some(res.reencoded),
@@ -498,6 +506,7 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
                         reencoded: None,
@@ -609,6 +618,7 @@ pub fn run() {
             commands::convert::convert_probe,
             commands::convert::convert_capabilities,
             commands::convert::convert_inspect,
+            commands::convert::convert_video_plan,
             commands::convert::convert_from_file,
             commands::extract::extract_probe,
             commands::extract::extract_from_url,
@@ -641,6 +651,7 @@ pub fn run() {
             commands::settings::open_logs_folder,
             commands::preset::preset_list,
             commands::preset::preset_save,
+            commands::preset::preset_import,
             commands::preset::preset_delete,
             commands::update::check_for_update,
             commands::update::download_update,

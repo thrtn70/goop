@@ -27,6 +27,13 @@ pub fn compression_for(target: TargetFormat) -> CompressionCapabilities {
 }
 
 pub fn capabilities_for(probe: &ProbeResult) -> ConversionCapabilities {
+    capabilities_for_with_encoders(probe, None)
+}
+
+pub fn capabilities_for_with_encoders(
+    probe: &ProbeResult,
+    encoders: Option<&crate::DetectedEncoders>,
+) -> ConversionCapabilities {
     use TargetFormat::*;
     let mut targets = vec![];
     match probe.source_kind {
@@ -103,6 +110,14 @@ pub fn capabilities_for(probe: &ProbeResult) -> ConversionCapabilities {
                 Some("The first subtitle stream is bitmap-based or unknown. Text extraction requires a supported text subtitle stream; bitmap subtitles need OCR.".into())
             } else { None };
             TargetCapability {
+                video_settings: if probe.source_kind == SourceKind::Video && matches!(target, Mp4 | Mov | Mkv) {
+                    let empty = crate::DetectedEncoders::empty();
+                    let mut settings = crate::video_options::capabilities(probe, target, encoders.unwrap_or(&empty));
+                    if encoders.is_none() {
+                        settings.copy = goop_core::VideoModeAvailability { available: false, reason: Some("Explicit video settings require an encoder inventory and fresh inspection".into()) };
+                    }
+                    Some(settings)
+                } else { None },
                 compression: Some(compression_for(target)),
                 image_settings: image_settings_for(probe, target),
                 target,
@@ -202,6 +217,7 @@ fn refused(reason: impl Into<String>) -> GoopError {
 
 /// The probe must be obtained from the engine's source read, never from client input.
 pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(), GoopError> {
+    goop_core::validate_video_request(req)?;
     // Compression uses a separate plan that cannot apply these video settings.
     let video_settings_supported =
         probe.source_kind == SourceKind::Video && req.compress_mode.is_none();
@@ -303,6 +319,11 @@ pub async fn validate_request_source(
     resolver: &BinaryResolver,
     req: &ConvertRequest,
 ) -> Result<(), GoopError> {
+    if req.video_options.is_some() {
+        return Err(GoopError::InvalidRequest(
+            "Explicit video admission requires an encoder inventory".into(),
+        ));
+    }
     let path = goop_core::path::expand(&req.input_path);
     let probe = if req.image_options.is_some() {
         let extension = path
@@ -332,6 +353,53 @@ pub async fn inspect_source(
 ) -> Result<goop_core::ConversionInspection, GoopError> {
     let probe = probe_source(resolver, path).await?;
     let capabilities = capabilities_for(&probe);
+    Ok(goop_core::ConversionInspection {
+        probe,
+        capabilities,
+    })
+}
+
+/// Fresh admission for explicit video controls, shared by planning and enqueue.
+pub async fn resolve_video_request_source(
+    resolver: &BinaryResolver,
+    req: &ConvertRequest,
+    encoders: &crate::DetectedEncoders,
+) -> Result<goop_core::VideoExecutionSummary, GoopError> {
+    goop_core::validate_video_request(req)?;
+    let path = goop_core::path::expand(&req.input_path);
+    let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+    if backend_for_extension(extension) != BackendKind::Ffmpeg {
+        return Err(GoopError::InvalidRequest(
+            "Explicit video settings require a source routed to the video converter".into(),
+        ));
+    }
+    let probe = FfmpegBackend::probe_with_cancel(
+        resolver,
+        &path,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    Ok(crate::video_options::resolve(req, &probe, encoders)?.summary)
+}
+pub async fn validate_request_source_with_encoders(
+    resolver: &BinaryResolver,
+    req: &ConvertRequest,
+    encoders: &crate::DetectedEncoders,
+) -> Result<(), GoopError> {
+    if req.video_options.is_some() {
+        resolve_video_request_source(resolver, req, encoders).await?;
+        Ok(())
+    } else {
+        validate_request_source(resolver, req).await
+    }
+}
+pub async fn inspect_source_with_encoders(
+    resolver: &BinaryResolver,
+    path: &Path,
+    encoders: &crate::DetectedEncoders,
+) -> Result<goop_core::ConversionInspection, GoopError> {
+    let probe = probe_source(resolver, path).await?;
+    let capabilities = capabilities_for_with_encoders(&probe, Some(encoders));
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,

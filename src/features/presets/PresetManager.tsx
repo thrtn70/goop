@@ -81,11 +81,7 @@ export default function PresetManager() {
         return;
       }
       const fresh = entriesToPresets(entries, presets);
-      // Save sequentially so the backend's `created_at` ordering is
-      // deterministic and any one failure short-circuits the rest.
-      for (const p of fresh) {
-        await api.preset.save(p);
-      }
+      await api.preset.import(fresh);
       await loadPresets();
       enqueueToast({
         variant: "success",

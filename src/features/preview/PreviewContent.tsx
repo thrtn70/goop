@@ -122,7 +122,7 @@ export default function PreviewContent({
         </div>
       )}
 
-      {outputSummary(job.result) && <p className="text-xs text-fg-secondary" role="status">{outputSummary(job.result)}</p>}
+      {outputSummary(job.result, job) && <p className="text-xs text-fg-secondary" role="status">{outputSummary(job.result, job)}</p>}
       <div
         className={
           variant === "modal"

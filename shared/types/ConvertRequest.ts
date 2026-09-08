@@ -7,8 +7,9 @@ import type { QualityPreset } from "./QualityPreset";
 import type { ResolutionCap } from "./ResolutionCap";
 import type { SubtitleOptions } from "./SubtitleOptions";
 import type { TargetFormat } from "./TargetFormat";
+import type { VideoConvertOptions } from "./VideoConvertOptions";
 
-export type ConvertRequest = { input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
+export type ConvertRequest = { video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
 /**
  * EXIF + ICC handling. `None` is treated as `Preserve` so older
  * callers / presets don't need to migrate; an explicit

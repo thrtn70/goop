@@ -1150,6 +1150,172 @@ mod tests {
     }
 
     #[test]
+    fn convert_video_options_and_effective_result_survive_reopen_and_retry() {
+        let (store, tmp) = temp_store();
+        let payload = serde_json::json!({
+            "input_path": "source.mp4",
+            "output_path": "converted.mp4",
+            "target": "mp4",
+            "quality_preset": null,
+            "resolution_cap": "r1080p",
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": "batch-video",
+            "metadata_policy": "preserve",
+            "subtitle": null,
+            "image_options": null,
+            "video_options": {
+                "kind": "encode",
+                "codec": "hevc",
+                "rate_control": {"kind": "average_bitrate", "kbps": 5000},
+                "speed": "slow",
+                "processor": "software"
+            }
+        });
+        let mut job = Job::new(JobKind::Convert, payload.clone());
+        job.state = JobState::Running;
+        store.insert(&job).unwrap();
+        let result: goop_core::JobResult = serde_json::from_value(serde_json::json!({
+            "output_path": "converted.mp4",
+            "bytes": 4242,
+            "duration_ms": 2000,
+            "result_kind": "file",
+            "file_count": 1,
+            "video_execution": {
+                "requested": {
+                    "kind": "encode",
+                    "codec": "hevc",
+                    "rate_control": {"kind": "average_bitrate", "kbps": 5000},
+                    "speed": "slow",
+                    "processor": "software"
+                },
+                "encoder": "libx265",
+                "video_codec": "hevc",
+                "video_stream_index": 0,
+                "audio_stream_index": 1,
+                "audio_codec": "aac",
+                "audio_copied": true,
+                "width": 1920,
+                "height": 1080,
+                "notices": []
+            }
+        }))
+        .unwrap();
+        store
+            .update_state(job.id, &JobState::Done, Some(&result), 1)
+            .unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let reopened = QueueStore::open(&path).unwrap();
+        let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(restored.payload, payload);
+        assert_eq!(restored.result, Some(result));
+
+        reopened
+            .update_state(
+                job.id,
+                &JobState::Error {
+                    message: "retryable".into(),
+                    detail: None,
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        assert_eq!(reopened.retry_errored(job.id).unwrap(), 1);
+        let retry = reopened.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.payload, payload);
+        let request: goop_core::ConvertRequest = serde_json::from_value(retry.payload).unwrap();
+        assert!(request.video_options.is_some());
+    }
+
+    #[test]
+    fn legacy_null_video_options_and_result_survive_reopen_and_retry() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let mut payload = serde_json::json!({
+                "input_path": "legacy.mp4",
+                "output_path": "converted.mp4",
+                "target": "mp4",
+                "quality_preset": "balanced"
+            });
+            if explicit_null {
+                payload["video_options"] = serde_json::Value::Null;
+            }
+            let mut job = Job::new(JobKind::Convert, payload.clone());
+            job.state = JobState::Running;
+            store.insert(&job).unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let reopened = QueueStore::open(&path).unwrap();
+            let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+            assert_eq!(restored.payload, payload);
+            let request: goop_core::ConvertRequest =
+                serde_json::from_value(restored.payload).unwrap();
+            assert_eq!(request.video_options, None);
+            reopened.reconcile().unwrap();
+            assert_eq!(reopened.retry_errored(job.id).unwrap(), 1);
+            assert_eq!(
+                reopened
+                    .next_queued(&JobKind::Convert, 0)
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_absent_or_null_video_execution_results_survive_reopen() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let job = Job::new(
+                JobKind::Convert,
+                serde_json::json!({
+                    "input_path": "legacy.mp4",
+                    "output_path": "converted.mp4",
+                    "target": "mp4"
+                }),
+            );
+            store.insert(&job).unwrap();
+            let mut legacy_result = serde_json::json!({
+                "output_path": "converted.mp4",
+                "bytes": 4242,
+                "duration_ms": 2000,
+                "result_kind": "file",
+                "file_count": 1
+            });
+            if explicit_null {
+                legacy_result["video_execution"] = serde_json::Value::Null;
+            }
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE jobs SET state = 'done', result = ?2, finished_at = 2000 WHERE id = ?1",
+                    params![job.id.0.to_string(), legacy_result.to_string()],
+                )
+                .unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let restored = QueueStore::open(&path)
+                .unwrap()
+                .get_by_id(job.id)
+                .unwrap()
+                .unwrap();
+            let result = restored.result.unwrap();
+            assert_eq!(result.output_path.as_deref(), Some("converted.mp4"));
+            assert_eq!(result.bytes, Some(4242));
+            assert_eq!(result.duration_ms, 2000);
+            assert_eq!(result.video_execution, None);
+        }
+    }
+
+    #[test]
     fn payload_field_patches_preserve_concurrent_fields_and_reopened_retry() {
         let (store, tmp) = temp_store();
         let mut job = Job::new(JobKind::Extract, serde_json::json!({"url":"original"}));
@@ -1659,6 +1825,7 @@ mod tests {
         j.state = JobState::Done;
         j.finished_at = Some(j.created_at + 1000);
         j.result = Some(JobResult {
+            video_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,

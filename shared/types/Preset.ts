@@ -7,6 +7,7 @@ import type { QualityPreset } from "./QualityPreset";
 import type { ResolutionCap } from "./ResolutionCap";
 import type { SubtitleOptions } from "./SubtitleOptions";
 import type { TargetFormat } from "./TargetFormat";
+import type { VideoConvertOptions } from "./VideoConvertOptions";
 
 /**
  * A saved combination of target format + quality / resolution / compression
@@ -17,4 +18,4 @@ import type { TargetFormat } from "./TargetFormat";
  * only the fields relevant to it. Presets without a `compress_mode` are
  * hidden from the Compress page's chip picker.
  */
-export type Preset = { id: string, name: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy?: MetadataPolicy | null, gif_options?: GifOptions | null, subtitle?: SubtitleOptions | null, image_options?: ImageConvertOptions | null, is_builtin: boolean, created_at: bigint, };
+export type Preset = { video_options?: VideoConvertOptions | null, id: string, name: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy?: MetadataPolicy | null, gif_options?: GifOptions | null, subtitle?: SubtitleOptions | null, image_options?: ImageConvertOptions | null, is_builtin: boolean, created_at: bigint, };

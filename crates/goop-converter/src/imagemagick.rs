@@ -43,6 +43,11 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         req: &ConvertRequest,
         cancel: CancellationToken,
     ) -> Result<ConvertResult, GoopError> {
+        if req.video_options.is_some() {
+            return Err(GoopError::InvalidRequest(
+                "Explicit video settings cannot be processed by the image converter".into(),
+            ));
+        }
         let input = PathBuf::from(&req.input_path);
         if !input.exists() {
             return Err(GoopError::SubprocessFailed {
@@ -105,6 +110,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
+            video_execution: None,
             source_bytes: Some(source_bytes),
             target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),
@@ -849,6 +855,7 @@ mod tests {
         let mut req: ConvertRequest = serde_json::from_value(serde_json::json!({
             "input_path": input, "output_path": output, "target": TargetFormat::Webp,
             "compress_mode": CompressMode::LosslessReoptimize,
+            "video_options": null,
         }))
         .unwrap();
         let result = backend
@@ -872,6 +879,55 @@ mod tests {
         assert_eq!(std::fs::read(&input).unwrap(), original);
         assert!(!sink.0.lock().unwrap().contains(&100.0));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_video_options_are_rejected_before_image_output_work() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.png");
+        write_test_png(&input, 8, 8);
+        let source = std::fs::read(&input).unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+
+        for options in [
+            goop_core::VideoConvertOptions::Copy,
+            goop_core::VideoConvertOptions::Encode {
+                codec: goop_core::VideoCodec::H264,
+                rate_control: goop_core::VideoRateControl::ConstantQuality { crf: 23 },
+                speed: goop_core::VideoSpeed::Medium,
+                processor: goop_core::VideoProcessor::Software,
+            },
+        ] {
+            let destination_dir = dir.path().join(match options {
+                goop_core::VideoConvertOptions::Copy => "copy-output",
+                goop_core::VideoConvertOptions::Encode { .. } => "encode-output",
+            });
+            let output = destination_dir.join("result.png");
+            let mut req: ConvertRequest = serde_json::from_value(serde_json::json!({
+                "input_path": input,
+                "output_path": output,
+                "target": TargetFormat::Png,
+            }))
+            .unwrap();
+            req.video_options = Some(options);
+
+            let error = backend
+                .convert(JobId::new(), &req, CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(matches!(error, GoopError::InvalidRequest(_)), "{error:?}");
+            assert!(!destination_dir.exists());
+            assert_eq!(std::fs::read(&input).unwrap(), source);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

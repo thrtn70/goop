@@ -350,7 +350,7 @@ describe("convert subtitle wire canary", () => {
 
     await api.convert.fromFile(req);
 
-    expect(invokeMock).toHaveBeenCalledWith("convert_from_file", { req });
+    expect(invokeMock).toHaveBeenCalledWith("convert_from_file", { req: {...req, video_options:null} });
   });
 });
 
@@ -389,6 +389,18 @@ it.each([null, {jpeg_quality:30,resize:{kind:"original" as const}}, {jpeg_qualit
   invokeMock.mockClear();
   const request = {request_id:"preview",source_revision:"jpeg-options",input_path:"/photo.jpg",target:"jpeg" as const,quality_preset:null,resolution_cap:null,compress_mode:null,metadata_policy:null,subtitle:null,gif_options:null,image_options};
   await api.preview.generate(request);
-  expect(invokeMock).toHaveBeenCalledWith("generate_preview", {request});
+  expect(invokeMock).toHaveBeenCalledWith("generate_preview", {request: {...request, video_options:null}});
   expect(JSON.parse(JSON.stringify(invokeMock.mock.calls[0][1])).request.image_options).toEqual(image_options);
+});
+
+it("requests a read-only video plan with an independently owned complete video snapshot", async () => {
+  invokeMock.mockClear();
+  const video_options = {kind:"encode" as const,codec:"hevc" as const,rate_control:{kind:"average_bitrate" as const,kbps:6500},speed:"slow" as const,processor:"software" as const};
+  const req = {input_path:"/in.mp4",output_path:"",target:"mp4" as const,video_options,quality_preset:null,resolution_cap:"r480p" as const,compress_mode:null,batch_id:null,metadata_policy:null,subtitle:null,gif_options:null};
+  await api.convert.videoPlan(req);
+  expect(invokeMock).toHaveBeenCalledTimes(1);
+  expect(invokeMock).toHaveBeenCalledWith("convert_video_plan",{req});
+  const sent = invokeMock.mock.calls[0][1].req;
+  video_options.rate_control.kbps = 9000;
+  expect(sent.video_options.rate_control.kbps).toBe(6500);
 });

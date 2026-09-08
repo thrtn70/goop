@@ -50,3 +50,10 @@ pub use update::UpdateInfo;
 
 pub mod preview;
 pub use preview::{PreviewKind, PreviewRequest, PreviewResult};
+
+pub mod video;
+pub use video::{
+    validate_video_options, validate_video_request, VideoCodec, VideoCodecCapability,
+    VideoConvertOptions, VideoExecutionSummary, VideoModeAvailability, VideoProbeDetails,
+    VideoProcessor, VideoRateControl, VideoSettingsCapabilities, VideoSpeed, VideoStreamInfo,
+};

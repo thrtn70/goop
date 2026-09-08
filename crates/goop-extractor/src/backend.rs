@@ -1356,6 +1356,7 @@ exit 0
                         "worker success requires public output"
                     );
                     Ok(goop_core::JobResult {
+                        video_execution: None,
                         output_path: Some(out.output_path),
                         bytes: Some(out.bytes),
                         duration_ms: out.duration_ms,
@@ -1619,6 +1620,7 @@ exit 0
         job.state = JobState::Done;
         job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(&cp).unwrap();
         job.result = Some(goop_core::JobResult {
+            video_execution: None,
             output_path: Some(result.output_path.clone()),
             bytes: Some(result.bytes),
             duration_ms: 0,
@@ -1773,6 +1775,7 @@ exit 0
                 )
                 .await?;
                 Ok(goop_core::JobResult {
+                    video_execution: None,
                     output_path: Some(result.output_path),
                     bytes: Some(result.bytes),
                     duration_ms: result.duration_ms,

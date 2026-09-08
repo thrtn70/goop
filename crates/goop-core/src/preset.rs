@@ -16,6 +16,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct Preset {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_options: Option<crate::video::VideoConvertOptions>,
     pub id: String,
     pub name: String,
     pub target: TargetFormat,

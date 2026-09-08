@@ -2,16 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
-import type { ImageSettingsCapabilities, PreviewRequest, PreviewResult } from "@/types";
+import type { ImageSettingsCapabilities, VideoSettingsCapabilities, PreviewRequest, PreviewResult } from "@/types";
 
 type Settings = Omit<PreviewRequest, "request_id" | "source_revision">;
 
 /** Samples are ephemeral and never enter the queue or the persisted draft. */
-export default function SettingsPreview({ request, imageSettings }: { request: Settings; imageSettings?: ImageSettingsCapabilities | null }) {
-  const supported = !request.image_options || (imageSettings?.available && (
+export default function SettingsPreview({ request, imageSettings, videoSettings }: { request: Settings; imageSettings?: ImageSettingsCapabilities | null; videoSettings?: Pick<VideoSettingsCapabilities, "preview_unavailable_reason"> | null }) {
+  const supported = !request.video_options && (!request.image_options || (imageSettings?.available && (
     request.image_options.resize.kind === "original" ? imageSettings.preview_original_available : imageSettings.preview_fit_within
-  ));
-  const unavailableReason = supported ? null : imageSettings?.preview_unavailable_reason ?? "Image settings preview is unavailable.";
+  )));
+  const unavailableReason = request.video_options ? videoSettings?.preview_unavailable_reason ?? "Explicit video settings previews are unavailable." : supported ? null : imageSettings?.preview_unavailable_reason ?? "Image settings preview is unavailable.";
   const revision = JSON.stringify(request, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value);
   const active = useRef<string | null>(null);
   const displayed = useRef<string | null>(null);

@@ -1,15 +1,16 @@
 import { clearWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
 import { useAppStore } from "@/store/appStore";
-import type { ProbeResult } from "@/types";
+import type { ProbeResult, Settings, Preset } from "@/types";
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan } = vi.hoisted(() => ({
+  mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockProbe: vi.fn(),
   mockFromFile: vi.fn(),
   mockOpen: vi.fn(),
@@ -19,6 +20,7 @@ const { mockProbe, mockFromFile, mockOpen, mockSave } = vi.hoisted(() => ({
 vi.mock("@/ipc/commands", () => ({
   api: {
     convert: {
+      videoPlan: (...args: unknown[]) => mockVideoPlan(...args),
       probe: (path: string) => mockProbe(path),
       inspect: async (path: string) => {
         const p = await mockProbe(path);
@@ -53,6 +55,12 @@ vi.mock("@/ipc/commands", () => ({
               reason: null,
               preserves_metadata: false,
               metadata_warning: null,
+              video_settings: p.source_kind === "video" && ["mp4","mov","mkv"].includes(target) ? {
+                copy:{available:true}, encode:{available:path !== "/tmp/unsupported.mp4",reason:"Unknown field order"},
+                codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
+                crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
+                speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",preview_available:false,preview_unavailable_reason:"Explicit video samples are unavailable."
+              } : null,
             })),
             compression: {
               quality: true,
@@ -772,4 +780,235 @@ it("uses one selected inspector while inspecting hidden sources and preserves ed
     "bg-accent",
   );
   expect(mockProbe).toHaveBeenCalledTimes(2);
+});
+
+describe("explicit video inspector", () => {
+  beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
+  afterEach(cleanup);
+  async function stage() { renderPage(); await userEvent.click(screen.getByRole("button",{name:"Add files"})); await screen.findByLabelText("Processing"); }
+  it("retains raw rates and Custom through mode, codec and route changes; blocks invalid save/enqueue", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Video quality"), "balanced");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    expect(screen.queryByLabelText("Video quality")).toBeNull();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    await userEvent.clear(screen.getByLabelText("CRF"));
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    expect(screen.getByRole("button",{name:"Save as preset"})).toHaveProperty("disabled",true);
+    expect(screen.getAllByText(/whole number from 1 to 51/).length).toBeGreaterThan(0);
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"), "average_bitrate");
+    expect(screen.getByLabelText("Video bitrate (kbps)")).toHaveProperty("value","5000");
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"), "constant_quality");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","");
+    await userEvent.type(screen.getByLabelText("CRF"),"31");
+    await userEvent.selectOptions(screen.getByLabelText("Speed"),"slow");
+    await userEvent.selectOptions(screen.getByLabelText("Codec"),"hevc");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"copy");
+    expect(screen.queryByLabelText("CRF")).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"automatic");
+    expect(screen.getByLabelText("Video quality")).toHaveProperty("value","balanced");
+    cleanup(); renderPage(); await screen.findByLabelText("Processing");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+    expect(screen.getByLabelText("Codec")).toHaveProperty("value","hevc");
+    expect(screen.getByLabelText("Speed")).toHaveProperty("value","slow");
+    expect(screen.getByText(/Software/)).toBeTruthy();
+  });
+  it("preserves explicit intent on unsupported targets and offers a way back", async () => {
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.click(screen.getByRole("button",{name:"MP3"}));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value","encode");
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    await userEvent.click(screen.getByRole("button",{name:"MP4"}));
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
+  });
+  it("validates every batch source before applying and clones compatible rows", async () => {
+    mockOpen.mockResolvedValue(["/tmp/test-video.mp4","/tmp/unsupported.mp4"]);
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    expect(screen.getByText(/Settings were not applied/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Select unsupported.mp4"}));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value","automatic");
+  });
+  it("keeps invalid active and inactive raw text through remount and validates both rate ranges", async () => {
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    for (const value of ["", "0", "52", "2.5"]) {
+      fireEvent.change(screen.getByLabelText("CRF"),{target:{value}});
+      expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    }
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"),"average_bitrate");
+    for (const value of ["", "99", "200001", "100.5"]) {
+      fireEvent.change(screen.getByLabelText("Video bitrate (kbps)"),{target:{value}});
+      expect(screen.getByRole("button",{name:"Save as preset"})).toHaveProperty("disabled",true);
+    }
+    cleanup(); renderPage(); await screen.findByLabelText("Video bitrate (kbps)");
+    expect(screen.getByLabelText("Video bitrate (kbps)")).toHaveProperty("value","100.5");
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"),"constant_quality");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","2.5");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"51"}});
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
+  });
+  it("names Copy resolution conflicts and repairs them without erasing Custom", async () => {
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await userEvent.selectOptions(screen.getByLabelText("Video resolution"),"r480p");
+    expect(screen.getByRole("option",{name:"Copy streams"})).toHaveProperty("disabled",true);
+    await userEvent.click(screen.getByRole("button",{name:"Use original resolution"}));
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"copy");
+    expect(screen.queryByLabelText("Video resolution")).toBeNull();
+    expect(screen.queryByLabelText("Speed")).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+  });
+  it("keeps Software and complete Custom choices across a global hardware preference change", async () => {
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.selectOptions(screen.getByLabelText("Codec"),"hevc");
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"),"average_bitrate");
+    fireEvent.change(screen.getByLabelText("Video bitrate (kbps)"),{target:{value:"6000"}});
+    await userEvent.selectOptions(screen.getByLabelText("Speed"),"fast");
+    act(()=>useAppStore.setState({settings:{...useAppStore.getState().settings,hw_acceleration_enabled:true} as Settings}));
+    expect(screen.getByText(/Processor: Software/)).toBeTruthy();
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+    await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0].video_options).toEqual({kind:"encode",codec:"hevc",rate_control:{kind:"average_bitrate",kbps:6000},speed:"fast",processor:"software"});
+  });
+  it("applies independent Custom settings to a compatible batch and retains later per-file edits", async () => {
+    mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"19"}});
+    await userEvent.click(screen.getByRole("button",{name:"Select b.mp4"}));
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Convert 2 files"}));
+    await waitFor(()=>expect(mockFromFile).toHaveBeenCalledTimes(2));
+    expect(mockFromFile.mock.calls[0][0].video_options.rate_control.crf).toBe(19);
+    expect(mockFromFile.mock.calls[1][0].video_options.rate_control.crf).toBe(31);
+    expect(mockFromFile.mock.calls[0][0].video_options.rate_control).not.toBe(mockFromFile.mock.calls[1][0].video_options.rate_control);
+  });
+  it("rejects an incompatible preset atomically and only clears raw drafts on successful replacement", async () => {
+    mockOpen.mockResolvedValue(["/tmp/test-video.mp4","/tmp/unsupported.mp4"]);
+    const preset = {id:"video",name:"Video preset",target:"mp4",video_options:{kind:"encode",codec:"hevc",rate_control:{kind:"constant_quality",crf:28},speed:"slow",processor:"software"},quality_preset:null,resolution_cap:null,compress_mode:null,is_builtin:false,created_at:0n} as Preset;
+    useAppStore.setState({presets:[preset]});
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:""}});
+    await userEvent.click(screen.getByRole("button",{name:"Video preset"}));
+    expect(screen.getByText(/Settings were not applied/)).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","");
+    await userEvent.click(screen.getByRole("button",{name:"Select unsupported.mp4"}));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value","automatic");
+    await userEvent.click(screen.getByRole("button",{name:"Select test-video.mp4"}));
+    useAppStore.setState({presets:[{...preset,video_options:{kind:"copy"}}]});
+    await userEvent.click(screen.getByRole("button",{name:"Video preset"}));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value","copy");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+  });
+  it("saves the complete supported Custom preset with dormant Automatic quality projected out", async () => {
+    const savePreset = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({savePreset});
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Video quality"),"small");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.selectOptions(screen.getByLabelText("Codec"),"hevc");
+    await userEvent.selectOptions(screen.getByLabelText("Rate control"),"average_bitrate");
+    fireEvent.change(screen.getByLabelText("Video bitrate (kbps)"),{target:{value:"6500"}});
+    await userEvent.selectOptions(screen.getByLabelText("Speed"),"slow");
+    await userEvent.click(screen.getByRole("button",{name:"Save as preset"}));
+    await userEvent.type(screen.getByPlaceholderText(/e.g./),"My video");
+    await userEvent.click(screen.getByRole("button",{name:"Save"}));
+    await waitFor(()=>expect(savePreset).toHaveBeenCalled());
+    expect(savePreset.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",codec:"hevc",rate_control:{kind:"average_bitrate",kbps:6500},speed:"slow",processor:"software"}});
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"automatic");
+    expect(screen.getByLabelText("Video quality")).toHaveProperty("value","small");
+  });
+  it("shows the fresh engine audio and geometry summary without creating a job", async () => {
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await waitFor(()=>expect(screen.getByRole("region",{name:"Video processing summary"}).textContent).toContain("Audio copied (aac)"));
+    expect(screen.getByRole("region",{name:"Video processing summary"}).textContent).toContain("1920 × 1080");
+    expect(screen.getByRole("region",{name:"Video processing summary"}).textContent).toContain("Color tags are unspecified");
+    expect(mockFromFile).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+    expect(screen.getByRole("button",{name:"Preview sample"})).toHaveProperty("disabled",true);
+  });
+  it("requires a ready current single-file disclosure before Save and blocks fresh planning errors", async () => {
+    let resolve!: (value:unknown)=>void;
+    mockVideoPlan.mockImplementationOnce(()=>new Promise(r=>{resolve=r;}));
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    fireEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+    expect(mockSave).not.toHaveBeenCalled(); expect(mockFromFile).not.toHaveBeenCalled();
+    expect(screen.getByRole("button",{name:"Save as preset"})).toHaveProperty("disabled",false);
+    await waitFor(()=>expect(mockVideoPlan).toHaveBeenCalledTimes(1));
+    await act(async()=>resolve({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:false,width:854,height:480,notices:["Source color is unspecified"]}));
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false);
+    expect(screen.getByRole("region",{name:"Video processing plans"}).textContent).toContain("AAC 192 kbps");
+    mockVideoPlan.mockRejectedValueOnce(new Error("Source changed: additional audio track"));
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    await waitFor(()=>expect(screen.getByRole("region",{name:"Video processing plans"}).textContent).toContain("additional audio track"));
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    expect(mockSave).not.toHaveBeenCalled(); expect(mockFromFile).not.toHaveBeenCalled();
+  });
+  it("discloses every explicit batch row and blocks a hidden pending or failed member", async () => {
+    let reject!: (reason:Error)=>void;
+    mockVideoPlan.mockImplementationOnce(async()=>({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:[]}))
+      .mockImplementationOnce(()=>new Promise((_r,fail)=>{reject=fail;}));
+    mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await waitFor(()=>expect(mockVideoPlan).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",true);
+    const area=screen.getByRole("region",{name:"Video processing plans"});
+    expect(within(area).getByText("a.mp4")).toBeTruthy(); expect(within(area).getByText("b.mp4")).toBeTruthy();
+    expect(area.textContent).toContain("Audio copied (aac)");
+    await act(async()=>reject(new Error("Hidden source has unsupported tracks")));
+    expect(area.textContent).toContain("Hidden source has unsupported tracks");
+    expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",true);
+    fireEvent.click(screen.getByRole("button",{name:"Convert 2 files"}));
+    expect(mockFromFile).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button",{name:"Select b.mp4"}));
+    mockVideoPlan.mockResolvedValueOnce({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:false,width:640,height:360,notices:["Color tags are unspecified"]});
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",false));
+    expect(mockVideoPlan).toHaveBeenCalledTimes(3);
+    expect(area.textContent).toContain("AAC 192 kbps"); expect(area.textContent).toContain("640 × 360"); expect(area.textContent).toContain("Color tags are unspecified");
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Convert 2 files"}));
+    await waitFor(()=>expect(mockFromFile).toHaveBeenCalledTimes(2));
+  });
+  it("plans only explicit members of a mixed batch and removing an active member retires its disclosure", async () => {
+    let resolve!: (value:unknown)=>void;
+    mockVideoPlan.mockImplementationOnce(()=>new Promise(r=>{resolve=r;}));
+    mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await waitFor(()=>expect(mockVideoPlan).toHaveBeenCalledTimes(1));
+    expect(mockVideoPlan.mock.calls[0][0].input_path).toBe("/tmp/a.mp4");
+    expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",true);
+    const area=screen.getByRole("region",{name:"Video processing plans"});
+    expect(within(area).queryByText("b.mp4")).toBeNull();
+    await userEvent.click(screen.getByRole("button",{name:"Remove a.mp4"}));
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false);
+    expect(screen.queryByRole("region",{name:"Video processing plans"})).toBeNull();
+    await act(async()=>resolve({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_copied:false,width:640,height:360,notices:["Retired notice"]}));
+    expect(screen.queryByText(/Retired notice/)).toBeNull();
+    await userEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+    await waitFor(()=>expect(mockFromFile).toHaveBeenCalledTimes(1));
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({input_path:"/tmp/b.mp4",video_options:null});
+    expect(mockVideoPlan).toHaveBeenCalledTimes(1);
+  });
+  it("captures the entire explicit request before a deferred Save and preserves later edits", async () => {
+    let resolve!: (path:string)=>void; mockSave.mockImplementationOnce(()=>new Promise(r=>{resolve=r;}));
+    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+    await waitFor(()=>expect(mockSave).toHaveBeenCalled());
+    await userEvent.clear(screen.getByLabelText("CRF")); await userEvent.type(screen.getByLabelText("CRF"),"31");
+    resolve("/tmp/out.mp4"); await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},speed:"medium",processor:"software"}});
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+  });
 });
