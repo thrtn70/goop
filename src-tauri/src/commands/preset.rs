@@ -13,19 +13,15 @@ pub async fn preset_list() -> Result<Vec<Preset>, IpcError> {
 
 #[tauri::command]
 pub async fn preset_save(preset: Preset) -> Result<Preset, IpcError> {
-    presets::validate(&preset)?;
-    let path = presets_path();
-    let current = presets::load_or_seed(&path)?;
-    let next = presets::upsert(current, preset.clone());
-    presets::save(&path, &next)?;
-    Ok(preset)
+    presets::save_one(&presets_path(), preset).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn preset_import(presets: Vec<Preset>) -> Result<Vec<Preset>, IpcError> {
+    presets::import(&presets_path(), presets).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn preset_delete(id: String) -> Result<(), IpcError> {
-    let path = presets_path();
-    let current = presets::load_or_seed(&path)?;
-    let next = presets::remove(current, &id);
-    presets::save(&path, &next)?;
-    Ok(())
+    presets::delete(&presets_path(), &id).map_err(Into::into)
 }

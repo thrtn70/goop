@@ -1,7 +1,9 @@
+import { cloneVideoOptions } from "./videoOptions";
 import { WorkspaceDraftProvider, withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import type {
   GifOptions,
   ImageConvertOptions,
+  VideoConvertOptions,
   MetadataPolicy,
   SubtitleOptions,
   TargetFormat,
@@ -18,6 +20,7 @@ interface RowOptionsState {
   target: TargetFormat;
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
+  videoOptions?: VideoConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -28,6 +31,7 @@ export interface FileRowOptions {
   target: TargetFormat;
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
+  videoOptions?: VideoConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -74,6 +78,7 @@ export function ConvertSettingsPanel({
   const update = (partial: Partial<RowOptionsState>) => {
     const next: RowOptionsState = {
       target: partial.target ?? target,
+      videoOptions: cloneVideoOptions(partial.videoOptions !== undefined ? partial.videoOptions : opts.videoOptions),
       imageOptions: cloneImageOptions(partial.imageOptions !== undefined ? partial.imageOptions : opts.imageOptions),
       gifOptions:
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,

@@ -1,3 +1,4 @@
+import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { create } from "zustand";
 import { markInitialDataReady } from "@/performance/startup";
 import type {
@@ -504,10 +505,11 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   async loadPresets() {
     const presets = await api.preset.list();
-    set({ presets });
+    set({ presets: presets.map(p => ({...p, video_options: cloneVideoOptions(p.video_options)})) });
   },
   async savePreset(p) {
-    const saved = await api.preset.save(p);
+    const result = await api.preset.save({...p, video_options: cloneVideoOptions(p.video_options)});
+    const saved = {...result, video_options: cloneVideoOptions(result.video_options)};
     set((s) => {
       const idx = s.presets.findIndex((x) => x.id === saved.id);
       if (idx < 0) return { presets: [...s.presets, saved] };

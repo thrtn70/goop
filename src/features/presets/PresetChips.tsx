@@ -1,3 +1,4 @@
+import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { useAppStore } from "@/store/appStore";
 import type { Preset } from "@/types";
 
@@ -26,7 +27,7 @@ export default function PresetChips({ kind, onApply }: PresetChipsProps) {
         <li key={p.id} className="shrink-0">
           <button
             type="button"
-            onClick={() => onApply(p)}
+            onClick={() => onApply({ ...p, ...(p.video_options === undefined ? {} : {video_options: cloneVideoOptions(p.video_options)}) })}
             title={p.name}
             className="btn-press rounded-full border border-subtle bg-surface-1 px-3 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:border-accent hover:text-accent"
           >

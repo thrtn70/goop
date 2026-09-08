@@ -1,3 +1,4 @@
+import { cloneVideoOptions, videoOptionsError, videoRequestOptions, type VideoDraftFile } from "./videoOptions";
 import {
   beginDestinationChoice,
   isCurrentDestinationChoice,
@@ -28,7 +29,7 @@ import type {
   TargetFormat,
 } from "@/types";
 
-export interface FileEntry extends EntryIdentity {
+export interface FileEntry extends EntryIdentity, VideoDraftFile {
   optionsReady?: boolean;
   path: string;
   target: TargetFormat;
@@ -83,6 +84,8 @@ export default function ConvertActionBar({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
+  const videoError = files.map(videoOptionsError).find(Boolean);
+  const blocked = disabled || Boolean(videoError);
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("convert");
@@ -104,13 +107,14 @@ export default function ConvertActionBar({
   }
 
   async function handleConvert() {
-    if (disabled || count === 0) return;
+    if (blocked || count === 0) return;
     const token = tryBegin("convert");
     if (token === null) return;
     let failure: string | null = null;
     try {
       const snapshot = files.map((file) => ({
         ...file,
+        videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
         subtitle: file.subtitle ? { ...file.subtitle } : null,
@@ -137,7 +141,8 @@ export default function ConvertActionBar({
             input_path: f.path,
             output_path: output,
             target: f.target,
-            quality_preset: f.qualityPreset,
+            quality_preset: f.videoOptions ? null : f.qualityPreset,
+            video_options: cloneVideoOptions(f.videoOptions),
             resolution_cap: f.resolutionCap,
             gif_options: f.gifOptions,
             image_options: cloneImageOptions(f.imageOptions),
@@ -171,7 +176,7 @@ export default function ConvertActionBar({
     <div className="flex flex-wrap items-center gap-3">
       <button
         type="button"
-        disabled={disabled || busy || count === 0}
+        disabled={blocked || busy || count === 0}
         onClick={() => void handleConvert()}
         className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out
           enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
@@ -194,7 +199,7 @@ export default function ConvertActionBar({
       {count > 1 && onApplyToAll && (
         <button
           type="button"
-          disabled={disabled}
+          disabled={blocked}
           onClick={onApplyToAll}
           title="Copy the first file's settings to every other file"
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
@@ -205,19 +210,20 @@ export default function ConvertActionBar({
       {count > 0 && (
         <button
           type="button"
-          disabled={disabled}
+          disabled={blocked}
           onClick={() => setSaveOpen(true)}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
           Save as preset
         </button>
       )}
-      {(error || pickerError) && (
+      {(error || pickerError || videoError) && (
         <span role="alert" className="text-xs text-error">
-          {error || pickerError}
+          {error || pickerError || videoError}
         </span>
       )}
       <PresetSaveDialog
+        validationError={videoError ?? null}
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
@@ -229,7 +235,8 @@ export default function ConvertActionBar({
           gif_options: files[0]?.gifOptions ? { ...files[0].gifOptions } : null,
           image_options: cloneImageOptions(files[0]?.imageOptions),
           subtitle: files[0]?.subtitle ? { ...files[0].subtitle } : null,
-          quality_preset: files[0]?.qualityPreset ?? null,
+          video_options: files[0] && !videoError ? videoRequestOptions(files[0]) : null,
+          quality_preset: files[0]?.videoOptions ? null : files[0]?.qualityPreset ?? null,
           resolution_cap: files[0]?.resolutionCap ?? null,
         }}
       />

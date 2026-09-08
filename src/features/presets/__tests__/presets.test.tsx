@@ -8,12 +8,16 @@ import { api } from "@/ipc/commands";
 import { useAppStore } from "@/store/appStore";
 import type { Preset, Settings, UpdateInfo } from "@/types";
 
+const importMocks = vi.hoisted(() => ({open:vi.fn(),read:vi.fn()}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({open:importMocks.open,save:vi.fn()}));
+vi.mock("@tauri-apps/plugin-fs", () => ({readTextFile:importMocks.read,writeTextFile:vi.fn()}));
 // --- IPC mock ---
 
 vi.mock("@/ipc/commands", () => ({
   api: {
     preset: {
       list: vi.fn().mockResolvedValue([]),
+      import: vi.fn().mockResolvedValue([]),
       save: vi.fn(async (p: Preset) => p),
       delete: vi.fn().mockResolvedValue(undefined),
     },
@@ -299,5 +303,53 @@ describe("JPEG preset save snapshot", () => {
       jpeg_quality: 90, resize: { kind: "fit_within", width: 2048, height: 2048 } } }));
     options.resize.height = 1;
     expect(vi.mocked(api.preset.save).mock.calls[0][0].image_options?.resize).toEqual({ kind: "fit_within", width: 2048, height: 2048 });
+  });
+});
+
+describe("video preset snapshots", () => {
+  afterEach(cleanup);
+  beforeEach(() => { vi.clearAllMocks(); resetStore(); });
+  it("captures nested rate controls when opened before later edits", async () => {
+    const {default: Dialog} = await import("../PresetSaveDialog");
+    const options = {kind:"encode" as const,codec:"hevc" as const,processor:"software" as const,speed:"slow" as const,rate_control:{kind:"average_bitrate" as const,kbps:5000}};
+    render(<Dialog open onClose={() => {}} snapshot={{target:"mov",video_options:options}}/>);
+    options.rate_control.kbps=8000;
+    await userEvent.type(screen.getByRole("textbox",{name:"Preset name"}),"Video");
+    await userEvent.click(screen.getByRole("button",{name:"Save"}));
+    expect(api.preset.save).toHaveBeenCalledWith(expect.objectContaining({video_options:{...options,rate_control:{kind:"average_bitrate",kbps:5000}}}));
+  });
+  it("refuses captured invalid raw settings", async () => {
+    const {default: Dialog} = await import("../PresetSaveDialog");
+    render(<Dialog open onClose={() => {}} validationError="Video CRF must be a whole number from 1 to 51" snapshot={{target:"mp4",video_options:{kind:"copy"}}}/>);
+    await userEvent.type(screen.getByRole("textbox",{name:"Preset name"}),"Invalid");
+    await userEvent.click(screen.getByRole("button",{name:"Save"}));
+    expect(api.preset.save).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain("whole number");
+  });
+});
+
+describe("atomic preset import UI", () => {
+  afterEach(cleanup);
+  beforeEach(() => {vi.clearAllMocks(); resetStore({presets:[makePreset({id:"old",name:"Keep"})]});
+    importMocks.open.mockResolvedValue("/presets.json");
+    importMocks.read.mockResolvedValue(JSON.stringify({version:3,presets:[{name:"First",target:"mp4",video_options:{kind:"copy"}},{name:"Second",target:"mov",video_options:{kind:"copy"}}]}));
+  });
+  it("sends one bulk invocation and refreshes only after success", async () => {
+    vi.mocked(api.preset.import).mockResolvedValueOnce([]);
+    render(<PresetManager/>);
+    await userEvent.click(screen.getByRole("button",{name:"Import…"}));
+    expect(api.preset.import).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.preset.import).mock.calls[0][0]).toHaveLength(2);
+    expect(api.preset.save).not.toHaveBeenCalled();
+    expect(api.preset.list).toHaveBeenCalledOnce();
+  });
+  it("does not install or refresh any item after backend rejection", async () => {
+    vi.mocked(api.preset.import).mockRejectedValueOnce(new Error("storage failed"));
+    render(<PresetManager/>);
+    await userEvent.click(screen.getByRole("button",{name:"Import…"}));
+    expect(api.preset.import).toHaveBeenCalledOnce();
+    expect(api.preset.save).not.toHaveBeenCalled(); expect(api.preset.list).not.toHaveBeenCalled();
+    expect(useAppStore.getState().presets.map(p => p.id)).toEqual(["old"]);
+    expect(await screen.findByText("storage failed")).toBeDefined();
   });
 });

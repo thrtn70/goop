@@ -651,6 +651,7 @@ pub fn run() {
             commands::settings::open_logs_folder,
             commands::preset::preset_list,
             commands::preset::preset_save,
+            commands::preset::preset_import,
             commands::preset::preset_delete,
             commands::update::check_for_update,
             commands::update::download_update,

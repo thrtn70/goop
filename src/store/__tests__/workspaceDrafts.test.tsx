@@ -80,3 +80,14 @@ it("preserves completion authority across route unmount and sibling clearing", (
   act(() => pendingCompletion());
   expect(parentDone).toHaveBeenCalledTimes(1);
 });
+
+it("owns nested video draft settings independently of caller objects", () => {
+  const value = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23}};
+  const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedCustom",value),{wrapper:scope("convert","video")});
+  value.rate_control.crf=44;
+  expect(saved.result.current[0].rate_control.crf).toBe(23);
+  const next = {...value,rate_control:{kind:"constant_quality" as const,crf:30}};
+  act(() => saved.result.current[1](next));
+  next.rate_control.crf=50;
+  expect(saved.result.current[0].rate_control.crf).toBe(30);
+});

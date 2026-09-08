@@ -1,5 +1,9 @@
 use goop_core::{CompressMode, GoopError, Preset, QualityPreset, ResolutionCap, TargetFormat};
 use std::path::Path;
+use std::sync::Mutex;
+
+// All command mutations and first-use seeding share one synchronous boundary.
+static MUTATIONS: Mutex<()> = Mutex::new(());
 
 /// Load presets from the given JSON file. Returns an empty vec if the file
 /// is missing — callers typically follow up with `seed_if_missing` to write
@@ -15,6 +19,13 @@ pub fn load(path: &Path) -> Result<Vec<Preset>, GoopError> {
 /// Atomic save via tempfile + rename so a crash mid-write can't leave a
 /// half-written presets file behind.
 pub fn save(path: &Path, presets: &[Preset]) -> Result<(), GoopError> {
+    let _guard = MUTATIONS
+        .lock()
+        .map_err(|_| GoopError::Config("Preset storage lock is unavailable".into()))?;
+    save_unlocked(path, presets)
+}
+
+fn save_unlocked(path: &Path, presets: &[Preset]) -> Result<(), GoopError> {
     for preset in presets {
         validate(preset)?;
     }
@@ -37,7 +48,63 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
             preset.name
         )));
     }
-    Ok(())
+    let request = goop_core::ConvertRequest {
+        input_path: String::new(),
+        output_path: String::new(),
+        target: preset.target,
+        quality_preset: preset.quality_preset,
+        resolution_cap: preset.resolution_cap,
+        gif_options: preset.gif_options.clone(),
+        compress_mode: preset.compress_mode,
+        batch_id: None,
+        metadata_policy: preset.metadata_policy,
+        subtitle: preset.subtitle.clone(),
+        image_options: preset.image_options.clone(),
+        video_options: preset.video_options.clone(),
+    };
+    goop_core::validate_video_request(&request)
+        .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
+}
+
+/// Validate the whole incoming bundle and merged records before publishing once.
+pub fn import(path: &Path, incoming: Vec<Preset>) -> Result<Vec<Preset>, GoopError> {
+    for preset in &incoming {
+        validate(preset)?;
+    }
+    mutate(path, |mut current| {
+        for preset in &incoming {
+            current = upsert(current, preset.clone());
+        }
+        current
+    })?;
+    Ok(incoming)
+}
+
+pub fn save_one(path: &Path, preset: Preset) -> Result<Preset, GoopError> {
+    validate(&preset)?;
+    mutate(path, |current| upsert(current, preset.clone()))?;
+    Ok(preset)
+}
+
+pub fn delete(path: &Path, id: &str) -> Result<(), GoopError> {
+    mutate(path, |current| remove(current, id)).map(|_| ())
+}
+
+fn mutate(
+    path: &Path,
+    edit: impl FnOnce(Vec<Preset>) -> Vec<Preset>,
+) -> Result<Vec<Preset>, GoopError> {
+    let _guard = MUTATIONS
+        .lock()
+        .map_err(|_| GoopError::Config("Preset storage lock is unavailable".into()))?;
+    let current = if path.exists() {
+        load(path)?
+    } else {
+        builtin_defaults()
+    };
+    let next = edit(current);
+    save_unlocked(path, &next)?;
+    Ok(next)
 }
 
 /// Upsert a preset by id. Replaces an existing entry in place (preserving
@@ -133,11 +200,14 @@ pub fn builtin_defaults() -> Vec<Preset> {
 /// defaults to it and return them. This is the command layer's entry point
 /// so `preset_list` seeds on first use.
 pub fn load_or_seed(path: &Path) -> Result<Vec<Preset>, GoopError> {
+    let _guard = MUTATIONS
+        .lock()
+        .map_err(|_| GoopError::Config("Preset storage lock is unavailable".into()))?;
     if path.exists() {
         return load(path);
     }
     let seed = builtin_defaults();
-    save(path, &seed)?;
+    save_unlocked(path, &seed)?;
     Ok(seed)
 }
 
@@ -162,6 +232,71 @@ mod tests {
             is_builtin: false,
             created_at: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn video_presets_roundtrip_and_reject_structural_conflicts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("video", "Custom video");
+        preset.quality_preset = None;
+        preset.video_options = Some(goop_core::VideoConvertOptions::Encode {
+            codec: goop_core::VideoCodec::Hevc,
+            processor: goop_core::VideoProcessor::Software,
+            speed: goop_core::VideoSpeed::Slow,
+            rate_control: goop_core::VideoRateControl::AverageBitrate { kbps: 5000 },
+        });
+        import(&path, vec![preset.clone()]).unwrap();
+        assert_eq!(load(&path).unwrap().last().unwrap(), &preset);
+        let before = std::fs::read(&path).unwrap();
+        preset.target = TargetFormat::Webm;
+        let error = save_one(&path, preset.clone()).unwrap_err().to_string();
+        assert!(error.contains("Custom video") && error.contains("MP4"));
+        preset.target = TargetFormat::Mp4;
+        preset.video_options = Some(goop_core::VideoConvertOptions::Copy);
+        preset.resolution_cap = Some(ResolutionCap::R720p);
+        assert!(save_one(&path, preset).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn bulk_import_validates_every_record_before_one_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        save(&path, &[sample("old", "Keep")]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut invalid = sample("bad", "Invalid second");
+        invalid.video_options = Some(goop_core::VideoConvertOptions::Copy);
+        assert!(import(&path, vec![sample("first", "First"), invalid]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(import(&path, vec![sample("first", "First")]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn concurrent_import_save_delete_and_seed_retain_mutations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        std::thread::scope(|scope| {
+            for index in 0..12 {
+                let path = &path;
+                scope.spawn(move || {
+                    if index % 2 == 0 {
+                        save_one(path, sample(&index.to_string(), "Saved")).unwrap();
+                    } else {
+                        import(path, vec![sample(&index.to_string(), "Imported")]).unwrap();
+                    }
+                });
+            }
+            let path = &path;
+            scope.spawn(move || {
+                delete(path, "absent").unwrap();
+            });
+            scope.spawn(move || {
+                load_or_seed(path).unwrap();
+            });
+        });
+        assert_eq!(load(&path).unwrap().len(), 16);
     }
 
     #[test]

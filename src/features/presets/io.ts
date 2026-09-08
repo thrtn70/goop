@@ -6,12 +6,14 @@
  * across machines.
  */
 
-import type { CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
+import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
+
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 2 as const;
+export const PRESET_BUNDLE_VERSION = 3 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -82,6 +84,7 @@ interface PresetEntry {
   gif_options: GifOptions | null;
   subtitle: SubtitleOptions | null;
   image_options: ImageConvertOptions | null;
+  video_options: VideoConvertOptions | null;
 }
 
 function compressModeForWire(m: CompressMode | null): WireCompressMode | null {
@@ -114,6 +117,7 @@ interface PresetBundleWire {
     gif_options: GifOptions | null;
     subtitle: SubtitleOptions | null;
     image_options: ImageConvertOptions | null;
+    video_options: VideoConvertOptions | null;
   }>;
 }
 
@@ -133,6 +137,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       gif_options: p.gif_options ?? null,
       subtitle: p.subtitle ?? null,
       image_options: cloneImageOptions(p.image_options),
+      video_options: cloneVideoOptions(p.video_options),
     })),
   };
   return JSON.stringify(bundle, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value, 2);
@@ -223,11 +228,14 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     );
   }
   let imageOptions: ImageConvertOptions | null;
+  let videoOptions: VideoConvertOptions | null;
   try {
     if (version === 1 && v.image_options != null) {
       throw new Error("image_options is not allowed in schema 1");
     }
     imageOptions = validateImageOptions(v.image_options);
+    if (version < 3 && v.video_options != null) throw new Error("video_options is not allowed before schema 3");
+    videoOptions = validateVideoRequest({ ...v, target: v.target as TargetFormat } as Parameters<typeof validateVideoRequest>[0]);
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
     }
@@ -244,6 +252,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     gif_options: validateGif(v.gif_options),
     subtitle: validateSubtitle(v.subtitle),
     image_options: imageOptions,
+    video_options: videoOptions,
   };
 }
 
@@ -264,9 +273,9 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== 1 && parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== PRESET_BUNDLE_VERSION) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected 1 or ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2 or ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {
@@ -278,7 +287,7 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
 
 /**
  * Convert parsed bundle entries into fresh `Preset` records ready for
- * `api.preset.save` (which handles the wire conversion to IPC shape).
+ * `api.preset.import` (which handles the wire conversion to IPC shape).
  * Generates new IDs and timestamps; resolves name collisions by
  * appending " (imported)" so duplicates are visible and removable.
  */
@@ -302,6 +311,7 @@ export function entriesToPresets(
       gif_options: entry.gif_options ? { ...entry.gif_options } : null,
       subtitle: entry.subtitle ? { ...entry.subtitle } : null,
       image_options: cloneImageOptions(entry.image_options),
+      video_options: cloneVideoOptions(entry.video_options),
       is_builtin: false,
       // i64 in Rust ↔ bigint in TS; the IPC layer converts to a wire number.
       created_at: BigInt(Date.now()),

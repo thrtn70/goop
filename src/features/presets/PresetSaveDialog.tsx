@@ -1,11 +1,13 @@
+import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
 
 interface PresetSaveDialogProps {
   open: boolean;
+  validationError?: string | null;
   onClose: () => void;
   /**
    * Fields to snapshot into the preset. Omit what the current page doesn't
@@ -21,6 +23,7 @@ interface PresetSaveDialogProps {
     gif_options?: GifOptions | null;
     subtitle?: SubtitleOptions | null;
     image_options?: ImageConvertOptions | null;
+    video_options?: VideoConvertOptions | null;
   };
 }
 
@@ -32,25 +35,28 @@ function newId(): string {
   }
 }
 
-export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSaveDialogProps) {
+export default function PresetSaveDialog({ open, onClose, snapshot, validationError }: PresetSaveDialogProps) {
   const savePreset = useAppStore((s) => s.savePreset);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const capturedError = useRef<string | null>(null);
   const captured = useRef<PresetSaveDialogProps["snapshot"] | null>(null);
   useEffect(() => {
     if (!open) captured.current = null;
     else if (captured.current === null) {
+      capturedError.current = validationError ?? null;
       captured.current = { ...snapshot,
+        video_options: cloneVideoOptions(snapshot.video_options),
         compress_mode: snapshot.compress_mode ? { ...snapshot.compress_mode } : null,
         gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
         subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
         image_options: cloneImageOptions(snapshot.image_options),
       };
     }
-  }, [open, snapshot]);
+  }, [open, snapshot, validationError]);
 
   useEffect(() => {
     if (open) {
@@ -75,6 +81,8 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
     try {
       const saved = captured.current;
       if (!saved) return;
+      if (capturedError.current) throw new Error(capturedError.current);
+      const videoOptions = validateVideoRequest(saved);
       const imageOptions = validateImageOptions(saved.image_options);
       if (imageOptions && saved.compress_mode) throw new Error("Compression and image settings cannot be combined");
       const preset: Preset = {
@@ -88,6 +96,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot }: PresetSave
         gif_options: saved.gif_options ?? null,
         subtitle: saved.subtitle ?? null,
         image_options: cloneImageOptions(imageOptions),
+        video_options: cloneVideoOptions(videoOptions),
         is_builtin: false,
         // Rust side ignores client created_at for ordering; the wire IPC
         // boundary converts this Number to i64.

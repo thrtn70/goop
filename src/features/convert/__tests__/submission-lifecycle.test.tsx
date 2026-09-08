@@ -90,3 +90,26 @@ it("Compress rejects unexpected image settings before opening a destination dial
   await screen.findByRole("alert");
   expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.enqueue).not.toHaveBeenCalled();
 });
+
+const videoCapability = {copy:{available:true},encode:{available:true},codecs:[{codec:"h264" as const,encoder:"libx264",available:true,recommended_crf:23}],crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,speeds:["medium" as const],default_speed:"medium" as const,processor:"software" as const,preview_available:false};
+it("snapshots active raw video controls before Save while retaining dormant Automatic quality", async () => {
+  const options = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23}};
+  const raw = {crfDraft:"31"};
+  let resolve!: (path:string) => void;
+  mocks.save.mockReset().mockImplementation(() => new Promise(r => {resolve=r;}));
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const done = vi.fn();
+  render(<ConvertActionBar files={[{...file,qualityPreset:"balanced",videoOptions:options,videoCapability,videoDraft:raw}]} disabled={false} onEnqueued={done}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+  options.rate_control.crf=49; raw.crfDraft="";
+  await act(async () => resolve("/out.mp4"));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",rate_control:{kind:"constant_quality",crf:31}}});
+});
+it("blank active CRF blocks enqueue and preset saving", () => {
+  mocks.save.mockReset(); mocks.enqueue.mockReset();
+  render(<ConvertActionBar files={[{...file,videoCapability,videoDraft:{crfDraft:""},videoOptions:{kind:"encode",codec:"h264",processor:"software",speed:"medium",rate_control:{kind:"constant_quality",crf:23}}}]} disabled={false} onEnqueued={vi.fn()}/>);
+  expect((screen.getByRole("button",{name:"Convert 1 file"}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button",{name:"Save as preset"}) as HTMLButtonElement).disabled).toBe(true);
+  expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.enqueue).not.toHaveBeenCalled();
+});
