@@ -1,5 +1,5 @@
 import { cloneVideoOptions, videoOptionsError, videoRequestOptions, videoDraftSlots, type VideoDraftText } from "@/features/convert/videoOptions";
-import { useVideoPlan } from "@/features/convert/useVideoPlan";
+import { useVideoPlans } from "@/features/convert/useVideoPlan";
 import { videoExecutionText } from "@/features/preview/outputSummary";
 import SettingsPreview from "@/features/preview/SettingsPreview";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
@@ -97,13 +97,25 @@ function ConvertPage() {
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
   const selectedVideo = videoFiles.find(file => file.id === selected?.id);
-  const selectedVideoOptions = selectedVideo && !videoOptionsError(selectedVideo) ? videoRequestOptions(selectedVideo) : null;
-  const videoPlan = useVideoPlan(selected && selectedVideoOptions ? {
-    input_path: selected.path, output_path: "", target: selected.target,
-    video_options: selectedVideoOptions, quality_preset: null, resolution_cap: selected.resolutionCap,
-    compress_mode: null, batch_id: null, metadata_policy: selected.metadataPolicy,
-    subtitle: selected.subtitle, gif_options: selected.gifOptions, image_options: cloneImageOptions(selected.imageOptions),
-  } : null, JSON.stringify([selected?.id, selected?.revision]));
+  const planEntries = videoFiles.flatMap(file => {
+    if (!file.id || !file.videoOptions || !file.optionsReady || videoOptionsError(file)) return [];
+    return [{
+      id: file.id, sourceIdentity: JSON.stringify([file.id, file.revision]),
+      request: {
+        input_path: file.path, output_path: "", target: file.target,
+        video_options: videoRequestOptions(file), quality_preset: null, resolution_cap: file.resolutionCap,
+        compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
+        subtitle: file.subtitle, gif_options: file.gifOptions, image_options: cloneImageOptions(file.imageOptions),
+      },
+    }];
+  });
+  const videoPlans = useVideoPlans(planEntries);
+  const videoPlan = videoPlans[selected?.id ?? ""];
+  const planProblem = (file: FileEntry) => {
+    if (!file.videoOptions) return null;
+    const plan = videoPlans[file.id ?? ""];
+    return plan?.summary ? null : plan?.error ?? "Checking video processing…";
+  };
 
   useEffect(() => {
     if (selected?.id !== selectedId) setSelectedId(selected?.id ?? null);
@@ -378,6 +390,7 @@ function ConvertPage() {
             <ConvertActionBar
               files={videoFiles}
               disabled={blocked}
+              planningBlocked={files.some(file => !!planProblem(file))}
               onEnqueued={() => {}}
               onSettled={onSettled}
               onApplyToAll={applyFirstToAll}
@@ -399,9 +412,9 @@ function ConvertPage() {
                 }
               />
               {selected.videoOptions && <section aria-label="Video processing summary" className="mt-4 text-xs text-fg-secondary">
-                {videoPlan.busy && <p>Checking video processing…</p>}
-                {videoPlan.error && <p role="alert" className="text-warning">{videoPlan.error}</p>}
-                {videoPlan.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan.summary)}</p>}
+                {videoPlan?.busy && <p>Checking video processing…</p>}
+                {videoPlan?.error && <p role="alert" className="text-warning">{videoPlan?.error}</p>}
+                {videoPlan?.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan?.summary)}</p>}
               </section>}
               {(!problems[files.indexOf(selected)] || selected.videoOptions) && <SettingsPreview videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
@@ -451,7 +464,7 @@ function ConvertPage() {
               path={f.path}
               selected={f.id === selected?.id}
               state={byId[f.id ?? ""] ?? PROBING}
-              problem={problems[i]}
+              problem={problems[i] ?? planProblem(f)}
               edited={f.submittedEdit}
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}
@@ -460,6 +473,24 @@ function ConvertPage() {
           ))}
         </ul>
       </WorkspaceList>
+      {files.some(file => file.videoOptions) && (
+        <section aria-label="Video processing plans" className="mt-4 rounded-lg border border-subtle bg-surface-0 p-3 text-xs">
+          <h3 className="font-medium text-fg">Video processing</h3>
+          <ul className="mt-2 space-y-3" aria-live="polite">
+            {files.map((file, i) => {
+              if (!file.videoOptions) return null;
+              const plan = videoPlans[file.id ?? ""];
+              const problem = problems[i] ?? planProblem(file);
+              return <li key={file.id ?? file.path}>
+                <p className="font-medium text-fg" title={file.path}>{sourceName(file.path)}</p>
+                <p className={problems[i] || plan?.error ? "text-warning" : "text-fg-secondary"}>
+                  {problem ?? (plan?.summary && file.target.toUpperCase() + " · " + videoExecutionText(plan.summary))}
+                </p>
+              </li>;
+            })}
+          </ul>
+        </section>
+      )}
       {pdfs.length > 0 && (
         <section aria-label="PDF operations" className="mt-4">
           {pdfs.length === 1 && <RecognizeChip path={pdfs[0]} />}

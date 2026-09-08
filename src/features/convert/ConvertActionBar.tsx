@@ -47,6 +47,7 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile {
 interface ConvertActionBarProps {
   files: FileEntry[];
   disabled: boolean;
+  planningBlocked?: boolean;
   onEnqueued: () => void;
   onSettled?: (success: SubmissionReceipt[]) => void;
   /** Optional: copies the first file's per-row settings to every other staged file. */
@@ -70,6 +71,7 @@ function newBatchId(): string {
 export default function ConvertActionBar({
   files,
   disabled,
+  planningBlocked = false,
   onEnqueued,
   onSettled,
   onApplyToAll,
@@ -107,7 +109,7 @@ export default function ConvertActionBar({
   }
 
   async function handleConvert() {
-    if (blocked || count === 0) return;
+    if (blocked || planningBlocked || count === 0) return;
     const token = tryBegin("convert");
     if (token === null) return;
     let failure: string | null = null;
@@ -176,7 +178,7 @@ export default function ConvertActionBar({
     <div className="flex flex-wrap items-center gap-3">
       <button
         type="button"
-        disabled={blocked || busy || count === 0}
+        disabled={blocked || planningBlocked || busy || count === 0}
         onClick={() => void handleConvert()}
         className="btn-press rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition duration-fast ease-out
           enabled:hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"

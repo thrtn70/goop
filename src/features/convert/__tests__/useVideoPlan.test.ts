@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { useVideoPlan } from "../useVideoPlan";
+import { useVideoPlan, useVideoPlans } from "../useVideoPlan";
 import type { ConvertRequest, VideoExecutionSummary } from "@/types";
 const plan = vi.hoisted(() => vi.fn());
 vi.mock("@/ipc/commands", () => ({api:{convert:{videoPlan:plan}}}));
@@ -70,4 +70,44 @@ it("debounces edits before native work and discards retired errors", async () =>
   await act(async () => reject(new Error("Retired source failed")));
   expect(view.result.current.error).toBeNull();
   expect(view.result.current.summary).toEqual(summary);
+});
+
+const row = (id:string, crf=23) => ({id,sourceIdentity:id,request:{...request,input_path:"/"+id+".mp4",video_options:{kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf}}}});
+it("plans all current rows serially and invalidates only changed rows", async () => {
+  vi.useFakeTimers(); plan.mockResolvedValue(summary);
+  const view=renderHook(({rows})=>useVideoPlans(rows),{initialProps:{rows:[row("a"),row("b")]}});
+  await act(async()=>vi.advanceTimersByTime(300));
+  expect(plan).toHaveBeenCalledTimes(2);
+  expect(view.result.current.a.summary).toEqual(summary); expect(view.result.current.b.summary).toEqual(summary);
+  view.rerender({rows:[row("a",31),row("b")]});
+  expect(view.result.current.a.summary).toBeNull(); expect(view.result.current.b.summary).toEqual(summary);
+  await act(async()=>vi.advanceTimersByTime(300)); expect(plan).toHaveBeenCalledTimes(3);
+  expect(plan.mock.calls[2][0].input_path).toBe("/a.mp4");
+});
+it("keeps only each row's latest pending snapshot and retires removed rows", async () => {
+  vi.useFakeTimers(); const resolvers: ((v:VideoExecutionSummary)=>void)[]=[];
+  plan.mockImplementation(()=>new Promise(resolve=>resolvers.push(resolve)));
+  const view=renderHook(({rows})=>useVideoPlans(rows),{initialProps:{rows:[row("a"),row("b"),row("c")]}});
+  await act(async()=>vi.advanceTimersByTime(300)); expect(plan).toHaveBeenCalledTimes(1);
+  view.rerender({rows:[row("a"),row("b",25),row("c")]}); await act(async()=>vi.advanceTimersByTime(300));
+  view.rerender({rows:[row("a"),row("b",31)]}); await act(async()=>vi.advanceTimersByTime(300));
+  expect(plan).toHaveBeenCalledTimes(1);
+  await act(async()=>resolvers[0](summary));
+  expect(plan).toHaveBeenCalledTimes(2); expect(plan.mock.calls[1][0].video_options.rate_control.crf).toBe(31);
+  await act(async()=>resolvers[1](summary));
+  expect(view.result.current.c).toBeUndefined(); expect(plan).toHaveBeenCalledTimes(2);
+});
+it("retains one native slot across batch remount and suppresses removed active errors", async () => {
+  vi.useFakeTimers(); let reject!: (error:Error)=>void; const resolvers: ((v:VideoExecutionSummary)=>void)[]=[];
+  plan.mockImplementationOnce(()=>new Promise((_resolve,fail)=>{reject=fail;})).mockImplementation(()=>new Promise(resolve=>resolvers.push(resolve)));
+  const first=renderHook(()=>useVideoPlans([row("a"),row("b")]));
+  await act(async()=>vi.advanceTimersByTime(300)); first.unmount();
+  const next=renderHook(()=>useVideoPlans([row("c"),row("d")])); await act(async()=>vi.advanceTimersByTime(300));
+  expect(plan).toHaveBeenCalledTimes(1);
+  await act(async()=>reject(new Error("Retired a failed")));
+  expect(plan).toHaveBeenCalledTimes(2); expect(plan.mock.calls[1][0].input_path).toBe("/c.mp4");
+  expect(next.result.current.c.error).toBeNull();
+  await act(async()=>resolvers[0](summary)); expect(plan).toHaveBeenCalledTimes(3);
+  expect(plan.mock.calls[2][0].input_path).toBe("/d.mp4");
+  await act(async()=>resolvers[1](summary));
 });
