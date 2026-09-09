@@ -74,9 +74,16 @@ async fn replaced_request_cannot_publish_and_leaves_one_preview() {
         service.generate(&resolver, request(&input, "old")),
         service.generate(&resolver, request(&input, "new"))
     );
-    assert!(matches!(old, Err(goop_core::GoopError::Cancelled)));
     let result = new.unwrap();
     assert!(std::path::Path::new(&result.after_path).exists());
+    match old {
+        Err(goop_core::GoopError::Cancelled) => {}
+        Ok(old_result) => assert!(
+            !std::path::Path::new(&old_result.after_path).exists(),
+            "a completed superseded preview must be removed when the latest request publishes"
+        ),
+        Err(error) => panic!("superseded preview failed unexpectedly: {error}"),
+    }
     service.cancel("old");
     assert!(std::path::Path::new(&result.after_path).exists());
 }
@@ -543,12 +550,20 @@ async fn invalid_captures_leave_no_artifacts_and_do_not_block_next_sample() {
             );
         }
         image::RgbImage::new(32, 16).save(&input).unwrap();
-        let (cancelled, success) = tokio::join!(
+        let (old, latest) = tokio::join!(
             service.generate(&resolver, request(&input, "old")),
             service.generate(&resolver, request(&input, "new"))
         );
-        assert!(matches!(cancelled, Err(goop_core::GoopError::Cancelled)));
-        let result = success.unwrap();
+        let result = latest.unwrap();
+        assert!(std::path::Path::new(&result.after_path).exists());
+        match old {
+            Err(goop_core::GoopError::Cancelled) => {}
+            Ok(old_result) => assert!(
+                !std::path::Path::new(&old_result.after_path).exists(),
+                "a completed superseded preview must be removed when the latest request publishes"
+            ),
+            Err(error) => panic!("superseded preview failed unexpectedly: {error}"),
+        }
         service.cancel("new");
         assert!(!std::path::Path::new(&result.after_path).exists());
     }
