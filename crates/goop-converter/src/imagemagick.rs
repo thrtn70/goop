@@ -110,6 +110,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
+            audio_execution: None,
             video_execution: None,
             source_bytes: Some(source_bytes),
             target_bytes,

@@ -347,6 +347,22 @@ jobs:
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --example performance_baseline
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --ignored --test-threads=1
+      - name: Audio controls (real ffmpeg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test audio_contracts
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test audio_controls
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test audio_controls_ffmpeg -- --list | tee audio-controls-tests.txt
+          test "$(grep -c ': test$' audio-controls-tests.txt)" -eq 4
+          for test_name in \
+            explicit_copy_and_custom_encode_publish_verified_audio_only_outputs \
+            bundled_ffmpeg_covers_every_audio_target_bitrate_rate_and_channel_choice \
+            bundled_ffmpeg_preserves_channel_and_resample_semantics \
+            source_change_before_publication_fails_without_a_destination; do
+            grep -q "^${test_name}: test$" audio-controls-tests.txt
+          done
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test audio_controls_ffmpeg -- --ignored --test-threads=1
       # The PDF surface, against the real mutool / gs / tesseract. Until now
       # nothing ran these: the only `--ignored` jobs were goop-converter's, so
       # every shipped PDF path — compress, OCR, page thumbnails, text and image

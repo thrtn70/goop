@@ -1,5 +1,12 @@
 import { cloneVideoOptions, videoOptionsError, videoRequestOptions, type VideoDraftFile } from "./videoOptions";
 import {
+  audioOptionsProblem,
+  audioRequestOptions,
+  cloneAudioOptions,
+  type AudioConvertOptions,
+  type AudioDraftFile,
+} from "./audioOptions";
+import {
   beginDestinationChoice,
   isCurrentDestinationChoice,
   tryBegin,
@@ -29,13 +36,14 @@ import type {
   TargetFormat,
 } from "@/types";
 
-export interface FileEntry extends EntryIdentity, VideoDraftFile {
+export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile {
   optionsReady?: boolean;
   path: string;
   target: TargetFormat;
   sourceDir: string;
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
+  audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   /** Set by an applied preset. `null` leaves the backend's own default in
@@ -46,6 +54,10 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile {
 
 interface ConvertActionBarProps {
   files: FileEntry[];
+  /** Source currently shown in the inspector. Preset save snapshots this row. */
+  presetSource?: FileEntry | null;
+  /** Complete validation result for the selected row, including image drafts. */
+  presetValidationError?: string | null;
   disabled: boolean;
   planningBlocked?: boolean;
   onEnqueued: () => void;
@@ -70,6 +82,8 @@ function newBatchId(): string {
 
 export default function ConvertActionBar({
   files,
+  presetSource,
+  presetValidationError,
   disabled,
   planningBlocked = false,
   onEnqueued,
@@ -86,8 +100,19 @@ export default function ConvertActionBar({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
+  const presetFile = presetSource ?? files[0];
   const videoError = files.map(videoOptionsError).find(Boolean);
-  const blocked = disabled || Boolean(videoError);
+  const audioError = files.map(audioOptionsProblem).find(Boolean);
+  const blocked = disabled || Boolean(videoError) || Boolean(audioError);
+  const presetVideoError = presetFile ? videoOptionsError(presetFile) : null;
+  const presetAudioError = presetFile ? audioOptionsProblem(presetFile) : null;
+  const hasSelectedPresetContext = presetSource !== undefined;
+  const presetError = hasSelectedPresetContext
+    ? presetValidationError ?? presetAudioError ?? presetVideoError
+    : audioError ?? videoError;
+  const presetBlocked = hasSelectedPresetContext
+    ? !presetFile || presetFile.optionsReady === false || Boolean(presetError)
+    : blocked;
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("convert");
@@ -116,6 +141,7 @@ export default function ConvertActionBar({
     try {
       const snapshot = files.map((file) => ({
         ...file,
+        audioOptions: audioRequestOptions(file),
         videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
@@ -139,11 +165,12 @@ export default function ConvertActionBar({
       const results = await Promise.allSettled(
         snapshot.map((f) => {
           const output = destination ?? outputFolder ?? dirname(f.path);
-          return api.convert.fromFile({
+          const request = {
             input_path: f.path,
             output_path: output,
             target: f.target,
-            quality_preset: f.videoOptions ? null : f.qualityPreset,
+            quality_preset: f.videoOptions || f.audioOptions ? null : f.qualityPreset,
+            audio_options: cloneAudioOptions(f.audioOptions),
             video_options: cloneVideoOptions(f.videoOptions),
             resolution_cap: f.resolutionCap,
             gif_options: f.gifOptions,
@@ -152,7 +179,8 @@ export default function ConvertActionBar({
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
             subtitle: f.subtitle,
-          });
+          };
+          return api.convert.fromFile(request);
         }),
       );
       const successful = snapshot.filter(
@@ -212,34 +240,35 @@ export default function ConvertActionBar({
       {count > 0 && (
         <button
           type="button"
-          disabled={blocked}
+          disabled={presetBlocked}
           onClick={() => setSaveOpen(true)}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
           Save as preset
         </button>
       )}
-      {(error || pickerError || videoError) && (
+      {(error || pickerError || audioError || videoError) && (
         <span role="alert" className="text-xs text-error">
-          {error || pickerError || videoError}
+          {error || pickerError || audioError || videoError}
         </span>
       )}
       <PresetSaveDialog
-        validationError={videoError ?? null}
+        validationError={presetError}
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
-          target: files[0]?.target ?? "mp4",
+          target: presetFile?.target ?? "mp4",
           // The dialog documents these as the Convert-register fields to
           // pass, and now that a preset actually applies them, omitting
           // them here would save the fork with both cleared.
-          metadata_policy: files[0]?.metadataPolicy ?? null,
-          gif_options: files[0]?.gifOptions ? { ...files[0].gifOptions } : null,
-          image_options: cloneImageOptions(files[0]?.imageOptions),
-          subtitle: files[0]?.subtitle ? { ...files[0].subtitle } : null,
-          video_options: files[0] && !videoError ? videoRequestOptions(files[0]) : null,
-          quality_preset: files[0]?.videoOptions ? null : files[0]?.qualityPreset ?? null,
-          resolution_cap: files[0]?.resolutionCap ?? null,
+          metadata_policy: presetFile?.metadataPolicy ?? null,
+          gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
+          image_options: cloneImageOptions(presetFile?.imageOptions),
+          audio_options: cloneAudioOptions(presetFile?.audioOptions),
+          subtitle: presetFile?.subtitle ? { ...presetFile.subtitle } : null,
+          video_options: presetFile && !presetVideoError ? videoRequestOptions(presetFile) : null,
+          quality_preset: presetFile?.videoOptions || presetFile?.audioOptions ? null : presetFile?.qualityPreset ?? null,
+          resolution_cap: presetFile?.resolutionCap ?? null,
         }}
       />
     </div>

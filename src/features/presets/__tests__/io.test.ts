@@ -96,7 +96,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
-      metadata_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null,
+      metadata_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null,
     }]);
   });
 
@@ -266,7 +266,7 @@ describe("JPEG preset persistence", () => {
   it("exports complete JPEG settings in the current schema and imports them unchanged", () => {
     const json = serializePresets([makePreset({ target: "jpeg", quality_preset: null,
       resolution_cap: null, image_options: settings })]);
-    expect(JSON.parse(json).version).toBe(4);
+    expect(JSON.parse(json).version).toBe(PRESET_BUNDLE_VERSION);
     const entries = parsePresetBundle(json);
     expect(entries[0].image_options).toEqual(settings);
     const presets = entriesToPresets(entries, []);
@@ -325,7 +325,7 @@ describe("schema 4 video presets", () => {
     frame_rate:{kind:"constant",numerator:30000,denominator:1001}} as const;
   it("roundtrips complete independently owned video controls", () => {
     const raw = serializePresets([makePreset({ quality_preset: null, resolution_cap:null, video_options: transformed })]);
-    expect(JSON.parse(raw).version).toBe(4);
+    expect(JSON.parse(raw).version).toBe(PRESET_BUNDLE_VERSION);
     const entries = parsePresetBundle(raw);
     const presets = entriesToPresets(entries, []);
     expect(presets[0].video_options).toEqual(transformed);
@@ -351,5 +351,62 @@ describe("schema 4 video presets", () => {
   });
   it.each([{target:"webm"}, {quality_preset:"original"}, {subtitle:{source_path:"/x.srt",mode:"soft"}}, {resolution_cap:"r720p",video_options:{kind:"copy"}}])("rejects request conflicts", overrides => {
     expect(() => parsePresetBundle(JSON.stringify({version:4,presets:[{name:"Conflict",target:"mp4",video_options:video,...overrides}]}))).toThrow(/Conflict/);
+  });
+});
+
+describe("schema 5 audio presets", () => {
+  const audio = {
+    kind: "encode",
+    bitrate: { kind: "target", kbps: 320 },
+    channels: { kind: "mono" },
+    sample_rate: { kind: "exact", hz: 44_100 },
+  } as const;
+
+  it("roundtrips complete independently owned audio controls", () => {
+    const raw = serializePresets([makePreset({
+      target: "mp3",
+      quality_preset: null,
+      resolution_cap: null,
+      audio_options: audio,
+    })]);
+    expect(JSON.parse(raw).version).toBe(5);
+    const entries = parsePresetBundle(raw);
+    const presets = entriesToPresets(entries, []);
+    expect(presets[0].audio_options).toEqual(audio);
+    expect(presets[0].audio_options).not.toBe(entries[0].audio_options);
+    if (presets[0].audio_options?.kind === "encode" && entries[0].audio_options?.kind === "encode") {
+      expect(presets[0].audio_options.bitrate).not.toBe(entries[0].audio_options.bitrate);
+      expect(presets[0].audio_options.channels).not.toBe(entries[0].audio_options.channels);
+      expect(presets[0].audio_options.sample_rate).not.toBe(entries[0].audio_options.sample_rate);
+    }
+  });
+
+  it.each([1, 2, 3, 4])("keeps schema %s legacy and rejects meaningful audio fields", (version) => {
+    expect(parsePresetBundle(JSON.stringify({ version, presets: [{ name: "Old", target: "mp3" }] }))[0].audio_options).toBeNull();
+    expect(() => parsePresetBundle(JSON.stringify({ version, presets: [{ name: "Wrong", target: "mp3", audio_options: audio }] }))).toThrow(/audio_options/);
+  });
+
+  it.each([
+    { ...audio, extra: true },
+    { ...audio, bitrate: { kind: "target", kbps: 63 } },
+    { ...audio, channels: { kind: "surround" } },
+    { ...audio, sample_rate: { kind: "exact", hz: 96_000 } },
+    { kind: "copy", extra: true },
+  ])("rejects malformed or unsupported audio settings", (audio_options) => {
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 5,
+      presets: [{ name: "Invalid", target: "mp3", audio_options }],
+    }))).toThrow(/Invalid/);
+  });
+
+  it("rejects target mismatches and request conflicts", () => {
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 5,
+      presets: [{ name: "Wrong target", target: "flac", audio_options: audio }],
+    }))).toThrow(/Wrong target/);
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 5,
+      presets: [{ name: "Conflict", target: "mp3", audio_options: audio, video_options: { kind: "copy" } }],
+    }))).toThrow(/Conflict/);
   });
 });

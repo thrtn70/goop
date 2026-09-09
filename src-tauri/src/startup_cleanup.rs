@@ -266,6 +266,7 @@ mod tests {
             }
             job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(cp).unwrap();
             job.result = Some(goop_core::JobResult {
+                audio_execution: None,
                 video_execution: None,
                 output_path: Some(output.to_string_lossy().into()),
                 bytes: Some(6),

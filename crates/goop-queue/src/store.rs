@@ -1254,6 +1254,172 @@ mod tests {
     }
 
     #[test]
+    fn convert_audio_options_and_effective_result_survive_reopen_and_retry() {
+        let (store, tmp) = temp_store();
+        let payload = serde_json::json!({
+            "input_path": "source.wav",
+            "output_path": "converted.mp3",
+            "target": "mp3",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": "batch-audio",
+            "metadata_policy": "preserve",
+            "subtitle": null,
+            "image_options": null,
+            "video_options": null,
+            "audio_options": {
+                "kind": "encode",
+                "bitrate": {"kind": "target", "kbps": 192},
+                "channels": {"kind": "stereo"},
+                "sample_rate": {"kind": "exact", "hz": 48000}
+            }
+        });
+        let mut job = Job::new(JobKind::Convert, payload.clone());
+        job.state = JobState::Running;
+        store.insert(&job).unwrap();
+        let audio_execution = serde_json::json!({
+            "requested": payload["audio_options"].clone(),
+            "encoder": "libmp3lame",
+            "codec": "mp3",
+            "audio_stream_index": 0,
+            "copied": false,
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "channel_layout": "stereo",
+            "sample_format": "fltp",
+            "bit_depth": null,
+            "reported_bitrate_kbps": 192,
+            "notices": []
+        });
+        let result: goop_core::JobResult = serde_json::from_value(serde_json::json!({
+            "output_path": "converted.mp3",
+            "bytes": 4242,
+            "duration_ms": 2000,
+            "result_kind": "file",
+            "file_count": 1,
+            "reencoded": true,
+            "audio_execution": audio_execution.clone()
+        }))
+        .unwrap();
+        store
+            .update_state(job.id, &JobState::Done, Some(&result), 1)
+            .unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let reopened = QueueStore::open(&path).unwrap();
+        let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(restored.payload, payload);
+        assert_eq!(
+            serde_json::to_value(restored.result.as_ref().unwrap()).unwrap()["audio_execution"],
+            audio_execution
+        );
+
+        reopened
+            .update_state(
+                job.id,
+                &JobState::Error {
+                    message: "retryable".into(),
+                    detail: None,
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        assert_eq!(reopened.retry_errored(job.id).unwrap(), 1);
+        let retry = reopened.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.payload, payload);
+        let request: goop_core::ConvertRequest = serde_json::from_value(retry.payload).unwrap();
+        assert!(matches!(
+            request.audio_options,
+            Some(goop_core::AudioConvertOptions::Encode {
+                bitrate: Some(goop_core::AudioBitrate::Target { kbps: 192 }),
+                channels: goop_core::AudioChannels::Stereo,
+                sample_rate: goop_core::AudioSampleRate::Exact { hz: 48_000 },
+            })
+        ));
+    }
+
+    #[test]
+    fn legacy_absent_or_null_audio_options_survive_reopen_and_retry() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let mut payload = serde_json::json!({
+                "input_path": "legacy.wav",
+                "output_path": "converted.mp3",
+                "target": "mp3"
+            });
+            if explicit_null {
+                payload["audio_options"] = serde_json::Value::Null;
+            }
+            let mut job = Job::new(JobKind::Convert, payload.clone());
+            job.state = JobState::Running;
+            store.insert(&job).unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let reopened = QueueStore::open(&path).unwrap();
+            let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+            let request: goop_core::ConvertRequest =
+                serde_json::from_value(restored.payload).unwrap();
+            assert_eq!(request.audio_options, None);
+            reopened.reconcile().unwrap();
+            assert_eq!(reopened.retry_errored(job.id).unwrap(), 1);
+            let retry = reopened.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+            assert_eq!(retry.payload, payload);
+            let retried: goop_core::ConvertRequest = serde_json::from_value(retry.payload).unwrap();
+            assert_eq!(retried.audio_options, None);
+        }
+    }
+
+    #[test]
+    fn legacy_absent_or_null_audio_execution_results_survive_reopen() {
+        for explicit_null in [false, true] {
+            let (store, tmp) = temp_store();
+            let job = Job::new(
+                JobKind::Convert,
+                serde_json::json!({
+                    "input_path": "legacy.wav",
+                    "output_path": "converted.mp3",
+                    "target": "mp3"
+                }),
+            );
+            store.insert(&job).unwrap();
+            let mut legacy_result = serde_json::json!({
+                "output_path": "converted.mp3",
+                "bytes": 4242,
+                "duration_ms": 2000,
+                "result_kind": "file",
+                "file_count": 1
+            });
+            if explicit_null {
+                legacy_result["audio_execution"] = serde_json::Value::Null;
+            }
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE jobs SET state = 'done', result = ?2, finished_at = 2000 WHERE id = ?1",
+                    params![job.id.0.to_string(), legacy_result.to_string()],
+                )
+                .unwrap();
+            let path = tmp.path().join("q.db");
+            drop(store);
+
+            let restored = QueueStore::open(&path)
+                .unwrap()
+                .get_by_id(job.id)
+                .unwrap()
+                .unwrap();
+            let result = restored.result.unwrap();
+            assert_eq!(result.output_path.as_deref(), Some("converted.mp3"));
+            assert_eq!(result.audio_execution, None);
+        }
+    }
+
+    #[test]
     fn legacy_null_video_options_and_result_survive_reopen_and_retry() {
         for explicit_null in [false, true] {
             let (store, tmp) = temp_store();
@@ -1848,6 +2014,7 @@ mod tests {
         j.state = JobState::Done;
         j.finished_at = Some(j.created_at + 1000);
         j.result = Some(JobResult {
+            audio_execution: None,
             video_execution: None,
             source_bytes: None,
             target_bytes: None,

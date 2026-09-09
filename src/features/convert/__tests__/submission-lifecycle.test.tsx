@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import ConvertActionBar from "../ConvertActionBar";
+import type { AudioConvertOptions } from "../audioOptions";
 import CompressActionBar from "@/features/compress/CompressActionBar";
 const mocks = vi.hoisted(() => ({ save: vi.fn(), enqueue: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -81,6 +82,96 @@ it("snapshots nested JPEG settings before the destination dialog even if the cal
   await act(async () => resolve("/out.jpg"));
   await waitFor(() => expect(done).toHaveBeenCalledOnce());
   expect(mocks.enqueue.mock.calls[0][0].image_options).toEqual({ jpeg_quality: 90, resize: { kind: "fit_within", width: 2048, height: 2048 } });
+});
+
+it("snapshots nested audio settings before the destination dialog", async () => {
+  const options: Extract<AudioConvertOptions, { kind: "encode" }> = {
+    kind: "encode" as const,
+    bitrate: { kind: "target" as const, kbps: 320 },
+    channels: { kind: "mono" as const },
+    sample_rate: { kind: "exact" as const, hz: 44_100 },
+  };
+  let resolve!: (path: string) => void;
+  mocks.save.mockReset().mockImplementation(() => new Promise(r => { resolve = r; }));
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const done = vi.fn();
+  render(<ConvertActionBar files={[{
+    ...file,
+    path: "/song.wav",
+    target: "mp3",
+    audioOptions: options,
+    audioAvailability: { available: true, reason: null, copyAvailable: true, copyReason: null, encodeAvailable: true, encodeReason: null },
+    audioSource: { audioStreamCount: 1, sampleRateHz: 48_000, channelCount: 2, channelLayoutReported: true, hasNonAudioStreams: false },
+  }]} disabled={false} onEnqueued={done} />);
+  fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+  options.bitrate = { kind: "target", kbps: 64 };
+  options.channels = { kind: "stereo" };
+  options.sample_rate = { kind: "exact", hz: 48_000 };
+  await act(async () => resolve("/out.mp3"));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({
+    quality_preset: null,
+    audio_options: {
+      kind: "encode",
+      bitrate: { kind: "target", kbps: 320 },
+      channels: { kind: "mono" },
+      sample_rate: { kind: "exact", hz: 44_100 },
+    },
+  });
+});
+
+it("queues mixed audio batches with each file's independent settings", async () => {
+  mocks.save.mockReset();
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const done = vi.fn();
+  const source = { audioStreamCount: 1, sampleRateHz: 48_000, channelCount: 2, channelLayoutReported: true, hasNonAudioStreams: false };
+  const availability = { available: true, reason: null, copyAvailable: true, copyReason: null, encodeAvailable: true, encodeReason: null };
+  render(<ConvertActionBar files={[
+    {
+      ...file,
+      path: "/music/first.wav",
+      target: "mp3",
+      audioOptions: { kind: "encode", bitrate: { kind: "target", kbps: 320 }, channels: { kind: "mono" }, sample_rate: { kind: "exact", hz: 44_100 } },
+      audioAvailability: availability,
+      audioSource: source,
+    },
+    {
+      ...file,
+      path: "/music/second.m4a",
+      target: "flac",
+      audioOptions: { kind: "encode", bitrate: null, channels: { kind: "stereo" }, sample_rate: { kind: "exact", hz: 48_000 } },
+      audioAvailability: availability,
+      audioSource: source,
+    },
+  ]} disabled={false} onEnqueued={done} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Convert 2 files" }));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(mocks.enqueue).toHaveBeenCalledTimes(2);
+  expect(mocks.enqueue.mock.calls.map(([request]) => request.audio_options)).toEqual([
+    { kind: "encode", bitrate: { kind: "target", kbps: 320 }, channels: { kind: "mono" }, sample_rate: { kind: "exact", hz: 44_100 } },
+    { kind: "encode", bitrate: null, channels: { kind: "stereo" }, sample_rate: { kind: "exact", hz: 48_000 } },
+  ]);
+});
+
+it("invalid raw audio bitrate blocks enqueue and preset saving", () => {
+  mocks.save.mockReset();
+  mocks.enqueue.mockReset();
+  render(<ConvertActionBar files={[{
+    ...file,
+    path: "/song.wav",
+    target: "mp3",
+    audioOptions: { kind: "encode", bitrate: { kind: "target", kbps: 192 }, channels: { kind: "stereo" }, sample_rate: { kind: "exact", hz: 48_000 } },
+    audioBitrateDraft: "19x",
+    audioAvailability: { available: true, reason: null, copyAvailable: true, copyReason: null, encodeAvailable: true, encodeReason: null },
+    audioSource: { audioStreamCount: 1, sampleRateHz: 48_000, channelCount: 2, channelLayoutReported: true, hasNonAudioStreams: false },
+  }]} disabled={false} onEnqueued={vi.fn()} />);
+  expect((screen.getByRole("button", { name: "Convert 1 file" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Save as preset" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toMatch(/bitrate must be one of/i);
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(mocks.enqueue).not.toHaveBeenCalled();
 });
 
 it("Compress rejects unexpected image settings before opening a destination dialog", async () => {

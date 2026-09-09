@@ -49,6 +49,7 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
         )));
     }
     let request = goop_core::ConvertRequest {
+        audio_options: preset.audio_options.clone(),
         input_path: String::new(),
         output_path: String::new(),
         target: preset.target,
@@ -62,7 +63,8 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
         image_options: preset.image_options.clone(),
         video_options: preset.video_options.clone(),
     };
-    goop_core::validate_video_request(&request)
+    goop_core::validate_audio_request(&request)
+        .and_then(|()| goop_core::validate_video_request(&request))
         .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
 }
 
@@ -134,6 +136,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         .unwrap_or(0);
     vec![
         Preset {
+            audio_options: None,
             video_options: None,
             id: "builtin-youtube-upload".into(),
             name: "YouTube Upload".into(),
@@ -149,6 +152,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            audio_options: None,
             video_options: None,
             id: "builtin-twitter-video".into(),
             name: "Twitter/X Video".into(),
@@ -164,6 +168,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            audio_options: None,
             video_options: None,
             id: "builtin-podcast-mp3".into(),
             name: "Podcast MP3".into(),
@@ -179,6 +184,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             created_at: now,
         },
         Preset {
+            audio_options: None,
             video_options: None,
             id: "builtin-web-image".into(),
             name: "Web Image".into(),
@@ -218,6 +224,7 @@ mod tests {
 
     fn sample(id: &str, name: &str) -> Preset {
         Preset {
+            audio_options: None,
             video_options: None,
             id: id.into(),
             name: name.into(),
@@ -265,6 +272,42 @@ mod tests {
         preset.resolution_cap = Some(ResolutionCap::R720p);
         assert!(save_one(&path, preset).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn audio_presets_roundtrip_and_reject_structural_conflicts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("audio", "Podcast audio");
+        preset.target = TargetFormat::Mp3;
+        preset.quality_preset = None;
+        preset.audio_options = Some(goop_core::AudioConvertOptions::Encode {
+            bitrate: Some(goop_core::AudioBitrate::Target { kbps: 192 }),
+            channels: goop_core::AudioChannels::Stereo,
+            sample_rate: goop_core::AudioSampleRate::Exact { hz: 48_000 },
+        });
+
+        save(&path, std::slice::from_ref(&preset)).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![preset.clone()]);
+
+        let before = std::fs::read(&path).unwrap();
+        preset.target = TargetFormat::Mp4;
+        let error = save_one(&path, preset).unwrap_err().to_string();
+        assert!(error.contains("Podcast audio") && error.contains("Explicit audio"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_presets_load_without_audio_options() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        std::fs::write(
+            &path,
+            r#"[{"id":"old","name":"Old","target":"mp3","quality_preset":null,"resolution_cap":null,"compress_mode":null,"is_builtin":false,"created_at":0}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(load(&path).unwrap()[0].audio_options, None);
     }
 
     #[test]

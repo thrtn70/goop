@@ -1,4 +1,5 @@
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
+import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import { useEffect, useRef, useState } from "react";
 import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
 import { useAppStore } from "@/store/appStore";
@@ -24,6 +25,7 @@ interface PresetSaveDialogProps {
     subtitle?: SubtitleOptions | null;
     image_options?: ImageConvertOptions | null;
     video_options?: VideoConvertOptions | null;
+    audio_options?: AudioConvertOptions | null;
   };
 }
 
@@ -50,6 +52,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
       capturedError.current = validationError ?? null;
       captured.current = { ...snapshot,
         video_options: cloneVideoOptions(snapshot.video_options),
+        audio_options: cloneAudioOptions(snapshot.audio_options),
         compress_mode: snapshot.compress_mode ? { ...snapshot.compress_mode } : null,
         gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
         subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
@@ -83,9 +86,10 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
       if (!saved) return;
       if (capturedError.current) throw new Error(capturedError.current);
       const videoOptions = validateVideoRequest(saved);
+      const audioOptions = validateAudioRequest(saved);
       const imageOptions = validateImageOptions(saved.image_options);
       if (imageOptions && saved.compress_mode) throw new Error("Compression and image settings cannot be combined");
-      const preset: Preset = {
+      const preset = {
         id: newId(),
         name: trimmed,
         target: saved.target,
@@ -97,11 +101,12 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         subtitle: saved.subtitle ?? null,
         image_options: cloneImageOptions(imageOptions),
         video_options: cloneVideoOptions(videoOptions),
+        audio_options: cloneAudioOptions(audioOptions),
         is_builtin: false,
         // Rust side ignores client created_at for ordering; the wire IPC
         // boundary converts this Number to i64.
         created_at: Date.now() as unknown as bigint,
-      };
+      } satisfies Preset;
       await savePreset(preset);
       onClose();
     } catch (e) {

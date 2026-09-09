@@ -11,9 +11,10 @@ import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
+import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 4 as const;
+export const PRESET_BUNDLE_VERSION = 5 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -85,6 +86,7 @@ interface PresetEntry {
   subtitle: SubtitleOptions | null;
   image_options: ImageConvertOptions | null;
   video_options: VideoConvertOptions | null;
+  audio_options: AudioConvertOptions | null;
 }
 
 function compressModeForWire(m: CompressMode | null): WireCompressMode | null {
@@ -118,6 +120,7 @@ interface PresetBundleWire {
     subtitle: SubtitleOptions | null;
     image_options: ImageConvertOptions | null;
     video_options: VideoConvertOptions | null;
+    audio_options: AudioConvertOptions | null;
   }>;
 }
 
@@ -138,6 +141,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       subtitle: p.subtitle ?? null,
       image_options: cloneImageOptions(p.image_options),
       video_options: cloneVideoOptions(p.video_options),
+      audio_options: cloneAudioOptions(p.audio_options),
     })),
   };
   return JSON.stringify(bundle, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value, 2);
@@ -229,6 +233,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
   }
   let imageOptions: ImageConvertOptions | null;
   let videoOptions: VideoConvertOptions | null;
+  let audioOptions: AudioConvertOptions | null;
   try {
     if (version === 1 && v.image_options != null) {
       throw new Error("image_options is not allowed in schema 1");
@@ -247,6 +252,8 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
       requestEntry = { ...v, video_options: legacyVideo };
     }
     videoOptions = validateVideoRequest({ ...requestEntry, target: v.target as TargetFormat } as Parameters<typeof validateVideoRequest>[0]);
+    if (version < 5 && v.audio_options != null) throw new Error("audio_options is not allowed before schema 5");
+    audioOptions = validateAudioRequest({ ...requestEntry, target: v.target as TargetFormat });
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
     }
@@ -264,6 +271,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     subtitle: validateSubtitle(v.subtitle),
     image_options: imageOptions,
     video_options: videoOptions,
+    audio_options: audioOptions,
   };
 }
 
@@ -284,9 +292,9 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== PRESET_BUNDLE_VERSION) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3 or ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3, 4 or ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {
@@ -323,6 +331,7 @@ export function entriesToPresets(
       subtitle: entry.subtitle ? { ...entry.subtitle } : null,
       image_options: cloneImageOptions(entry.image_options),
       video_options: cloneVideoOptions(entry.video_options),
+      audio_options: cloneAudioOptions(entry.audio_options),
       is_builtin: false,
       // i64 in Rust ↔ bigint in TS; the IPC layer converts to a wire number.
       created_at: BigInt(Date.now()),

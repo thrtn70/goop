@@ -281,6 +281,9 @@ pub struct ConvertRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub image_options: Option<ImageConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub audio_options: Option<crate::audio::AudioConvertOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -324,11 +327,17 @@ pub struct ProbeResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub image_has_alpha: Option<bool>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub audio_details: Option<crate::audio::AudioProbeDetails>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertResult {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub audio_execution: Option<crate::audio::AudioExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_execution: Option<crate::video::VideoExecutionSummary>,

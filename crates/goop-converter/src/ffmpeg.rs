@@ -12,9 +12,38 @@ use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceIdentity {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn source_identity(path: &Path) -> Result<SourceIdentity, GoopError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        GoopError::InvalidRequest(format!(
+            "Could not verify source identity for {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(SourceIdentity {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn verify_source_identity(path: &Path, expected: &SourceIdentity) -> Result<(), GoopError> {
+    if &source_identity(path)? != expected {
+        return Err(GoopError::InvalidRequest(
+            "The source changed during conversion; no output was published".into(),
+        ));
+    }
+    Ok(())
+}
 
 pub struct FfmpegBackend<'a> {
     resolver: &'a BinaryResolver,
@@ -30,6 +59,8 @@ pub struct FfmpegBackend<'a> {
     /// `cmd.spawn()` and unregistered via RAII guard on every exit path.
     /// `None` disables pause/resume — pause IPC will return JobNotRunning.
     pids: Option<Arc<dyn PidRegistry>>,
+    #[cfg(debug_assertions)]
+    before_publish_test_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl<'a> FfmpegBackend<'a> {
@@ -40,6 +71,8 @@ impl<'a> FfmpegBackend<'a> {
             encoders: None,
             hw_enabled: false,
             pids: None,
+            #[cfg(debug_assertions)]
+            before_publish_test_hook: None,
         }
     }
 
@@ -82,6 +115,13 @@ impl<'a> FfmpegBackend<'a> {
         self.pids = Some(pids);
         self
     }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn with_before_publish_test_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.before_publish_test_hook = Some(hook);
+        self
+    }
 }
 
 impl<'a> ConversionBackend for FfmpegBackend<'a> {
@@ -113,6 +153,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             return Err(GoopError::Cancelled);
         }
         goop_core::validate_video_request(req)?;
+        goop_core::validate_audio_request(req)?;
         let bin = self.resolver.resolve("ffmpeg")?;
         let expanded_input = goop_core::path::expand(&req.input_path);
         let input = match std::fs::canonicalize(&expanded_input) {
@@ -124,8 +165,13 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 });
             }
         };
+        let explicit_audio_identity = req
+            .audio_options
+            .as_ref()
+            .map(|_| source_identity(&input))
+            .transpose()?;
         let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
-        let probe = if req.video_options.is_some() {
+        let probe = if req.video_options.is_some() || req.audio_options.is_some() {
             Self::probe_with_cancel(self.resolver, &input, &cancel).await?
         } else {
             tokio::select! {
@@ -134,7 +180,10 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 probe = Self::probe(self.resolver, &input) => probe?,
             }
         };
-        let (mut plan, subtitle_input, video_execution) = if req.video_options.is_some() {
+        let (mut plan, subtitle_input, video_execution, mut audio_execution) = if req
+            .video_options
+            .is_some()
+        {
             let detected;
             let encoders = match self.encoders.as_deref() {
                 Some(encoders) => encoders,
@@ -151,10 +200,30 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 resolved.plan,
                 SubtitleInput::default(),
                 Some(resolved.summary),
+                None,
+            )
+        } else if req.audio_options.is_some() {
+            let detected;
+            let encoders = match self.encoders.as_deref() {
+                Some(encoders) => encoders,
+                None => {
+                    detected = crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
+                    &detected
+                }
+            };
+            if cancel.is_cancelled() {
+                return Err(GoopError::Cancelled);
+            }
+            let resolved = crate::audio_options::resolve(req, &probe, encoders)?;
+            (
+                resolved.plan,
+                SubtitleInput::default(),
+                None,
+                Some(resolved.summary),
             )
         } else {
             let (plan, subtitle) = build_plan(req, &probe)?;
-            (plan, subtitle, None)
+            (plan, subtitle, None, None)
         };
 
         let final_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
@@ -184,6 +253,10 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         };
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
+
+        if let Some(identity) = &explicit_audio_identity {
+            verify_source_identity(&input, identity)?;
+        }
 
         let result = self
             .run_ffmpeg(
@@ -247,8 +320,22 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 crate::video_options::validate_copy_facts(&probe, &actual)?;
             }
         }
+        if let Some(expected) = &audio_execution {
+            let actual = Self::probe_with_cancel(self.resolver, &output_path, &cancel).await?;
+            audio_execution = Some(crate::audio_options::validate_output_against_source(
+                expected, &probe, &actual,
+            )?);
+        }
+        #[cfg(debug_assertions)]
+        if let Some(hook) = &self.before_publish_test_hook {
+            hook();
+        }
+        if let Some(identity) = &explicit_audio_identity {
+            verify_source_identity(&input, identity)?;
+        }
         let published = staged.publish(&destination, target_bytes, false, &cancel)?;
         Ok(ConvertResult {
+            audio_execution,
             video_execution,
             source_bytes: Some(source_bytes),
             target_bytes,
@@ -733,6 +820,7 @@ mod tests {
 
     fn req_with(target: TargetFormat, subtitle: Option<SubtitleOptions>) -> ConvertRequest {
         ConvertRequest {
+            audio_options: None,
             video_options: None,
             input_path: "/in.mp4".into(),
             output_path: "/out".into(),
@@ -750,6 +838,7 @@ mod tests {
 
     fn probe_h264_aac() -> ProbeResult {
         ProbeResult {
+            audio_details: None,
             video_details: None,
             duration_ms: 1000,
             width: Some(1920),
@@ -780,6 +869,18 @@ mod tests {
             audio_codecs: codecs.iter().map(|c| (*c).to_string()).collect(),
             ..probe_h264_aac()
         }
+    }
+
+    #[test]
+    fn source_identity_detects_size_and_modified_time_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.bin");
+        fs::write(&path, b"first").unwrap();
+        let original = source_identity(&path).unwrap();
+        assert!(verify_source_identity(&path, &original).is_ok());
+
+        fs::write(&path, b"longer replacement").unwrap();
+        assert!(verify_source_identity(&path, &original).is_err());
     }
 
     #[test]
