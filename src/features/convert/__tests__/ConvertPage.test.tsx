@@ -805,6 +805,60 @@ it("uses one selected inspector while inspecting hidden sources and preserves ed
   expect(mockProbe).toHaveBeenCalledTimes(2);
 });
 
+it("saves the selected source settings despite an invalid hidden batch row", async () => {
+  cleanup();
+  vi.clearAllMocks();
+  clearWorkspaceDrafts("convert");
+  const savePreset = vi.fn().mockResolvedValue(undefined);
+  useAppStore.setState({ presets: [], savePreset });
+  mockProbe.mockResolvedValue(mp4Probe);
+  mockOpen.mockResolvedValue(["/first.mp4", "/second.mp4"]);
+
+  render(
+    <MemoryRouter>
+      <ConvertPage />
+    </MemoryRouter>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => expect(mockProbe).toHaveBeenCalledTimes(2));
+  await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+  fireEvent.change(screen.getByLabelText("CRF"), { target: { value: "" } });
+  await userEvent.click(
+    screen.getByRole("button", { name: /Select second.mp4/i }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "MKV" }));
+  await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+  await userEvent.selectOptions(screen.getByLabelText("Codec"), "hevc");
+  await userEvent.selectOptions(
+    screen.getByLabelText("Rate control"),
+    "average_bitrate",
+  );
+  fireEvent.change(screen.getByLabelText("Video bitrate (kbps)"), {
+    target: { value: "6500" },
+  });
+  expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  expect(screen.getByRole("button", { name: "Save as preset" })).toHaveProperty(
+    "disabled",
+    false,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Save as preset" }),
+  );
+  await userEvent.type(screen.getByLabelText("Preset name"), "Second row");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
+  expect(savePreset.mock.calls[0][0].target).toBe("mkv");
+  expect(savePreset.mock.calls[0][0].video_options).toMatchObject({
+    kind: "encode",
+    codec: "hevc",
+    rate_control: { kind: "average_bitrate", kbps: 6500 },
+  });
+});
+
 describe("explicit video inspector", () => {
   beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
   afterEach(cleanup);

@@ -420,6 +420,10 @@ function ConvertPage() {
           actions={
             <ConvertActionBar
               files={videoFiles}
+              presetSource={selectedVideo}
+              presetValidationError={
+                selected ? problems[files.indexOf(selected)] ?? null : null
+              }
               disabled={blocked}
               planningBlocked={files.some(file => !!planProblem(file))}
               onEnqueued={() => {}}

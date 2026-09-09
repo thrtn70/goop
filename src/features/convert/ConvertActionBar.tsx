@@ -54,6 +54,10 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile
 
 interface ConvertActionBarProps {
   files: FileEntry[];
+  /** Source currently shown in the inspector. Preset save snapshots this row. */
+  presetSource?: FileEntry | null;
+  /** Complete validation result for the selected row, including image drafts. */
+  presetValidationError?: string | null;
   disabled: boolean;
   planningBlocked?: boolean;
   onEnqueued: () => void;
@@ -78,6 +82,8 @@ function newBatchId(): string {
 
 export default function ConvertActionBar({
   files,
+  presetSource,
+  presetValidationError,
   disabled,
   planningBlocked = false,
   onEnqueued,
@@ -94,9 +100,19 @@ export default function ConvertActionBar({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
+  const presetFile = presetSource ?? files[0];
   const videoError = files.map(videoOptionsError).find(Boolean);
   const audioError = files.map(audioOptionsProblem).find(Boolean);
   const blocked = disabled || Boolean(videoError) || Boolean(audioError);
+  const presetVideoError = presetFile ? videoOptionsError(presetFile) : null;
+  const presetAudioError = presetFile ? audioOptionsProblem(presetFile) : null;
+  const hasSelectedPresetContext = presetSource !== undefined;
+  const presetError = hasSelectedPresetContext
+    ? presetValidationError ?? presetAudioError ?? presetVideoError
+    : audioError ?? videoError;
+  const presetBlocked = hasSelectedPresetContext
+    ? !presetFile || presetFile.optionsReady === false || Boolean(presetError)
+    : blocked;
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("convert");
@@ -224,7 +240,7 @@ export default function ConvertActionBar({
       {count > 0 && (
         <button
           type="button"
-          disabled={blocked}
+          disabled={presetBlocked}
           onClick={() => setSaveOpen(true)}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
@@ -237,22 +253,22 @@ export default function ConvertActionBar({
         </span>
       )}
       <PresetSaveDialog
-        validationError={audioError ?? videoError ?? null}
+        validationError={presetError}
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
-          target: files[0]?.target ?? "mp4",
+          target: presetFile?.target ?? "mp4",
           // The dialog documents these as the Convert-register fields to
           // pass, and now that a preset actually applies them, omitting
           // them here would save the fork with both cleared.
-          metadata_policy: files[0]?.metadataPolicy ?? null,
-          gif_options: files[0]?.gifOptions ? { ...files[0].gifOptions } : null,
-          image_options: cloneImageOptions(files[0]?.imageOptions),
-          audio_options: cloneAudioOptions(files[0]?.audioOptions),
-          subtitle: files[0]?.subtitle ? { ...files[0].subtitle } : null,
-          video_options: files[0] && !videoError ? videoRequestOptions(files[0]) : null,
-          quality_preset: files[0]?.videoOptions || files[0]?.audioOptions ? null : files[0]?.qualityPreset ?? null,
-          resolution_cap: files[0]?.resolutionCap ?? null,
+          metadata_policy: presetFile?.metadataPolicy ?? null,
+          gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
+          image_options: cloneImageOptions(presetFile?.imageOptions),
+          audio_options: cloneAudioOptions(presetFile?.audioOptions),
+          subtitle: presetFile?.subtitle ? { ...presetFile.subtitle } : null,
+          video_options: presetFile && !presetVideoError ? videoRequestOptions(presetFile) : null,
+          quality_preset: presetFile?.videoOptions || presetFile?.audioOptions ? null : presetFile?.qualityPreset ?? null,
+          resolution_cap: presetFile?.resolutionCap ?? null,
         }}
       />
     </div>
