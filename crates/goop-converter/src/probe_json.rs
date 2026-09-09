@@ -1,9 +1,11 @@
 use goop_core::{
     AudioNumericFact, AudioProbeDetails, AudioStreamInfo, GoopError, ProbeResult,
-    VideoProbeDetails, VideoRationalFact, VideoStreamInfo,
+    TrackDispositionFacts, TrackIdentity, TrackInventory, TrackTextFact, VideoProbeDetails,
+    VideoRationalFact, VideoStreamInfo, TRACK_INVENTORY_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Deserialize)]
 struct FfprobeRoot {
@@ -21,11 +23,25 @@ struct FfprobeFormat {
 #[derive(Debug, Deserialize)]
 struct FfprobeStream {
     #[serde(flatten)]
-    facts: std::collections::HashMap<String, Value>,
-    codec_type: Option<String>,
-    codec_name: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
+    facts: HashMap<String, Value>,
+}
+
+impl FfprobeStream {
+    fn text(&self, key: &str) -> Option<&str> {
+        self.facts.get(key).and_then(Value::as_str)
+    }
+
+    fn codec_type(&self) -> Option<&str> {
+        self.text("codec_type")
+    }
+
+    fn codec_name(&self) -> Option<&str> {
+        self.text("codec_name")
+    }
+
+    fn u32(&self, key: &str) -> Option<u32> {
+        u32::try_from(self.facts.get(key)?.as_u64()?).ok()
+    }
 }
 
 pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
@@ -53,21 +69,21 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
 
     let video = streams
         .iter()
-        .find(|s| s.codec_type.as_deref() == Some("video"));
+        .find(|stream| stream.codec_type() == Some("video"));
     let audio = streams
         .iter()
-        .find(|s| s.codec_type.as_deref() == Some("audio"));
+        .find(|stream| stream.codec_type() == Some("audio"));
 
     let subtitle_codecs: Vec<String> = streams
         .iter()
-        .filter(|s| s.codec_type.as_deref() == Some("subtitle"))
-        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .filter(|stream| stream.codec_type() == Some("subtitle"))
+        .map(|stream| stream.codec_name().unwrap_or_default().to_owned())
         .collect();
 
     let audio_codecs: Vec<String> = streams
         .iter()
-        .filter(|s| s.codec_type.as_deref() == Some("audio"))
-        .map(|s| s.codec_name.clone().unwrap_or_default())
+        .filter(|stream| stream.codec_type() == Some("audio"))
+        .map(|stream| stream.codec_name().unwrap_or_default().to_owned())
         .collect();
 
     let has_video = video.is_some();
@@ -88,16 +104,17 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
 
     Ok(ProbeResult {
         audio_details: audio_details(&streams),
+        track_inventory: track_inventory(&streams),
         video_details: if has_video {
             stream_details(&streams)
         } else {
             None
         },
         duration_ms,
-        width: video.and_then(|s| s.width),
-        height: video.and_then(|s| s.height),
-        video_codec: video.and_then(|s| s.codec_name.clone()),
-        audio_codec: audio.and_then(|s| s.codec_name.clone()),
+        width: video.and_then(|stream| stream.u32("width")),
+        height: video.and_then(|stream| stream.u32("height")),
+        video_codec: video.and_then(|stream| stream.codec_name().map(str::to_owned)),
+        audio_codec: audio.and_then(|stream| stream.codec_name().map(str::to_owned)),
         file_size,
         container,
         has_video,
@@ -110,6 +127,95 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         audio_codecs,
         image_has_alpha: None,
     })
+}
+
+fn track_text_fact(value: Option<&Value>) -> TrackTextFact {
+    match value {
+        None => TrackTextFact::Missing,
+        Some(Value::String(value)) => TrackTextFact::Value {
+            value: value.clone(),
+        },
+        Some(_) => TrackTextFact::Malformed,
+    }
+}
+
+fn nested_track_text_fact(
+    facts: &HashMap<String, Value>,
+    object: &str,
+    key: &str,
+) -> TrackTextFact {
+    match facts.get(object) {
+        None => TrackTextFact::Missing,
+        Some(Value::Object(values)) => track_text_fact(values.get(key)),
+        Some(_) => TrackTextFact::Malformed,
+    }
+}
+
+fn disposition_bool(value: &Value) -> Option<bool> {
+    value.as_bool().or_else(|| match value.as_u64() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    })
+}
+
+fn disposition_facts(value: Option<&Value>) -> TrackDispositionFacts {
+    let mut result = TrackDispositionFacts {
+        default: None,
+        forced: None,
+        attached_pic: None,
+        other: BTreeMap::new(),
+        malformed: false,
+    };
+    let Some(value) = value else {
+        return result;
+    };
+    let Some(values) = value.as_object() else {
+        result.malformed = true;
+        return result;
+    };
+    for (name, value) in values {
+        let parsed = disposition_bool(value);
+        if parsed.is_none() {
+            result.malformed = true;
+        }
+        match name.as_str() {
+            "default" => result.default = parsed,
+            "forced" => result.forced = parsed,
+            "attached_pic" => result.attached_pic = parsed,
+            _ => {
+                if let Some(parsed) = parsed {
+                    result.other.insert(name.clone(), parsed);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn track_inventory(streams: &[FfprobeStream]) -> Option<TrackInventory> {
+    let streams: Option<Vec<TrackIdentity>> = streams
+        .iter()
+        .map(|stream| {
+            let index = u32::try_from(stream.facts.get("index")?.as_u64()?).ok()?;
+            let codec_type = stream.codec_type()?.to_owned();
+            Some(TrackIdentity {
+                index,
+                codec_type,
+                codec_name: track_text_fact(stream.facts.get("codec_name")),
+                container_stream_id: track_text_fact(stream.facts.get("id")),
+                language: nested_track_text_fact(&stream.facts, "tags", "language"),
+                title: nested_track_text_fact(&stream.facts, "tags", "title"),
+                disposition: disposition_facts(stream.facts.get("disposition")),
+            })
+        })
+        .collect();
+    let inventory = TrackInventory {
+        version: TRACK_INVENTORY_VERSION,
+        streams: streams?,
+    };
+    goop_core::validate_track_inventory(&inventory).ok()?;
+    Some(inventory)
 }
 
 fn numeric_fact(value: Option<&Value>) -> Option<AudioNumericFact> {
@@ -127,7 +233,7 @@ fn numeric_fact(value: Option<&Value>) -> Option<AudioNumericFact> {
 fn audio_details(streams: &[FfprobeStream]) -> Option<AudioProbeDetails> {
     let audio: Option<Vec<AudioStreamInfo>> = streams
         .iter()
-        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .filter(|stream| stream.codec_type() == Some("audio"))
         .map(|stream| {
             let facts = &stream.facts;
             let index = u32::try_from(facts.get("index")?.as_u64()?).ok()?;
@@ -138,7 +244,7 @@ fn audio_details(streams: &[FfprobeStream]) -> Option<AudioProbeDetails> {
             };
             Some(AudioStreamInfo {
                 index,
-                codec_name: stream.codec_name.clone(),
+                codec_name: stream.codec_name().map(str::to_owned),
                 sample_rate_hz: numeric_fact(facts.get("sample_rate")),
                 channels: numeric_fact(facts.get("channels")),
                 channel_layout: text("channel_layout"),
@@ -160,7 +266,7 @@ fn audio_details(streams: &[FfprobeStream]) -> Option<AudioProbeDetails> {
         streams: audio,
         has_non_audio_streams: streams
             .iter()
-            .any(|stream| stream.codec_type.as_deref() != Some("audio")),
+            .any(|stream| stream.codec_type() != Some("audio")),
     })
 }
 
@@ -350,11 +456,8 @@ fn stream_details(streams: &[FfprobeStream]) -> Option<VideoProbeDetails> {
         ambiguous |= rotations.windows(2).any(|pair| pair[0] != pair[1]);
         result.push(VideoStreamInfo {
             index,
-            codec_type: stream
-                .codec_type
-                .clone()
-                .unwrap_or_else(|| "unknown".into()),
-            codec_name: stream.codec_name.clone(),
+            codec_type: stream.codec_type().unwrap_or("unknown").to_owned(),
+            codec_name: stream.codec_name().map(str::to_owned),
             pixel_format: text("pix_fmt"),
             color_transfer: text("color_transfer"),
             color_primaries: text("color_primaries"),

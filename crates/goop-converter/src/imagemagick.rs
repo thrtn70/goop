@@ -112,6 +112,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         Ok(ConvertResult {
             audio_execution: None,
             video_execution: None,
+            track_execution: None,
             source_bytes: Some(source_bytes),
             target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),

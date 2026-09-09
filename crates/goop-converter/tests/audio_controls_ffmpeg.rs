@@ -1,8 +1,12 @@
 mod common;
 
-use goop_converter::{backend::ConversionBackend, encoders::DetectedEncoders, FfmpegBackend};
+use goop_converter::{
+    backend::ConversionBackend, capabilities::inspect_source_with_encoders,
+    encoders::DetectedEncoders, FfmpegBackend,
+};
 use goop_core::{
     AudioBitrate, AudioChannels, AudioConvertOptions, AudioSampleRate, JobId, TargetFormat,
+    TrackConvertOptions,
 };
 use std::{path::Path, process::Command, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -81,6 +85,33 @@ fn tone_magnitude(samples: &[f32], sample_rate_hz: f64, frequency_hz: f64) -> f6
                 (sine + sample * phase.sin(), cosine + sample * phase.cos())
             });
     sine.hypot(cosine) / samples.len() as f64
+}
+
+async fn selected_copy_request(
+    resolver: &goop_sidecar::BinaryResolver,
+    encoders: &DetectedEncoders,
+    source: &Path,
+    output: &Path,
+) -> goop_core::ConvertRequest {
+    let inspection = inspect_source_with_encoders(resolver, source, encoders)
+        .await
+        .unwrap();
+    assert!(inspection.track_source_unavailable_reason.is_none());
+    let binding = inspection.track_source.expect("source binding");
+    let stream_index = binding
+        .inventory
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type == "audio")
+        .expect("audio track")
+        .index;
+    let mut request = common::request(source, output, TargetFormat::M4a, None);
+    request.audio_options = Some(AudioConvertOptions::Copy);
+    request.track_options = Some(TrackConvertOptions::Audio {
+        source: binding,
+        stream_index,
+    });
+    request
 }
 
 #[tokio::test]
@@ -401,5 +432,63 @@ async fn source_change_before_publication_fails_without_a_destination() {
     assert!(error
         .user_message()
         .contains("source changed during conversion"));
+    assert!(!output.exists());
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[ignore = "requires bundled ffmpeg and ffprobe sidecars"]
+async fn selected_source_is_revalidated_immediately_before_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let resolver = common::bundled_resolver(temp.path());
+    let ffmpeg = common::ffmpeg_path(&resolver);
+    let source = temp.path().join("source.mp4");
+    let replacement = temp.path().join("replacement.mp4");
+    common::make_source_sized(&ffmpeg, &source, 160, 120);
+    common::make_source_sized(&ffmpeg, &replacement, 320, 240);
+    let output = temp.path().join("must-not-run.m4a");
+    let encoders = Arc::new(DetectedEncoders::from_names(["aac"]));
+    let request = selected_copy_request(&resolver, &encoders, &source, &output).await;
+    let changed_source = source.clone();
+    let backend = FfmpegBackend::new(&resolver, Arc::new(common::SilentSink))
+        .with_encoders(encoders, false)
+        .with_before_run_test_hook(Arc::new(move || {
+            std::fs::copy(&replacement, &changed_source).unwrap();
+        }));
+
+    let error = backend
+        .convert(JobId::new(), &request, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error.user_message().contains("reinspect"));
+    assert!(!output.exists());
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[ignore = "requires bundled ffmpeg and ffprobe sidecars"]
+async fn selected_source_is_revalidated_immediately_before_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let resolver = common::bundled_resolver(temp.path());
+    let ffmpeg = common::ffmpeg_path(&resolver);
+    let source = temp.path().join("source.mp4");
+    let replacement = temp.path().join("replacement.mp4");
+    common::make_source_sized(&ffmpeg, &source, 160, 120);
+    common::make_source_sized(&ffmpeg, &replacement, 320, 240);
+    let output = temp.path().join("must-not-publish.m4a");
+    let encoders = Arc::new(DetectedEncoders::from_names(["aac"]));
+    let request = selected_copy_request(&resolver, &encoders, &source, &output).await;
+    let changed_source = source.clone();
+    let backend = FfmpegBackend::new(&resolver, Arc::new(common::SilentSink))
+        .with_encoders(encoders, false)
+        .with_before_publish_test_hook(Arc::new(move || {
+            std::fs::copy(&replacement, &changed_source).unwrap();
+        }));
+
+    let error = backend
+        .convert(JobId::new(), &request, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error.user_message().contains("reinspect"));
     assert!(!output.exists());
 }

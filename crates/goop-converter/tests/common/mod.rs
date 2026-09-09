@@ -191,6 +191,7 @@ pub fn request(
 ) -> ConvertRequest {
     ConvertRequest {
         audio_options: None,
+        track_options: None,
         video_options: None,
         input_path: input.to_string_lossy().into_owned(),
         output_path: output.to_string_lossy().into_owned(),

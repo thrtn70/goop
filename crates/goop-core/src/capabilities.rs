@@ -86,4 +86,7 @@ pub struct ConversionInspection {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub track_source: Option<crate::tracks::TrackSourceBinding>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_source_unavailable_reason: Option<String>,
 }

@@ -60,6 +60,8 @@ pub struct FfmpegBackend<'a> {
     /// `None` disables pause/resume — pause IPC will return JobNotRunning.
     pids: Option<Arc<dyn PidRegistry>>,
     #[cfg(debug_assertions)]
+    before_run_test_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(debug_assertions)]
     before_publish_test_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -71,6 +73,8 @@ impl<'a> FfmpegBackend<'a> {
             encoders: None,
             hw_enabled: false,
             pids: None,
+            #[cfg(debug_assertions)]
+            before_run_test_hook: None,
             #[cfg(debug_assertions)]
             before_publish_test_hook: None,
         }
@@ -118,6 +122,13 @@ impl<'a> FfmpegBackend<'a> {
 
     #[cfg(debug_assertions)]
     #[doc(hidden)]
+    pub fn with_before_run_test_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.before_run_test_hook = Some(hook);
+        self
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn with_before_publish_test_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.before_publish_test_hook = Some(hook);
         self
@@ -154,6 +165,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         }
         goop_core::validate_video_request(req)?;
         goop_core::validate_audio_request(req)?;
+        goop_core::validate_track_request(req)?;
         let bin = self.resolver.resolve("ffmpeg")?;
         let expanded_input = goop_core::path::expand(&req.input_path);
         let input = match std::fs::canonicalize(&expanded_input) {
@@ -170,8 +182,16 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             .as_ref()
             .map(|_| source_identity(&input))
             .transpose()?;
+        let selected_track_source = req.track_options.as_ref().map(|options| match options {
+            goop_core::TrackConvertOptions::Audio { source, .. } => source.clone(),
+        });
         let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
-        let probe = if req.video_options.is_some() || req.audio_options.is_some() {
+        let probe = if let Some(expected) = selected_track_source.as_ref() {
+            let (probe, actual) =
+                crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
+            crate::track_options::verify_source_binding(expected, actual.as_ref())?;
+            probe
+        } else if req.video_options.is_some() || req.audio_options.is_some() {
             Self::probe_with_cancel(self.resolver, &input, &cancel).await?
         } else {
             tokio::select! {
@@ -180,51 +200,54 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                 probe = Self::probe(self.resolver, &input) => probe?,
             }
         };
-        let (mut plan, subtitle_input, video_execution, mut audio_execution) = if req
-            .video_options
-            .is_some()
-        {
-            let detected;
-            let encoders = match self.encoders.as_deref() {
-                Some(encoders) => encoders,
-                None => {
-                    detected = crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
-                    &detected
+        let (mut plan, subtitle_input, video_execution, mut audio_execution, track_execution) =
+            if req.video_options.is_some() {
+                let detected;
+                let encoders = match self.encoders.as_deref() {
+                    Some(encoders) => encoders,
+                    None => {
+                        detected =
+                            crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
+                        &detected
+                    }
+                };
+                if cancel.is_cancelled() {
+                    return Err(GoopError::Cancelled);
                 }
-            };
-            if cancel.is_cancelled() {
-                return Err(GoopError::Cancelled);
-            }
-            let resolved = crate::video_options::resolve(req, &probe, encoders)?;
-            (
-                resolved.plan,
-                SubtitleInput::default(),
-                Some(resolved.summary),
-                None,
-            )
-        } else if req.audio_options.is_some() {
-            let detected;
-            let encoders = match self.encoders.as_deref() {
-                Some(encoders) => encoders,
-                None => {
-                    detected = crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
-                    &detected
+                let resolved = crate::video_options::resolve(req, &probe, encoders)?;
+                (
+                    resolved.plan,
+                    SubtitleInput::default(),
+                    Some(resolved.summary),
+                    None,
+                    None,
+                )
+            } else if req.audio_options.is_some() {
+                let detected;
+                let encoders = match self.encoders.as_deref() {
+                    Some(encoders) => encoders,
+                    None => {
+                        detected =
+                            crate::encoders::detect_with_cancel(self.resolver, &cancel).await;
+                        &detected
+                    }
+                };
+                if cancel.is_cancelled() {
+                    return Err(GoopError::Cancelled);
                 }
+                let resolved = crate::audio_options::resolve(req, &probe, encoders)?;
+                let track_execution = crate::track_options::resolve(req, &probe)?;
+                (
+                    resolved.plan,
+                    SubtitleInput::default(),
+                    None,
+                    Some(resolved.summary),
+                    track_execution,
+                )
+            } else {
+                let (plan, subtitle) = build_plan(req, &probe)?;
+                (plan, subtitle, None, None, None)
             };
-            if cancel.is_cancelled() {
-                return Err(GoopError::Cancelled);
-            }
-            let resolved = crate::audio_options::resolve(req, &probe, encoders)?;
-            (
-                resolved.plan,
-                SubtitleInput::default(),
-                None,
-                Some(resolved.summary),
-            )
-        } else {
-            let (plan, subtitle) = build_plan(req, &probe)?;
-            (plan, subtitle, None, None)
-        };
 
         let final_path = resolve_output_path(&req.input_path, &req.output_path, &plan)?;
         let destination = if goop_core::path::expand(&req.output_path).is_dir() {
@@ -254,6 +277,15 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
 
+        #[cfg(debug_assertions)]
+        if let Some(hook) = &self.before_run_test_hook {
+            hook();
+        }
+        if let Some(expected) = selected_track_source.as_ref() {
+            let (_, actual) =
+                crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
+            crate::track_options::verify_source_binding(expected, actual.as_ref())?;
+        }
         if let Some(identity) = &explicit_audio_identity {
             verify_source_identity(&input, identity)?;
         }
@@ -325,10 +357,18 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             audio_execution = Some(crate::audio_options::validate_output_against_source(
                 expected, &probe, &actual,
             )?);
+            if let Some(expected) = &track_execution {
+                crate::track_options::validate_output_against_selection(expected, &actual)?;
+            }
         }
         #[cfg(debug_assertions)]
         if let Some(hook) = &self.before_publish_test_hook {
             hook();
+        }
+        if let Some(expected) = selected_track_source.as_ref() {
+            let (_, actual) =
+                crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
+            crate::track_options::verify_source_binding(expected, actual.as_ref())?;
         }
         if let Some(identity) = &explicit_audio_identity {
             verify_source_identity(&input, identity)?;
@@ -337,6 +377,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         Ok(ConvertResult {
             audio_execution,
             video_execution,
+            track_execution,
             source_bytes: Some(source_bytes),
             target_bytes,
             output_path: published.path.to_string_lossy().into_owned(),
@@ -821,6 +862,7 @@ mod tests {
     fn req_with(target: TargetFormat, subtitle: Option<SubtitleOptions>) -> ConvertRequest {
         ConvertRequest {
             audio_options: None,
+            track_options: None,
             video_options: None,
             input_path: "/in.mp4".into(),
             output_path: "/out".into(),
@@ -839,6 +881,7 @@ mod tests {
     fn probe_h264_aac() -> ProbeResult {
         ProbeResult {
             audio_details: None,
+            track_inventory: None,
             video_details: None,
             duration_ms: 1000,
             width: Some(1920),

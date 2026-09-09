@@ -300,7 +300,19 @@ fn absent_and_null_track_fields_preserve_legacy_contracts() {
     ] {
         let inspection: ConversionInspection = serde_json::from_value(payload).unwrap();
         assert_eq!(inspection.track_source, None);
+        assert_eq!(inspection.track_source_unavailable_reason, None);
     }
+
+    let unavailable: ConversionInspection = serde_json::from_value(json!({
+        "probe":{"duration_ms":1,"file_size":1,"has_video":false,"has_audio":true,"source_kind":"audio"},
+        "capabilities":{"targets":[],"compression":{"quality":false,"target_size":false,"lossless":false,"reason":null}},
+        "track_source_unavailable_reason":"Complete stream identity is unavailable"
+    }))
+    .unwrap();
+    assert_eq!(
+        unavailable.track_source_unavailable_reason.as_deref(),
+        Some("Complete stream identity is unavailable")
+    );
 
     for payload in [
         json!({"id":"old","name":"Old","target":"mp3","quality_preset":null,"resolution_cap":null,"compress_mode":null,"is_builtin":false,"created_at":0}),

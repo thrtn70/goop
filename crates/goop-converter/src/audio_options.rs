@@ -3,7 +3,7 @@ use goop_core::{
     validate_audio_request, AudioBitrate, AudioChannels, AudioConvertOptions,
     AudioExecutionSummary, AudioModeAvailability, AudioNumericFact, AudioSampleRate,
     AudioSettingsCapabilities, AudioStreamInfo, ConvertRequest, GoopError, ProbeResult,
-    TargetFormat, VideoRationalFact,
+    TargetFormat, TrackConvertOptions, TrackSourceBinding, VideoRationalFact,
 };
 
 #[derive(Debug, Clone)]
@@ -47,6 +47,17 @@ fn source_stream(probe: &ProbeResult) -> Result<&AudioStreamInfo, GoopError> {
     Ok(&details.streams[0])
 }
 
+fn source_stream_for_request<'a>(
+    request: &ConvertRequest,
+    probe: &'a ProbeResult,
+) -> Result<&'a AudioStreamInfo, GoopError> {
+    if request.track_options.is_some() {
+        crate::track_options::selected_audio_stream(request, probe)
+    } else {
+        source_stream(probe)
+    }
+}
+
 pub fn resolve(
     request: &ConvertRequest,
     probe: &ProbeResult,
@@ -59,13 +70,13 @@ pub fn resolve(
         .ok_or_else(|| invalid("Explicit audio settings are missing"))?;
     let (codec, encoder, _) = target_facts(request.target)
         .ok_or_else(|| invalid("This output does not support explicit audio settings"))?;
-    let source = source_stream(probe)?;
+    let source = source_stream_for_request(request, probe)?;
     let source_channels = exact(&source.channels).filter(|value| *value > 0);
     let source_rate = exact(&source.sample_rate_hz);
     let notice = probe
         .audio_details
         .as_ref()
-        .is_some_and(|details| details.has_non_audio_streams)
+        .is_some_and(|details| details.has_non_audio_streams && request.track_options.is_none())
         .then(|| "Non-audio streams and artwork are not included".to_owned());
 
     let mut args = vec![
@@ -208,10 +219,38 @@ pub fn capabilities(
     target: TargetFormat,
     encoders: &DetectedEncoders,
 ) -> AudioSettingsCapabilities {
+    capabilities_with_track(probe, target, encoders, None)
+}
+
+pub fn capabilities_for_track(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+    source: &TrackSourceBinding,
+    stream_index: u32,
+) -> AudioSettingsCapabilities {
+    capabilities_with_track(
+        probe,
+        target,
+        encoders,
+        Some(TrackConvertOptions::Audio {
+            source: source.clone(),
+            stream_index,
+        }),
+    )
+}
+
+fn capabilities_with_track(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+    track_options: Option<TrackConvertOptions>,
+) -> AudioSettingsCapabilities {
     let (codec, encoder, bitrates) =
         target_facts(target).unwrap_or(("unsupported", "unsupported", &[]));
     let request = |audio_options| ConvertRequest {
         audio_options: Some(audio_options),
+        track_options: track_options.clone(),
         video_options: None,
         input_path: String::new(),
         output_path: String::new(),
@@ -225,10 +264,9 @@ pub fn capabilities(
         subtitle: None,
         image_options: None,
     };
-    let source = probe
-        .audio_details
-        .as_ref()
-        .and_then(|details| (details.streams.len() == 1).then(|| details.streams[0].clone()));
+    let source = source_stream_for_request(&request(AudioConvertOptions::Copy), probe)
+        .ok()
+        .cloned();
     let source_rate = source
         .as_ref()
         .and_then(|stream| exact(&stream.sample_rate_hz));
@@ -277,8 +315,16 @@ pub fn validate_output_against_source(
     source: &ProbeResult,
     actual: &ProbeResult,
 ) -> Result<AudioExecutionSummary, GoopError> {
-    let source_audio = source_stream(source)
-        .map_err(|_| invalid("Admitted source audio facts are no longer complete"))?;
+    let source_audio = source
+        .audio_details
+        .as_ref()
+        .and_then(|details| {
+            details
+                .streams
+                .iter()
+                .find(|stream| stream.index == expected.audio_stream_index)
+        })
+        .ok_or_else(|| invalid("Admitted source audio facts are no longer complete"))?;
     let stream = source_stream(actual).map_err(|_| {
         invalid("Completed audio output did not contain exactly one verified audio stream")
     })?;

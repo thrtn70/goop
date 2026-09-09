@@ -24,6 +24,7 @@ pub mod probe_json;
 pub mod progress;
 pub mod raw;
 pub mod subtitle;
+pub mod track_options;
 
 pub use backend::{backend_for_extension, BackendKind, ConversionBackend};
 pub use compat::{decide, Plan};

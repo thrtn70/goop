@@ -626,6 +626,7 @@ pub fn capabilities(
 ) -> VideoSettingsCapabilities {
     let request = |options| ConvertRequest {
         audio_options: None,
+        track_options: None,
         batch_id: None,
         input_path: String::new(),
         output_path: String::new(),
