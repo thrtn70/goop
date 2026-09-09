@@ -130,8 +130,11 @@ export function audioSourceFacts(
   details: AudioProbeDetails | null | undefined,
   fallbackAudioStreamCount = 0,
   fallbackHasNonAudioStreams = false,
+  selectedStreamIndex?: number | null,
 ): AudioSourceFacts {
-  const stream = details?.streams[0];
+  const stream = selectedStreamIndex == null
+    ? details?.streams[0]
+    : details?.streams.find((candidate) => candidate.index === selectedStreamIndex);
   return {
     audioStreamCount: details?.streams.length ?? fallbackAudioStreamCount,
     sampleRateHz: stream?.sample_rate_hz?.kind === "exact"
@@ -283,9 +286,6 @@ export function audioOptionsProblem(file: AudioDraftFile): string | null {
     if (!/^\d+$/.test(raw) || !audioBitratesForTarget(file.target).includes(Number(raw))) {
       return `${file.target.toUpperCase()} bitrate must be one of ${audioBitratesForTarget(file.target).join(", ")} kbps`;
     }
-  }
-  if (file.audioSource && file.audioSource.audioStreamCount !== 1) {
-    return "Explicit audio settings need exactly one audio track. Track selection is not available yet.";
   }
   if (file.audioAvailability) {
     if (!file.audioAvailability.available) {

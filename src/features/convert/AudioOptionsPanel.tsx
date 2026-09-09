@@ -50,7 +50,6 @@ export default function AudioOptionsPanel({
       setAppliedBitrate(String(numeric));
     }
   }, [encode?.bitrate?.kbps, appliedBitrate, setAppliedBitrate, setBitrateDraft]);
-  const oneTrack = source.audioStreamCount === 1;
   const bitrateChoices = availability.bitrateChoicesKbps ?? audioBitratesForTarget(target);
   const bitrateInvalid = encode != null && bitrateChoices.length > 0
     && (!/^\d+$/.test(bitrateDraft) || !bitrateChoices.includes(Number(bitrateDraft)));
@@ -105,13 +104,13 @@ export default function AudioOptionsPanel({
           <option value="automatic">Automatic</option>
           <option
             value="copy"
-            disabled={value?.kind !== "copy" && (!oneTrack || !availability.available || !availability.copyAvailable)}
+            disabled={value?.kind !== "copy" && (!availability.available || !availability.copyAvailable)}
           >
             Copy audio
           </option>
           <option
             value="encode"
-            disabled={value?.kind !== "encode" && (!oneTrack || !availability.available || !availability.encodeAvailable)}
+            disabled={value?.kind !== "encode" && (!availability.available || !availability.encodeAvailable)}
           >
             Custom encode
           </option>
@@ -127,10 +126,8 @@ export default function AudioOptionsPanel({
       {!availability.encodeAvailable && (
         <p className="text-fg-muted">Custom encode: {availability.encodeReason ?? "Unavailable for this source."}</p>
       )}
-      {!oneTrack && (
-        <p className="text-warning">
-          Explicit audio settings need exactly one audio track. Track selection is not available yet.
-        </p>
+      {source.audioStreamCount > 1 && (
+        <p className="text-fg-muted">Choose the source track in Audio track above.</p>
       )}
       {source.sampleRateHz == null && (
         <p className="text-fg-muted">

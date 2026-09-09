@@ -26,6 +26,12 @@ import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import { cloneImageOptions } from "./imageOptions";
 import { subtitleForTarget } from "./FileRow";
+import {
+  cloneTrackOptions,
+  trackRequestOptions,
+  trackSelectionProblem,
+  type TrackDraftFile,
+} from "./trackOptions";
 import type {
   GifOptions,
   ImageConvertOptions,
@@ -34,9 +40,10 @@ import type {
   ResolutionCap,
   SubtitleOptions,
   TargetFormat,
+  TrackPresetPolicy,
 } from "@/types";
 
-export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile {
+export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile, TrackDraftFile {
   optionsReady?: boolean;
   path: string;
   target: TargetFormat;
@@ -50,6 +57,7 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile
    *  place — these are only ever populated from a preset the user picked. */
   qualityPreset: QualityPreset | null;
   resolutionCap: ResolutionCap | null;
+  audioPlanReady?: boolean;
 }
 
 interface ConvertActionBarProps {
@@ -103,7 +111,11 @@ export default function ConvertActionBar({
   const presetFile = presetSource ?? files[0];
   const videoError = files.map(videoOptionsError).find(Boolean);
   const audioError = files.map(audioOptionsProblem).find(Boolean);
-  const blocked = disabled || Boolean(videoError) || Boolean(audioError);
+  const trackError = files.map(trackSelectionProblem).find(Boolean);
+  const missingAudioPlan = files.some((file) =>
+    Boolean(file.audioOptions && (file.trackSettings || file.trackOptions !== undefined) && !file.audioPlanReady),
+  );
+  const blocked = disabled || Boolean(videoError) || Boolean(audioError) || Boolean(trackError) || missingAudioPlan;
   const presetVideoError = presetFile ? videoOptionsError(presetFile) : null;
   const presetAudioError = presetFile ? audioOptionsProblem(presetFile) : null;
   const hasSelectedPresetContext = presetSource !== undefined;
@@ -142,6 +154,7 @@ export default function ConvertActionBar({
       const snapshot = files.map((file) => ({
         ...file,
         audioOptions: audioRequestOptions(file),
+        trackOptions: cloneTrackOptions(trackRequestOptions(file)),
         videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
@@ -171,6 +184,7 @@ export default function ConvertActionBar({
             target: f.target,
             quality_preset: f.videoOptions || f.audioOptions ? null : f.qualityPreset,
             audio_options: cloneAudioOptions(f.audioOptions),
+            ...(f.trackOptions === null ? {} : { track_options: cloneTrackOptions(f.trackOptions) }),
             video_options: cloneVideoOptions(f.videoOptions),
             resolution_cap: f.resolutionCap,
             gif_options: f.gifOptions,
@@ -247,9 +261,9 @@ export default function ConvertActionBar({
           Save as preset
         </button>
       )}
-      {(error || pickerError || audioError || videoError) && (
+      {(error || pickerError || audioError || videoError || trackError) && (
         <span role="alert" className="text-xs text-error">
-          {error || pickerError || audioError || videoError}
+          {error || pickerError || audioError || videoError || trackError}
         </span>
       )}
       <PresetSaveDialog
@@ -265,6 +279,9 @@ export default function ConvertActionBar({
           gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
           image_options: cloneImageOptions(presetFile?.imageOptions),
           audio_options: cloneAudioOptions(presetFile?.audioOptions),
+          track_policy: presetFile?.audioOptions && presetFile.trackOptions !== undefined
+            ? ({ kind: "audio", selection: { kind: "choose_per_file" } } satisfies TrackPresetPolicy)
+            : null,
           subtitle: presetFile?.subtitle ? { ...presetFile.subtitle } : null,
           video_options: presetFile && !presetVideoError ? videoRequestOptions(presetFile) : null,
           quality_preset: presetFile?.videoOptions || presetFile?.audioOptions ? null : presetFile?.qualityPreset ?? null,

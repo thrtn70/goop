@@ -1,7 +1,7 @@
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
@@ -26,6 +26,7 @@ interface PresetSaveDialogProps {
     image_options?: ImageConvertOptions | null;
     video_options?: VideoConvertOptions | null;
     audio_options?: AudioConvertOptions | null;
+    track_policy?: TrackPresetPolicy | null;
   };
 }
 
@@ -53,6 +54,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
       captured.current = { ...snapshot,
         video_options: cloneVideoOptions(snapshot.video_options),
         audio_options: cloneAudioOptions(snapshot.audio_options),
+        track_policy: snapshot.track_policy ? { kind: "audio", selection: { kind: "choose_per_file" } } : null,
         compress_mode: snapshot.compress_mode ? { ...snapshot.compress_mode } : null,
         gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
         subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
@@ -102,6 +104,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         image_options: cloneImageOptions(imageOptions),
         video_options: cloneVideoOptions(videoOptions),
         audio_options: cloneAudioOptions(audioOptions),
+        track_policy: saved.track_policy ?? null,
         is_builtin: false,
         // Rust side ignores client created_at for ordering; the wire IPC
         // boundary converts this Number to i64.
@@ -131,6 +134,11 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         <p className="mt-1 text-xs text-fg-muted">
           Give this combination a name so you can apply it again later.
         </p>
+        {(captured.current?.track_policy ?? snapshot.track_policy) && (
+          <p className="mt-2 text-xs text-fg-secondary">
+            Audio track will be chosen for each source.
+          </p>
+        )}
         <input
           ref={inputRef}
           aria-label="Preset name"

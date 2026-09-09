@@ -137,6 +137,19 @@ describe("PresetChips", () => {
     expect(video_options.frame_rate.numerator).toBe(24000);
   });
 
+  it("labels and independently applies a portable choose-per-file track policy", async () => {
+    const policy = { kind: "audio" as const, selection: { kind: "choose_per_file" as const } };
+    const preset = makePreset({ id: "audio", name: "Podcast", target: "m4a", audio_options: { kind: "copy" }, track_policy: policy });
+    resetStore({ presets: [preset] });
+    const onApply = vi.fn();
+    render(<PresetChips kind="convert" onApply={onApply} />);
+    expect(screen.getByText("· Choose track")).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: /Podcast.*Choose track/ }));
+    const applied = onApply.mock.calls[0][0] as Preset;
+    expect(applied.track_policy).toEqual(policy);
+    expect(applied.track_policy).not.toBe(policy);
+  });
+
   it("exposes named preset buttons in list items with native keyboard activation", async () => {
     const preset = makePreset({
       id: "gif-social",
@@ -345,6 +358,27 @@ describe("video preset snapshots", () => {
     await userEvent.click(screen.getByRole("button",{name:"Save"}));
     expect(api.preset.save).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toContain("whole number");
+  });
+});
+
+describe("audio track preset snapshots", () => {
+  afterEach(cleanup);
+  beforeEach(() => { vi.clearAllMocks(); resetStore(); });
+
+  it("explains and saves Choose per file without a source binding", async () => {
+    const { default: Dialog } = await import("../PresetSaveDialog");
+    render(<Dialog open onClose={() => {}} snapshot={{
+      target: "m4a",
+      audio_options: { kind: "copy" },
+      track_policy: { kind: "audio", selection: { kind: "choose_per_file" } },
+    }} />);
+    expect(screen.getByText("Audio track will be chosen for each source.")).toBeDefined();
+    await userEvent.type(screen.getByRole("textbox", { name: "Preset name" }), "Commentary workflow");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(api.preset.save).toHaveBeenCalledOnce());
+    const saved = vi.mocked(api.preset.save).mock.calls[0][0];
+    expect(saved.track_policy).toEqual({ kind: "audio", selection: { kind: "choose_per_file" } });
+    expect(JSON.stringify(saved)).not.toMatch(/canonical_path|stream_index|inventory/);
   });
 });
 

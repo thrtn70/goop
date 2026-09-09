@@ -1,9 +1,9 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { useVideoPlan, useVideoPlans } from "../useVideoPlan";
-import type { ConvertRequest, VideoExecutionSummary } from "@/types";
-const plan = vi.hoisted(() => vi.fn());
-vi.mock("@/ipc/commands", () => ({api:{convert:{videoPlan:plan}}}));
+import { useAudioPlans, useVideoPlan, useVideoPlans } from "../useVideoPlan";
+import type { AudioExecutionSummary, ConvertRequest, VideoExecutionSummary } from "@/types";
+const { plan, audioPlan } = vi.hoisted(() => ({ plan: vi.fn(), audioPlan: vi.fn() }));
+vi.mock("@/ipc/commands", () => ({api:{convert:{videoPlan:plan,audioPlan}}}));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
 const request: ConvertRequest = {input_path:"/a.mp4",output_path:"",target:"mp4",video_options:{kind:"copy"},quality_preset:null,resolution_cap:null,compress_mode:null,metadata_policy:"preserve",subtitle:null,gif_options:null,batch_id:null};
 const summary: VideoExecutionSummary = {requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_copied:false,width:1920,height:1080,notices:[]};
@@ -121,4 +121,27 @@ it("captures exact nested dimensions and frame timing before deferred planning",
   await act(async()=>vi.advanceTimersByTime(300));
   expect(plan.mock.calls[0][0].video_options.resize).toEqual({kind:"fit_within",width:1280,height:721});
   expect(plan.mock.calls[0][0].video_options.frame_rate).toEqual({kind:"constant",numerator:24000,denominator:1001});
+});
+
+it("shares the bounded planner with source-bound audio requests and owns the binding snapshot", async () => {
+  vi.useFakeTimers();
+  const audioSummary: AudioExecutionSummary = {
+    requested: { kind: "copy" }, encoder: null, codec: "aac", audio_stream_index: 3,
+    copied: true, sample_rate_hz: 48_000, channels: 2, channel_layout: "stereo",
+    sample_format: null, bit_depth: null, reported_bitrate_kbps: null, notices: [],
+  };
+  audioPlan.mockResolvedValue(audioSummary);
+  const source = { version: 1, canonical_path: "/movie.mkv", size_bytes: "10", modified_unix_ns: "20", inventory: { version: 1, streams: [] } };
+  const audioRequest: ConvertRequest = {
+    ...request,
+    target: "m4a",
+    video_options: null,
+    audio_options: { kind: "copy" },
+    track_options: { kind: "audio", source, stream_index: 3 },
+  };
+  renderHook(() => useAudioPlans([{ id: "audio", request: audioRequest, sourceIdentity: "audio:1" }]));
+  source.modified_unix_ns = "99";
+  await act(async () => vi.advanceTimersByTime(300));
+  expect(audioPlan).toHaveBeenCalledOnce();
+  expect(audioPlan.mock.calls[0][0].track_options.source.modified_unix_ns).toBe("20");
 });

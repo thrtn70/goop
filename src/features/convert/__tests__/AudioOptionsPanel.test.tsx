@@ -80,7 +80,7 @@ it("retains invalid bitrate text and explains lossless output truthfully", () =>
   expect(screen.queryByText(/Bitrate is an encoder target/i)).toBeNull();
 });
 
-it("shows truthful source omissions and blocks ambiguous explicit selection", () => {
+it("shows truthful source omissions and hands multi-track choice to the track panel", () => {
   render(<AudioOptionsPanel
     target="flac"
     value={null}
@@ -88,12 +88,12 @@ it("shows truthful source omissions and blocks ambiguous explicit selection", ()
     source={{ audioStreamCount: 2, sampleRateHz: null, channelCount: null, channelLayoutReported: false, hasNonAudioStreams: true }}
     onChange={vi.fn()}
   />);
-  expect(screen.getByText(/exactly one audio track/i)).toBeTruthy();
+  expect(screen.getByText(/choose the source track in audio track above/i)).toBeTruthy();
   expect(screen.getByText(/sample rate was not reported/i)).toBeTruthy();
   expect(screen.getByText(/channel layout was not reported/i)).toBeTruthy();
   expect(screen.getByText(/video, subtitles, and artwork are not included/i)).toBeTruthy();
-  expect((screen.getByRole("option", { name: "Copy audio" }) as HTMLOptionElement).disabled).toBe(true);
-  expect((screen.getByRole("option", { name: "Custom encode" }) as HTMLOptionElement).disabled).toBe(true);
+  expect((screen.getByRole("option", { name: "Copy audio" }) as HTMLOptionElement).disabled).toBe(false);
+  expect((screen.getByRole("option", { name: "Custom encode" }) as HTMLOptionElement).disabled).toBe(false);
   expect(screen.queryByText(/preview/i)).toBeNull();
 });
 

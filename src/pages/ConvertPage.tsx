@@ -8,8 +8,8 @@ import {
   cloneAudioOptions,
   isAudioTarget,
 } from "@/features/convert/audioOptions";
-import { useVideoPlans } from "@/features/convert/useVideoPlan";
-import { videoExecutionText } from "@/features/preview/outputSummary";
+import { useAudioPlans, useVideoPlans } from "@/features/convert/useVideoPlan";
+import { audioExecutionText, videoExecutionText } from "@/features/preview/outputSummary";
 import SettingsPreview from "@/features/preview/SettingsPreview";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
@@ -45,6 +45,14 @@ import { smartDefault } from "@/features/convert/TargetPicker";
 import { conversionProblem } from "@/features/workspace/readiness";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
+import {
+  cloneTrackOptions,
+  resolvedTrackOptions,
+  selectedTrackChoice,
+  trackOptionsAfterSourceReplacement,
+  trackRequestOptions,
+  trackSelectionProblem,
+} from "@/features/convert/trackOptions";
 
 import { useAppStore } from "@/store/appStore";
 import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
@@ -82,11 +90,48 @@ function ConvertPage() {
     if (state?.phase !== "ready") return file;
     const targetCapability = state.capabilities.targets.find(c => c.target === file.target);
     const audioSettings = targetCapability?.audio_settings;
+    const trackSettings = targetCapability?.track_settings;
     const probe = state.probe;
+    const sourceScopedOptions = trackOptionsAfterSourceReplacement(file.trackOptions, trackSettings);
+    const effectiveTrackOptions = file.audioOptions
+      ? resolvedTrackOptions(sourceScopedOptions, trackSettings)
+      : cloneTrackOptions(sourceScopedOptions);
+    const selectedChoice = selectedTrackChoice(trackSettings, effectiveTrackOptions);
+    const baseAvailability = audioAvailability(audioSettings, targetCapability?.available ?? false, targetCapability?.reason);
+    const copyChoices = trackSettings?.audio_choices.filter(choice => choice.copy.available) ?? [];
+    const encodeChoices = trackSettings?.audio_choices.filter(choice => choice.encode.available) ?? [];
+    const copy = trackSettings
+      ? {
+          available: copyChoices.length > 0,
+          reason: copyChoices.length > 0 ? null : trackSettings.audio_choices[0]?.copy.reason ?? null,
+        }
+      : null;
+    const encode = trackSettings
+      ? {
+          available: encodeChoices.length > 0,
+          reason: encodeChoices.length > 0 ? null : trackSettings.audio_choices[0]?.encode.reason ?? null,
+        }
+      : null;
     return {
       ...file,
-      audioAvailability: audioAvailability(audioSettings, targetCapability?.available ?? false, targetCapability?.reason),
-      audioSource: audioSourceFacts(probe.audio_details, probe.audio_codecs?.length ?? (probe.has_audio ? 1 : 0), probe.has_video || probe.has_subtitles),
+      ...(sourceScopedOptions === undefined && !effectiveTrackOptions
+        ? {}
+        : { trackOptions: effectiveTrackOptions }),
+      trackSettings,
+      trackSourceUnavailableReason: state.track_source_unavailable_reason ?? null,
+      audioAvailability: {
+        ...baseAvailability,
+        copyAvailable: copy?.available ?? baseAvailability.copyAvailable,
+        copyReason: copy ? copy.reason ?? null : baseAvailability.copyReason,
+        encodeAvailable: encode?.available ?? baseAvailability.encodeAvailable,
+        encodeReason: encode ? encode.reason ?? null : baseAvailability.encodeReason,
+      },
+      audioSource: audioSourceFacts(
+        probe.audio_details,
+        probe.audio_codecs?.length ?? (probe.has_audio ? 1 : 0),
+        probe.has_video || probe.has_subtitles,
+        selectedChoice?.track.index,
+      ),
     };
   };
   const imageProblems = files.map(file => {
@@ -122,6 +167,23 @@ function ConvertPage() {
         previous.map((f) => (f.id ? f : { ...f, ...newIdentity() })),
       );
   }, [files, setFiles]);
+  useEffect(() => {
+    setFiles((previous) => {
+      let changed = false;
+      const next = previous.map((file) => {
+        if (!file.trackOptions) return file;
+        const state = byId[file.id ?? ""];
+        if (state?.phase !== "ready") return file;
+        const currentSource = state.capabilities.targets.find(
+          (target) => target.target === file.target,
+        )?.track_settings?.source;
+        if (!currentSource || currentSource.canonical_path === file.trackOptions.source.canonical_path) return file;
+        changed = true;
+        return { ...file, trackOptions: null, revision: (file.revision ?? 0) + 1 };
+      });
+      return changed ? next : previous;
+    });
+  }, [byId, setFiles]);
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
   const selectedVideo = videoFiles.find(file => file.id === selected?.id);
@@ -138,11 +200,44 @@ function ConvertPage() {
     }];
   });
   const videoPlans = useVideoPlans(planEntries);
+  const audioPlanEntries = videoFiles.flatMap(file => {
+    if (!file.id || !file.audioOptions || !file.optionsReady || audioOptionsProblem(file) || trackSelectionProblem(file)) return [];
+    const trackOptions = trackRequestOptions(file);
+    if (!trackOptions) return [];
+    return [{
+      id: file.id,
+      sourceIdentity: JSON.stringify([file.id, file.revision, trackOptions.source]),
+      request: {
+        input_path: file.path, output_path: "", target: file.target,
+        audio_options: audioRequestOptions(file), track_options: trackOptions,
+        video_options: null, quality_preset: null, resolution_cap: null,
+        compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
+        subtitle: null, gif_options: null, image_options: null,
+      },
+    }];
+  });
+  const audioPlans = useAudioPlans(audioPlanEntries);
+  const plannedFiles = videoFiles.map(file => {
+    const audioPlan = audioPlans[file.id ?? ""];
+    return {
+      ...file,
+      audioPlanReady: !file.audioOptions || (!file.trackSettings && file.trackOptions === undefined) || Boolean(audioPlan?.summary),
+      audioPlanError: audioPlan?.error ?? null,
+    };
+  });
+  const selectedPlanned = plannedFiles.find(file => file.id === selected?.id);
   const videoPlan = videoPlans[selected?.id ?? ""];
+  const audioPlan = audioPlans[selected?.id ?? ""];
   const planProblem = (file: FileEntry) => {
-    if (!file.videoOptions) return null;
-    const plan = videoPlans[file.id ?? ""];
-    return plan?.summary ? null : plan?.error ?? "Checking video processing…";
+    if (file.videoOptions) {
+      const plan = videoPlans[file.id ?? ""];
+      return plan?.summary ? null : plan?.error ?? "Checking video processing…";
+    }
+    if (file.audioOptions && (file.trackSettings || file.trackOptions !== undefined) && !trackSelectionProblem(file)) {
+      const plan = audioPlans[file.id ?? ""];
+      return plan?.summary ? null : plan?.error ?? "Checking audio processing…";
+    }
+    return null;
   };
 
   useEffect(() => {
@@ -285,6 +380,7 @@ function ConvertPage() {
                 imageOptions: cloneImageOptions(opts.imageOptions),
                 videoOptions: cloneVideoOptions(opts.videoOptions),
                 audioOptions: cloneAudioOptions(opts.audioOptions),
+                ...(opts.trackOptions === undefined ? {} : { trackOptions: cloneTrackOptions(opts.trackOptions) }),
                 metadataPolicy: opts.metadataPolicy,
                 subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
@@ -309,7 +405,8 @@ function ConvertPage() {
   );
 
   // Validate the whole proposed batch before changing any entry or raw editor.
-  const applySettings = (settings: FileRowOptions) => {
+  const applySettings = (settings: FileRowOptions, sourceId?: string) => {
+    const carriesTrackIntent = settings.trackOptions !== undefined;
     const next = files.map(file => ({
       ...file,
       target: settings.target, metadataPolicy: settings.metadataPolicy,
@@ -320,6 +417,11 @@ function ConvertPage() {
       imageOptions: cloneImageOptions(settings.imageOptions),
       videoOptions: cloneVideoOptions(settings.videoOptions),
       audioOptions: cloneAudioOptions(settings.audioOptions),
+      ...(carriesTrackIntent
+        ? { trackOptions: sourceId === file.id && settings.trackOptions
+          ? cloneTrackOptions(settings.trackOptions)
+          : null }
+        : { trackOptions: undefined }),
       gifOptions: settings.gifOptions ? { ...settings.gifOptions } : null,
       subtitle: settings.subtitle ? { ...settings.subtitle } : null,
     }));
@@ -350,12 +452,13 @@ function ConvertPage() {
       subtitle: preset.subtitle ?? null,
       qualityPreset: preset.quality_preset,
       resolutionCap: preset.resolution_cap,
+      trackOptions: preset.track_policy ? null : undefined,
     });
   };
 
   const applyFirstToAll = () => {
     if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean)) return;
-    applySettings({...files[0],audioOptions:audioRequestOptions(videoFiles[0]),videoOptions:videoRequestOptions(videoFiles[0])});
+    applySettings({...plannedFiles[0],audioOptions:audioRequestOptions(plannedFiles[0]),videoOptions:videoRequestOptions(plannedFiles[0])}, files[0].id);
   };
 
   const handleBrowse = useCallback(async () => {
@@ -384,9 +487,10 @@ function ConvertPage() {
     }
   }, [pickerToken, handleBrowse, location.pathname]);
 
-  const problems = files.map((f, i) =>
+  const baseProblems = files.map((f, i) =>
     audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
   );
+  const problems = plannedFiles.map((file, index) => trackSelectionProblem(file) ?? baseProblems[index]);
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
     <WorkspaceFrame
@@ -419,13 +523,13 @@ function ConvertPage() {
           }
           actions={
             <ConvertActionBar
-              files={videoFiles}
-              presetSource={selectedVideo}
+              files={plannedFiles}
+              presetSource={selectedPlanned}
               presetValidationError={
-                selected ? problems[files.indexOf(selected)] ?? null : null
+                selected ? baseProblems[files.indexOf(selected)] ?? null : null
               }
               disabled={blocked}
-              planningBlocked={files.some(file => !!planProblem(file))}
+              planningBlocked={plannedFiles.some(file => !!planProblem(file))}
               onEnqueued={() => {}}
               onSettled={onSettled}
               onApplyToAll={applyFirstToAll}
@@ -440,8 +544,9 @@ function ConvertPage() {
                 onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 path={selected.path}
                 draftIdentity={selected.id}
-                options={selected}
+                options={selectedPlanned ?? selected}
                 state={selectedState}
+                onReinspect={() => selected.id && retry(selected.id)}
                 onOptionsChange={(_, opts) =>
                   selected.id && handleOptionsChange(selected.id, opts)
                 }
@@ -450,6 +555,10 @@ function ConvertPage() {
                 {videoPlan?.busy && <p>Checking video processing…</p>}
                 {videoPlan?.error && <p role="alert" className="text-warning">{videoPlan?.error}</p>}
                 {videoPlan?.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan?.summary)}</p>}
+              </section>}
+              {selectedPlanned?.audioOptions && selectedPlanned.trackOptions && <section aria-label="Audio processing summary" className="mt-4 text-xs text-fg-secondary">
+                {audioPlan?.busy && <p>Checking audio processing…</p>}
+                {audioPlan?.summary && <p>{selected.target.toUpperCase()} · {audioExecutionText(audioPlan.summary)}</p>}
               </section>}
               {!isAudioTarget(selected.target) && !selected.audioOptions && (!problems[files.indexOf(selected)] || selected.videoOptions) && <SettingsPreview videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
@@ -499,7 +608,7 @@ function ConvertPage() {
               path={f.path}
               selected={f.id === selected?.id}
               state={byId[f.id ?? ""] ?? PROBING}
-              problem={problems[i] ?? planProblem(f)}
+              problem={problems[i] ?? planProblem(plannedFiles[i])}
               edited={f.submittedEdit}
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}
@@ -515,7 +624,7 @@ function ConvertPage() {
             {files.map((file, i) => {
               if (!file.videoOptions) return null;
               const plan = videoPlans[file.id ?? ""];
-              const problem = problems[i] ?? planProblem(file);
+              const problem = problems[i] ?? planProblem(plannedFiles[i]);
               return <li key={file.id ?? file.path}>
                 <p className="font-medium text-fg" title={file.path}>{sourceName(file.path)}</p>
                 <p className={problems[i] || plan?.error ? "text-warning" : "text-fg-secondary"}>

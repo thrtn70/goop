@@ -9,8 +9,9 @@ import type { ProbeResult, Settings, Preset } from "@/types";
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan } = vi.hoisted(() => ({
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
+  mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
   mockFromFile: vi.fn(),
   mockOpen: vi.fn(),
@@ -21,9 +22,17 @@ vi.mock("@/ipc/commands", () => ({
   api: {
     convert: {
       videoPlan: (...args: unknown[]) => mockVideoPlan(...args),
+      audioPlan: (...args: unknown[]) => mockAudioPlan(...args),
       probe: (path: string) => mockProbe(path),
       inspect: async (path: string) => {
         const p = await mockProbe(path);
+        const trackSource = p.track_inventory ? {
+          version: 1,
+          canonical_path: path,
+          size_bytes: String(p.file_size),
+          modified_unix_ns: "1700000000000000000",
+          inventory: p.track_inventory,
+        } : null;
         const targets =
           p.source_kind === "image"
             ? ["png", "jpeg", "webp", "bmp", "avif", "jpeg_xl", "tiff"]
@@ -72,6 +81,20 @@ vi.mock("@/ipc/commands", () => ({
                   {frame_rate:{kind:"constant",numerator:60,denominator:1},label:"60 fps"},
                 ],...(path === "/tmp/no-timing.mp4" ? {average_frame_rate:{kind:"malformed"}} : {average_frame_rate:{kind:"exact",numerator:30000,denominator:1001},base_frame_rate:{kind:"exact",numerator:30,denominator:1},time_base:{kind:"exact",numerator:1,denominator:90000}})}
               } : null,
+              audio_settings: trackSource && ["mp3","m4a","aac","wav","flac"].includes(target) ? {
+                copy:{available:true},encode:{available:true},target_codec:target === "m4a" || target === "aac" ? "aac" : target,
+                encoder:target === "m4a" || target === "aac" ? "aac" : target,bitrate_choices_kbps:[64,96,128,160,192,256],default_bitrate_kbps:192,
+                channel_choices:[{kind:"preserve"},{kind:"mono"},{kind:"stereo"}],default_channels:{kind:"preserve"},
+                sample_rate_choices:[{kind:"preserve"},{kind:"exact",hz:44100},{kind:"exact",hz:48000}],default_sample_rate:{kind:"exact",hz:48000},source:p.audio_details?.streams[0] ?? null,
+              } : null,
+              track_settings: trackSource && ["mp3","m4a","aac","wav","flac"].includes(target) ? {
+                source: trackSource,
+                audio_choices: trackSource.inventory.streams.filter((track: {codec_type:string}) => track.codec_type === "audio").map((track: {index:number}) => ({
+                  track,
+                  copy:path.includes("mixed") && track.index === 3 ? {available:false,reason:"This track cannot be copied"} : {available:true},
+                  encode:path.includes("mixed") && track.index === 1 ? {available:false,reason:"This track cannot be encoded"} : {available:true},
+                })),
+              } : null,
             })),
             compression: {
               quality: true,
@@ -80,6 +103,8 @@ vi.mock("@/ipc/commands", () => ({
               reason: null,
             },
           },
+          track_source: trackSource,
+          track_source_unavailable_reason: null,
         };
       },
       fromFile: (req: unknown) => mockFromFile(req),
@@ -136,6 +161,30 @@ const audioOnlyProbe: ProbeResult = {
   has_subtitles: false,
   subtitle_codecs: [],
   audio_codecs: ["opus"],
+};
+
+const trackFact = (value: string) => ({ kind: "value" as const, value });
+const trackIdentity = (index: number, title: string) => ({
+  index,
+  codec_type: "audio",
+  codec_name: trackFact("aac"),
+  container_stream_id: { kind: "missing" as const },
+  language: trackFact("eng"),
+  title: trackFact(title),
+  disposition: { default: index === 1, forced: false, attached_pic: false, other: {}, malformed: false },
+});
+const multiTrackProbe: ProbeResult = {
+  ...audioOnlyProbe,
+  audio_codecs: ["aac", "aac"],
+  audio_codec: "aac",
+  track_inventory: { version: 1, streams: [trackIdentity(1, "Main"), trackIdentity(3, "Commentary")] },
+  audio_details: {
+    has_non_audio_streams: false,
+    streams: [
+      { index: 1, codec_name: "aac", sample_rate_hz: { kind: "exact", value: 48_000 }, channels: { kind: "exact", value: 2 }, channel_layout: "stereo" },
+      { index: 3, codec_name: "aac", sample_rate_hz: { kind: "exact", value: 48_000 }, channels: { kind: "exact", value: 2 }, channel_layout: "stereo" },
+    ],
+  },
 };
 
 const imageProbe: ProbeResult = {
@@ -271,6 +320,106 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "MP3" }));
 
     expect(screen.queryByRole("button", { name: "Preview sample" })).toBeNull();
+  });
+
+  it("keeps multi-track Automatic unchanged, then requires and plans an exact explicit choice", async () => {
+    clearWorkspaceDrafts("convert");
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    expect(screen.getAllByText("Choose Copy audio or Custom encode to select a track.").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("radio").every((radio) => (radio as HTMLInputElement).disabled)).toBe(true);
+
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", true);
+    expect(screen.getAllByText(/choose an audio track for this source before converting/i).length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    await waitFor(() => expect(mockAudioPlan).toHaveBeenCalled());
+    expect(mockAudioPlan.mock.calls.at(-1)?.[0].track_options).toMatchObject({
+      kind: "audio",
+      stream_index: 3,
+      source: { canonical_path: "/tmp/test-video.mp4" },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls.at(-1)?.[0].track_options).toMatchObject({
+      kind: "audio",
+      stream_index: 3,
+      source: { canonical_path: "/tmp/test-video.mp4" },
+    });
+  });
+
+  it("keeps Apply first source-bound and makes every other track choice independent", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => expect(screen.getByText("first.mkv")).toBeDefined());
+
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply first to all" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
+    expect(screen.getByLabelText("Audio processing")).toHaveProperty("value", "copy");
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", true);
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    await waitFor(() => expect(mockAudioPlan.mock.calls.some(([request]) =>
+      request.track_options?.stream_index === 3
+        && request.track_options?.source?.canonical_path === "/tmp/second.mkv",
+    )).toBe(true));
+  });
+
+  it("can switch modes when different tracks support Copy and Custom", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/mixed.mkv"]);
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => expect(screen.getByText("mixed.mkv")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "encode");
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    expect(screen.getByRole("option", { name: "Copy audio" })).toHaveProperty("disabled", false);
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    expect(screen.getAllByText("This track cannot be copied").length).toBeGreaterThan(0);
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("disabled", false);
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(mockAudioPlan.mock.calls.some(([request]) =>
+      request.audio_options?.kind === "copy" && request.track_options?.stream_index === 1,
+    )).toBe(true));
+  });
+
+  it("saves selected-track intent as portable Choose per file", async () => {
+    clearWorkspaceDrafts("convert");
+    const savePreset = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ presets: [], savePreset });
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save as preset" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Save as preset" }));
+    expect(screen.getByText("Audio track will be chosen for each source.")).toBeDefined();
+    await userEvent.type(screen.getByLabelText("Preset name"), "Main track workflow");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
+    expect(savePreset.mock.calls[0][0].track_policy).toEqual({ kind: "audio", selection: { kind: "choose_per_file" } });
+    expect(JSON.stringify(savePreset.mock.calls[0][0])).not.toMatch(/canonical_path|stream_index|inventory/);
   });
 
   it("shows error state with retry on probe failure", async () => {
@@ -559,6 +708,7 @@ describe("ConvertPage", () => {
     // Video targets should NOT be visible
     expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
     expect(screen.queryByRole("button", { name: "MKV" })).toBeNull();
+    expect(screen.queryByLabelText("Audio track")).toBeNull();
   });
 
   it("does not show compression presets on Convert page (moved to Compress tab in v0.1.6)", async () => {

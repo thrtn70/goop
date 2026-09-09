@@ -155,6 +155,66 @@ it("queues mixed audio batches with each file's independent settings", async () 
   ]);
 });
 
+const selectedTrackFixture = (path: string, index: number) => {
+  const track = {
+    index,
+    codec_type: "audio",
+    codec_name: { kind: "value" as const, value: "aac" },
+    container_stream_id: { kind: "missing" as const },
+    language: { kind: "value" as const, value: "eng" },
+    title: { kind: "value" as const, value: index === 1 ? "Main" : "Commentary" },
+    disposition: { default: index === 1, forced: false, attached_pic: false, other: {}, malformed: false },
+  };
+  const source = { version: 1, canonical_path: path, size_bytes: "10", modified_unix_ns: "20", inventory: { version: 1, streams: [track] } };
+  return {
+    trackOptions: { kind: "audio" as const, source, stream_index: index },
+    trackSettings: { source, audio_choices: [{ track, copy: { available: true }, encode: { available: true } }] },
+  };
+};
+
+it("requires a ready source-bound audio plan before enqueue", () => {
+  const selected = selectedTrackFixture("/song.m4a", 1);
+  const candidate = {
+    ...file,
+    path: "/song.m4a",
+    target: "m4a" as const,
+    audioOptions: { kind: "copy" as const },
+    audioAvailability: { available: true, reason: null, copyAvailable: true, copyReason: null, encodeAvailable: true, encodeReason: null },
+    audioSource: { audioStreamCount: 1, sampleRateHz: 48_000, channelCount: 2, channelLayoutReported: true, hasNonAudioStreams: false },
+    ...selected,
+  };
+  const view = render(<ConvertActionBar files={[{ ...candidate, audioPlanReady: false }]} disabled={false} onEnqueued={() => {}} />);
+  expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", true);
+  view.rerender(<ConvertActionBar files={[{ ...candidate, audioPlanReady: true }]} disabled={false} onEnqueued={() => {}} />);
+  expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false);
+});
+
+it("owns distinct selected bindings before the batch's first await", async () => {
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const first = selectedTrackFixture("/first.mkv", 1);
+  const second = selectedTrackFixture("/second.mkv", 3);
+  const common = {
+    ...file,
+    target: "m4a" as const,
+    audioOptions: { kind: "copy" as const },
+    audioAvailability: { available: true, reason: null, copyAvailable: true, copyReason: null, encodeAvailable: true, encodeReason: null },
+    audioSource: { audioStreamCount: 2, sampleRateHz: 48_000, channelCount: 2, channelLayoutReported: true, hasNonAudioStreams: true },
+    audioPlanReady: true,
+  };
+  render(<ConvertActionBar files={[
+    { ...common, path: "/first.mkv", ...first },
+    { ...common, path: "/second.mkv", ...second },
+  ]} disabled={false} onEnqueued={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Convert 2 files" }));
+  first.trackOptions.source.modified_unix_ns = "999";
+  second.trackOptions.source.inventory.streams[0].title = { kind: "value", value: "Changed" };
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+  expect(mocks.enqueue.mock.calls.map(([request]) => request.track_options)).toMatchObject([
+    { stream_index: 1, source: { canonical_path: "/first.mkv", modified_unix_ns: "20" } },
+    { stream_index: 3, source: { canonical_path: "/second.mkv", inventory: { streams: [{ title: { value: "Commentary" } }] } } },
+  ]);
+});
+
 it("invalid raw audio bitrate blocks enqueue and preset saving", () => {
   mocks.save.mockReset();
   mocks.enqueue.mockReset();

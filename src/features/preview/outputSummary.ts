@@ -1,4 +1,4 @@
-import type { AudioExecutionSummary, Job, JobResult, VideoRationalFact, VideoExecutionSummary } from "@/types";
+import type { AudioExecutionSummary, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary } from "@/types";
 
 function rational(fact: VideoRationalFact | null | undefined): string | null {
   return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
@@ -83,6 +83,31 @@ export function audioExecutionText(summary: AudioExecutionSummary): string {
   return [...facts, ...summary.notices].join(" · ");
 }
 
+function trackFact(fact: TrackTextFact, fallback: string): string {
+  if (fact.kind !== "value") return fallback;
+  const language: Record<string, string> = { en: "English", eng: "English", es: "Spanish", spa: "Spanish", fr: "French", fra: "French", de: "German", deu: "German", ja: "Japanese", jpn: "Japanese" };
+  return language[fact.value.toLowerCase()] ?? fact.value;
+}
+
+export function trackExecutionText(summary: TrackExecutionSummary): string {
+  const selected = summary.selected;
+  const facts = [
+    `Track ${selected.index}`,
+    trackFact(selected.language, "Language not reported"),
+    trackFact(selected.title, "Title not reported"),
+  ];
+  if (summary.notices.length) facts.push(...summary.notices);
+  else {
+    if (summary.dropped_audio.length) {
+      facts.push(`${summary.dropped_audio.length} additional audio ${summary.dropped_audio.length === 1 ? "stream" : "streams"} omitted`);
+    }
+    if (summary.dropped_other.length) {
+      facts.push(`${summary.dropped_other.length} non-audio ${summary.dropped_other.length === 1 ? "stream" : "streams"} omitted`);
+    }
+  }
+  return facts.join(" · ");
+}
+
 /** Measured results only; old history entries do not imply zero source bytes. */
 export function outputSummary(result: JobResult | null | undefined, job?: Pick<Job, "kind" | "payload">): string | null {
   if (!result) return null;
@@ -98,9 +123,10 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
   if (measured && output != null && target != null && Number.isSafeInteger(target) && target > 0) {
     facts.push(output <= target ? "Target met" : "Target missed");
   }
+  if (result.track_execution) facts.push(trackExecutionText(result.track_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
   else if (result.video_execution) facts.push(videoExecutionText(result.video_execution));
-  else {
+  else if (!result.track_execution) {
     if (result.reencoded === false) facts.push("No re-encode reported");
     const payload = job?.payload;
     const target = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.target : null;
