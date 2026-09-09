@@ -1,6 +1,6 @@
 import { render, screen, cleanup } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import FileRow from "../FileRow";
+import FileRow, { uprightVideoSize } from "../FileRow";
 import CompressFileRow from "@/features/compress/CompressFileRow";
 import type { FileRowOptions } from "../FileRow";
 const state = {
@@ -32,6 +32,19 @@ const state = {
   { phase: "ready" }
 >;
 afterEach(cleanup);
+it("uses display rotation when seeding upright fit-within dimensions", () => {
+  expect(uprightVideoSize({
+    width: 1920,
+    height: 1080,
+    video_details: { streams: [{
+      index: 0,
+      codec_type: "video",
+      rotation_degrees: 90,
+      rotation_ambiguous: false,
+      attached_pic: false,
+    }] },
+  })).toEqual({ width: 1080, height: 1920 });
+});
 it("external options remain authoritative after a preset changes target", () => {
   const options: FileRowOptions = {
     target: "png",

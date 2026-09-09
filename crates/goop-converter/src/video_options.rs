@@ -70,6 +70,94 @@ fn dimensions(probe: &ProbeResult, video: &VideoStreamInfo) -> Result<(u32, u32)
     }
     Ok((w, h))
 }
+
+fn fit_within(
+    source_width: u32,
+    source_height: u32,
+    box_width: u32,
+    box_height: u32,
+) -> Result<(u32, u32), GoopError> {
+    let (scale_numerator, scale_denominator) =
+        if source_width <= box_width && source_height <= box_height {
+            (1_u64, 1_u64)
+        } else if u64::from(box_width) * u64::from(source_height)
+            <= u64::from(box_height) * u64::from(source_width)
+        {
+            (u64::from(box_width), u64::from(source_width))
+        } else {
+            (u64::from(box_height), u64::from(source_height))
+        };
+    let even_floor = |axis: u32| ((u64::from(axis) * scale_numerator / scale_denominator) / 2) * 2;
+    let width = even_floor(source_width);
+    let height = even_floor(source_height);
+    if width < 2 || height < 2 {
+        return Err(invalid(
+            "Fit-within dimensions resolve below 2 pixels on one axis",
+        ));
+    }
+    Ok((width as u32, height as u32))
+}
+
+fn timing_unavailable_reason(video: &VideoStreamInfo) -> Option<String> {
+    let facts = [
+        video.average_frame_rate.as_ref(),
+        video.base_frame_rate.as_ref(),
+        video.time_base.as_ref(),
+    ];
+    if facts
+        .iter()
+        .any(|fact| matches!(fact, Some(VideoRationalFact::Malformed)))
+    {
+        Some("Frame-rate controls are unavailable because source timing facts are malformed".into())
+    } else if facts
+        .iter()
+        .any(|fact| !matches!(fact, Some(VideoRationalFact::Exact { .. })))
+    {
+        Some(
+            "Frame-rate controls require complete source timing facts: average rate, base rate and time base"
+                .into(),
+        )
+    } else {
+        None
+    }
+}
+
+fn source_timing_unavailable_reason(
+    video: &VideoStreamInfo,
+    audio: Option<&VideoStreamInfo>,
+) -> Option<String> {
+    timing_unavailable_reason(video).or_else(|| {
+        let complete = video.start_time_ms.is_some()
+            && video.duration_ms.is_some()
+            && audio
+                .is_none_or(|audio| audio.start_time_ms.is_some() && audio.duration_ms.is_some());
+        (!complete).then(|| {
+            "Frame-rate controls require complete source stream endpoints and start times".into()
+        })
+    })
+}
+
+fn constant_frame_rates() -> Vec<VideoFrameRateChoice> {
+    [
+        (24_000, 1_001, "23.976"),
+        (24, 1, "24"),
+        (25, 1, "25"),
+        (30_000, 1_001, "29.97"),
+        (30, 1, "30"),
+        (50, 1, "50"),
+        (60_000, 1_001, "59.94"),
+        (60, 1, "60"),
+    ]
+    .into_iter()
+    .map(|(numerator, denominator, label)| VideoFrameRateChoice {
+        frame_rate: VideoFrameRate::Constant {
+            numerator,
+            denominator,
+        },
+        label: format!("{label} fps"),
+    })
+    .collect()
+}
 fn encode_source(video: &VideoStreamInfo, w: u32, h: u32) -> Result<Vec<String>, GoopError> {
     if video.field_order.as_deref() != Some("progressive") {
         return Err(invalid("Custom encode requires explicitly progressive video; field order is interlaced or unknown"));
@@ -197,6 +285,8 @@ pub fn resolve(
             codec,
             rate_control,
             speed,
+            resize,
+            frame_rate,
             ..
         } => {
             let notices = encode_source(video, width, height)?;
@@ -228,28 +318,69 @@ pub fn resolve(
                     args.extend(["-b:v".into(), format!("{kbps}k")])
                 }
             };
-            let cap = match req.resolution_cap {
-                Some(ResolutionCap::R1080p) => Some(1920),
-                Some(ResolutionCap::R720p) => Some(1280),
-                Some(ResolutionCap::R480p) => Some(854),
-                _ => None,
-            };
-            if let Some(cap) = cap {
-                let out_w = width.min(cap);
-                // Match FFmpeg scale's nearest even height for a square-pixel source.
-                let out_h = ((u64::from(height) * u64::from(out_w) + u64::from(width))
-                    / (2 * u64::from(width)))
-                    * 2;
-                if out_h == 0 || out_h > u64::from(height) {
-                    return Err(invalid(
-                        "Resolution cap cannot produce valid video geometry without enlargement",
-                    ));
+            if let Some(resize) = resize {
+                match resize {
+                    VideoResize::Original => {}
+                    VideoResize::FitWithin {
+                        width: box_width,
+                        height: box_height,
+                    } => {
+                        (width, height) = fit_within(width, height, *box_width, *box_height)?;
+                        filters.push(format!("scale={width}:{height}"));
+                        filters.push("setsar=1".into());
+                    }
                 }
-                width = out_w;
-                height = out_h as u32;
-                filters.push(format!("scale='trunc(min({cap},iw)/2)*2':-2"));
-                // Even-height rounding must not change the admitted square pixels.
-                filters.push("setsar=1".into());
+            } else {
+                let cap = match req.resolution_cap {
+                    Some(ResolutionCap::R1080p) => Some(1920),
+                    Some(ResolutionCap::R720p) => Some(1280),
+                    Some(ResolutionCap::R480p) => Some(854),
+                    _ => None,
+                };
+                if let Some(cap) = cap {
+                    let out_w = width.min(cap);
+                    // Match FFmpeg scale's nearest even height for a square-pixel source.
+                    let out_h = ((u64::from(height) * u64::from(out_w) + u64::from(width))
+                        / (2 * u64::from(width)))
+                        * 2;
+                    if out_h == 0 || out_h > u64::from(height) {
+                        return Err(invalid(
+                            "Resolution cap cannot produce valid video geometry without enlargement",
+                        ));
+                    }
+                    width = out_w;
+                    height = out_h as u32;
+                    filters.push(format!("scale='trunc(min({cap},iw)/2)*2':-2"));
+                    // Even-height rounding must not change the admitted square pixels.
+                    filters.push("setsar=1".into());
+                }
+            }
+            if let Some(frame_rate) = frame_rate {
+                if let Some(reason) = source_timing_unavailable_reason(video, audio) {
+                    return Err(invalid(reason));
+                }
+                match frame_rate {
+                    VideoFrameRate::Preserve => {
+                        args.extend([
+                            "-fps_mode:v".into(),
+                            "passthrough".into(),
+                            "-enc_time_base:v".into(),
+                            "demux".into(),
+                        ]);
+                    }
+                    VideoFrameRate::Constant {
+                        numerator,
+                        denominator,
+                    } => {
+                        filters.push(format!("fps=fps={numerator}/{denominator}:round=near"));
+                        args.extend([
+                            "-fps_mode:v".into(),
+                            "passthrough".into(),
+                            "-enc_time_base:v".into(),
+                            "filter".into(),
+                        ]);
+                    }
+                }
             }
             (*codec, Some(name.into()), notices)
         }
@@ -302,6 +433,31 @@ pub fn resolve(
             audio_copied: copied,
             width,
             height,
+            requested_resize: match options {
+                VideoConvertOptions::Encode { resize, .. } => resize.clone(),
+                VideoConvertOptions::Copy => None,
+            },
+            requested_frame_rate: match options {
+                VideoConvertOptions::Encode { frame_rate, .. } => frame_rate.clone(),
+                VideoConvertOptions::Copy => None,
+            },
+            source_average_frame_rate: video.average_frame_rate.clone(),
+            source_base_frame_rate: video.base_frame_rate.clone(),
+            source_time_base: video.time_base.clone(),
+            resolved_constant_frame_rate: match options {
+                VideoConvertOptions::Encode {
+                    frame_rate:
+                        Some(VideoFrameRate::Constant {
+                            numerator,
+                            denominator,
+                        }),
+                    ..
+                } => Some(VideoRationalFact::Exact {
+                    numerator: *numerator,
+                    denominator: *denominator,
+                }),
+                _ => None,
+            },
             notices,
         },
     })
@@ -337,12 +493,129 @@ pub fn validate_output(
         }
         encode_source(video, expected.width, expected.height)?;
     }
+    if expected.requested_frame_rate.is_some() {
+        if timing_unavailable_reason(video).is_some() {
+            return Err(invalid(
+                "Completed video frame rate or time base is missing or malformed",
+            ));
+        }
+        if let Some(expected_rate) = &expected.resolved_constant_frame_rate {
+            if video.average_frame_rate.as_ref() != Some(expected_rate) {
+                return Err(invalid(
+                    "Completed video frame rate does not match the requested output",
+                ));
+            }
+        }
+    }
     if actual.duration_ms == 0 || actual.file_size == 0 {
         return Err(invalid(
             "Completed video has no usable duration or media data",
         ));
     }
     Ok(())
+}
+
+/// Add bounded per-stream timing checks when the fresh source probe is available.
+/// Per-frame cadence proof remains confined to small semantic fixtures.
+pub fn validate_output_against_source(
+    expected: &VideoExecutionSummary,
+    source: &ProbeResult,
+    actual: &ProbeResult,
+) -> Result<(), GoopError> {
+    validate_output(expected, actual)?;
+    if expected.requested_frame_rate.is_none() {
+        return Ok(());
+    }
+    let (source_video, source_audio) = streams(source)?;
+    let (video, audio) = streams(actual)?;
+    let frame_rate = expected
+        .resolved_constant_frame_rate
+        .as_ref()
+        .or(video.average_frame_rate.as_ref());
+    let frame_tolerance = frame_rate.and_then(frame_rate_interval_ms).ok_or_else(|| {
+        invalid("Completed video frame rate cannot provide a bounded duration tolerance")
+    })?;
+    let time_base_tolerance = video
+        .time_base
+        .as_ref()
+        .and_then(time_base_interval_ms)
+        .ok_or_else(|| {
+            invalid("Completed video time base cannot provide a bounded duration tolerance")
+        })?;
+    let tolerance = frame_tolerance.saturating_add(time_base_tolerance);
+    if source.duration_ms.abs_diff(actual.duration_ms) > tolerance {
+        return Err(invalid(format!(
+            "Completed video duration differs from the source by more than the {tolerance} ms timing tolerance"
+        )));
+    }
+    let source_video_duration = source_video
+        .duration_ms
+        .or((source.duration_ms > 0).then_some(source.duration_ms))
+        .ok_or_else(|| invalid("Source video endpoint is unavailable"))?;
+    let actual_video_duration = video
+        .duration_ms
+        .ok_or_else(|| invalid("Completed video endpoint is unavailable"))?;
+    if source_video_duration.abs_diff(actual_video_duration) > tolerance {
+        return Err(invalid(format!(
+            "Completed video endpoint differs from the source by more than the {tolerance} ms timing tolerance"
+        )));
+    }
+    if let (Some(source_audio), Some(audio)) = (source_audio, audio) {
+        let source_video_start = source_video
+            .start_time_ms
+            .ok_or_else(|| invalid("Source video start time is unavailable"))?;
+        let source_audio_start = source_audio
+            .start_time_ms
+            .ok_or_else(|| invalid("Source audio start time is unavailable"))?;
+        let actual_video_start = video
+            .start_time_ms
+            .ok_or_else(|| invalid("Completed video start time is unavailable"))?;
+        let actual_audio_start = audio
+            .start_time_ms
+            .ok_or_else(|| invalid("Completed audio start time is unavailable"))?;
+        let source_offset = i128::from(source_audio_start) - i128::from(source_video_start);
+        let actual_offset = i128::from(actual_audio_start) - i128::from(actual_video_start);
+        if source_offset.abs_diff(actual_offset) > u128::from(tolerance) {
+            return Err(invalid(format!(
+                "Completed audio offset differs from the source by more than the {tolerance} ms timing tolerance"
+            )));
+        }
+        let source_audio_duration = source_audio
+            .duration_ms
+            .ok_or_else(|| invalid("Source audio endpoint is unavailable"))?;
+        let actual_audio_duration = audio
+            .duration_ms
+            .ok_or_else(|| invalid("Completed audio endpoint is unavailable"))?;
+        let source_audio_endpoint = source_offset + i128::from(source_audio_duration);
+        let actual_audio_endpoint = actual_offset + i128::from(actual_audio_duration);
+        if source_audio_endpoint.abs_diff(actual_audio_endpoint) > u128::from(tolerance) {
+            return Err(invalid(format!(
+                "Completed audio endpoint differs from the source by more than the {tolerance} ms timing tolerance"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn exact_rational(fact: &VideoRationalFact) -> Option<(u64, u64)> {
+    let VideoRationalFact::Exact {
+        numerator,
+        denominator,
+    } = fact
+    else {
+        return None;
+    };
+    Some((u64::from(*numerator), u64::from(*denominator)))
+}
+
+fn frame_rate_interval_ms(fact: &VideoRationalFact) -> Option<u64> {
+    let (numerator, denominator) = exact_rational(fact)?;
+    Some(1_000_u64.checked_mul(denominator)?.div_ceil(numerator))
+}
+
+fn time_base_interval_ms(fact: &VideoRationalFact) -> Option<u64> {
+    let (numerator, denominator) = exact_rational(fact)?;
+    Some(1_000_u64.checked_mul(numerator)?.div_ceil(denominator))
 }
 
 /// Advertise source-specific modes using the same resolver as execution.
@@ -389,6 +662,8 @@ pub fn capabilities(
                 rate_control: VideoRateControl::ConstantQuality { crf: 23 },
                 speed: VideoSpeed::Medium,
                 processor: VideoProcessor::Software,
+                resize: None,
+                frame_rate: None,
             }),
             probe,
             encoders,
@@ -403,6 +678,18 @@ pub fn capabilities(
     })
     .collect();
     let available = codecs.iter().any(|c| c.available);
+    let resize_reason = (!available)
+        .then(|| codecs.first().and_then(|codec| codec.reason.clone()))
+        .flatten();
+    let timing_reason = streams(probe)
+        .ok()
+        .and_then(|(video, audio)| source_timing_unavailable_reason(video, audio));
+    let frame_rate_reason = if !available {
+        codecs.first().and_then(|codec| codec.reason.clone())
+    } else {
+        timing_reason
+    };
+    let frame_rate_available = frame_rate_reason.is_none();
     VideoSettingsCapabilities {
         copy,
         encode: VideoModeAvailability {
@@ -423,6 +710,29 @@ pub fn capabilities(
         speeds: vec![VideoSpeed::Fast, VideoSpeed::Medium, VideoSpeed::Slow],
         default_speed: VideoSpeed::Medium,
         processor: VideoProcessor::Software,
+        resize: Some(VideoResizeCapabilities {
+            available,
+            reason: resize_reason,
+            min_dimension: 2,
+            max_dimension: 32_768,
+            no_enlargement: true,
+            default: VideoResize::Original,
+        }),
+        frame_rate: Some(VideoFrameRateCapabilities {
+            available: frame_rate_available,
+            reason: frame_rate_reason,
+            default: frame_rate_available.then_some(VideoFrameRate::Preserve),
+            constant_choices: constant_frame_rates(),
+            average_frame_rate: streams(probe)
+                .ok()
+                .and_then(|(video, _)| video.average_frame_rate.clone()),
+            base_frame_rate: streams(probe)
+                .ok()
+                .and_then(|(video, _)| video.base_frame_rate.clone()),
+            time_base: streams(probe)
+                .ok()
+                .and_then(|(video, _)| video.time_base.clone()),
+        }),
         preview_available: false,
         preview_unavailable_reason: Some(PREVIEW_REASON.into()),
     }

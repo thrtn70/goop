@@ -41,6 +41,94 @@ pub enum VideoRateControl {
     AverageBitrate { kbps: u32 },
 }
 
+/// Explicit output geometry for Custom video encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoResize {
+    Original,
+    FitWithin { width: u32, height: u32 },
+}
+
+impl<'de> Deserialize<'de> for VideoResize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictResize {
+            Original {},
+            FitWithin { width: u32, height: u32 },
+        }
+        Ok(match StrictResize::deserialize(deserializer)? {
+            StrictResize::Original {} => Self::Original,
+            StrictResize::FitWithin { width, height } => Self::FitWithin { width, height },
+        })
+    }
+}
+
+/// Explicit presentation-timing policy for Custom video encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoFrameRate {
+    Preserve,
+    Constant { numerator: u32, denominator: u32 },
+}
+
+impl<'de> Deserialize<'de> for VideoFrameRate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictFrameRate {
+            Preserve {},
+            Constant { numerator: u32, denominator: u32 },
+        }
+        Ok(match StrictFrameRate::deserialize(deserializer)? {
+            StrictFrameRate::Preserve {} => Self::Preserve,
+            StrictFrameRate::Constant {
+                numerator,
+                denominator,
+            } => Self::Constant {
+                numerator,
+                denominator,
+            },
+        })
+    }
+}
+
+/// One observed exact rational or a probe value that was present but unusable.
+/// Absence on the containing field means the probe value was missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoRationalFact {
+    Exact { numerator: u32, denominator: u32 },
+    Malformed,
+}
+
+impl<'de> Deserialize<'de> for VideoRationalFact {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictRationalFact {
+            Exact { numerator: u32, denominator: u32 },
+            Malformed {},
+        }
+        Ok(match StrictRationalFact::deserialize(deserializer)? {
+            StrictRationalFact::Exact {
+                numerator,
+                denominator,
+            } => Self::Exact {
+                numerator,
+                denominator,
+            },
+            StrictRationalFact::Malformed {} => Self::Malformed,
+        })
+    }
+}
+
 /// Opt-in video processing; absence on a request retains legacy behavior.
 /// Copy never encodes video. Encode honors the selected codec, rate, speed and
 /// processor without substitution. Deserialization checks strict payload shape;
@@ -56,6 +144,12 @@ pub enum VideoConvertOptions {
         rate_control: VideoRateControl,
         speed: VideoSpeed,
         processor: VideoProcessor,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
+        resize: Option<VideoResize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
+        frame_rate: Option<VideoFrameRate>,
     },
 }
 
@@ -74,6 +168,10 @@ impl<'de> Deserialize<'de> for VideoConvertOptions {
                 rate_control: VideoRateControl,
                 speed: VideoSpeed,
                 processor: VideoProcessor,
+                #[serde(default)]
+                resize: Option<VideoResize>,
+                #[serde(default)]
+                frame_rate: Option<VideoFrameRate>,
             },
         }
         Ok(match StrictOptions::deserialize(deserializer)? {
@@ -83,11 +181,15 @@ impl<'de> Deserialize<'de> for VideoConvertOptions {
                 rate_control,
                 speed,
                 processor,
+                resize,
+                frame_rate,
             } => Self::Encode {
                 codec,
                 rate_control,
                 speed,
                 processor,
+                resize,
+                frame_rate,
             },
         })
     }
@@ -109,6 +211,37 @@ pub fn validate_video_options(options: &VideoConvertOptions) -> Result<(), GoopE
         } if !(100..=200_000).contains(kbps) => Err(GoopError::InvalidRequest(
             "Video bitrate must be a whole number from 100 to 200000 kbps".into(),
         )),
+        VideoConvertOptions::Encode {
+            resize: Some(VideoResize::FitWithin { width, height }),
+            ..
+        } if !(2..=32_768).contains(width) || !(2..=32_768).contains(height) => {
+            Err(GoopError::InvalidRequest(
+                "Video dimensions must be whole numbers from 2 to 32768 pixels".into(),
+            ))
+        }
+        VideoConvertOptions::Encode {
+            frame_rate:
+                Some(VideoFrameRate::Constant {
+                    numerator,
+                    denominator,
+                }),
+            ..
+        } if !matches!(
+            (*numerator, *denominator),
+            (24_000, 1_001)
+                | (24, 1)
+                | (25, 1)
+                | (30_000, 1_001)
+                | (30, 1)
+                | (50, 1)
+                | (60_000, 1_001)
+                | (60, 1)
+        ) =>
+        {
+            Err(GoopError::InvalidRequest(
+                "Video frame rate must be one of the supported exact rates".into(),
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -142,6 +275,18 @@ pub fn validate_video_request(request: &ConvertRequest) -> Result<(), GoopError>
     {
         return Err(GoopError::InvalidRequest(
             "Copy streams requires original resolution".into(),
+        ));
+    }
+    if matches!(
+        options,
+        VideoConvertOptions::Encode {
+            resize: Some(_),
+            ..
+        }
+    ) && !matches!(request.resolution_cap, None | Some(ResolutionCap::Original))
+    {
+        return Err(GoopError::InvalidRequest(
+            "New video dimensions cannot be combined with a legacy resolution cap".into(),
         ));
     }
     Ok(())
@@ -195,6 +340,21 @@ pub struct VideoStreamInfo {
     /// A missing rotation value alone does not imply ambiguity.
     pub rotation_ambiguous: bool,
     pub attached_pic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub average_frame_rate: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub base_frame_rate: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub time_base: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number")]
+    pub start_time_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable, type = "number")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Resolved video processing and per-stream outcomes. Requested rate, speed and
@@ -226,7 +386,73 @@ pub struct VideoExecutionSummary {
     pub width: u32,
     /// Expected upright output height after the admitted resolution cap.
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub requested_resize: Option<VideoResize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub requested_frame_rate: Option<VideoFrameRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub source_average_frame_rate: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub source_base_frame_rate: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub source_time_base: Option<VideoRationalFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub resolved_constant_frame_rate: Option<VideoRationalFact>,
     pub notices: Vec<String>,
+}
+
+/// Engine-owned bounds and default for Custom video dimensions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct VideoResizeCapabilities {
+    pub available: bool,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reason: Option<String>,
+    pub min_dimension: u32,
+    pub max_dimension: u32,
+    pub no_enlargement: bool,
+    pub default: VideoResize,
+}
+
+/// One named exact constant frame-rate choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct VideoFrameRateChoice {
+    pub frame_rate: VideoFrameRate,
+    pub label: String,
+}
+
+/// Engine-owned source timing facts and supported Custom timing choices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct VideoFrameRateCapabilities {
+    pub available: bool,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub default: Option<VideoFrameRate>,
+    pub constant_choices: Vec<VideoFrameRateChoice>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub average_frame_rate: Option<VideoRationalFact>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub base_frame_rate: Option<VideoRationalFact>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub time_base: Option<VideoRationalFact>,
 }
 
 /// Engine-derived availability of a processing mode and its unavailable reason.
@@ -273,6 +499,12 @@ pub struct VideoSettingsCapabilities {
     pub speeds: Vec<VideoSpeed>,
     pub default_speed: VideoSpeed,
     pub processor: VideoProcessor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub resize: Option<VideoResizeCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub frame_rate: Option<VideoFrameRateCapabilities>,
     pub preview_available: bool,
     #[serde(default)]
     #[ts(optional = nullable)]

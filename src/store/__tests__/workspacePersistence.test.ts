@@ -65,11 +65,15 @@ describe("JPEG draft persistence", () => {
 
 describe("video draft persistence", () => {
   it("retains dormant Automatic quality, incompatible target, Custom settings and blank text", () => {
-    const custom = {kind:"encode",codec:"h264",processor:"software",speed:"medium",rate_control:{kind:"constant_quality",crf:23}};
+    const custom = {kind:"encode",codec:"h264",processor:"software",speed:"medium",rate_control:{kind:"constant_quality",crf:23},resize:{kind:"fit_within",width:1920,height:1080},frame_rate:{kind:"constant",numerator:24000,denominator:1001}};
     const entries = {
       [JSON.stringify(["convert","ConvertPage.files"])]:{value:[{path:"/v.mp4",sourceDir:"/",target:"webm",qualityPreset:"balanced",videoOptions:custom}]},
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.crfDraft"])]:{value:""},
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.bitrateDraft"])]:{value:"-"},
+      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.widthDraft"])]:{value:""},
+      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.heightDraft"])]:{value:"-"},
+      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.appliedWidth"])]:{value:"1920"},
+      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.appliedHeight"])]:{value:"1080"},
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.savedCustom"])]:{value:custom},
     };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);

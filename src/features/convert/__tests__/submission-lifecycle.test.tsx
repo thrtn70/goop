@@ -91,20 +91,24 @@ it("Compress rejects unexpected image settings before opening a destination dial
   expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.enqueue).not.toHaveBeenCalled();
 });
 
-const videoCapability = {copy:{available:true},encode:{available:true},codecs:[{codec:"h264" as const,encoder:"libx264",available:true,recommended_crf:23}],crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,speeds:["medium" as const],default_speed:"medium" as const,processor:"software" as const,preview_available:false};
+const videoCapability = {copy:{available:true},encode:{available:true},codecs:[{codec:"h264" as const,encoder:"libx264",available:true,recommended_crf:23}],crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,speeds:["medium" as const],default_speed:"medium" as const,processor:"software" as const,
+  resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original" as const}},
+  frame_rate:{available:true,default:{kind:"preserve" as const},constant_choices:[{label:"23.976",frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}}]},preview_available:false};
 it("snapshots active raw video controls before Save while retaining dormant Automatic quality", async () => {
-  const options = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23}};
-  const raw = {crfDraft:"31"};
+  const options = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23},
+    resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
+  const raw = {crfDraft:"31",widthDraft:"1280",heightDraft:"720"};
   let resolve!: (path:string) => void;
   mocks.save.mockReset().mockImplementation(() => new Promise(r => {resolve=r;}));
   mocks.enqueue.mockReset().mockResolvedValue("job");
   const done = vi.fn();
   render(<ConvertActionBar files={[{...file,qualityPreset:"balanced",videoOptions:options,videoCapability,videoDraft:raw}]} disabled={false} onEnqueued={done}/>);
   fireEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
-  options.rate_control.crf=49; raw.crfDraft="";
+  options.rate_control.crf=49; options.resize.width=640; options.frame_rate.numerator=60; raw.crfDraft=""; raw.widthDraft="";
   await act(async () => resolve("/out.mp4"));
   await waitFor(() => expect(done).toHaveBeenCalledOnce());
-  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",rate_control:{kind:"constant_quality",crf:31}}});
+  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",rate_control:{kind:"constant_quality",crf:31},
+    resize:{kind:"fit_within",width:1280,height:720},frame_rate:{kind:"constant",numerator:24000,denominator:1001}}});
 });
 it("blank active CRF blocks enqueue and preset saving", () => {
   mocks.save.mockReset(); mocks.enqueue.mockReset();

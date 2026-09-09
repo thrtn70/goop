@@ -13,7 +13,7 @@ import { cloneImageOptions, validateImageOptions } from "@/features/convert/imag
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 3 as const;
+export const PRESET_BUNDLE_VERSION = 4 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -235,7 +235,18 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     }
     imageOptions = validateImageOptions(v.image_options);
     if (version < 3 && v.video_options != null) throw new Error("video_options is not allowed before schema 3");
-    videoOptions = validateVideoRequest({ ...v, target: v.target as TargetFormat } as Parameters<typeof validateVideoRequest>[0]);
+    let requestEntry = v;
+    if (version === 3 && isObject(v.video_options)) {
+      const legacyVideo = { ...v.video_options };
+      for (const field of ["resize", "frame_rate"] as const) {
+        if (Object.hasOwn(legacyVideo, field)) {
+          if (legacyVideo[field] != null) throw new Error("resize and frame_rate are not allowed in schema 3 video_options");
+          delete legacyVideo[field];
+        }
+      }
+      requestEntry = { ...v, video_options: legacyVideo };
+    }
+    videoOptions = validateVideoRequest({ ...requestEntry, target: v.target as TargetFormat } as Parameters<typeof validateVideoRequest>[0]);
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
     }
@@ -273,9 +284,9 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== PRESET_BUNDLE_VERSION) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2 or ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3 or ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {

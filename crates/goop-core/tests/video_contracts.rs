@@ -4,6 +4,17 @@ use serde_json::{json, Value};
 fn encode(rate: Value) -> Value {
     json!({"kind":"encode","codec":"h264","rate_control":rate,"speed":"medium","processor":"software"})
 }
+fn encode_with(rate: Value, resize: Value, frame_rate: Value) -> Value {
+    json!({
+        "kind":"encode",
+        "codec":"h264",
+        "rate_control":rate,
+        "speed":"medium",
+        "processor":"software",
+        "resize":resize,
+        "frame_rate":frame_rate
+    })
+}
 fn request(options: Value) -> ConvertRequest {
     serde_json::from_value(json!({"input_path":"in.mp4","output_path":"out.mp4","target":"mp4","video_options":options})).unwrap()
 }
@@ -52,6 +63,145 @@ fn ranges_are_inclusive_and_reject_floats() {
             ))
             .is_err());
         }
+    }
+}
+
+#[test]
+fn resize_and_frame_rate_wire_forms_are_strict_and_exact() {
+    let rate = json!({"kind":"constant_quality","crf":23});
+    for (resize, frame_rate) in [
+        (json!({"kind":"original"}), json!({"kind":"preserve"})),
+        (
+            json!({"kind":"fit_within","width":1920,"height":1080}),
+            json!({"kind":"constant","numerator":30000,"denominator":1001}),
+        ),
+    ] {
+        let value = encode_with(rate.clone(), resize, frame_rate);
+        let options: VideoConvertOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&options).unwrap(), value);
+        assert!(validate_video_options(&options).is_ok());
+    }
+
+    for (resize, frame_rate) in [
+        (
+            json!({"kind":"original","width":1920}),
+            json!({"kind":"preserve"}),
+        ),
+        (
+            json!({"kind":"original"}),
+            json!({"kind":"preserve","extra":true}),
+        ),
+        (
+            json!({"kind":"fit_within","width":1920,"height":1080,"extra":true}),
+            json!({"kind":"preserve"}),
+        ),
+        (
+            json!({"kind":"original"}),
+            json!({"kind":"constant","numerator":30,"denominator":1,"extra":true}),
+        ),
+    ] {
+        assert!(serde_json::from_value::<VideoConvertOptions>(encode_with(
+            rate.clone(),
+            resize,
+            frame_rate
+        ))
+        .is_err());
+    }
+    assert!(
+        serde_json::from_value::<VideoRationalFact>(json!({"kind":"malformed","extra":true}))
+            .is_err()
+    );
+}
+
+#[test]
+fn resize_and_frame_rate_validation_enforces_supported_bounds() {
+    let rate = json!({"kind":"constant_quality","crf":23});
+    for dimension in [2, 32768] {
+        let options: VideoConvertOptions = serde_json::from_value(encode_with(
+            rate.clone(),
+            json!({"kind":"fit_within","width":dimension,"height":dimension}),
+            json!({"kind":"constant","numerator":24000,"denominator":1001}),
+        ))
+        .unwrap();
+        assert!(validate_video_options(&options).is_ok());
+    }
+    for dimension in [0, 1, 32769] {
+        let options: VideoConvertOptions = serde_json::from_value(encode_with(
+            rate.clone(),
+            json!({"kind":"fit_within","width":dimension,"height":100}),
+            json!({"kind":"preserve"}),
+        ))
+        .unwrap();
+        assert!(validate_video_options(&options).is_err());
+    }
+    for frame_rate in [
+        json!({"kind":"constant","numerator":0,"denominator":1}),
+        json!({"kind":"constant","numerator":30,"denominator":0}),
+        json!({"kind":"constant","numerator":60000,"denominator":2002}),
+        json!({"kind":"constant","numerator":120,"denominator":1}),
+    ] {
+        let options: VideoConvertOptions = serde_json::from_value(encode_with(
+            rate.clone(),
+            json!({"kind":"original"}),
+            frame_rate,
+        ))
+        .unwrap();
+        assert!(validate_video_options(&options).is_err());
+    }
+    for malformed in [
+        json!({"kind":"fit_within","width":1.5,"height":100}),
+        json!({"kind":"fit_within","width":-1,"height":100}),
+        json!({"kind":"fit_within","width":"1920","height":1080}),
+    ] {
+        assert!(serde_json::from_value::<VideoConvertOptions>(encode_with(
+            rate.clone(),
+            malformed,
+            json!({"kind":"preserve"})
+        ))
+        .is_err());
+    }
+}
+
+#[test]
+fn resize_conflicts_with_legacy_cap_but_frame_rate_alone_does_not() {
+    let mut req = request(encode(json!({"kind":"constant_quality","crf":23})));
+    req.resolution_cap = Some(ResolutionCap::R720p);
+    let VideoConvertOptions::Encode {
+        codec,
+        rate_control,
+        speed,
+        processor,
+        ..
+    } = req.video_options.clone().unwrap()
+    else {
+        unreachable!()
+    };
+    req.video_options = Some(VideoConvertOptions::Encode {
+        codec,
+        rate_control: rate_control.clone(),
+        speed,
+        processor,
+        resize: None,
+        frame_rate: Some(VideoFrameRate::Preserve),
+    });
+    assert!(validate_video_request(&req).is_ok());
+
+    for resize in [
+        VideoResize::Original,
+        VideoResize::FitWithin {
+            width: 1280,
+            height: 720,
+        },
+    ] {
+        req.video_options = Some(VideoConvertOptions::Encode {
+            codec,
+            rate_control: rate_control.clone(),
+            speed,
+            processor,
+            resize: Some(resize),
+            frame_rate: None,
+        });
+        assert!(validate_video_request(&req).is_err());
     }
 }
 #[test]

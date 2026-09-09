@@ -82,12 +82,20 @@ it("preserves completion authority across route unmount and sibling clearing", (
 });
 
 it("owns nested video draft settings independently of caller objects", () => {
-  const value = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23}};
+  const value = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23},resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
   const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedCustom",value),{wrapper:scope("convert","video")});
   value.rate_control.crf=44;
+  value.resize.width=640;
+  value.frame_rate.numerator=60;
   expect(saved.result.current[0].rate_control.crf).toBe(23);
-  const next = {...value,rate_control:{kind:"constant_quality" as const,crf:30}};
+  expect(saved.result.current[0].resize.width).toBe(1920);
+  expect(saved.result.current[0].frame_rate.numerator).toBe(24000);
+  const next = {...value,rate_control:{kind:"constant_quality" as const,crf:30},resize:{...value.resize,width:1280},frame_rate:{...value.frame_rate,numerator:30000}};
   act(() => saved.result.current[1](next));
   next.rate_control.crf=50;
+  next.resize.width=320;
+  next.frame_rate.numerator=25;
   expect(saved.result.current[0].rate_control.crf).toBe(30);
+  expect(saved.result.current[0].resize.width).toBe(1280);
+  expect(saved.result.current[0].frame_rate.numerator).toBe(30000);
 });

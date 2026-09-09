@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/ipc/commands";
 import { jobIdKey, useAppStore } from "@/store/appStore";
-import type { HistoryCounts, Job, JobId, JobState, Settings, SidecarEvent } from "@/types";
+import type { HistoryCounts, Job, JobId, JobState, Preset, Settings, SidecarEvent } from "@/types";
 
 vi.mock("@/ipc/commands", () => ({
   api: {
@@ -197,6 +197,27 @@ describe("app store queue and settings operations", () => {
     const sent = vi.mocked(api.settings.set).mock.calls[0]?.[0] ?? {};
     expect(sent).not.toHaveProperty("cookies_from_browser");
     expect(sent).not.toHaveProperty("output_dir_extract");
+  });
+
+  it("owns nested video transforms returned by and sent to preset IPC", async () => {
+    const transformed = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,
+      rate_control:{kind:"constant_quality" as const,crf:23},resize:{kind:"fit_within" as const,width:1920,height:1080},
+      frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
+    const preset: Preset = {id:"video",name:"Video",target:"mp4",quality_preset:null,resolution_cap:null,compress_mode:null,
+      video_options:transformed,is_builtin:false,created_at:0n};
+    vi.mocked(api.preset.list).mockResolvedValueOnce([preset]);
+    await useAppStore.getState().loadPresets();
+    transformed.resize.width = 640;
+    transformed.frame_rate.numerator = 60;
+    const loaded = useAppStore.getState().presets[0].video_options;
+    expect(loaded).toMatchObject({resize:{kind:"fit_within",width:1920,height:1080},frame_rate:{kind:"constant",numerator:24000,denominator:1001}});
+
+    const returned = {...preset,video_options:{...transformed,resize:{...transformed.resize,width:1280},frame_rate:{...transformed.frame_rate,numerator:30000}}} as Preset;
+    vi.mocked(api.preset.save).mockResolvedValueOnce(returned);
+    await useAppStore.getState().savePreset(preset);
+    if (returned.video_options?.kind !== "encode" || returned.video_options.resize?.kind !== "fit_within") throw new Error("expected transformed Encode preset");
+    returned.video_options.resize.width = 320;
+    expect(useAppStore.getState().presets[0].video_options).toMatchObject({resize:{kind:"fit_within",width:1280,height:1080}});
   });
 
   it("enqueues an info toast for a cookie_fallback sidecar warning", () => {

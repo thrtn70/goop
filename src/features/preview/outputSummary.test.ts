@@ -26,3 +26,28 @@ it("keeps processing facts without byte measurements and never infers per-stream
   expect(image).not.toContain("Stream copied");
   expect(image).not.toContain("video configuration");
 });
+it("reports requested and resolved dimensions and exact timing without classifying cadence", () => {
+  const execution = {
+    requested:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},speed:"medium",processor:"software",resize:{kind:"fit_within",width:1280,height:721},frame_rate:{kind:"constant",numerator:24000,denominator:1001}},
+    encoder:"libx264",video_codec:"h264",video_stream_index:0,audio_stream_index:null,audio_codec:null,audio_copied:false,width:1280,height:720,
+    requested_resize:{kind:"fit_within",width:1280,height:721},requested_frame_rate:{kind:"constant",numerator:24000,denominator:1001},
+    source_average_frame_rate:{kind:"exact",numerator:30000,denominator:1001},source_base_frame_rate:{kind:"exact",numerator:30,denominator:1},source_time_base:{kind:"exact",numerator:1,denominator:90000},
+    resolved_constant_frame_rate:{kind:"exact",numerator:24000,denominator:1001},notices:[],
+  };
+  const summary = outputSummary(result({video_execution:execution}));
+  expect(summary).toContain("Fit within 1280 × 721 px");
+  expect(summary).toContain("resolved 1280 × 720 px upright");
+  expect(summary).toContain("Reported average 30000/1001 fps");
+  expect(summary).toContain("base 30/1 fps");
+  expect(summary).toContain("time base 1/90000");
+  expect(summary).toContain("Constant 23.976 fps");
+  expect(summary).toContain("resolved 24000/1001 fps");
+  expect(summary).toContain("frames may be duplicated or dropped");
+  expect(summary).not.toMatch(/\b(?:CFR|VFR|constant source|variable source)\b/);
+});
+it("labels absent legacy timing as Previous automatic timing instead of Preserve", () => {
+  const execution = {requested:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},speed:"medium",processor:"software"},encoder:"libx264",video_codec:"h264",video_stream_index:0,audio_copied:false,width:1920,height:1080,notices:[]};
+  const summary = outputSummary(result({video_execution:execution}));
+  expect(summary).toContain("Previous automatic timing");
+  expect(summary).not.toContain("Preserve source timing");
+});

@@ -1157,7 +1157,7 @@ mod tests {
             "output_path": "converted.mp4",
             "target": "mp4",
             "quality_preset": null,
-            "resolution_cap": "r1080p",
+            "resolution_cap": null,
             "gif_options": null,
             "compress_mode": null,
             "batch_id": "batch-video",
@@ -1169,7 +1169,9 @@ mod tests {
                 "codec": "hevc",
                 "rate_control": {"kind": "average_bitrate", "kbps": 5000},
                 "speed": "slow",
-                "processor": "software"
+                "processor": "software",
+                "resize": {"kind": "fit_within", "width": 1920, "height": 1080},
+                "frame_rate": {"kind": "constant", "numerator": 30000, "denominator": 1001}
             }
         });
         let mut job = Job::new(JobKind::Convert, payload.clone());
@@ -1187,7 +1189,9 @@ mod tests {
                     "codec": "hevc",
                     "rate_control": {"kind": "average_bitrate", "kbps": 5000},
                     "speed": "slow",
-                    "processor": "software"
+                    "processor": "software",
+                    "resize": {"kind": "fit_within", "width": 1920, "height": 1080},
+                    "frame_rate": {"kind": "constant", "numerator": 30000, "denominator": 1001}
                 },
                 "encoder": "libx265",
                 "video_codec": "hevc",
@@ -1197,6 +1201,12 @@ mod tests {
                 "audio_copied": true,
                 "width": 1920,
                 "height": 1080,
+                "requested_resize": {"kind": "fit_within", "width": 1920, "height": 1080},
+                "requested_frame_rate": {"kind": "constant", "numerator": 30000, "denominator": 1001},
+                "source_average_frame_rate": {"kind": "exact", "numerator": 24000, "denominator": 1001},
+                "source_base_frame_rate": {"kind": "exact", "numerator": 24, "denominator": 1},
+                "source_time_base": {"kind": "exact", "numerator": 1, "denominator": 90000},
+                "resolved_constant_frame_rate": {"kind": "exact", "numerator": 30000, "denominator": 1001},
                 "notices": []
             }
         }))
@@ -1227,7 +1237,20 @@ mod tests {
         let retry = reopened.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
         assert_eq!(retry.payload, payload);
         let request: goop_core::ConvertRequest = serde_json::from_value(retry.payload).unwrap();
-        assert!(request.video_options.is_some());
+        assert!(matches!(
+            request.video_options,
+            Some(goop_core::VideoConvertOptions::Encode {
+                resize: Some(goop_core::VideoResize::FitWithin {
+                    width: 1_920,
+                    height: 1_080,
+                }),
+                frame_rate: Some(goop_core::VideoFrameRate::Constant {
+                    numerator: 30_000,
+                    denominator: 1_001,
+                }),
+                ..
+            })
+        ));
     }
 
     #[test]

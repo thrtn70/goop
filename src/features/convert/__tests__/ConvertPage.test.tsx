@@ -60,6 +60,17 @@ vi.mock("@/ipc/commands", () => ({
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
                 crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                 speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",preview_available:false,preview_unavailable_reason:"Explicit video samples are unavailable."
+                ,resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}}
+                ,frame_rate:{available:path !== "/tmp/no-timing.mp4",reason:path === "/tmp/no-timing.mp4" ? "Reported timing is missing or malformed" : null,default:path === "/tmp/no-timing.mp4" ? null : {kind:"preserve"},constant_choices:[
+                  {frame_rate:{kind:"constant",numerator:24000,denominator:1001},label:"23.976 fps"},
+                  {frame_rate:{kind:"constant",numerator:24,denominator:1},label:"24 fps"},
+                  {frame_rate:{kind:"constant",numerator:25,denominator:1},label:"25 fps"},
+                  {frame_rate:{kind:"constant",numerator:30000,denominator:1001},label:"29.97 fps"},
+                  {frame_rate:{kind:"constant",numerator:30,denominator:1},label:"30 fps"},
+                  {frame_rate:{kind:"constant",numerator:50,denominator:1},label:"50 fps"},
+                  {frame_rate:{kind:"constant",numerator:60000,denominator:1001},label:"59.94 fps"},
+                  {frame_rate:{kind:"constant",numerator:60,denominator:1},label:"60 fps"},
+                ],...(path === "/tmp/no-timing.mp4" ? {average_frame_rate:{kind:"malformed"}} : {average_frame_rate:{kind:"exact",numerator:30000,denominator:1001},base_frame_rate:{kind:"exact",numerator:30,denominator:1},time_base:{kind:"exact",numerator:1,denominator:90000}})}
               } : null,
             })),
             compression: {
@@ -786,6 +797,84 @@ describe("explicit video inspector", () => {
   beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
   afterEach(cleanup);
   async function stage() { renderPage(); await userEvent.click(screen.getByRole("button",{name:"Add files"})); await screen.findByLabelText("Processing"); }
+  it("defaults a new Custom entry to independent dimensions and exact frame timing", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    expect(screen.getByLabelText("Dimensions")).toHaveProperty("value", "original");
+    expect(screen.getByLabelText("Frame rate")).toHaveProperty("value", "preserve");
+    expect(Array.from((screen.getByLabelText("Frame rate") as HTMLSelectElement).options).map(option => option.text)).toEqual([
+      "Preserve source cadence", "23.976 fps", "24 fps", "25 fps", "29.97 fps", "30 fps", "50 fps", "59.94 fps", "60 fps",
+    ]);
+    expect(screen.getByText(/Reported average 30000\/1001 fps/)).toBeTruthy();
+    expect(screen.getByText(/base 30\/1 fps/)).toBeTruthy();
+    expect(screen.queryByText(/constant source|variable source|CFR|VFR/)).toBeNull();
+    await waitFor(() => expect(mockVideoPlan).toHaveBeenCalled());
+    expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).toMatchObject({
+      resize: { kind: "original" },
+      frame_rate: { kind: "preserve" },
+    });
+  });
+  it("keeps Custom and dimensions usable when source timing disables only FPS editing", async () => {
+    mockOpen.mockResolvedValue(["/tmp/no-timing.mp4"]);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    expect(screen.getByLabelText("Dimensions")).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Frame rate")).toHaveProperty("disabled", true);
+    expect(screen.getByText(/Reported timing is missing or malformed/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", true);
+    await waitFor(() => expect(mockVideoPlan).toHaveBeenCalled());
+    expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).toMatchObject({ resize: { kind: "original" } });
+    expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).not.toHaveProperty("frame_rate");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false));
+  });
+  it("keeps partial fit-within text visible, blocks actions, then sends exact independent controls", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    await userEvent.selectOptions(screen.getByLabelText("Dimensions"), "fit_within");
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value", "1920");
+    expect(screen.getByLabelText("Maximum height")).toHaveProperty("value", "1080");
+    fireEvent.change(screen.getByLabelText("Maximum width"), { target: { value: "" } });
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value", "");
+    expect(screen.getByLabelText("Maximum width").getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByLabelText("Maximum height").getAttribute("aria-invalid")).toBe("false");
+    expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", true);
+    expect(screen.getAllByText(/width must be a whole number from 2 to 32768/i).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Maximum width"), { target: { value: "1280" } });
+    fireEvent.change(screen.getByLabelText("Maximum height"), { target: { value: "721" } });
+    await userEvent.selectOptions(screen.getByLabelText("Frame rate"), "24000/1001");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0].video_options).toMatchObject({
+      resize: { kind: "fit_within", width: 1280, height: 721 },
+      frame_rate: { kind: "constant", numerator: 24000, denominator: 1001 },
+    });
+  });
+  it("explains duplicate/drop timing and preserves dimensions while timing changes", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    await userEvent.selectOptions(screen.getByLabelText("Dimensions"), "fit_within");
+    fireEvent.change(screen.getByLabelText("Maximum width"), { target: { value: "1280" } });
+    await userEvent.selectOptions(screen.getByLabelText("Frame rate"), "60/1");
+    expect(screen.getByText(/Frames may be duplicated or dropped; playback speed and audio timing stay unchanged/)).toBeTruthy();
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value", "1280");
+    await userEvent.selectOptions(screen.getByLabelText("Frame rate"), "preserve");
+    expect(screen.getByText(/Preserves source presentation timing/)).toBeTruthy();
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value", "1280");
+  });
+  it("labels a legacy cap as a width and requires Replace before dimensions take authority", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Video resolution"), "r720p");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    expect(screen.getByText("Legacy maximum width: 1280 px")).toBeTruthy();
+    expect(screen.queryByLabelText("Dimensions")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Replace with fit-within dimensions" }));
+    expect(screen.getByLabelText("Dimensions")).toHaveProperty("value", "fit_within");
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value", "1280");
+    expect(screen.getByLabelText("Maximum height")).toHaveProperty("value", "32768");
+    expect(screen.queryByText(/Legacy maximum width/)).toBeNull();
+    await waitFor(() => expect(mockVideoPlan.mock.calls.at(-1)?.[0].resolution_cap).toBe("original"));
+  });
   it("retains raw rates and Custom through mode, codec and route changes; blocks invalid save/enqueue", async () => {
     await stage();
     await userEvent.selectOptions(screen.getByLabelText("Video quality"), "balanced");
@@ -851,9 +940,10 @@ describe("explicit video inspector", () => {
     await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
   });
   it("names Copy resolution conflicts and repairs them without erasing Custom", async () => {
-    await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
-    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await stage();
     await userEvent.selectOptions(screen.getByLabelText("Video resolution"),"r480p");
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
     expect(screen.getByRole("option",{name:"Copy streams"})).toHaveProperty("disabled",true);
     await userEvent.click(screen.getByRole("button",{name:"Use original resolution"}));
     await userEvent.selectOptions(screen.getByLabelText("Processing"),"copy");
@@ -873,22 +963,35 @@ describe("explicit video inspector", () => {
     await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
     await userEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
     await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());
-    expect(mockFromFile.mock.calls[0][0].video_options).toEqual({kind:"encode",codec:"hevc",rate_control:{kind:"average_bitrate",kbps:6000},speed:"fast",processor:"software"});
+    expect(mockFromFile.mock.calls[0][0].video_options).toEqual({kind:"encode",codec:"hevc",rate_control:{kind:"average_bitrate",kbps:6000},speed:"fast",processor:"software",resize:{kind:"original"},frame_rate:{kind:"preserve"}});
   });
   it("applies independent Custom settings to a compatible batch and retains later per-file edits", async () => {
     mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
     fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await userEvent.selectOptions(screen.getByLabelText("Dimensions"),"fit_within");
+    fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"1280"}});
+    await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"24/1");
     await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
     fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"19"}});
+    fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"640"}});
+    await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"60/1");
     await userEvent.click(screen.getByRole("button",{name:"Select b.mp4"}));
     expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+    expect(screen.getByLabelText("Maximum width")).toHaveProperty("value","1280");
+    expect(screen.getByLabelText("Frame rate")).toHaveProperty("value","24/1");
     await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",false));
     await userEvent.click(screen.getByRole("button",{name:"Convert 2 files"}));
     await waitFor(()=>expect(mockFromFile).toHaveBeenCalledTimes(2));
     expect(mockFromFile.mock.calls[0][0].video_options.rate_control.crf).toBe(19);
     expect(mockFromFile.mock.calls[1][0].video_options.rate_control.crf).toBe(31);
     expect(mockFromFile.mock.calls[0][0].video_options.rate_control).not.toBe(mockFromFile.mock.calls[1][0].video_options.rate_control);
+    expect(mockFromFile.mock.calls[0][0].video_options.resize).toEqual({kind:"fit_within",width:640,height:1080});
+    expect(mockFromFile.mock.calls[1][0].video_options.resize).toEqual({kind:"fit_within",width:1280,height:1080});
+    expect(mockFromFile.mock.calls[0][0].video_options.resize).not.toBe(mockFromFile.mock.calls[1][0].video_options.resize);
+    expect(mockFromFile.mock.calls[0][0].video_options.frame_rate).toEqual({kind:"constant",numerator:60,denominator:1});
+    expect(mockFromFile.mock.calls[1][0].video_options.frame_rate).toEqual({kind:"constant",numerator:24,denominator:1});
+    expect(mockFromFile.mock.calls[0][0].video_options.frame_rate).not.toBe(mockFromFile.mock.calls[1][0].video_options.frame_rate);
   });
   it("rejects an incompatible preset atomically and only clears raw drafts on successful replacement", async () => {
     mockOpen.mockResolvedValue(["/tmp/test-video.mp4","/tmp/unsupported.mp4"]);

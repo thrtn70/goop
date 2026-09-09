@@ -1,4 +1,22 @@
-import type { Job, JobResult, VideoExecutionSummary } from "@/types";
+import type { Job, JobResult, VideoRationalFact, VideoExecutionSummary } from "@/types";
+
+function rational(fact: VideoRationalFact | null | undefined): string | null {
+  return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
+}
+
+function rateName(numerator: number, denominator: number): string {
+  const names: Record<string, string> = {
+    "24000/1001": "23.976",
+    "24/1": "24",
+    "25/1": "25",
+    "30000/1001": "29.97",
+    "30/1": "30",
+    "50/1": "50",
+    "60000/1001": "59.94",
+    "60/1": "60",
+  };
+  return names[`${numerator}/${denominator}`] ?? `${numerator}/${denominator}`;
+}
 
 export function videoExecutionText(summary: VideoExecutionSummary): string {
   const codec = summary.video_codec === "h264" ? "H.264" : "HEVC";
@@ -8,7 +26,33 @@ export function videoExecutionText(summary: VideoExecutionSummary): string {
     options.rate_control.kind === "constant_quality" ? "CRF " + options.rate_control.crf : options.rate_control.kbps + " kbps",
     options.speed[0].toUpperCase() + options.speed.slice(1), "Software",
   ];
-  facts.push(summary.width + " × " + summary.height + " px upright");
+  if (options.kind === "encode") {
+    const resize = summary.requested_resize ?? options.resize;
+    if (resize?.kind === "fit_within") {
+      facts.push(`Fit within ${resize.width} × ${resize.height} px`);
+    } else if (resize?.kind === "original") {
+      facts.push("Original dimensions");
+    }
+
+    const average = rational(summary.source_average_frame_rate);
+    const base = rational(summary.source_base_frame_rate);
+    const timeBase = rational(summary.source_time_base);
+    const reported = [
+      average && `Reported average ${average} fps`,
+      base && `base ${base} fps`,
+      timeBase && `time base ${timeBase}`,
+    ].filter((fact): fact is string => !!fact);
+    if (reported.length) facts.push(reported.join(", "));
+
+    const frameRate = summary.requested_frame_rate ?? options.frame_rate;
+    if (!frameRate) facts.push("Previous automatic timing");
+    else if (frameRate.kind === "preserve") facts.push("Preserve source timing");
+    else {
+      const resolved = rational(summary.resolved_constant_frame_rate);
+      facts.push(`Constant ${rateName(frameRate.numerator, frameRate.denominator)} fps (${resolved ? `resolved ${resolved} fps; ` : ""}frames may be duplicated or dropped)`);
+    }
+  }
+  facts.push((options.kind === "encode" && (summary.requested_resize ?? options.resize) ? "resolved " : "") + summary.width + " × " + summary.height + " px upright");
   facts.push(summary.audio_stream_index == null ? "No audio" : summary.audio_copied ? "Audio copied (" + (summary.audio_codec ?? "codec unavailable") + ")" : summary.audio_codec === "aac" ? "Audio: AAC 192 kbps" : "Audio: " + (summary.audio_codec ?? "codec unavailable"));
   return [...facts, ...summary.notices].join(" · ");
 }
