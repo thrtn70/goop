@@ -111,3 +111,14 @@ it("retains one native slot across batch remount and suppresses removed active e
   expect(plan.mock.calls[2][0].input_path).toBe("/d.mp4");
   await act(async()=>resolvers[1](summary));
 });
+it("captures exact nested dimensions and frame timing before deferred planning", async () => {
+  vi.useFakeTimers(); plan.mockResolvedValue(summary);
+  const nested: ConvertRequest = {...request,video_options:{kind:"encode",codec:"h264",processor:"software",speed:"medium",rate_control:{kind:"constant_quality",crf:23},resize:{kind:"fit_within",width:1280,height:721},frame_rate:{kind:"constant",numerator:24000,denominator:1001}}};
+  renderHook(() => useVideoPlan(nested));
+  if (nested.video_options?.kind !== "encode" || nested.video_options.resize?.kind !== "fit_within" || nested.video_options.frame_rate?.kind !== "constant") throw new Error("bad fixture");
+  nested.video_options.resize.width = 640;
+  nested.video_options.frame_rate.numerator = 24;
+  await act(async()=>vi.advanceTimersByTime(300));
+  expect(plan.mock.calls[0][0].video_options.resize).toEqual({kind:"fit_within",width:1280,height:721});
+  expect(plan.mock.calls[0][0].video_options.frame_rate).toEqual({kind:"constant",numerator:24000,denominator:1001});
+});

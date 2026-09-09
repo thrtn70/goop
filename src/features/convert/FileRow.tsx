@@ -9,6 +9,7 @@ import type {
   TargetFormat,
   QualityPreset,
   ResolutionCap,
+  ProbeResult,
 } from "@/types";
 import VideoOptionsPanel from "./VideoOptionsPanel";
 import TargetPicker from "./TargetPicker";
@@ -56,6 +57,21 @@ export function subtitleForTarget(
 
 export function defaultGifOptions(): GifOptions {
   return { size_preset: "medium", trim_start_ms: null, trim_end_ms: null };
+}
+
+export function uprightVideoSize(
+  probe: Pick<ProbeResult, "width" | "height" | "video_details">,
+): { width: number; height: number } {
+  let width = probe.width ?? 1920;
+  let height = probe.height ?? 1080;
+  const stream = probe.video_details?.streams.find(
+    (candidate) => candidate.codec_type === "video" && !candidate.attached_pic,
+  );
+  const rotation = stream?.rotation_degrees ?? 0;
+  if (((rotation % 180) + 180) % 180 === 90) {
+    [width, height] = [height, width];
+  }
+  return { width, height };
 }
 
 export function ConvertSettingsPanel({
@@ -107,7 +123,7 @@ export function ConvertSettingsPanel({
   const showVideoQuality =
     !explicit && p.source_kind === "video" && ["mp4", "mkv", "webm", "mov"].includes(target);
   const showVideoResolution =
-    opts.videoOptions?.kind !== "copy" && (showVideoQuality || (p.source_kind === "video" && ["mp4","mkv","mov","avi"].includes(target)));
+    !explicit && (showVideoQuality || (p.source_kind === "video" && ["mp4","mkv","mov","avi"].includes(target)));
   const ignoredQuality =
     !explicit && !showVideoQuality &&
     opts.qualityPreset != null &&
@@ -120,6 +136,7 @@ export function ConvertSettingsPanel({
   const subSupport = subtitleSupport(target);
   const showSubtitle =
     subtitle != null || (p.source_kind === "video" && (subSupport.soft || subSupport.burn));
+  const sourceSize = uprightVideoSize(p);
 
   return (
     <div className="space-y-4">
@@ -155,7 +172,7 @@ export function ConvertSettingsPanel({
           </p>
         )}
       {(videoCapability || explicit) && <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
-        <VideoOptionsPanel file={opts} capability={videoCapability} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onDraftEdit={onDraftEdit}/>
+        <VideoOptionsPanel file={opts} capability={videoCapability} sourceSize={sourceSize} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onReplaceLegacyResolution={videoOptions => update({resolutionCap:"original",videoOptions})} onDraftEdit={onDraftEdit}/>
       </WorkspaceDraftProvider>}
       {(ignoredQuality || ignoredResolution) && (
         <p className="mt-2 text-xs text-warning" role="alert">

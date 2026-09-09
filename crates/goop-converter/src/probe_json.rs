@@ -1,4 +1,4 @@
-use goop_core::{GoopError, ProbeResult, VideoProbeDetails, VideoStreamInfo};
+use goop_core::{GoopError, ProbeResult, VideoProbeDetails, VideoRationalFact, VideoStreamInfo};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -139,6 +139,99 @@ fn valid_display_matrix(matrix: &Value, rotation: &Value) -> bool {
     rows == vec![vec![a, b, 0], vec![c, d, 0], vec![0, 0, 1073741824]]
 }
 
+fn rational_fact(value: Option<&Value>) -> Option<VideoRationalFact> {
+    let value = value?;
+    let exact = || {
+        let text = value.as_str()?;
+        let (numerator, denominator) = text.split_once('/')?;
+        let numerator = numerator.parse::<u32>().ok()?;
+        let denominator = denominator.parse::<u32>().ok()?;
+        if numerator == 0 || denominator == 0 {
+            return None;
+        }
+        let divisor = gcd(numerator, denominator);
+        Some(VideoRationalFact::Exact {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    };
+    Some(exact().unwrap_or(VideoRationalFact::Malformed))
+}
+
+fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+const MAX_SAFE_INTEGER_MS: i64 = 9_007_199_254_740_991;
+const FIRST_UNSAFE_INTEGER_MS: f64 = 9_007_199_254_740_992.0;
+
+fn seconds_to_milliseconds(seconds: f64) -> Option<i64> {
+    let milliseconds = seconds * 1_000.0;
+    if !milliseconds.is_finite()
+        || milliseconds <= -FIRST_UNSAFE_INTEGER_MS
+        || milliseconds >= FIRST_UNSAFE_INTEGER_MS
+    {
+        return None;
+    }
+    Some(milliseconds.round() as i64)
+}
+
+fn decimal_milliseconds(value: Option<&Value>) -> Option<i64> {
+    seconds_to_milliseconds(value?.as_str()?.parse::<f64>().ok()?)
+}
+
+fn duration_milliseconds(facts: &std::collections::HashMap<String, Value>) -> Option<u64> {
+    let direct = decimal_milliseconds(facts.get("duration"))
+        .and_then(|milliseconds| u64::try_from(milliseconds).ok())
+        .filter(|milliseconds| *milliseconds > 0);
+    direct
+        .or_else(|| {
+            let ticks = facts
+                .get("duration_ts")?
+                .as_i64()
+                .or_else(|| facts.get("duration_ts")?.as_str()?.parse().ok())?;
+            let VideoRationalFact::Exact {
+                numerator,
+                denominator,
+            } = rational_fact(facts.get("time_base"))?
+            else {
+                return None;
+            };
+            let milliseconds = i128::from(ticks)
+                .checked_mul(i128::from(numerator))?
+                .checked_mul(1_000)?
+                .checked_div(i128::from(denominator))?;
+            u64::try_from(milliseconds)
+                .ok()
+                .filter(|value| *value > 0 && *value <= MAX_SAFE_INTEGER_MS as u64)
+        })
+        .or_else(|| {
+            let text = facts.get("tags")?.get("DURATION")?.as_str()?;
+            let mut parts = text.split(':');
+            let hours = parts.next()?.parse::<f64>().ok()?;
+            let minutes = parts.next()?.parse::<f64>().ok()?;
+            let seconds = parts.next()?.parse::<f64>().ok()?;
+            if parts.next().is_some()
+                || !hours.is_finite()
+                || !minutes.is_finite()
+                || !seconds.is_finite()
+                || hours < 0.0
+                || !(0.0..60.0).contains(&minutes)
+                || !(0.0..60.0).contains(&seconds)
+            {
+                return None;
+            }
+            seconds_to_milliseconds(hours * 3_600.0 + minutes * 60.0 + seconds)
+                .and_then(|milliseconds| u64::try_from(milliseconds).ok())
+                .filter(|milliseconds| *milliseconds > 0)
+        })
+}
+
 // Missing indices/dispositions leave the richer inventory unavailable while
 // preserving legacy first-video routing and basic probe behavior.
 fn stream_details(streams: &[FfprobeStream]) -> Option<VideoProbeDetails> {
@@ -213,9 +306,14 @@ fn stream_details(streams: &[FfprobeStream]) -> Option<VideoProbeDetails> {
             color_range: text("color_range"),
             field_order: text("field_order"),
             sample_aspect_ratio: text("sample_aspect_ratio"),
+            average_frame_rate: rational_fact(facts.get("avg_frame_rate")),
+            base_frame_rate: rational_fact(facts.get("r_frame_rate")),
+            time_base: rational_fact(facts.get("time_base")),
             rotation_degrees: rotations.first().copied(),
             rotation_ambiguous: ambiguous,
             attached_pic: attached == 1,
+            start_time_ms: decimal_milliseconds(facts.get("start_time")),
+            duration_ms: duration_milliseconds(facts),
         });
     }
     Some(VideoProbeDetails { streams: result })
@@ -367,5 +465,15 @@ mod tests {
     #[test]
     fn rejects_invalid_json() {
         assert!(parse_probe_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn timestamp_milliseconds_reject_the_first_js_unsafe_integers() {
+        assert_eq!(
+            seconds_to_milliseconds(9_007_199_254_740.99),
+            Some(9_007_199_254_740_990)
+        );
+        assert_eq!(seconds_to_milliseconds(9_007_199_254_740.992), None);
+        assert_eq!(seconds_to_milliseconds(-9_007_199_254_740.992), None);
     }
 }

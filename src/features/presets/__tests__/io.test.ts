@@ -263,10 +263,10 @@ describe("JPEG preset persistence", () => {
   const bundle = (image_options: unknown, version = 2, extra = {}) => JSON.stringify({ version,
     presets: [{ name: "Portrait JPEG", target: "jpeg", image_options, ...extra }] });
 
-  it("exports complete JPEG settings in schema 3 and imports them unchanged", () => {
+  it("exports complete JPEG settings in the current schema and imports them unchanged", () => {
     const json = serializePresets([makePreset({ target: "jpeg", quality_preset: null,
       resolution_cap: null, image_options: settings })]);
-    expect(JSON.parse(json).version).toBe(3);
+    expect(JSON.parse(json).version).toBe(4);
     const entries = parsePresetBundle(json);
     expect(entries[0].image_options).toEqual(settings);
     const presets = entriesToPresets(entries, []);
@@ -319,27 +319,37 @@ describe("JPEG preset persistence", () => {
 });
 
 
-describe("schema 3 video presets", () => {
+describe("schema 4 video presets", () => {
   const video = { kind: "encode", codec: "hevc", processor: "software", speed: "slow", rate_control: { kind: "average_bitrate", kbps: 5000 } } as const;
+  const transformed = {...video,resize:{kind:"fit_within",width:1920,height:1080},
+    frame_rate:{kind:"constant",numerator:30000,denominator:1001}} as const;
   it("roundtrips complete independently owned video controls", () => {
-    const raw = serializePresets([makePreset({ quality_preset: null, video_options: video })]);
-    expect(JSON.parse(raw).version).toBe(3);
+    const raw = serializePresets([makePreset({ quality_preset: null, resolution_cap:null, video_options: transformed })]);
+    expect(JSON.parse(raw).version).toBe(4);
     const entries = parsePresetBundle(raw);
     const presets = entriesToPresets(entries, []);
-    expect(presets[0].video_options).toEqual(video);
+    expect(presets[0].video_options).toEqual(transformed);
     expect(presets[0].video_options).not.toBe(entries[0].video_options);
     if (presets[0].video_options?.kind === "encode" && entries[0].video_options?.kind === "encode") {
       expect(presets[0].video_options.rate_control).not.toBe(entries[0].video_options.rate_control);
+      expect(presets[0].video_options.resize).not.toBe(entries[0].video_options.resize);
+      expect(presets[0].video_options.frame_rate).not.toBe(entries[0].video_options.frame_rate);
     }
   });
   it.each([1, 2])("keeps schema %s legacy and rejects meaningful video fields", version => {
     expect(parsePresetBundle(JSON.stringify({version, presets:[{name:"Old",target:"mp4"}]}))[0].video_options).toBeNull();
     expect(() => parsePresetBundle(JSON.stringify({version, presets:[{name:"Wrong",target:"mp4",video_options:video}]}))).toThrow(/video_options/);
   });
+  it("accepts legacy Encode in schema 3 but rejects schema 4 transforms", () => {
+    const bundle = (video_options: unknown) => JSON.stringify({version:3,presets:[{name:"Legacy",target:"mp4",video_options}]});
+    expect(parsePresetBundle(bundle(video))[0].video_options).toEqual(video);
+    expect(() => parsePresetBundle(bundle(transformed))).toThrow(/schema 3/);
+    expect(parsePresetBundle(bundle({...video,resize:null,frame_rate:null}))[0].video_options).toEqual(video);
+  });
   it.each([{...video, extra:true}, {...video, rate_control:{kind:"constant_quality",crf:0}}, {...video, rate_control:{kind:"average_bitrate",kbps:1.5}}, {kind:"copy",codec:"h264"}])("rejects nested invalid settings", video_options => {
-    expect(() => parsePresetBundle(JSON.stringify({version:3,presets:[{name:"Invalid",target:"mp4",video_options}]}))).toThrow(/Invalid/);
+    expect(() => parsePresetBundle(JSON.stringify({version:4,presets:[{name:"Invalid",target:"mp4",video_options}]}))).toThrow(/Invalid/);
   });
   it.each([{target:"webm"}, {quality_preset:"original"}, {subtitle:{source_path:"/x.srt",mode:"soft"}}, {resolution_cap:"r720p",video_options:{kind:"copy"}}])("rejects request conflicts", overrides => {
-    expect(() => parsePresetBundle(JSON.stringify({version:3,presets:[{name:"Conflict",target:"mp4",video_options:video,...overrides}]}))).toThrow(/Conflict/);
+    expect(() => parsePresetBundle(JSON.stringify({version:4,presets:[{name:"Conflict",target:"mp4",video_options:video,...overrides}]}))).toThrow(/Conflict/);
   });
 });

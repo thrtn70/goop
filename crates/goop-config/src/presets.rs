@@ -245,6 +245,14 @@ mod tests {
             processor: goop_core::VideoProcessor::Software,
             speed: goop_core::VideoSpeed::Slow,
             rate_control: goop_core::VideoRateControl::AverageBitrate { kbps: 5000 },
+            resize: Some(goop_core::VideoResize::FitWithin {
+                width: 1_920,
+                height: 1_080,
+            }),
+            frame_rate: Some(goop_core::VideoFrameRate::Constant {
+                numerator: 30_000,
+                denominator: 1_001,
+            }),
         });
         import(&path, vec![preset.clone()]).unwrap();
         assert_eq!(load(&path).unwrap().last().unwrap(), &preset);

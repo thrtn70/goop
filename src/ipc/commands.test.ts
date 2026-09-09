@@ -404,3 +404,16 @@ it("requests a read-only video plan with an independently owned complete video s
   video_options.rate_control.kbps = 9000;
   expect(sent.video_options.rate_control.kbps).toBe(6500);
 });
+
+it("owns nested video resize and frame-rate payloads at the IPC boundary", async () => {
+  invokeMock.mockClear();
+  const video_options = {kind:"encode" as const,codec:"hevc" as const,rate_control:{kind:"constant_quality" as const,crf:23},speed:"medium" as const,processor:"software" as const,
+    resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
+  const req = {input_path:"/in.mp4",output_path:"",target:"mp4" as const,video_options,quality_preset:null,resolution_cap:null,compress_mode:null,batch_id:null,metadata_policy:null,subtitle:null,gif_options:null};
+  await api.convert.videoPlan(req);
+  const sent = invokeMock.mock.calls[0][1].req.video_options;
+  video_options.resize.width = 640;
+  video_options.frame_rate.numerator = 60;
+  expect(sent.resize).toEqual({kind:"fit_within",width:1920,height:1080});
+  expect(sent.frame_rate).toEqual({kind:"constant",numerator:24000,denominator:1001});
+});

@@ -242,7 +242,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         let reencoded = result?;
         if let Some(expected) = &video_execution {
             let actual = Self::probe_with_cancel(self.resolver, &output_path, &cancel).await?;
-            crate::video_options::validate_output(expected, &actual)?;
+            crate::video_options::validate_output_against_source(expected, &probe, &actual)?;
             if matches!(expected.requested, goop_core::VideoConvertOptions::Copy) {
                 crate::video_options::validate_copy_facts(&probe, &actual)?;
             }

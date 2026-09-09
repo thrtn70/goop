@@ -904,6 +904,8 @@ mod tests {
                 rate_control: goop_core::VideoRateControl::ConstantQuality { crf: 23 },
                 speed: goop_core::VideoSpeed::Medium,
                 processor: goop_core::VideoProcessor::Software,
+                resize: None,
+                frame_rate: None,
             },
         ] {
             let destination_dir = dir.path().join(match options {

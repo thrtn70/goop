@@ -120,6 +120,23 @@ describe("PresetChips", () => {
     expect(onApply).toHaveBeenCalledWith(preset);
   });
 
+  it("applies independently owned nested video transforms", async () => {
+    const video_options = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,
+      rate_control:{kind:"constant_quality" as const,crf:23},resize:{kind:"fit_within" as const,width:1920,height:1080},
+      frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
+    const preset = makePreset({id:"video",name:"Video",video_options});
+    resetStore({presets:[preset]});
+    const onApply = vi.fn();
+    render(<PresetChips kind="convert" onApply={onApply}/>);
+    await userEvent.click(screen.getByRole("button",{name:"Video"}));
+    const applied = onApply.mock.calls[0][0] as Preset;
+    if (applied.video_options?.kind !== "encode" || applied.video_options.resize?.kind !== "fit_within" || applied.video_options.frame_rate?.kind !== "constant") throw new Error("expected transformed Encode preset");
+    applied.video_options.resize.width = 640;
+    applied.video_options.frame_rate.numerator = 60;
+    expect(video_options.resize.width).toBe(1920);
+    expect(video_options.frame_rate.numerator).toBe(24000);
+  });
+
   it("exposes named preset buttons in list items with native keyboard activation", async () => {
     const preset = makePreset({
       id: "gif-social",
@@ -309,14 +326,17 @@ describe("JPEG preset save snapshot", () => {
 describe("video preset snapshots", () => {
   afterEach(cleanup);
   beforeEach(() => { vi.clearAllMocks(); resetStore(); });
-  it("captures nested rate controls when opened before later edits", async () => {
+  it("captures nested video controls when opened before later edits", async () => {
     const {default: Dialog} = await import("../PresetSaveDialog");
-    const options = {kind:"encode" as const,codec:"hevc" as const,processor:"software" as const,speed:"slow" as const,rate_control:{kind:"average_bitrate" as const,kbps:5000}};
+    const options = {kind:"encode" as const,codec:"hevc" as const,processor:"software" as const,speed:"slow" as const,rate_control:{kind:"average_bitrate" as const,kbps:5000},
+      resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:30000,denominator:1001}};
     render(<Dialog open onClose={() => {}} snapshot={{target:"mov",video_options:options}}/>);
-    options.rate_control.kbps=8000;
+    options.rate_control.kbps=8000; options.resize.width=640; options.frame_rate.numerator=60;
     await userEvent.type(screen.getByRole("textbox",{name:"Preset name"}),"Video");
     await userEvent.click(screen.getByRole("button",{name:"Save"}));
-    expect(api.preset.save).toHaveBeenCalledWith(expect.objectContaining({video_options:{...options,rate_control:{kind:"average_bitrate",kbps:5000}}}));
+    expect(api.preset.save).toHaveBeenCalledWith(expect.objectContaining({video_options:{...options,
+      rate_control:{kind:"average_bitrate",kbps:5000},resize:{kind:"fit_within",width:1920,height:1080},
+      frame_rate:{kind:"constant",numerator:30000,denominator:1001}}}));
   });
   it("refuses captured invalid raw settings", async () => {
     const {default: Dialog} = await import("../PresetSaveDialog");

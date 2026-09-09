@@ -175,6 +175,7 @@ jobs:
           ls src-tauri/bin/
           # Verify binaries invoke
           "./src-tauri/bin/ffmpeg-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
+          "./src-tauri/bin/ffprobe-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} -version
           "./src-tauri/bin/yt-dlp-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/gallery-dl-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           # gs + tesseract load co-located libraries — bundled dylibs via
@@ -322,9 +323,30 @@ jobs:
       - name: Video controls (real ffmpeg)
         shell: bash
         run: |
+          set -euo pipefail
           CARGO_INCREMENTAL=0 cargo test -p goop-core --test video_contracts
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --list | tee video-controls-tests.txt
+          case "$RUNNER_OS" in
+            macOS) expected_video_controls=38 ;;
+            Windows) expected_video_controls=35 ;;
+            *) echo "::error::unexpected runner OS: $RUNNER_OS"; exit 1 ;;
+          esac
+          test "$(grep -c ': test$' video-controls-tests.txt)" -eq "$expected_video_controls"
+          for test_name in \
+            probe_reduces_exact_timing_facts_and_preserves_missing_or_malformed \
+            probe_uses_stream_tick_and_matroska_tag_duration_fallbacks \
+            presentation_bounds_use_the_greatest_pts_not_decode_order_tail \
+            incomplete_stream_endpoints_disable_frame_rate_before_conversion \
+            fit_within_resolves_landscape_portrait_rounding_and_no_enlargement \
+            bundled_ffmpeg_preserves_vfr_intervals_and_converts_frame_counts_without_speed_change \
+            bundled_ffmpeg_preserve_keeps_nonzero_bframe_timing_and_relative_audio_offset \
+            bundled_ffmpeg_new_controls_cover_codec_container_matrix_and_stream_endpoints \
+            bundled_ffmpeg_fit_within_decodes_marked_corners_upright_for_all_rotations; do
+            grep -q "^${test_name}: test$" video-controls-tests.txt
+          done
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --example performance_baseline
-          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --ignored
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --ignored --test-threads=1
       # The PDF surface, against the real mutool / gs / tesseract. Until now
       # nothing ran these: the only `--ignored` jobs were goop-converter's, so
       # every shipped PDF path — compress, OCR, page thumbnails, text and image
