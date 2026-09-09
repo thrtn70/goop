@@ -108,6 +108,9 @@ pub struct JobResult {
     /// `Folder` results. Defaults to `1` for backward compatibility.
     #[serde(default = "default_file_count")]
     pub file_count: u32,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub audio_execution: Option<crate::audio::AudioExecutionSummary>,
 }
 
 fn default_file_count() -> u32 {

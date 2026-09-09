@@ -1,5 +1,12 @@
 import { cloneVideoOptions, videoOptionsError, videoRequestOptions, type VideoDraftFile } from "./videoOptions";
 import {
+  audioOptionsProblem,
+  audioRequestOptions,
+  cloneAudioOptions,
+  type AudioConvertOptions,
+  type AudioDraftFile,
+} from "./audioOptions";
+import {
   beginDestinationChoice,
   isCurrentDestinationChoice,
   tryBegin,
@@ -29,13 +36,14 @@ import type {
   TargetFormat,
 } from "@/types";
 
-export interface FileEntry extends EntryIdentity, VideoDraftFile {
+export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile {
   optionsReady?: boolean;
   path: string;
   target: TargetFormat;
   sourceDir: string;
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
+  audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   /** Set by an applied preset. `null` leaves the backend's own default in
@@ -87,7 +95,8 @@ export default function ConvertActionBar({
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
   const videoError = files.map(videoOptionsError).find(Boolean);
-  const blocked = disabled || Boolean(videoError);
+  const audioError = files.map(audioOptionsProblem).find(Boolean);
+  const blocked = disabled || Boolean(videoError) || Boolean(audioError);
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("convert");
@@ -116,6 +125,7 @@ export default function ConvertActionBar({
     try {
       const snapshot = files.map((file) => ({
         ...file,
+        audioOptions: audioRequestOptions(file),
         videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
@@ -139,11 +149,12 @@ export default function ConvertActionBar({
       const results = await Promise.allSettled(
         snapshot.map((f) => {
           const output = destination ?? outputFolder ?? dirname(f.path);
-          return api.convert.fromFile({
+          const request = {
             input_path: f.path,
             output_path: output,
             target: f.target,
-            quality_preset: f.videoOptions ? null : f.qualityPreset,
+            quality_preset: f.videoOptions || f.audioOptions ? null : f.qualityPreset,
+            audio_options: cloneAudioOptions(f.audioOptions),
             video_options: cloneVideoOptions(f.videoOptions),
             resolution_cap: f.resolutionCap,
             gif_options: f.gifOptions,
@@ -152,7 +163,8 @@ export default function ConvertActionBar({
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
             subtitle: f.subtitle,
-          });
+          };
+          return api.convert.fromFile(request);
         }),
       );
       const successful = snapshot.filter(
@@ -219,13 +231,13 @@ export default function ConvertActionBar({
           Save as preset
         </button>
       )}
-      {(error || pickerError || videoError) && (
+      {(error || pickerError || audioError || videoError) && (
         <span role="alert" className="text-xs text-error">
-          {error || pickerError || videoError}
+          {error || pickerError || audioError || videoError}
         </span>
       )}
       <PresetSaveDialog
-        validationError={videoError ?? null}
+        validationError={audioError ?? videoError ?? null}
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
@@ -236,9 +248,10 @@ export default function ConvertActionBar({
           metadata_policy: files[0]?.metadataPolicy ?? null,
           gif_options: files[0]?.gifOptions ? { ...files[0].gifOptions } : null,
           image_options: cloneImageOptions(files[0]?.imageOptions),
+          audio_options: cloneAudioOptions(files[0]?.audioOptions),
           subtitle: files[0]?.subtitle ? { ...files[0].subtitle } : null,
           video_options: files[0] && !videoError ? videoRequestOptions(files[0]) : null,
-          quality_preset: files[0]?.videoOptions ? null : files[0]?.qualityPreset ?? null,
+          quality_preset: files[0]?.videoOptions || files[0]?.audioOptions ? null : files[0]?.qualityPreset ?? null,
           resolution_cap: files[0]?.resolutionCap ?? null,
         }}
       />

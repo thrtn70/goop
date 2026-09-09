@@ -158,7 +158,17 @@ pub fn parse_encoders(stdout: &str) -> DetectedEncoders {
             Some(n) => n,
             None => continue,
         };
-        if KNOWN_HW_ENCODERS.contains(&name) || ["libx264", "libx265", "aac"].contains(&name) {
+        if KNOWN_HW_ENCODERS.contains(&name)
+            || [
+                "libx264",
+                "libx265",
+                "libmp3lame",
+                "aac",
+                "pcm_s16le",
+                "flac",
+            ]
+            .contains(&name)
+        {
             found.insert(name.to_string());
         }
     }
@@ -214,6 +224,16 @@ Encoders:
         assert!(det.is_available("libx264"));
         assert_eq!(det.count(), 0);
         assert_eq!(det.preferred_h264(), None);
+    }
+
+    #[test]
+    fn parses_explicit_audio_encoders() {
+        let det = parse_encoders(
+            "A..... libmp3lame MP3\nA..... aac AAC\nA..... pcm_s16le PCM\nA..... flac FLAC",
+        );
+        for name in ["libmp3lame", "aac", "pcm_s16le", "flac"] {
+            assert!(det.is_available(name), "{name}");
+        }
     }
 
     #[test]

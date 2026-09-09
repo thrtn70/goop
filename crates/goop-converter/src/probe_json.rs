@@ -1,4 +1,7 @@
-use goop_core::{GoopError, ProbeResult, VideoProbeDetails, VideoRationalFact, VideoStreamInfo};
+use goop_core::{
+    AudioNumericFact, AudioProbeDetails, AudioStreamInfo, GoopError, ProbeResult,
+    VideoProbeDetails, VideoRationalFact, VideoStreamInfo,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -84,6 +87,7 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
     };
 
     Ok(ProbeResult {
+        audio_details: audio_details(&streams),
         video_details: if has_video {
             stream_details(&streams)
         } else {
@@ -105,6 +109,58 @@ pub fn parse_probe_json(raw: &[u8]) -> Result<ProbeResult, GoopError> {
         subtitle_codecs,
         audio_codecs,
         image_has_alpha: None,
+    })
+}
+
+fn numeric_fact(value: Option<&Value>) -> Option<AudioNumericFact> {
+    let value = value?;
+    let parsed = value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+        .and_then(|number| u32::try_from(number).ok());
+    Some(match parsed {
+        Some(value) => AudioNumericFact::Exact { value },
+        None => AudioNumericFact::Malformed,
+    })
+}
+
+fn audio_details(streams: &[FfprobeStream]) -> Option<AudioProbeDetails> {
+    let audio: Option<Vec<AudioStreamInfo>> = streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .map(|stream| {
+            let facts = &stream.facts;
+            let index = u32::try_from(facts.get("index")?.as_u64()?).ok()?;
+            let text = |key: &str| {
+                facts
+                    .get(key)
+                    .map(|value| value.as_str().unwrap_or("malformed").to_owned())
+            };
+            Some(AudioStreamInfo {
+                index,
+                codec_name: stream.codec_name.clone(),
+                sample_rate_hz: numeric_fact(facts.get("sample_rate")),
+                channels: numeric_fact(facts.get("channels")),
+                channel_layout: text("channel_layout"),
+                sample_format: text("sample_fmt"),
+                bits_per_raw_sample: numeric_fact(
+                    facts
+                        .get("bits_per_raw_sample")
+                        .or_else(|| facts.get("bits_per_sample")),
+                ),
+                bit_rate_bps: numeric_fact(facts.get("bit_rate")),
+                time_base: rational_fact(facts.get("time_base")),
+                start_time_ms: decimal_milliseconds(facts.get("start_time")),
+                duration_ms: duration_milliseconds(facts),
+            })
+        })
+        .collect();
+    let audio = audio?;
+    (!audio.is_empty()).then(|| AudioProbeDetails {
+        streams: audio,
+        has_non_audio_streams: streams
+            .iter()
+            .any(|stream| stream.codec_type.as_deref() != Some("audio")),
     })
 }
 

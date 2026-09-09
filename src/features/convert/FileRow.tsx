@@ -1,4 +1,12 @@
 import { cloneVideoOptions } from "./videoOptions";
+import {
+  audioAvailability,
+  audioOptionsForTarget,
+  audioSourceFacts,
+  cloneAudioOptions,
+  isAudioTarget,
+  type AudioConvertOptions,
+} from "./audioOptions";
 import { WorkspaceDraftProvider, withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import type {
   GifOptions,
@@ -12,6 +20,7 @@ import type {
   ProbeResult,
 } from "@/types";
 import VideoOptionsPanel from "./VideoOptionsPanel";
+import AudioOptionsPanel from "./AudioOptionsPanel";
 import TargetPicker from "./TargetPicker";
 import ImageOptionsPanel from "./ImageOptionsPanel";
 import { cloneImageOptions, imageOptionsProblem } from "./imageOptions";
@@ -23,6 +32,7 @@ interface RowOptionsState {
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
   videoOptions?: VideoConvertOptions | null;
+  audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -34,6 +44,7 @@ export interface FileRowOptions {
   gifOptions: GifOptions | null;
   imageOptions?: ImageConvertOptions | null;
   videoOptions?: VideoConvertOptions | null;
+  audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -96,6 +107,7 @@ export function ConvertSettingsPanel({
     const next: RowOptionsState = {
       target: partial.target ?? target,
       videoOptions: cloneVideoOptions(partial.videoOptions !== undefined ? partial.videoOptions : opts.videoOptions),
+      audioOptions: cloneAudioOptions(partial.audioOptions !== undefined ? partial.audioOptions : opts.audioOptions),
       imageOptions: cloneImageOptions(partial.imageOptions !== undefined ? partial.imageOptions : opts.imageOptions),
       gifOptions:
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
@@ -113,8 +125,20 @@ export function ConvertSettingsPanel({
     onOptionsChange(path, next);
   };
 
-  const videoCapability = state.capabilities.targets.find(c => c.target === target)?.video_settings;
+  const targetCapability = state.capabilities.targets.find(c => c.target === target);
+  const videoCapability = targetCapability?.video_settings;
   const explicit = !!opts.videoOptions;
+  const audioSettings = targetCapability?.audio_settings;
+  const audioCapability = audioAvailability(
+    audioSettings,
+    targetCapability?.available ?? false,
+    targetCapability?.reason,
+  );
+  const audioSource = audioSourceFacts(
+    p.audio_details,
+    p.audio_codecs?.length ?? (p.has_audio ? 1 : 0),
+    p.has_video || p.has_subtitles,
+  );
   const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
   const imageProblem = imageOptionsProblem(opts.imageOptions, imageCapability);
   const showGifOpts = target === "gif" && p.source_kind === "video";
@@ -149,6 +173,7 @@ export function ConvertSettingsPanel({
             const nextImageCapability = state.capabilities.targets.find(c => c.target === t)?.image_settings;
             update({
               target: t,
+              audioOptions: audioOptionsForTarget(opts.audioOptions, t),
               imageOptions: opts.imageOptions ?? (t !== target && nextImageCapability?.available
                 ? { jpeg_quality: nextImageCapability.default_quality, resize: { kind: "original" } }
                 : null),
@@ -174,6 +199,18 @@ export function ConvertSettingsPanel({
       {(videoCapability || explicit) && <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
         <VideoOptionsPanel file={opts} capability={videoCapability} sourceSize={sourceSize} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onReplaceLegacyResolution={videoOptions => update({resolutionCap:"original",videoOptions})} onDraftEdit={onDraftEdit}/>
       </WorkspaceDraftProvider>}
+      {isAudioTarget(target) && (audioSettings || opts.audioOptions) && (
+        <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
+          <AudioOptionsPanel
+            target={target}
+            value={opts.audioOptions ?? null}
+            availability={audioCapability}
+            source={audioSource}
+            onChange={(audioOptions) => update({ audioOptions })}
+            onDraftEdit={onDraftEdit}
+          />
+        </WorkspaceDraftProvider>
+      )}
       {(ignoredQuality || ignoredResolution) && (
         <p className="mt-2 text-xs text-warning" role="alert">
           Selected video settings do not apply to this output.

@@ -1,4 +1,5 @@
 import { cloneVideoOptions } from "@/features/convert/videoOptions";
+import { cloneAudioOptions, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import type { VideoConvertOptions } from "@/types";
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, type ComponentType, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { create } from "zustand";
@@ -76,10 +77,14 @@ export function withWorkspaceDrafts<P extends object>(Component: ComponentType<P
 }
 
 /** Each editable video boundary owns its nested rate settings. */
-function ownVideoDraft<T>(slot: string, value: T): T {
+function ownMediaDraft<T>(slot: string, value: T): T {
+  if (slot === "AudioOptionsPanel.savedCustom") return cloneAudioOptions(value as AudioConvertOptions | null) as T;
   if (slot === "VideoOptionsPanel.savedCustom") return cloneVideoOptions(value as VideoConvertOptions | null) as T;
   if (slot === "ConvertPage.files" && Array.isArray(value)) {
-    return value.map(file => ({...file, ...(file.videoOptions === undefined ? {} : {videoOptions:cloneVideoOptions(file.videoOptions)})})) as T;
+    return value.map(file => ({...file,
+      ...(file.audioOptions === undefined ? {} : {audioOptions:cloneAudioOptions(file.audioOptions)}),
+      ...(file.videoOptions === undefined ? {} : {videoOptions:cloneVideoOptions(file.videoOptions)}),
+    })) as T;
   }
   return value;
 }
@@ -93,7 +98,7 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
   // A source change establishes new initial values; ordinary prop changes do
   // not overwrite an unfinished edit (same semantics as useState's initializer).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const seed = useMemo(() => ownVideoDraft(slot, typeof initial === "function" ? (initial as () => T)() : initial), [key, epoch]);
+  const seed = useMemo(() => ownMediaDraft(slot, typeof initial === "function" ? (initial as () => T)() : initial), [key, epoch]);
   useEffect(() => {
     useDraftStore.setState(s => s.entries[key] ? s : { entries: { ...s.entries, [key]: { value: seed } } });
   }, [key, seed]);
@@ -102,7 +107,7 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
       if ((s.epochs[epochKey] ?? 0) !== epoch) return s;
       const current = s.entries[key] ? s.entries[key].value as T : seed;
       const nextValue = typeof next === "function" ? (next as (value: T) => T)(current) : next;
-      const value = Object.is(current, nextValue) ? current : ownVideoDraft(slot, nextValue);
+      const value = Object.is(current, nextValue) ? current : ownMediaDraft(slot, nextValue);
       if (Object.is(current, value) && s.entries[key]) return s;
       const revisions = { ...s.revisions };
       const parts = JSON.parse(key) as string[];

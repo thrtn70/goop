@@ -79,3 +79,30 @@ describe("video draft persistence", () => {
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
   });
 });
+
+describe("audio draft persistence", () => {
+  const audio = {
+    kind: "encode",
+    bitrate: { kind: "target", kbps: 320 },
+    channels: { kind: "mono" },
+    sample_rate: { kind: "exact", hz: 44_100 },
+  };
+  const fileKey = JSON.stringify(["convert", "ConvertPage.files"]);
+
+  it("restores independently owned per-file and saved Custom options", () => {
+    const entries = {
+      [fileKey]: { value: [{ path: "/song.wav", sourceDir: "/", target: "mp3", audioOptions: audio }] },
+      [JSON.stringify(["convert", "source", "/song.wav", "id", "AudioOptionsPanel.savedCustom"])]: { value: audio },
+    };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored).toEqual(entries);
+    expect(restored[fileKey].value).not.toBe(entries[fileKey].value);
+  });
+
+  it("drops malformed audio options without affecting legacy files", () => {
+    const malformed = { [fileKey]: { value: [{ path: "/song.wav", sourceDir: "/", target: "mp3", audioOptions: { ...audio, extra: true } }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(malformed))).toEqual({});
+    const legacy = { [fileKey]: { value: [{ path: "/song.wav", sourceDir: "/", target: "mp3" }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(legacy))).toEqual(legacy);
+  });
+});

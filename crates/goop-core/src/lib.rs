@@ -1,3 +1,9 @@
+pub mod audio;
+pub use audio::{
+    validate_audio_request, AudioBitrate, AudioChannels, AudioConvertOptions,
+    AudioExecutionSummary, AudioModeAvailability, AudioNumericFact, AudioProbeDetails,
+    AudioSampleRate, AudioSettingsCapabilities, AudioStreamInfo,
+};
 pub mod capabilities;
 pub use capabilities::{
     CompressionCapabilities, ConversionCapabilities, ConversionInspection,

@@ -261,6 +261,18 @@ describe("ConvertPage", () => {
     expect(extractBtn.className).toContain("bg-accent");
   });
 
+  it("does not offer the generic sample preview for Automatic audio", async () => {
+    clearWorkspaceDrafts("convert");
+    mockProbe.mockResolvedValue(audioOnlyProbe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "MP3" }));
+
+    expect(screen.queryByRole("button", { name: "Preview sample" })).toBeNull();
+  });
+
   it("shows error state with retry on probe failure", async () => {
     mockProbe.mockRejectedValue({
       code: "sidecar_missing",

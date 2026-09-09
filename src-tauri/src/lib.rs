@@ -29,6 +29,10 @@ use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use thumbnail::ThumbnailService;
 
+fn uses_explicit_engine_path(request: &ConvertRequest) -> bool {
+    request.video_options.is_some() || request.audio_options.is_some()
+}
+
 pub fn run() {
     let started = std::time::Instant::now();
     let performance = performance::PerformanceState::new(
@@ -355,6 +359,7 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        audio_execution: None,
                         video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
@@ -396,9 +401,10 @@ pub fn run() {
                     let hw = if req.video_options.is_some() { false } else { hw_preference.load(Ordering::Relaxed) };
                     // Explicit requests are freshly admitted by the FFmpeg worker
                     // before staging; legacy source routing retains its validation.
-                    if req.video_options.is_none() {
+                    if !uses_explicit_engine_path(&req) {
                         goop_converter::capabilities::validate_request_source(&r, &req).await?;
                     }
+                    goop_core::validate_audio_request(&req)?;
                     goop_core::validate_video_request(&req)?;
                     let res = if req.target.is_image() {
                         // ImageMagick runs in-process — no child PID, no
@@ -412,6 +418,7 @@ pub fn run() {
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
+                        audio_execution: res.audio_execution,
                         video_execution: res.video_execution,
                         source_bytes: res.source_bytes,
                         target_bytes: res.target_bytes,
@@ -506,6 +513,7 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        audio_execution: None,
                         video_execution: None,
                         source_bytes: None,
                         target_bytes: None,
@@ -691,5 +699,45 @@ pub fn run() {
             tracing::error!(%error, "failed to start");
             logging::flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod explicit_engine_path_tests {
+    use super::*;
+
+    fn request(extra: serde_json::Value) -> ConvertRequest {
+        let mut value = serde_json::json!({
+            "input_path": "source.wav",
+            "output_path": "converted.mp3",
+            "target": "mp3",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": null,
+            "metadata_policy": null,
+            "subtitle": null,
+            "image_options": null,
+            "video_options": null,
+            "audio_options": null
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().expect("test override object").clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn explicit_audio_and_video_use_fresh_engine_admission_but_automatic_does_not() {
+        assert!(!uses_explicit_engine_path(&request(serde_json::json!({}))));
+        assert!(uses_explicit_engine_path(&request(serde_json::json!({
+            "audio_options": {"kind": "copy"}
+        }))));
+        assert!(uses_explicit_engine_path(&request(serde_json::json!({
+            "target": "mp4",
+            "video_options": {"kind": "copy"}
+        }))));
     }
 }

@@ -18,6 +18,9 @@ use uuid::Uuid;
 pub struct Preset {
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub audio_options: Option<crate::audio::AudioConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub video_options: Option<crate::video::VideoConvertOptions>,
     pub id: String,
     pub name: String,
@@ -57,5 +60,6 @@ mod tests {
         assert_eq!(preset.gif_options, None);
         assert_eq!(preset.subtitle, None);
         assert_eq!(preset.image_options, None);
+        assert_eq!(preset.audio_options, None);
     }
 }

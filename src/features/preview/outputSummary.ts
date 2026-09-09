@@ -1,4 +1,4 @@
-import type { Job, JobResult, VideoRationalFact, VideoExecutionSummary } from "@/types";
+import type { AudioExecutionSummary, Job, JobResult, VideoRationalFact, VideoExecutionSummary } from "@/types";
 
 function rational(fact: VideoRationalFact | null | undefined): string | null {
   return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
@@ -57,6 +57,32 @@ export function videoExecutionText(summary: VideoExecutionSummary): string {
   return [...facts, ...summary.notices].join(" · ");
 }
 
+export function audioExecutionText(summary: AudioExecutionSummary): string {
+  const codec = summary.codec === "aac"
+    ? "AAC"
+    : summary.codec === "pcm_s16le"
+      ? "PCM s16le"
+      : summary.codec.toUpperCase();
+  const facts = [summary.copied
+    ? `Audio copied (${codec})`
+    : `Audio encoded (${codec}${summary.encoder ? ` · ${summary.encoder}` : ""})`];
+  if (summary.requested.kind === "encode" && summary.requested.bitrate?.kind === "target") {
+    facts.push(`Target ${summary.requested.bitrate.kbps} kbps`);
+  }
+  facts.push(summary.sample_rate_hz % 1_000 === 0
+    ? `${summary.sample_rate_hz / 1_000} kHz`
+    : `${Number((summary.sample_rate_hz / 1_000).toFixed(1))} kHz`);
+  facts.push(summary.channel_layout
+    ? `${summary.channels} ${summary.channels === 1 ? "channel" : "channels"} (${summary.channel_layout})`
+    : `${summary.channels} ${summary.channels === 1 ? "channel" : "channels"}`);
+  if (summary.sample_format) facts.push(`Sample format ${summary.sample_format}`);
+  if (summary.bit_depth != null) facts.push(`${summary.bit_depth}-bit`);
+  if (summary.reported_bitrate_kbps != null) {
+    facts.push(`Reported ${summary.reported_bitrate_kbps} kbps`);
+  }
+  return [...facts, ...summary.notices].join(" · ");
+}
+
 /** Measured results only; old history entries do not imply zero source bytes. */
 export function outputSummary(result: JobResult | null | undefined, job?: Pick<Job, "kind" | "payload">): string | null {
   if (!result) return null;
@@ -72,7 +98,8 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
   if (measured && output != null && target != null && Number.isSafeInteger(target) && target > 0) {
     facts.push(output <= target ? "Target met" : "Target missed");
   }
-  if (result.video_execution) facts.push(videoExecutionText(result.video_execution));
+  if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
+  else if (result.video_execution) facts.push(videoExecutionText(result.video_execution));
   else {
     if (result.reencoded === false) facts.push("No re-encode reported");
     const payload = job?.payload;

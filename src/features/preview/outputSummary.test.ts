@@ -51,3 +51,29 @@ it("labels absent legacy timing as Previous automatic timing instead of Preserve
   expect(summary).toContain("Previous automatic timing");
   expect(summary).not.toContain("Preserve source timing");
 });
+
+it("reports explicit audio copy and custom facts including omission notices", () => {
+  const copied = outputSummary(result({audio_execution:{
+    requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,
+    sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:"fltp",
+    bit_depth:null,reported_bitrate_kbps:192,notices:["Non-audio streams and artwork are not included"],
+  }}));
+  expect(copied).toContain("Audio copied (AAC)");
+  expect(copied).toContain("48 kHz");
+  expect(copied).toContain("2 channels (stereo)");
+  expect(copied).toContain("Reported 192 kbps");
+  expect(copied).toContain("Non-audio streams and artwork are not included");
+
+  const encoded = outputSummary(result({audio_execution:{
+    requested:{kind:"encode",bitrate:null,channels:{kind:"mono"},sample_rate:{kind:"exact",hz:44100}},
+    encoder:"flac",codec:"flac",audio_stream_index:0,copied:false,sample_rate_hz:44100,
+    channels:1,channel_layout:"mono",sample_format:"s16",bit_depth:16,
+    reported_bitrate_kbps:null,notices:[],
+  }}));
+  expect(encoded).toContain("Audio encoded (FLAC · flac)");
+  expect(encoded).toContain("44.1 kHz");
+  expect(encoded).toContain("1 channel (mono)");
+  expect(encoded).toContain("Sample format s16");
+  expect(encoded).toContain("16-bit");
+  expect(encoded).not.toContain("Target");
+});

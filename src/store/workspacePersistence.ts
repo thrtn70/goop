@@ -1,4 +1,5 @@
 import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoOptions";
+import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { parsePresetBundle } from "@/features/presets/io";
 
 export type DraftEntries = Record<string, { value: unknown }>;
@@ -7,6 +8,9 @@ export const DRAFT_STORAGE_KEY = "goop.workspace-drafts.v1";
 const MAX_BYTES = 512 * 1024;
 const TOOLS = new Set(["extract", "convert", "compress", "image", "metadata", "recognize"]);
 const SLOTS = new Set<string>([...videoDraftSlots,"ImageOptionsPanel.qualityDraft", "ImageOptionsPanel.widthDraft", "ImageOptionsPanel.heightDraft", "ImageOptionsPanel.appliedQuality", "ImageOptionsPanel.appliedWidth", "ImageOptionsPanel.appliedHeight", "AudioBatchEditor.album", "AudioBatchEditor.albumArtist", "AudioBatchEditor.artist", "AudioBatchEditor.backup", "AudioBatchEditor.comment", "AudioBatchEditor.composer", "AudioBatchEditor.cover", "AudioBatchEditor.disc", "AudioBatchEditor.genre", "AudioBatchEditor.titles", "AudioBatchEditor.tracks", "AudioBatchEditor.year", "AudioTagForm.album", "AudioTagForm.albumArtist", "AudioTagForm.artist", "AudioTagForm.backup", "AudioTagForm.comment", "AudioTagForm.composer", "AudioTagForm.cover", "AudioTagForm.disc", "AudioTagForm.genre", "AudioTagForm.title", "AudioTagForm.track", "AudioTagForm.year", "CompressActionBar.overrideDir", "CompressControls.appliedMode", "CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressPage.files", "CompressPage.pdfs", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "ConvertPage.files", "ConvertPage.pdfs", "ConvertPage.selectedId", "CropEditor.aspect", "CropEditor.crop", "CropEditor.zoom", "GifOptionsPanel.appliedEnd", "GifOptionsPanel.appliedStart", "GifOptionsPanel.endDraft", "GifOptionsPanel.startDraft", "ImageAppIconFlow.selected", "ImageCropFlow.rect", "ImageOcrFlow.images", "ImageOcrFlow.lang", "ImageOcrFlow.outputKind", "ImagePage.files", "ImagePage.op", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.mode", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageRotateFlow.degrees", "ImageWatermarkFlow.opacity", "ImageWatermarkFlow.position", "ImageWatermarkFlow.text", "ImagesToPdfFlow.images", "MetadataPage.files", "PdfDeleteFlow.pages", "PdfExtractFlow.ranges", "PdfFlow.op", "PdfFlow.quality", "PdfFlow.ranges", "PdfInsertBlankFlow.draft", "PdfInsertBlankFlow.positions", "PdfMetadataForm.author", "PdfMetadataForm.keywords", "PdfMetadataForm.subject", "PdfMetadataForm.title", "PdfOcrFlow.lang", "PdfReorderFlow.pages", "PdfRotateFlow.pages", "PdfSplitEditor.input", "PdfToImagesFlow.dpi", "PdfToImagesFlow.format", "ProbeCard.audioOnly", "ProbeCard.selected", "RecognizePage.input", "RecognizePage.lang", "RecognizePage.outputKind", "TopBar.url", "UrlHero.lastUrl"]);
+SLOTS.add("AudioOptionsPanel.savedCustom");
+SLOTS.add("AudioOptionsPanel.bitrateDraft");
+SLOTS.add("AudioOptionsPanel.appliedBitrate");
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string" && item.length <= 4096);
 
@@ -31,6 +35,7 @@ function validFiles(value: unknown, compress: boolean): boolean {
         metadata_policy:file.metadataPolicy, subtitle:file.subtitle, image_options:file.imageOptions}]}));
       // Drafts retain hidden Automatic quality and temporarily incompatible targets.
       // Validate explicit shape independently; submission performs strict admission.
+      validateAudioOptions(file.audioOptions);
       validateVideoOptions(file.videoOptions);
       return !compress || file.mode != null;
     } catch { return false; }
@@ -38,6 +43,9 @@ function validFiles(value: unknown, compress: boolean): boolean {
 }
 
 function validSlot(slot: string, value: unknown): boolean {
+  if (slot === "AudioOptionsPanel.savedCustom") {
+    try { const options = validateAudioOptions(value); return options === null || options.kind === "encode"; } catch { return false; }
+  }
   if (slot === "VideoOptionsPanel.savedCustom") {
     try { const options = validateVideoOptions(value); return options === null || options.kind === "encode"; } catch { return false; }
   }
