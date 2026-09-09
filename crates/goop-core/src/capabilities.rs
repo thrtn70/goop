@@ -4,6 +4,23 @@ use ts_rs::TS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct TrackChoiceCapability {
+    pub track: crate::tracks::TrackIdentity,
+    pub copy: crate::audio::AudioModeAvailability,
+    pub encode: crate::audio::AudioModeAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct TrackSettingsCapabilities {
+    pub source: crate::tracks::TrackSourceBinding,
+    pub audio_choices: Vec<TrackChoiceCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
 pub struct CompressionCapabilities {
     pub quality: bool,
     pub target_size: bool,
@@ -39,6 +56,9 @@ pub struct TargetCapability {
     pub video_settings: Option<crate::video::VideoSettingsCapabilities>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub track_settings: Option<TrackSettingsCapabilities>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub compression: Option<CompressionCapabilities>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -63,4 +83,7 @@ pub struct ConversionCapabilities {
 pub struct ConversionInspection {
     pub probe: crate::ProbeResult,
     pub capabilities: ConversionCapabilities,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_source: Option<crate::tracks::TrackSourceBinding>,
 }

@@ -7,7 +7,7 @@ pub use audio::{
 pub mod capabilities;
 pub use capabilities::{
     CompressionCapabilities, ConversionCapabilities, ConversionInspection,
-    ImageSettingsCapabilities, TargetCapability,
+    ImageSettingsCapabilities, TargetCapability, TrackChoiceCapability, TrackSettingsCapabilities,
 };
 pub mod convert;
 pub mod error;
@@ -23,6 +23,7 @@ pub mod pdf;
 pub mod preset;
 pub mod process_registry;
 pub mod signals;
+pub mod tracks;
 pub mod update;
 
 pub use convert::{
@@ -52,6 +53,14 @@ pub use pdf::{
 pub use preset::Preset;
 pub use process_registry::{NoopRegistry, PidGuard, PidRegistry};
 pub use signals::{Interrupt, JobSignals};
+pub use tracks::{
+    validate_track_disposition, validate_track_identity, validate_track_inventory,
+    validate_track_options, validate_track_request, validate_track_source_binding,
+    validate_track_text_fact, TrackConvertOptions, TrackDispositionFacts, TrackExecutionSummary,
+    TrackIdentity, TrackInventory, TrackPresetPolicy, TrackPresetSelection, TrackSourceBinding,
+    TrackTextFact, MAX_TRACK_SOURCE_BINDING_BYTES, MAX_TRACK_STREAMS, MAX_TRACK_TEXT_BYTES,
+    TRACK_INVENTORY_VERSION, TRACK_SOURCE_BINDING_VERSION,
+};
 pub use update::UpdateInfo;
 
 pub mod preview;

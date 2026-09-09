@@ -284,6 +284,9 @@ pub struct ConvertRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_options: Option<crate::audio::AudioConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_options: Option<crate::tracks::TrackConvertOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -330,6 +333,9 @@ pub struct ProbeResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_details: Option<crate::audio::AudioProbeDetails>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_inventory: Option<crate::tracks::TrackInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -341,6 +347,9 @@ pub struct ConvertResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_execution: Option<crate::video::VideoExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_execution: Option<crate::tracks::TrackExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,
