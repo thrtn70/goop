@@ -140,7 +140,7 @@ mod macos {
             let mut rgb = Vec::new();
             rgb.try_reserve_exact(length / 4 * 3)
                 .map_err(|_| raw_error("Insufficient memory for RAW RGB pixels"))?;
-            for pixel in rgba.chunks_exact(4) {
+            for pixel in rgba.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&pixel[..3]);
             }
             image::RgbImage::from_raw(self.width, self.height, rgb)

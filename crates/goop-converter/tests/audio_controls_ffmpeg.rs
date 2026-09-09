@@ -63,8 +63,10 @@ fn decoded_f32(ffmpeg: &Path, path: &Path) -> Vec<f32> {
     assert_eq!(output.stdout.len() % 4, 0);
     output
         .stdout
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -281,7 +283,9 @@ async fn bundled_ffmpeg_preserves_channel_and_resample_semantics() {
     let stereo_samples = decoded_f32(&ffmpeg, &stereo);
     assert!(stereo_samples.len() > 20_000);
     assert!(stereo_samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .all(|pair| (pair[0] - pair[1]).abs() < 1.0e-6));
 
     let anti_phase = temp.path().join("anti-phase.wav");
