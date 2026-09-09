@@ -686,6 +686,7 @@ mod tests {
 
     fn done_result() -> JobResult {
         JobResult {
+            track_execution: None,
             audio_execution: None,
             video_execution: None,
             source_bytes: None,
@@ -958,7 +959,7 @@ mod tests {
             Box::pin(async move {
                 tokio::select! {
                     _ = signals.cancel.cancelled() => Err(GoopError::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ audio_execution: None, video_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ track_execution: None, audio_execution: None, video_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
                 }
             })
         });

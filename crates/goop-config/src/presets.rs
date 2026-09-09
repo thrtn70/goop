@@ -50,6 +50,7 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
     }
     let request = goop_core::ConvertRequest {
         audio_options: preset.audio_options.clone(),
+        track_options: None,
         input_path: String::new(),
         output_path: String::new(),
         target: preset.target,
@@ -66,6 +67,31 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
     goop_core::validate_audio_request(&request)
         .and_then(|()| goop_core::validate_video_request(&request))
         .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
+        .and_then(|()| {
+            if preset.track_policy.is_none() {
+                return Ok(());
+            }
+            if preset.audio_options.is_none() {
+                return Err(GoopError::Config(format!(
+                    "Preset \"{}\": audio track selection requires Copy audio or Custom encode",
+                    preset.name
+                )));
+            }
+            if !matches!(
+                preset.target,
+                TargetFormat::Mp3
+                    | TargetFormat::M4a
+                    | TargetFormat::Aac
+                    | TargetFormat::Wav
+                    | TargetFormat::Flac
+            ) {
+                return Err(GoopError::Config(format!(
+                    "Preset \"{}\": audio track selection requires MP3, M4A, AAC, WAV or FLAC output",
+                    preset.name
+                )));
+            }
+            Ok(())
+        })
 }
 
 /// Validate the whole incoming bundle and merged records before publishing once.
@@ -138,6 +164,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         Preset {
             audio_options: None,
             video_options: None,
+            track_policy: None,
             id: "builtin-youtube-upload".into(),
             name: "YouTube Upload".into(),
             target: TargetFormat::Mp4,
@@ -154,6 +181,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         Preset {
             audio_options: None,
             video_options: None,
+            track_policy: None,
             id: "builtin-twitter-video".into(),
             name: "Twitter/X Video".into(),
             target: TargetFormat::Mp4,
@@ -170,6 +198,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         Preset {
             audio_options: None,
             video_options: None,
+            track_policy: None,
             id: "builtin-podcast-mp3".into(),
             name: "Podcast MP3".into(),
             target: TargetFormat::Mp3,
@@ -186,6 +215,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
         Preset {
             audio_options: None,
             video_options: None,
+            track_policy: None,
             id: "builtin-web-image".into(),
             name: "Web Image".into(),
             target: TargetFormat::Webp,
@@ -226,6 +256,7 @@ mod tests {
         Preset {
             audio_options: None,
             video_options: None,
+            track_policy: None,
             id: id.into(),
             name: name.into(),
             target: TargetFormat::Mp4,
@@ -239,6 +270,41 @@ mod tests {
             is_builtin: false,
             created_at: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn portable_track_policy_roundtrips_without_source_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("track", "Choose audio per file");
+        preset.target = TargetFormat::Mp3;
+        preset.quality_preset = None;
+        preset.audio_options = Some(goop_core::AudioConvertOptions::Copy);
+        preset.track_policy = Some(goop_core::TrackPresetPolicy::Audio {
+            selection: goop_core::TrackPresetSelection::ChoosePerFile,
+        });
+
+        save(&path, std::slice::from_ref(&preset)).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![preset]);
+        let stored = std::fs::read_to_string(path).unwrap();
+        assert!(stored.contains("choose_per_file"));
+        assert!(!stored.contains("canonical_path"));
+        assert!(!stored.contains("stream_index"));
+        assert!(!stored.contains("inventory"));
+    }
+
+    #[test]
+    fn track_policy_requires_explicit_audio_processing_and_audio_target() {
+        let mut preset = sample("track", "Choose audio per file");
+        preset.track_policy = Some(goop_core::TrackPresetPolicy::Audio {
+            selection: goop_core::TrackPresetSelection::ChoosePerFile,
+        });
+        assert!(validate(&preset).is_err());
+        preset.target = TargetFormat::Mp3;
+        preset.quality_preset = None;
+        assert!(validate(&preset).is_err());
+        preset.audio_options = Some(goop_core::AudioConvertOptions::Copy);
+        assert!(validate(&preset).is_ok());
     }
 
     #[test]
@@ -307,7 +373,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(load(&path).unwrap()[0].audio_options, None);
+        let preset = &load(&path).unwrap()[0];
+        assert_eq!(preset.audio_options, None);
+        assert_eq!(preset.track_policy, None);
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConvertRequest,
+  AudioExecutionSummary,
   VideoExecutionSummary,
   ConversionCapabilities,
   ConversionInspection,
@@ -38,9 +39,37 @@ import type {
   SidecarStatus,
   UpdateInfo,
   UpdateStatus,
+  TrackConvertOptions,
+  TrackPresetPolicy,
   UrlProbe,
   WatermarkSpec,
 } from "@/types";
+
+function cloneTrackOptions(options: TrackConvertOptions | null | undefined): TrackConvertOptions | null {
+  if (!options) return null;
+  return {
+    kind: "audio",
+    stream_index: options.stream_index,
+    source: {
+      ...options.source,
+      inventory: {
+        ...options.source.inventory,
+        streams: options.source.inventory.streams.map(stream => ({
+          ...stream,
+          codec_name: { ...stream.codec_name },
+          container_stream_id: { ...stream.container_stream_id },
+          language: { ...stream.language },
+          title: { ...stream.title },
+          disposition: { ...stream.disposition, other: { ...stream.disposition.other } },
+        })),
+      },
+    },
+  };
+}
+
+function cloneTrackPolicy(policy: TrackPresetPolicy | null | undefined): TrackPresetPolicy | null {
+  return policy ? { kind: "audio", selection: { kind: "choose_per_file" } } : null;
+}
 
 // The ts-rs-generated `CompressMode` declares `value: bigint` for
 // `target_size_bytes` because u64 round-trips as bigint in JS. But Tauri
@@ -101,6 +130,7 @@ function presetToIpc(p: Preset): IpcPreset {
   return {
     ...p,
     video_options: cloneVideoOptions(p.video_options),
+    track_policy: cloneTrackPolicy(p.track_policy),
     created_at: Number(p.created_at),
     gif_options: gifToIpc(p.gif_options),
     compress_mode:
@@ -133,11 +163,12 @@ export const api = {
   },
   convert: {
     videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
+    audioPlan: (req: ConvertRequest) => invoke<AudioExecutionSummary>("convert_audio_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), ...(req.track_options === undefined ? {} : {track_options: cloneTrackOptions(req.track_options)}), gif_options: gifToIpc(req.gif_options) } }),
     inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
     capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),
     probe: (path: string) => invoke<ProbeResult>("convert_probe", { path }),
     fromFile: (req: IpcConvertRequest) =>
-      invoke<JobId>("convert_from_file", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
+      invoke<JobId>("convert_from_file", { req: { ...req, video_options: cloneVideoOptions(req.video_options), ...(req.track_options === undefined ? {} : {track_options: cloneTrackOptions(req.track_options)}), gif_options: gifToIpc(req.gif_options) } }),
   },
   extract: {
     probe: (url: string) => invoke<UrlProbe>("extract_probe", { url }),

@@ -106,3 +106,62 @@ describe("audio draft persistence", () => {
     expect(decodeDraftEntries(encodeDraftEntries(legacy))).toEqual(legacy);
   });
 });
+
+describe("selected audio track draft persistence", () => {
+  const missing = { kind: "missing" };
+  const source = {
+    version: 1,
+    canonical_path: "/media/movie.mkv",
+    size_bytes: "4096",
+    modified_unix_ns: "1700000000000000000",
+    inventory: {
+      version: 1,
+      streams: [
+        {
+          index: 1,
+          codec_type: "audio",
+          codec_name: { kind: "value", value: "aac" },
+          container_stream_id: missing,
+          language: { kind: "value", value: "eng" },
+          title: { kind: "value", value: "Commentary" },
+          disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+        },
+      ],
+    },
+  };
+  const trackOptions = { kind: "audio", source, stream_index: 1 };
+  const fileKey = JSON.stringify(["convert", "ConvertPage.files"]);
+
+  it("deep-copies a source-bound choice across restart without persisting readiness", () => {
+    const entries = { [fileKey]: { value: [{
+      path: "/media/movie.mkv", sourceDir: "/media", target: "mp3",
+      qualityPreset: null, resolutionCap: null, audioOptions: { kind: "copy" },
+      trackOptions,
+    }] } };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored).toEqual(entries);
+    expect(restored[fileKey].value).not.toBe(entries[fileKey].value);
+    const restoredTrack = (restored[fileKey].value as Array<{trackOptions: typeof trackOptions}>)[0].trackOptions;
+    expect(restoredTrack).not.toBe(trackOptions);
+    expect(restoredTrack.source).not.toBe(source);
+    expect(restoredTrack.source.inventory).not.toBe(source.inventory);
+    expect(restoredTrack.source.inventory.streams).not.toBe(source.inventory.streams);
+    expect((restored[fileKey].value as Array<Record<string, unknown>>)[0]).not.toHaveProperty("trackPlan");
+  });
+
+  it("rejects malformed nested identity without discarding an unrelated valid entry", () => {
+    const badFile = { path: "/media/movie.mkv", sourceDir: "/media", target: "mp3",
+      qualityPreset: null, resolutionCap: null, audioOptions: { kind: "copy" },
+      trackOptions: { ...trackOptions, source: { ...source, inventory: {
+        ...source.inventory,
+        streams: [{ ...source.inventory.streams[0], index: 2, extra: true }],
+      } } },
+    };
+    const validKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+    const raw = JSON.stringify({ version: 1, entries: {
+      [fileKey]: { value: [badFile] },
+      [validKey]: { value: "cw90" },
+    } });
+    expect(decodeDraftEntries(raw)).toEqual({ [validKey]: { value: "cw90" } });
+  });
+});

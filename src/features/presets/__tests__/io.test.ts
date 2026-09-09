@@ -96,7 +96,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
-      metadata_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null,
+      metadata_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null, track_policy: null,
     }]);
   });
 
@@ -369,7 +369,7 @@ describe("schema 5 audio presets", () => {
       resolution_cap: null,
       audio_options: audio,
     })]);
-    expect(JSON.parse(raw).version).toBe(5);
+    expect(JSON.parse(raw).version).toBe(PRESET_BUNDLE_VERSION);
     const entries = parsePresetBundle(raw);
     const presets = entriesToPresets(entries, []);
     expect(presets[0].audio_options).toEqual(audio);
@@ -408,5 +408,68 @@ describe("schema 5 audio presets", () => {
       version: 5,
       presets: [{ name: "Conflict", target: "mp3", audio_options: audio, video_options: { kind: "copy" } }],
     }))).toThrow(/Conflict/);
+  });
+});
+
+describe("schema 6 portable track policy", () => {
+  const choosePerFile = {
+    kind: "audio",
+    selection: { kind: "choose_per_file" },
+  } as const;
+
+  it("roundtrips Choose per file without exporting source-bound identity", () => {
+    const preset = makePreset({
+      target: "mp3",
+      quality_preset: null,
+      resolution_cap: null,
+      audio_options: { kind: "copy" },
+      track_policy: choosePerFile,
+    });
+    const raw = serializePresets([preset]);
+    const wire = JSON.parse(raw);
+    expect(wire.version).toBe(6);
+    expect(wire.presets[0].track_policy).toEqual(choosePerFile);
+    expect(raw).not.toContain("canonical_path");
+    expect(raw).not.toContain("stream_index");
+    expect(raw).not.toContain("inventory");
+
+    const entries = parsePresetBundle(raw);
+    const restored = entriesToPresets(entries, [])[0];
+    expect(restored.track_policy).toEqual(choosePerFile);
+    expect(restored.track_policy).not.toBe(entries[0].track_policy);
+  });
+
+  it.each([1, 2, 3, 4, 5])("keeps schema %s absent/null compatible", (version) => {
+    const absent = JSON.stringify({ version, presets: [{ name: "Old", target: "mp3" }] });
+    const explicitNull = JSON.stringify({ version, presets: [{ name: "Old", target: "mp3", track_policy: null }] });
+    expect(parsePresetBundle(absent)[0].track_policy).toBeNull();
+    expect(parsePresetBundle(explicitNull)[0].track_policy).toBeNull();
+  });
+
+  it.each([1, 2, 3, 4, 5])("rejects meaningful schema 6 fields in schema %s atomically", (version) => {
+    const raw = JSON.stringify({ version, presets: [
+      { name: "Valid first", target: "mp3" },
+      { name: "Invalid second", target: "mp3", track_policy: choosePerFile },
+    ] });
+    expect(() => parsePresetBundle(raw)).toThrow(/Invalid second.*track_policy/);
+  });
+
+  it.each([
+    { ...choosePerFile, extra: true },
+    { kind: "audio", selection: { kind: "choose_per_file", source: "/private/source.mkv" } },
+    { kind: "audio", selection: { kind: "selected", stream_index: 2 } },
+    { kind: "subtitle", selection: { kind: "choose_per_file" } },
+  ])("rejects non-portable or malformed policy: %j", (track_policy) => {
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 6,
+      presets: [{ name: "Invalid policy", target: "mp3", audio_options: { kind: "copy" }, track_policy }],
+    }))).toThrow(/Invalid policy.*track_policy/);
+  });
+
+  it.each(["opus", "ogg", "extract_audio_keep_codec", "mp4"])("rejects Choose per file for unsupported %s output", (target) => {
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 6,
+      presets: [{ name: "Wrong target", target, audio_options: { kind: "copy" }, track_policy: choosePerFile }],
+    }))).toThrow(/Wrong target.*(track_policy|Explicit audio)/);
   });
 });

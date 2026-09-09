@@ -417,3 +417,41 @@ it("owns nested video resize and frame-rate payloads at the IPC boundary", async
   expect(sent.resize).toEqual({kind:"fit_within",width:1920,height:1080});
   expect(sent.frame_rate).toEqual({kind:"constant",numerator:24000,denominator:1001});
 });
+
+it.each(["audioPlan", "fromFile"] as const)("owns the complete track binding before %s IPC", async (method) => {
+  invokeMock.mockClear();
+  const track_options = {
+    kind: "audio" as const,
+    source: {
+      version: 1,
+      canonical_path: "/media/movie.mkv",
+      size_bytes: "4096",
+      modified_unix_ns: "1700000000000000000",
+      inventory: {
+        version: 1,
+        streams: [{
+          index: 1,
+          codec_type: "audio",
+          codec_name: { kind: "value" as const, value: "aac" },
+          container_stream_id: { kind: "missing" as const },
+          language: { kind: "value" as const, value: "eng" },
+          title: { kind: "value" as const, value: "Commentary" },
+          disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+        }],
+      },
+    },
+    stream_index: 1,
+  };
+  const req = { input_path: "/media/movie.mkv", output_path: "", target: "mp3" as const,
+    quality_preset: null, resolution_cap: null, compress_mode: null, batch_id: null,
+    metadata_policy: null, subtitle: null, gif_options: null, video_options: null,
+    audio_options: { kind: "copy" as const }, track_options };
+
+  if (method === "audioPlan") await api.convert.audioPlan(req);
+  else await api.convert.fromFile(req);
+  const sent = invokeMock.mock.calls[0][1].req.track_options;
+  track_options.source.inventory.streams[0].title.value = "Changed after await";
+  (track_options.source.inventory.streams[0].disposition.other as Record<string, boolean>).commentary = true;
+  expect(sent.source.inventory.streams[0].title.value).toBe("Commentary");
+  expect(sent.source.inventory.streams[0].disposition.other).toEqual({});
+});

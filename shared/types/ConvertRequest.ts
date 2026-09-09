@@ -8,6 +8,7 @@ import type { QualityPreset } from "./QualityPreset";
 import type { ResolutionCap } from "./ResolutionCap";
 import type { SubtitleOptions } from "./SubtitleOptions";
 import type { TargetFormat } from "./TargetFormat";
+import type { TrackConvertOptions } from "./TrackConvertOptions";
 import type { VideoConvertOptions } from "./VideoConvertOptions";
 
 export type ConvertRequest = { video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
@@ -22,4 +23,4 @@ metadata_policy: MetadataPolicy | null,
  * subtitle handling, so pre-subtitle presets and queued job
  * payloads keep deserializing unchanged.
  */
-subtitle: SubtitleOptions | null, image_options?: ImageConvertOptions | null, audio_options?: AudioConvertOptions | null, };
+subtitle: SubtitleOptions | null, image_options?: ImageConvertOptions | null, audio_options?: AudioConvertOptions | null, track_options?: TrackConvertOptions | null, };

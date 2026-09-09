@@ -359,6 +359,7 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        track_execution: None,
                         audio_execution: None,
                         video_execution: None,
                         source_bytes: None,
@@ -418,6 +419,7 @@ pub fn run() {
                         ffmpeg.convert(id, &req, cancel).await?
                     };
                     Ok(JobResult {
+                        track_execution: res.track_execution,
                         audio_execution: res.audio_execution,
                         video_execution: res.video_execution,
                         source_bytes: res.source_bytes,
@@ -513,6 +515,7 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        track_execution: None,
                         audio_execution: None,
                         video_execution: None,
                         source_bytes: None,
@@ -627,6 +630,7 @@ pub fn run() {
             commands::convert::convert_capabilities,
             commands::convert::convert_inspect,
             commands::convert::convert_video_plan,
+            commands::convert::convert_audio_plan,
             commands::convert::convert_from_file,
             commands::extract::extract_probe,
             commands::extract::extract_from_url,

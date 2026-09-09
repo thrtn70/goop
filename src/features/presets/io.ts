@@ -6,7 +6,7 @@
  * across machines.
  */
 
-import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat } from "@/types";
+import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
@@ -14,7 +14,7 @@ import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/vide
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 5 as const;
+export const PRESET_BUNDLE_VERSION = 6 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -87,6 +87,7 @@ interface PresetEntry {
   image_options: ImageConvertOptions | null;
   video_options: VideoConvertOptions | null;
   audio_options: AudioConvertOptions | null;
+  track_policy: TrackPresetPolicy | null;
 }
 
 function compressModeForWire(m: CompressMode | null): WireCompressMode | null {
@@ -121,6 +122,7 @@ interface PresetBundleWire {
     image_options: ImageConvertOptions | null;
     video_options: VideoConvertOptions | null;
     audio_options: AudioConvertOptions | null;
+    track_policy: TrackPresetPolicy | null;
   }>;
 }
 
@@ -142,6 +144,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       image_options: cloneImageOptions(p.image_options),
       video_options: cloneVideoOptions(p.video_options),
       audio_options: cloneAudioOptions(p.audio_options),
+      track_policy: cloneTrackPolicy(p.track_policy),
     })),
   };
   return JSON.stringify(bundle, (_key, value: unknown) => typeof value === "bigint" ? Number(value) : value, 2);
@@ -156,6 +159,27 @@ export class PresetParseError extends Error {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === [...expected].sort()[index]);
+}
+
+function cloneTrackPolicy(value: TrackPresetPolicy | null | undefined): TrackPresetPolicy | null {
+  return value ? { kind: "audio", selection: { kind: "choose_per_file" } } : null;
+}
+
+function validateTrackPolicy(value: unknown): TrackPresetPolicy | null {
+  if (value == null) return null;
+  if (!isObject(value) || !hasExactKeys(value, ["kind", "selection"]) || value.kind !== "audio") {
+    throw new Error("track_policy must be the portable audio Choose per file policy");
+  }
+  const selection = value.selection;
+  if (!isObject(selection) || !hasExactKeys(selection, ["kind"]) || selection.kind !== "choose_per_file") {
+    throw new Error("track_policy must contain only Choose per file intent");
+  }
+  return { kind: "audio", selection: { kind: "choose_per_file" } };
 }
 
 function validateCompressMode(v: unknown): CompressMode | null {
@@ -234,6 +258,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
   let imageOptions: ImageConvertOptions | null;
   let videoOptions: VideoConvertOptions | null;
   let audioOptions: AudioConvertOptions | null;
+  let trackPolicy: TrackPresetPolicy | null;
   try {
     if (version === 1 && v.image_options != null) {
       throw new Error("image_options is not allowed in schema 1");
@@ -254,6 +279,14 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     videoOptions = validateVideoRequest({ ...requestEntry, target: v.target as TargetFormat } as Parameters<typeof validateVideoRequest>[0]);
     if (version < 5 && v.audio_options != null) throw new Error("audio_options is not allowed before schema 5");
     audioOptions = validateAudioRequest({ ...requestEntry, target: v.target as TargetFormat });
+    if (version < 6 && v.track_policy != null) throw new Error("track_policy is not allowed before schema 6");
+    trackPolicy = validateTrackPolicy(v.track_policy);
+    if (trackPolicy !== null && audioOptions === null) {
+      throw new Error("track_policy requires Copy audio or Custom encode");
+    }
+    if (trackPolicy !== null && !["mp3", "m4a", "aac", "wav", "flac"].includes(String(v.target))) {
+      throw new Error("track_policy requires MP3, M4A, AAC, WAV or FLAC output");
+    }
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
     }
@@ -272,6 +305,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     image_options: imageOptions,
     video_options: videoOptions,
     audio_options: audioOptions,
+    track_policy: trackPolicy,
   };
 }
 
@@ -292,9 +326,9 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== PRESET_BUNDLE_VERSION) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3, 4 or ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3, 4, 5 or ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {
@@ -332,6 +366,7 @@ export function entriesToPresets(
       image_options: cloneImageOptions(entry.image_options),
       video_options: cloneVideoOptions(entry.video_options),
       audio_options: cloneAudioOptions(entry.audio_options),
+      track_policy: cloneTrackPolicy(entry.track_policy),
       is_builtin: false,
       // i64 in Rust ↔ bigint in TS; the IPC layer converts to a wire number.
       created_at: BigInt(Date.now()),
