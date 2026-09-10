@@ -7,10 +7,15 @@ fn text(value: &str) -> Value {
 }
 
 fn stream(index: u32, codec_type: &str, title: &str) -> Value {
+    let codec_name = match codec_type {
+        "audio" => "aac",
+        "subtitle" => "mov_text",
+        _ => "h264",
+    };
     json!({
         "index": index,
         "codec_type": codec_type,
-        "codec_name": text(if codec_type == "audio" { "aac" } else { "h264" }),
+        "codec_name": text(codec_name),
         "container_stream_id": {"kind": "missing"},
         "language": text("eng"),
         "title": text(title),
@@ -43,6 +48,20 @@ fn track_options(stream_index: u32) -> Value {
         "kind": "audio",
         "source": binding(vec![stream(0, "video", "Picture"), stream(1, "audio", "Main")]),
         "stream_index": stream_index
+    })
+}
+
+fn video_track_options(audio: Value, subtitles: Value) -> Value {
+    json!({
+        "kind": "video",
+        "source": binding(vec![
+            stream(0, "video", "Picture"),
+            stream(1, "audio", "Main"),
+            stream(2, "audio", "Commentary"),
+            stream(3, "subtitle", "English")
+        ]),
+        "audio": audio,
+        "subtitles": subtitles
     })
 }
 
@@ -322,17 +341,43 @@ fn absent_and_null_track_fields_preserve_legacy_contracts() {
         assert_eq!(preset.track_policy, None);
     }
 
-    let result: ConvertResult = serde_json::from_value(json!({
-        "output_path":"out","bytes":1,"duration_ms":1,"reencoded":false
-    }))
-    .unwrap();
-    assert_eq!(result.track_execution, None);
+    for payload in [
+        json!({"output_path":"out","bytes":1,"duration_ms":1,"reencoded":false}),
+        json!({"output_path":"out","bytes":1,"duration_ms":1,"reencoded":false,"video_track_execution":null}),
+    ] {
+        let result: ConvertResult = serde_json::from_value(payload).unwrap();
+        assert_eq!(result.track_execution, None);
+        assert_eq!(result.video_track_execution, None);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["video_track_execution"],
+            Value::Null
+        );
+    }
 
-    let capability: TargetCapability = serde_json::from_value(json!({
-        "target":"mp3","available":true,"reason":null,"preserves_metadata":false,"metadata_warning":null
-    }))
-    .unwrap();
-    assert_eq!(capability.track_settings, None);
+    for payload in [
+        json!({"output_path":"out","bytes":1,"duration_ms":1}),
+        json!({"output_path":"out","bytes":1,"duration_ms":1,"video_track_execution":null}),
+    ] {
+        let result: JobResult = serde_json::from_value(payload).unwrap();
+        assert_eq!(result.video_track_execution, None);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["video_track_execution"],
+            Value::Null
+        );
+    }
+
+    for payload in [
+        json!({"target":"mp3","available":true,"reason":null,"preserves_metadata":false,"metadata_warning":null}),
+        json!({"target":"mp3","available":true,"reason":null,"preserves_metadata":false,"metadata_warning":null,"video_track_settings":null}),
+    ] {
+        let capability: TargetCapability = serde_json::from_value(payload).unwrap();
+        assert_eq!(capability.track_settings, None);
+        assert_eq!(capability.video_track_settings, None);
+        assert_eq!(
+            serde_json::to_value(&capability).unwrap()["video_track_settings"],
+            Value::Null
+        );
+    }
 }
 
 #[test]
@@ -376,6 +421,356 @@ fn generated_track_unions_match_the_wire_contract() {
     use ts_rs::TS;
     assert!(TrackTextFact::decl().contains("\"kind\": \"value\""));
     assert!(TrackConvertOptions::decl().contains("\"kind\": \"audio\""));
+    assert!(TrackConvertOptions::decl().contains("\"kind\": \"video\""));
     assert!(TrackPresetPolicy::decl().contains("\"kind\": \"audio\""));
+    assert!(TrackPresetPolicy::decl().contains("\"kind\": \"video\""));
     assert!(TrackPresetSelection::decl().contains("\"kind\": \"choose_per_file\""));
+    assert!(TrackStreamPolicy::decl().contains("\"kind\": \"keep_all\""));
+    assert!(TrackStreamPolicy::decl().contains("\"kind\": \"choose\""));
+    assert!(TrackStreamPolicy::decl().contains("\"kind\": \"none\""));
+    assert!(TrackPresetStreamPolicy::decl().contains("\"kind\": \"choose_per_file\""));
+}
+
+#[test]
+fn video_track_policies_roundtrip_with_strict_wire_shapes() {
+    let policies = [
+        json!({"kind": "keep_all"}),
+        json!({"kind": "choose", "stream_indices": [1, 2]}),
+        json!({"kind": "none"}),
+    ];
+    for value in policies {
+        let parsed: TrackStreamPolicy = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    let options_value = video_track_options(
+        json!({"kind": "choose", "stream_indices": [1, 2]}),
+        json!({"kind": "choose", "stream_indices": [3]}),
+    );
+    let options: TrackConvertOptions = serde_json::from_value(options_value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&options).unwrap(), options_value);
+    assert!(validate_track_options(&options).is_ok());
+
+    for value in [
+        json!({"kind": "keep_all"}),
+        json!({"kind": "choose_per_file"}),
+        json!({"kind": "none"}),
+    ] {
+        let parsed: TrackPresetStreamPolicy = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    let preset_value = json!({
+        "kind": "video",
+        "audio": {"kind": "keep_all"},
+        "subtitles": {"kind": "choose_per_file"}
+    });
+    let preset: TrackPresetPolicy = serde_json::from_value(preset_value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(preset).unwrap(), preset_value);
+}
+
+#[test]
+fn video_choose_rejects_empty_duplicate_unordered_missing_and_wrong_family_indices() {
+    for audio in [
+        json!({"kind": "choose", "stream_indices": []}),
+        json!({"kind": "choose", "stream_indices": [1, 1]}),
+        json!({"kind": "choose", "stream_indices": [2, 1]}),
+        json!({"kind": "choose", "stream_indices": [99]}),
+        json!({"kind": "choose", "stream_indices": [3]}),
+    ] {
+        assert!(
+            serde_json::from_value::<TrackConvertOptions>(video_track_options(
+                audio,
+                json!({"kind": "none"})
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        serde_json::from_value::<TrackConvertOptions>(video_track_options(
+            json!({"kind": "none"}),
+            json!({"kind": "choose", "stream_indices": [1]})
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn video_track_policy_requires_explicit_supported_video_processing() {
+    let options = video_track_options(json!({"kind": "keep_all"}), json!({"kind": "none"}));
+    for target in ["mp4", "mov", "mkv"] {
+        let request: ConvertRequest = serde_json::from_value(json!({
+            "input_path": "/tmp/input.mkv",
+            "output_path": "/tmp/output",
+            "target": target,
+            "video_options": {"kind": "copy"},
+            "track_options": options
+        }))
+        .unwrap();
+        assert!(validate_track_request(&request).is_ok(), "{target}");
+    }
+
+    for target in ["webm", "avi", "mp3"] {
+        let request: ConvertRequest = serde_json::from_value(json!({
+            "input_path": "/tmp/input.mkv",
+            "output_path": "/tmp/output",
+            "target": target,
+            "video_options": {"kind": "copy"},
+            "track_options": options
+        }))
+        .unwrap();
+        assert!(validate_track_request(&request).is_err(), "{target}");
+    }
+
+    for conflict in [
+        json!({}),
+        json!({"audio_options": {"kind": "copy"}}),
+        json!({"subtitle": {"source_path": "sub.srt", "mode": "soft"}}),
+    ] {
+        let mut payload = json!({
+            "input_path": "/tmp/input.mkv",
+            "output_path": "/tmp/output.mp4",
+            "target": "mp4",
+            "track_options": options
+        });
+        for (key, value) in conflict.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        if conflict.as_object().unwrap().is_empty() {
+            assert!(payload.get("video_options").is_none());
+        } else {
+            payload["video_options"] = json!({"kind": "copy"});
+        }
+        let request: ConvertRequest = serde_json::from_value(payload).unwrap();
+        assert!(validate_track_request(&request).is_err());
+    }
+
+    let audio_only = json!({
+        "kind": "video",
+        "source": binding(vec![stream(0, "audio", "Main")]),
+        "audio": {"kind": "keep_all"},
+        "subtitles": {"kind": "none"}
+    });
+    assert!(serde_json::from_value::<TrackConvertOptions>(audio_only).is_err());
+}
+
+#[test]
+fn video_track_types_reject_unknown_fields_without_changing_audio_wire_shape() {
+    for invalid in [
+        json!({"kind": "keep_all", "extra": true}),
+        json!({"kind": "choose", "stream_indices": [1], "extra": true}),
+        json!({"kind": "none", "stream_indices": []}),
+    ] {
+        assert!(serde_json::from_value::<TrackStreamPolicy>(invalid).is_err());
+    }
+    assert!(serde_json::from_value::<TrackPresetStreamPolicy>(json!({
+        "kind": "choose_per_file",
+        "stream_indices": [1]
+    }))
+    .is_err());
+
+    let legacy = track_options(1);
+    let parsed: TrackConvertOptions = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+
+    for invalid in [
+        TrackStreamPolicy::Choose {
+            stream_indices: vec![],
+        },
+        TrackStreamPolicy::Choose {
+            stream_indices: vec![2, 1],
+        },
+    ] {
+        assert!(serde_json::to_value(invalid).is_err());
+    }
+
+    let source: TrackSourceBinding = serde_json::from_value(binding(vec![
+        stream(0, "video", "Picture"),
+        stream(1, "audio", "Main"),
+    ]))
+    .unwrap();
+    assert!(serde_json::to_value(TrackConvertOptions::Video {
+        source,
+        audio: TrackStreamPolicy::Choose {
+            stream_indices: vec![99],
+        },
+        subtitles: TrackStreamPolicy::None,
+    })
+    .is_err());
+}
+
+#[test]
+fn video_track_contract_refuses_incomplete_or_out_of_scope_inventory() {
+    let make_options = |streams: Vec<Value>| {
+        json!({
+            "kind": "video",
+            "source": binding(streams),
+            "audio": {"kind": "keep_all"},
+            "subtitles": {"kind": "keep_all"}
+        })
+    };
+
+    let mut malformed_text = stream(1, "audio", "Main");
+    malformed_text["language"] = json!({"kind": "malformed"});
+    let mut active_disposition = stream(1, "audio", "Main");
+    active_disposition["disposition"]["other"]["hearing_impaired"] = json!(true);
+    let mut attached_picture = stream(2, "video", "Artwork");
+    attached_picture["disposition"]["attached_pic"] = json!(true);
+
+    for streams in [
+        vec![stream(0, "video", "Picture"), malformed_text],
+        vec![stream(0, "video", "Picture"), active_disposition],
+        vec![stream(0, "video", "Picture"), attached_picture],
+        vec![
+            stream(0, "video", "Picture"),
+            stream(1, "video", "Alternate"),
+        ],
+        vec![
+            stream(0, "video", "Picture"),
+            stream(1, "data", "Timed data"),
+        ],
+    ] {
+        assert!(serde_json::from_value::<TrackConvertOptions>(make_options(streams)).is_err());
+    }
+}
+
+#[test]
+fn video_track_summary_and_capability_contracts_roundtrip_strictly() {
+    let source: TrackSourceBinding = serde_json::from_value(binding(vec![
+        stream(0, "video", "Picture"),
+        stream(1, "audio", "Main"),
+        stream(2, "subtitle", "English"),
+    ]))
+    .unwrap();
+    let availability = TrackModeAvailability {
+        available: true,
+        reason: None,
+    };
+    let capability = VideoTrackSettingsCapabilities {
+        source: source.clone(),
+        audio_tracks: vec![VideoTrackChoiceCapability {
+            track: serde_json::from_value(stream(1, "audio", "Main")).unwrap(),
+            copy: availability.clone(),
+            custom: availability.clone(),
+        }],
+        subtitle_tracks: vec![VideoTrackChoiceCapability {
+            track: serde_json::from_value(stream(2, "subtitle", "English")).unwrap(),
+            copy: availability.clone(),
+            custom: availability.clone(),
+        }],
+        audio_policy: VideoTrackPolicyCapabilities {
+            copy: VideoTrackPolicyModeCapabilities {
+                keep_all: availability.clone(),
+                choose: availability.clone(),
+                none: availability.clone(),
+            },
+            custom: VideoTrackPolicyModeCapabilities {
+                keep_all: availability.clone(),
+                choose: availability.clone(),
+                none: availability.clone(),
+            },
+        },
+        subtitle_policy: VideoTrackPolicyCapabilities {
+            copy: VideoTrackPolicyModeCapabilities {
+                keep_all: availability.clone(),
+                choose: availability.clone(),
+                none: availability.clone(),
+            },
+            custom: VideoTrackPolicyModeCapabilities {
+                keep_all: availability.clone(),
+                choose: availability.clone(),
+                none: availability,
+            },
+        },
+    };
+    let capability_value = serde_json::to_value(&capability).unwrap();
+    assert_eq!(
+        serde_json::from_value::<VideoTrackSettingsCapabilities>(capability_value.clone()).unwrap(),
+        capability
+    );
+    let mut invalid_capability = capability_value;
+    invalid_capability["extra"] = json!(true);
+    assert!(serde_json::from_value::<VideoTrackSettingsCapabilities>(invalid_capability).is_err());
+
+    let capability_value = serde_json::to_value(&capability).unwrap();
+    let mut wrong_family = capability_value.clone();
+    wrong_family["audio_tracks"][0]["track"] = stream(2, "subtitle", "English");
+    assert!(serde_json::from_value::<VideoTrackSettingsCapabilities>(wrong_family).is_err());
+    let mut fabricated = capability_value.clone();
+    fabricated["audio_tracks"][0]["track"]["index"] = json!(9);
+    assert!(serde_json::from_value::<VideoTrackSettingsCapabilities>(fabricated).is_err());
+    let mut missing_choice = capability_value;
+    missing_choice["subtitle_tracks"] = json!([]);
+    assert!(serde_json::from_value::<VideoTrackSettingsCapabilities>(missing_choice).is_err());
+    let mut invalid_capability = capability.clone();
+    invalid_capability.audio_tracks.clear();
+    assert!(serde_json::to_value(invalid_capability).is_err());
+    let mut invalid_source_capability = capability.clone();
+    invalid_source_capability.source.version = 2;
+    assert!(serde_json::to_value(invalid_source_capability).is_err());
+
+    let requested: TrackConvertOptions = serde_json::from_value(json!({
+        "kind": "video",
+        "source": source,
+        "audio": {"kind": "choose", "stream_indices": [1]},
+        "subtitles": {"kind": "none"}
+    }))
+    .unwrap();
+    let summary = VideoTrackExecutionSummary {
+        requested,
+        retained: vec![VideoTrackStreamOutcome {
+            source: serde_json::from_value(stream(1, "audio", "Main")).unwrap(),
+            output_stream_index: 1,
+            output_type_index: 0,
+            processing: VideoTrackProcessing::Copied,
+            source_codec_tag: text_fact("mp4a"),
+            output_codec_name: text_fact("aac"),
+            output_codec_tag: text_fact("mp4a"),
+            output_language: text_fact("eng"),
+            output_title: text_fact("Main"),
+            output_default: Some(true),
+            output_forced: Some(false),
+        }],
+        omitted_audio: vec![],
+        omitted_subtitles: vec![serde_json::from_value(stream(2, "subtitle", "English")).unwrap()],
+        notices: vec!["Omitted one subtitle stream by request.".into()],
+    };
+    let summary_value = serde_json::to_value(&summary).unwrap();
+    assert_eq!(
+        serde_json::from_value::<VideoTrackExecutionSummary>(summary_value.clone()).unwrap(),
+        summary
+    );
+    let mut wrong_request = summary_value;
+    wrong_request["requested"] = track_options(1);
+    assert!(serde_json::from_value::<VideoTrackExecutionSummary>(wrong_request).is_err());
+
+    let summary_value = serde_json::to_value(&summary).unwrap();
+    let mut fabricated_outcome = summary_value.clone();
+    fabricated_outcome["retained"][0]["source"]["index"] = json!(9);
+    assert!(serde_json::from_value::<VideoTrackExecutionSummary>(fabricated_outcome).is_err());
+    let mut wrong_output_order = summary_value.clone();
+    wrong_output_order["retained"][0]["output_stream_index"] = json!(2);
+    assert!(serde_json::from_value::<VideoTrackExecutionSummary>(wrong_output_order).is_err());
+    let mut inconsistent_omission = summary_value;
+    inconsistent_omission["omitted_audio"] = json!([stream(1, "audio", "Main")]);
+    assert!(serde_json::from_value::<VideoTrackExecutionSummary>(inconsistent_omission).is_err());
+    let mut invalid_summary = summary.clone();
+    invalid_summary.retained[0].output_stream_index = 2;
+    assert!(serde_json::to_value(invalid_summary).is_err());
+
+    let encoded = json!({"kind": "encoded_aac", "bitrate_kbps": 192});
+    let parsed: VideoTrackProcessing = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), encoded);
+    assert!(serde_json::from_value::<VideoTrackProcessing>(json!({
+        "kind": "encoded_aac",
+        "bitrate_kbps": 256
+    }))
+    .is_err());
+    assert!(serde_json::to_value(VideoTrackProcessing::EncodedAac { bitrate_kbps: 256 }).is_err());
+}
+
+fn text_fact(value: &str) -> TrackTextFact {
+    TrackTextFact::Value {
+        value: value.to_owned(),
+    }
 }
