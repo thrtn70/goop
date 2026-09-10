@@ -88,3 +88,17 @@ pub async fn convert_video_plan(
     .await
     .map_err(Into::into)
 }
+
+#[tauri::command]
+pub async fn convert_audio_plan(
+    req: ConvertRequest,
+    state: State<'_, AppState>,
+) -> Result<goop_core::AudioExecutionSummary, IpcError> {
+    goop_converter::capabilities::resolve_audio_request_source(
+        &state.resolver,
+        &req,
+        &state.encoders,
+    )
+    .await
+    .map_err(Into::into)
+}

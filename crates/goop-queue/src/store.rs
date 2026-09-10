@@ -1343,6 +1343,105 @@ mod tests {
     }
 
     #[test]
+    fn selected_track_binding_and_disclosure_survive_reopen_and_retry_exactly() {
+        let (store, tmp) = temp_store();
+        let identity = serde_json::json!({
+            "index": 2,
+            "codec_type": "audio",
+            "codec_name": {"kind": "value", "value": "aac"},
+            "container_stream_id": {"kind": "missing"},
+            "language": {"kind": "value", "value": "eng"},
+            "title": {"kind": "value", "value": "Commentary"},
+            "disposition": {"default": false, "forced": false, "attached_pic": false, "other": {}, "malformed": false}
+        });
+        let source = serde_json::json!({
+            "version": 1,
+            "canonical_path": "/media/movie.mkv",
+            "size_bytes": "4096",
+            "modified_unix_ns": "1700000000000000000",
+            "inventory": {"version": 1, "streams": [identity.clone()]}
+        });
+        let payload = serde_json::json!({
+            "input_path": "/media/movie.mkv",
+            "output_path": "/media/commentary.mp3",
+            "target": "mp3",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "compress_mode": null,
+            "batch_id": null,
+            "metadata_policy": "preserve",
+            "subtitle": null,
+            "gif_options": null,
+            "image_options": null,
+            "video_options": null,
+            "audio_options": {"kind": "copy"},
+            "track_options": {"kind": "audio", "source": source, "stream_index": 2}
+        });
+        let mut job = Job::new(JobKind::Convert, payload.clone());
+        job.state = JobState::Running;
+        store.insert(&job).unwrap();
+        let result: goop_core::JobResult = serde_json::from_value(serde_json::json!({
+            "output_path": "/media/commentary.mp3",
+            "bytes": 1024,
+            "duration_ms": 1000,
+            "result_kind": "file",
+            "file_count": 1,
+            "track_execution": {
+                "requested": payload["track_options"].clone(),
+                "selected": identity,
+                "dropped_audio": [],
+                "dropped_other": [],
+                "output_stream_index": 0,
+                "notices": []
+            }
+        }))
+        .unwrap();
+        store
+            .update_state(job.id, &JobState::Done, Some(&result), 1)
+            .unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let reopened = QueueStore::open(&path).unwrap();
+        let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(restored.payload, payload);
+        assert_eq!(
+            serde_json::to_value(restored.result.as_ref().unwrap()).unwrap()["track_execution"],
+            serde_json::json!({
+                "requested": payload["track_options"].clone(),
+                "selected": identity,
+                "dropped_audio": [],
+                "dropped_other": [],
+                "output_stream_index": 0,
+                "notices": []
+            })
+        );
+        assert_eq!(restored.result, Some(result));
+        reopened
+            .update_state(
+                job.id,
+                &JobState::Error {
+                    message: "retryable".into(),
+                    detail: None,
+                },
+                None,
+                1,
+            )
+            .unwrap();
+        assert_eq!(reopened.retry_errored(job.id).unwrap(), 1);
+        let retry = reopened.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.payload, payload);
+        let request: goop_core::ConvertRequest = serde_json::from_value(retry.payload).unwrap();
+        assert!(matches!(
+            request.track_options,
+            Some(goop_core::TrackConvertOptions::Audio {
+                stream_index: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn legacy_absent_or_null_audio_options_survive_reopen_and_retry() {
         for explicit_null in [false, true] {
             let (store, tmp) = temp_store();
@@ -2014,6 +2113,7 @@ mod tests {
         j.state = JobState::Done;
         j.finished_at = Some(j.created_at + 1000);
         j.result = Some(JobResult {
+            track_execution: None,
             audio_execution: None,
             video_execution: None,
             source_bytes: None,

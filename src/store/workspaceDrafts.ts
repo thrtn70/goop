@@ -1,9 +1,9 @@
 import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, type AudioConvertOptions } from "@/features/convert/audioOptions";
-import type { VideoConvertOptions } from "@/types";
+import type { TrackConvertOptions, VideoConvertOptions } from "@/types";
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, type ComponentType, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { create } from "zustand";
-import { loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistence";
+import { cloneTrackOptions, loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistence";
 
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
@@ -84,6 +84,7 @@ function ownMediaDraft<T>(slot: string, value: T): T {
     return value.map(file => ({...file,
       ...(file.audioOptions === undefined ? {} : {audioOptions:cloneAudioOptions(file.audioOptions)}),
       ...(file.videoOptions === undefined ? {} : {videoOptions:cloneVideoOptions(file.videoOptions)}),
+      ...(file.trackOptions === undefined ? {} : {trackOptions:cloneTrackOptions(file.trackOptions as TrackConvertOptions | null)}),
     })) as T;
   }
   return value;

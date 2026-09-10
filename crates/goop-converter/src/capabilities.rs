@@ -5,7 +5,7 @@ use crate::{
 use goop_core::{
     CompressMode, CompressionCapabilities, ConversionCapabilities, ConvertRequest, GoopError,
     ImageResize, ImageSettingsCapabilities, ProbeResult, SourceKind, TargetCapability,
-    TargetFormat,
+    TargetFormat, TrackSourceBinding,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::Path;
@@ -33,6 +33,14 @@ pub fn capabilities_for(probe: &ProbeResult) -> ConversionCapabilities {
 pub fn capabilities_for_with_encoders(
     probe: &ProbeResult,
     encoders: Option<&crate::DetectedEncoders>,
+) -> ConversionCapabilities {
+    capabilities_for_bound_source(probe, encoders, None)
+}
+
+fn capabilities_for_bound_source(
+    probe: &ProbeResult,
+    encoders: Option<&crate::DetectedEncoders>,
+    track_source: Option<&TrackSourceBinding>,
 ) -> ConversionCapabilities {
     use TargetFormat::*;
     let mut targets = vec![];
@@ -128,6 +136,20 @@ pub fn capabilities_for_with_encoders(
                     }
                     Some(settings)
                 } else { None },
+                track_settings: if matches!(target, Mp3 | M4a | Aac | Wav | Flac) {
+                    let empty = crate::DetectedEncoders::empty();
+                    track_source.and_then(|source| {
+                        crate::track_options::settings(
+                            probe,
+                            target,
+                            encoders.unwrap_or(&empty),
+                            source,
+                        )
+                        .ok()
+                    })
+                } else {
+                    None
+                },
                 compression: Some(compression_for(target)),
                 image_settings: image_settings_for(probe, target),
                 target,
@@ -229,6 +251,8 @@ fn refused(reason: impl Into<String>) -> GoopError {
 pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(), GoopError> {
     goop_core::validate_video_request(req)?;
     goop_core::validate_audio_request(req)?;
+    goop_core::validate_track_request(req)?;
+    crate::track_options::resolve(req, probe)?;
     // Compression uses a separate plan that cannot apply these video settings.
     let video_settings_supported =
         probe.source_kind == SourceKind::Video && req.compress_mode.is_none();
@@ -324,7 +348,7 @@ pub async fn probe_capabilities(
     resolver: &BinaryResolver,
     path: &Path,
 ) -> Result<ConversionCapabilities, GoopError> {
-    Ok(capabilities_for(&probe_source(resolver, path).await?))
+    Ok(inspect_source(resolver, path).await?.capabilities)
 }
 pub async fn validate_request_source(
     resolver: &BinaryResolver,
@@ -367,11 +391,28 @@ pub async fn inspect_source(
     resolver: &BinaryResolver,
     path: &Path,
 ) -> Result<goop_core::ConversionInspection, GoopError> {
-    let probe = probe_source(resolver, path).await?;
-    let capabilities = capabilities_for(&probe);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let (probe, track_source, track_source_unavailable_reason) =
+        if backend_for_extension(extension) == BackendKind::Ffmpeg {
+            crate::track_options::probe_bound_source_for_inspection(
+                resolver,
+                path,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?
+        } else {
+            (probe_source(resolver, path).await?, None, None)
+        };
+    let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
+    let capabilities = capabilities_for_bound_source(&probe, None, track_source.as_ref());
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
+        track_source,
+        track_source_unavailable_reason,
     })
 }
 
@@ -405,6 +446,7 @@ pub async fn resolve_audio_request_source(
     encoders: &crate::DetectedEncoders,
 ) -> Result<goop_core::AudioExecutionSummary, GoopError> {
     goop_core::validate_audio_request(req)?;
+    goop_core::validate_track_request(req)?;
     let path = goop_core::path::expand(&req.input_path);
     let extension = path
         .extension()
@@ -415,12 +457,18 @@ pub async fn resolve_audio_request_source(
             "Explicit audio settings require a source routed to the media converter".into(),
         ));
     }
-    let probe = FfmpegBackend::probe_with_cancel(
-        resolver,
-        &path,
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let probe = if let Some(goop_core::TrackConvertOptions::Audio { source, .. }) =
+        req.track_options.as_ref()
+    {
+        let (probe, actual) =
+            crate::track_options::probe_bound_source(resolver, &path, &cancel).await?;
+        crate::track_options::verify_source_binding(source, actual.as_ref())?;
+        crate::track_options::resolve(req, &probe)?;
+        probe
+    } else {
+        FfmpegBackend::probe_with_cancel(resolver, &path, &cancel).await?
+    };
     Ok(crate::audio_options::resolve(req, &probe, encoders)?.summary)
 }
 
@@ -444,10 +492,27 @@ pub async fn inspect_source_with_encoders(
     path: &Path,
     encoders: &crate::DetectedEncoders,
 ) -> Result<goop_core::ConversionInspection, GoopError> {
-    let probe = probe_source(resolver, path).await?;
-    let capabilities = capabilities_for_with_encoders(&probe, Some(encoders));
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let (probe, track_source, track_source_unavailable_reason) =
+        if backend_for_extension(extension) == BackendKind::Ffmpeg {
+            crate::track_options::probe_bound_source_for_inspection(
+                resolver,
+                path,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?
+        } else {
+            (probe_source(resolver, path).await?, None, None)
+        };
+    let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
+    let capabilities = capabilities_for_bound_source(&probe, Some(encoders), track_source.as_ref());
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
+        track_source,
+        track_source_unavailable_reason,
     })
 }

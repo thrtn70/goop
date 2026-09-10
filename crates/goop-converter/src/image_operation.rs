@@ -65,6 +65,7 @@ pub async fn run(
     });
     let output = publish_worker(worker, destination, cancel).await?;
     Ok(JobResult {
+        track_execution: None,
         audio_execution: None,
         video_execution: None,
         output_path: Some(output.path.to_string_lossy().into_owned()),

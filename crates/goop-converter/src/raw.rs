@@ -42,6 +42,7 @@ pub fn probe_raw(path: &Path) -> Result<ProbeResult, GoopError> {
         let result = macos::read(path, false)?;
         Ok(ProbeResult {
             audio_details: None,
+            track_inventory: None,
             video_details: None,
             duration_ms: 0,
             width: Some(result.width),

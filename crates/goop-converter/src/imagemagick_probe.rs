@@ -68,6 +68,7 @@ pub(crate) fn image_probe_result(
 ) -> ProbeResult {
     ProbeResult {
         audio_details: None,
+        track_inventory: None,
         video_details: None,
         duration_ms: 0,
         width: Some(width),

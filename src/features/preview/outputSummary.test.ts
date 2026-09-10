@@ -77,3 +77,75 @@ it("reports explicit audio copy and custom facts including omission notices", ()
   expect(encoded).toContain("16-bit");
   expect(encoded).not.toContain("Target");
 });
+
+it("combines the chosen source track and deliberate omissions with audio processing", () => {
+  const selected = {
+    index: 4,
+    codec_type: "audio",
+    codec_name: { kind: "value" as const, value: "aac" },
+    container_stream_id: { kind: "missing" as const },
+    language: { kind: "value" as const, value: "eng" },
+    title: { kind: "value" as const, value: "Commentary" },
+    disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+  };
+  const binding = {
+    version: 1,
+    canonical_path: "/movie.mkv",
+    size_bytes: "100",
+    modified_unix_ns: "200",
+    inventory: { version: 1, streams: [selected] },
+  };
+  const summary = outputSummary(result({
+    track_execution: {
+      requested: { kind: "audio", source: binding, stream_index: 4 },
+      selected,
+      dropped_audio: [{ ...selected, index: 5 }],
+      dropped_other: [{ ...selected, index: 0, codec_type: "video" }],
+      output_stream_index: 0,
+      notices: [],
+    },
+    audio_execution: {
+      requested: { kind: "copy" }, encoder: null, codec: "aac", audio_stream_index: 0,
+      copied: true, sample_rate_hz: 48_000, channels: 2, channel_layout: "stereo",
+      sample_format: null, bit_depth: null, reported_bitrate_kbps: null, notices: [],
+    },
+  }));
+  expect(summary).toContain("Track 4");
+  expect(summary).toContain("English");
+  expect(summary).toContain("Commentary");
+  expect(summary).toContain("1 additional audio stream omitted");
+  expect(summary).toContain("1 non-audio stream omitted");
+  expect(summary).toContain("Audio copied (AAC)");
+});
+
+it("normalizes only track language while preserving a title that resembles a language code", () => {
+  const selected = {
+    index: 2,
+    codec_type: "audio",
+    codec_name: { kind: "value" as const, value: "aac" },
+    container_stream_id: { kind: "missing" as const },
+    language: { kind: "value" as const, value: "eng" },
+    title: { kind: "value" as const, value: "de" },
+    disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+  };
+  const binding = {
+    version: 1,
+    canonical_path: "/movie.mkv",
+    size_bytes: "100",
+    modified_unix_ns: "200",
+    inventory: { version: 1, streams: [selected] },
+  };
+  const summary = outputSummary(result({
+    track_execution: {
+      requested: { kind: "audio", source: binding, stream_index: 2 },
+      selected,
+      dropped_audio: [],
+      dropped_other: [],
+      output_stream_index: 0,
+      notices: [],
+    },
+  }));
+  expect(summary).toContain("English");
+  expect(summary).toContain("de");
+  expect(summary).not.toContain("German");
+});

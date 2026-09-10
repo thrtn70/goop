@@ -99,3 +99,14 @@ it("owns nested video draft settings independently of caller objects", () => {
   expect(saved.result.current[0].resize.width).toBe(1280);
   expect(saved.result.current[0].frame_rate.numerator).toBe(30000);
 });
+
+it("owns selected track identity independently of caller objects", () => {
+  const trackOptions = {kind:"audio" as const,stream_index:1,source:{version:1,canonical_path:"/movie.mkv",size_bytes:"4096",modified_unix_ns:"1700000000000000000",inventory:{version:1,streams:[{index:1,codec_type:"audio",codec_name:{kind:"value" as const,value:"aac"},container_stream_id:{kind:"missing" as const},language:{kind:"value" as const,value:"eng"},title:{kind:"value" as const,value:"Commentary"},disposition:{default:false,forced:false,attached_pic:false,other:{},malformed:false}}]}}};
+  const files = [{path:"/movie.mkv",sourceDir:"/",target:"mp3",trackOptions}];
+  const saved = renderHook(() => useWorkspaceDraftState("ConvertPage.files", files), {wrapper:scope("convert","movie")});
+  trackOptions.source.inventory.streams[0].title.value = "Changed";
+  (trackOptions.source.inventory.streams[0].disposition.other as Record<string, boolean>).commentary = true;
+  const owned = saved.result.current[0][0].trackOptions;
+  expect(owned.source.inventory.streams[0].title.value).toBe("Commentary");
+  expect(owned.source.inventory.streams[0].disposition.other).toEqual({});
+});

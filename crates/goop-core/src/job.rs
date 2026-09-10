@@ -111,6 +111,9 @@ pub struct JobResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_execution: Option<crate::audio::AudioExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_execution: Option<crate::tracks::TrackExecutionSummary>,
 }
 
 fn default_file_count() -> u32 {
@@ -176,6 +179,13 @@ mod tests {
         assert_eq!(result.source_bytes, None);
         assert_eq!(result.target_bytes, None);
         assert_eq!(result.reencoded, None);
+        assert_eq!(result.track_execution, None);
+
+        let explicit_null: JobResult = serde_json::from_value(
+            serde_json::json!({"output_path":"out", "bytes":10,"duration_ms":1,"track_execution":null}),
+        )
+        .unwrap();
+        assert_eq!(explicit_null.track_execution, None);
     }
 
     #[test]

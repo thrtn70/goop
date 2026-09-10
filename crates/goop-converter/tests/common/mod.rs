@@ -102,6 +102,18 @@ pub fn ffmpeg_path(r: &BinaryResolver) -> PathBuf {
     resolved.path
 }
 
+pub fn ffprobe_path(r: &BinaryResolver) -> PathBuf {
+    let resolved = r
+        .resolve("ffprobe")
+        .expect("ffprobe must be resolvable for this ignored test");
+    assert!(
+        !resolved.source_is_path,
+        "expected the bundled sidecar, got {} from PATH — run scripts/fetch-sidecars.sh",
+        resolved.path.display()
+    );
+    resolved.path
+}
+
 /// A 2-second colour clip with a silent audio track.
 pub fn make_source(ffmpeg: &Path, out: &Path) {
     make_source_sized(ffmpeg, out, 160, 120);
@@ -141,6 +153,177 @@ pub fn make_source_sized(ffmpeg: &Path, out: &Path, w: u32, h: u32) {
     assert!(status.success(), "failed to build the test source clip");
 }
 
+/// A video plus three independently addressable AAC tracks.
+///
+/// The first two tracks deliberately share a language tag while the third
+/// omits it. Titles and default/forced dispositions remain distinct so the
+/// inventory assertions cannot accidentally pass by relying on display text.
+pub fn make_diagnostic_track_source(ffmpeg: &Path, out: &Path) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:r=10:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:sample_rate=48000:duration=1",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-map",
+            "2:a:0",
+            "-map",
+            "3:a:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-metadata:s:a:0",
+            "language=eng",
+            "-metadata:s:a:0",
+            "title=Main",
+            "-metadata:s:a:1",
+            "language=eng",
+            "-metadata:s:a:1",
+            "title=Commentary",
+            "-metadata:s:a:2",
+            "title=No language",
+            "-disposition:a:0",
+            "default",
+            "-disposition:a:1",
+            "forced",
+            "-disposition:a:2",
+            "0",
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to build the diagnostic track fixture"
+    );
+}
+
+/// Two tones whose codecs differ specifically in M4A copy compatibility.
+pub fn make_mixed_copy_track_source(ffmpeg: &Path, out: &Path) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000:duration=1",
+            "-map",
+            "0:a:0",
+            "-map",
+            "1:a:0",
+            "-c:a:0",
+            "aac",
+            "-c:a:1",
+            "flac",
+            "-metadata:s:a:0",
+            "title=AAC tone",
+            "-metadata:s:a:1",
+            "title=FLAC tone",
+            "-disposition:a:0",
+            "default",
+            "-disposition:a:1",
+            "0",
+        ])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to build the mixed-copy track fixture"
+    );
+}
+
+pub fn probe_streams_json(r: &BinaryResolver, out: &Path) -> serde_json::Value {
+    let output = Command::new(ffprobe_path(r))
+        .args(["-v", "error", "-show_streams", "-of", "json"])
+        .arg(out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "bundled ffprobe failed");
+    serde_json::from_slice(&output.stdout).expect("ffprobe stream JSON")
+}
+
+pub fn decoded_audio_f32(r: &BinaryResolver, path: &Path, sample_rate_hz: u32) -> Vec<f32> {
+    let output = Command::new(ffmpeg_path(r))
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-ac",
+            "1",
+            "-ar",
+            &sample_rate_hz.to_string(),
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "failed to decode selected audio");
+    assert!(
+        !output.stdout.is_empty(),
+        "decoded selected audio was empty"
+    );
+    assert_eq!(output.stdout.len() % 4, 0);
+    output
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
+        .collect()
+}
+
+pub fn tone_magnitude(samples: &[f32], sample_rate_hz: f64, frequency_hz: f64) -> f64 {
+    let (sine, cosine) =
+        samples
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sine, cosine), (index, sample)| {
+                let phase = std::f64::consts::TAU * frequency_hz * index as f64 / sample_rate_hz;
+                let sample = f64::from(*sample);
+                (sine + sample * phase.sin(), cosine + sample * phase.cos())
+            });
+    sine.hypot(cosine) / samples.len() as f64
+}
+
 /// Codec names of `out`'s streams of type `kind` ("v", "a", "s"), in order.
 pub fn stream_codecs(r: &BinaryResolver, out: &Path, kind: &str) -> Vec<String> {
     probe_entries(r, out, kind, "stream=codec_name")
@@ -161,8 +344,7 @@ pub fn video_dimensions(r: &BinaryResolver, out: &Path) -> (u32, u32) {
 }
 
 fn probe_entries(r: &BinaryResolver, out: &Path, kind: &str, entries: &str) -> Vec<String> {
-    let ffprobe = r.resolve("ffprobe").expect("ffprobe").path;
-    let probe = Command::new(ffprobe)
+    let probe = Command::new(ffprobe_path(r))
         .args([
             "-v",
             "error",
@@ -191,6 +373,7 @@ pub fn request(
 ) -> ConvertRequest {
     ConvertRequest {
         audio_options: None,
+        track_options: None,
         video_options: None,
         input_path: input.to_string_lossy().into_owned(),
         output_path: output.to_string_lossy().into_owned(),

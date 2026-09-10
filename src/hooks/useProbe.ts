@@ -1,7 +1,7 @@
-import type { ProbeResult, ConversionCapabilities } from "@/types";
+import type { ConversionInspection } from "@/types";
 
 /** One coherent inspection result shared by source summaries and settings. */
 export type ProbeState =
   | { phase: "probing" }
-  | { phase: "ready"; probe: ProbeResult; capabilities: ConversionCapabilities }
+  | ({ phase: "ready" } & ConversionInspection)
   | { phase: "error"; message: string };

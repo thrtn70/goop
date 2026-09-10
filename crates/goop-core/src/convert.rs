@@ -284,8 +284,13 @@ pub struct ConvertRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_options: Option<crate::audio::AudioConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_options: Option<crate::tracks::TrackConvertOptions>,
 }
 
+/// Media probe facts. The bounded track inventory is absent when complete
+/// identity cannot be represented safely; legacy processing facts remain usable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ProbeResult {
@@ -330,8 +335,13 @@ pub struct ProbeResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_details: Option<crate::audio::AudioProbeDetails>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_inventory: Option<crate::tracks::TrackInventory>,
 }
 
+/// Completed conversion measurements and optional explicit processing disclosures.
+/// Track execution remains absent for Automatic and legacy conversions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertResult {
@@ -341,6 +351,9 @@ pub struct ConvertResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_execution: Option<crate::video::VideoExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_execution: Option<crate::tracks::TrackExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,

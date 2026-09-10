@@ -5,6 +5,7 @@ import {
   audioSourceFacts,
   cloneAudioOptions,
   isAudioTarget,
+  type AudioAvailability,
   type AudioConvertOptions,
 } from "./audioOptions";
 import { WorkspaceDraftProvider, withWorkspaceDrafts } from "@/store/workspaceDrafts";
@@ -18,6 +19,8 @@ import type {
   QualityPreset,
   ResolutionCap,
   ProbeResult,
+  TrackConvertOptions,
+  TrackSettingsCapabilities,
 } from "@/types";
 import VideoOptionsPanel from "./VideoOptionsPanel";
 import AudioOptionsPanel from "./AudioOptionsPanel";
@@ -26,6 +29,7 @@ import ImageOptionsPanel from "./ImageOptionsPanel";
 import { cloneImageOptions, imageOptionsProblem } from "./imageOptions";
 import GifOptionsPanel from "./GifOptionsPanel";
 import SubtitleField, { subtitleSupport } from "./SubtitleField";
+import AudioTrackPanel from "./AudioTrackPanel";
 
 interface RowOptionsState {
   target: TargetFormat;
@@ -33,6 +37,11 @@ interface RowOptionsState {
   imageOptions?: ImageConvertOptions | null;
   videoOptions?: VideoConvertOptions | null;
   audioOptions?: AudioConvertOptions | null;
+  audioAvailability?: AudioAvailability | null;
+  trackOptions?: TrackConvertOptions | null;
+  trackSettings?: TrackSettingsCapabilities | null;
+  trackSourceUnavailableReason?: string | null;
+  audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -45,6 +54,11 @@ export interface FileRowOptions {
   imageOptions?: ImageConvertOptions | null;
   videoOptions?: VideoConvertOptions | null;
   audioOptions?: AudioConvertOptions | null;
+  audioAvailability?: AudioAvailability | null;
+  trackOptions?: TrackConvertOptions | null;
+  trackSettings?: TrackSettingsCapabilities | null;
+  trackSourceUnavailableReason?: string | null;
+  audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
@@ -91,6 +105,7 @@ export function ConvertSettingsPanel({
   state,
   onOptionsChange,
   onDraftEdit,
+  onReinspect,
   draftIdentity,
 }: {
   path: string;
@@ -98,6 +113,7 @@ export function ConvertSettingsPanel({
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onDraftEdit?: () => void;
+  onReinspect?: () => void;
   draftIdentity?: string;
 }) {
   const p = state.probe;
@@ -108,6 +124,11 @@ export function ConvertSettingsPanel({
       target: partial.target ?? target,
       videoOptions: cloneVideoOptions(partial.videoOptions !== undefined ? partial.videoOptions : opts.videoOptions),
       audioOptions: cloneAudioOptions(partial.audioOptions !== undefined ? partial.audioOptions : opts.audioOptions),
+      audioAvailability: opts.audioAvailability,
+      trackOptions: partial.trackOptions !== undefined ? partial.trackOptions : opts.trackOptions,
+      trackSettings: opts.trackSettings,
+      trackSourceUnavailableReason: opts.trackSourceUnavailableReason,
+      audioPlanError: opts.audioPlanError,
       imageOptions: cloneImageOptions(partial.imageOptions !== undefined ? partial.imageOptions : opts.imageOptions),
       gifOptions:
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
@@ -129,7 +150,8 @@ export function ConvertSettingsPanel({
   const videoCapability = targetCapability?.video_settings;
   const explicit = !!opts.videoOptions;
   const audioSettings = targetCapability?.audio_settings;
-  const audioCapability = audioAvailability(
+  const trackSettings = targetCapability?.track_settings;
+  const audioCapability = opts.audioAvailability ?? audioAvailability(
     audioSettings,
     targetCapability?.available ?? false,
     targetCapability?.reason,
@@ -138,6 +160,7 @@ export function ConvertSettingsPanel({
     p.audio_details,
     p.audio_codecs?.length ?? (p.has_audio ? 1 : 0),
     p.has_video || p.has_subtitles,
+    opts.trackOptions?.stream_index,
   );
   const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
   const imageProblem = imageOptionsProblem(opts.imageOptions, imageCapability);
@@ -161,6 +184,12 @@ export function ConvertSettingsPanel({
   const showSubtitle =
     subtitle != null || (p.source_kind === "video" && (subSupport.soft || subSupport.burn));
   const sourceSize = uprightVideoSize(p);
+  const showTrackSettings = isAudioTarget(target) && Boolean(
+    opts.audioOptions
+      || opts.trackOptions !== undefined
+      || opts.trackSourceUnavailableReason
+      || (trackSettings?.audio_choices.length ?? 0) > 1,
+  );
 
   return (
     <div className="space-y-4">
@@ -199,6 +228,18 @@ export function ConvertSettingsPanel({
       {(videoCapability || explicit) && <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
         <VideoOptionsPanel file={opts} capability={videoCapability} sourceSize={sourceSize} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onReplaceLegacyResolution={videoOptions => update({resolutionCap:"original",videoOptions})} onDraftEdit={onDraftEdit}/>
       </WorkspaceDraftProvider>}
+      {showTrackSettings && (
+        <AudioTrackPanel
+          settings={trackSettings}
+          audioDetails={p.audio_details}
+          mode={opts.audioOptions?.kind ?? "automatic"}
+          value={opts.trackOptions}
+          unavailableReason={opts.trackSourceUnavailableReason}
+          planError={opts.audioPlanError}
+          onChange={(trackOptions) => update({ trackOptions })}
+          onReinspect={onReinspect}
+        />
+      )}
       {isAudioTarget(target) && (audioSettings || opts.audioOptions) && (
         <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
           <AudioOptionsPanel

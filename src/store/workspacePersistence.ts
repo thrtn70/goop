@@ -1,6 +1,7 @@
 import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoOptions";
 import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { parsePresetBundle } from "@/features/presets/io";
+import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackSourceBinding, TrackTextFact } from "@/types";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
@@ -13,6 +14,97 @@ SLOTS.add("AudioOptionsPanel.bitrateDraft");
 SLOTS.add("AudioOptionsPanel.appliedBitrate");
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string" && item.length <= 4096);
+const textBytes = (value: string) => new TextEncoder().encode(value).length;
+const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) => {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+};
+
+function trackTextFact(value: unknown): TrackTextFact {
+  if (!object(value) || typeof value.kind !== "string") throw new Error("invalid track text fact");
+  if (value.kind === "missing" || value.kind === "malformed") {
+    if (!exactKeys(value, ["kind"])) throw new Error("invalid track text fact fields");
+    return { kind: value.kind };
+  }
+  if (value.kind === "value" && exactKeys(value, ["kind", "value"]) && typeof value.value === "string" && textBytes(value.value) <= 512) {
+    return { kind: "value", value: value.value };
+  }
+  throw new Error("invalid track text fact");
+}
+
+function trackDisposition(value: unknown): TrackDispositionFacts {
+  if (!object(value) || !exactKeys(value, ["default", "forced", "attached_pic", "other", "malformed"]) ||
+    ![value.default, value.forced, value.attached_pic].every(item => item === null || typeof item === "boolean") ||
+    typeof value.malformed !== "boolean" || !object(value.other)) throw new Error("invalid track disposition");
+  const other: Array<[string, boolean]> = [];
+  for (const [name, enabled] of Object.entries(value.other)) {
+    if (textBytes(name) > 512 || typeof enabled !== "boolean") throw new Error("invalid track disposition fact");
+    other.push([name, enabled]);
+  }
+  return {
+    default: value.default as boolean | null,
+    forced: value.forced as boolean | null,
+    attached_pic: value.attached_pic as boolean | null,
+    other: Object.fromEntries(other),
+    malformed: value.malformed,
+  };
+}
+
+function trackIdentity(value: unknown): TrackIdentity {
+  if (!object(value) || !exactKeys(value, ["index", "codec_type", "codec_name", "container_stream_id", "language", "title", "disposition"]) ||
+    !Number.isInteger(value.index) || Number(value.index) < 0 || Number(value.index) > 0xffff_ffff ||
+    typeof value.codec_type !== "string" || textBytes(value.codec_type) > 512) throw new Error("invalid track identity");
+  return {
+    index: Number(value.index),
+    codec_type: value.codec_type,
+    codec_name: trackTextFact(value.codec_name),
+    container_stream_id: trackTextFact(value.container_stream_id),
+    language: trackTextFact(value.language),
+    title: trackTextFact(value.title),
+    disposition: trackDisposition(value.disposition),
+  };
+}
+
+function trackInventory(value: unknown): TrackInventory {
+  if (!object(value) || !exactKeys(value, ["version", "streams"]) || value.version !== 1 || !Array.isArray(value.streams) || value.streams.length > 128) throw new Error("invalid track inventory");
+  const streams = value.streams.map(trackIdentity);
+  if (streams.some((stream, index) => index > 0 && streams[index - 1].index >= stream.index)) throw new Error("track indices must be unique and ordered");
+  return { version: 1, streams };
+}
+
+function canonicalU64(value: unknown): value is string {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) return false;
+  try { return BigInt(value) <= 0xffff_ffff_ffff_ffffn; } catch { return false; }
+}
+
+function trackSource(value: unknown): TrackSourceBinding {
+  if (!object(value) || !exactKeys(value, ["version", "canonical_path", "size_bytes", "modified_unix_ns", "inventory"]) ||
+    value.version !== 1 || typeof value.canonical_path !== "string" || !canonicalU64(value.size_bytes) || !canonicalU64(value.modified_unix_ns)) throw new Error("invalid track source binding");
+  const source: TrackSourceBinding = {
+    version: 1,
+    canonical_path: value.canonical_path,
+    size_bytes: value.size_bytes,
+    modified_unix_ns: value.modified_unix_ns,
+    inventory: trackInventory(value.inventory),
+  };
+  if (new TextEncoder().encode(JSON.stringify(source)).length > 64 * 1024) throw new Error("track source binding is too large");
+  return source;
+}
+
+export function validateTrackOptions(value: unknown): TrackConvertOptions | null {
+  if (value == null) return null;
+  if (!object(value) || !exactKeys(value, ["kind", "source", "stream_index"]) || value.kind !== "audio" ||
+    !Number.isInteger(value.stream_index) || Number(value.stream_index) < 0 || Number(value.stream_index) > 0xffff_ffff) throw new Error("invalid track options");
+  const source = trackSource(value.source);
+  const selected = source.inventory.streams.find(stream => stream.index === value.stream_index);
+  if (!selected || selected.codec_type !== "audio") throw new Error("selected track is not an audio stream in the source inventory");
+  return { kind: "audio", source, stream_index: Number(value.stream_index) };
+}
+
+export function cloneTrackOptions(value: TrackConvertOptions | null | undefined): TrackConvertOptions | null {
+  return validateTrackOptions(value);
+}
 
 function bounded(value: unknown, depth = 0): boolean {
   if (depth > 16) return false;
@@ -37,6 +129,7 @@ function validFiles(value: unknown, compress: boolean): boolean {
       // Validate explicit shape independently; submission performs strict admission.
       validateAudioOptions(file.audioOptions);
       validateVideoOptions(file.videoOptions);
+      validateTrackOptions(file.trackOptions);
       return !compress || file.mode != null;
     } catch { return false; }
   });

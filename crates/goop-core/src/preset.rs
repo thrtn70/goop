@@ -22,6 +22,9 @@ pub struct Preset {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_options: Option<crate::video::VideoConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub track_policy: Option<crate::tracks::TrackPresetPolicy>,
     pub id: String,
     pub name: String,
     pub target: TargetFormat,
@@ -61,5 +64,6 @@ mod tests {
         assert_eq!(preset.subtitle, None);
         assert_eq!(preset.image_options, None);
         assert_eq!(preset.audio_options, None);
+        assert_eq!(preset.track_policy, None);
     }
 }
