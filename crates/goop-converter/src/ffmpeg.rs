@@ -183,10 +183,10 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             .map(|_| source_identity(&input))
             .transpose()?;
         let selected_track_source = req.track_options.as_ref().map(|options| match options {
-            goop_core::TrackConvertOptions::Audio { source, .. } => source.clone(),
+            goop_core::TrackConvertOptions::Audio { source, .. } => source,
         });
         let source_bytes = goop_core::output::source_bytes(std::slice::from_ref(&input))?;
-        let probe = if let Some(expected) = selected_track_source.as_ref() {
+        let probe = if let Some(expected) = selected_track_source {
             let (probe, actual) =
                 crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
             crate::track_options::verify_source_binding(expected, actual.as_ref())?;
@@ -281,7 +281,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         if let Some(hook) = &self.before_run_test_hook {
             hook();
         }
-        if let Some(expected) = selected_track_source.as_ref() {
+        if let Some(expected) = selected_track_source {
             let (_, actual) =
                 crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
             crate::track_options::verify_source_binding(expected, actual.as_ref())?;
@@ -365,7 +365,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         if let Some(hook) = &self.before_publish_test_hook {
             hook();
         }
-        if let Some(expected) = selected_track_source.as_ref() {
+        if let Some(expected) = selected_track_source {
             let (_, actual) =
                 crate::track_options::probe_bound_source(self.resolver, &input, &cancel).await?;
             crate::track_options::verify_source_binding(expected, actual.as_ref())?;

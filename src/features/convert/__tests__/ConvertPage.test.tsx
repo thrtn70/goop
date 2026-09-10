@@ -355,6 +355,26 @@ describe("ConvertPage", () => {
     });
   });
 
+  it("hides a retained exact choice in Automatic and omits it from the request", async () => {
+    clearWorkspaceDrafts("convert");
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    expect(screen.getByRole("radio", { name: /commentary/i })).toHaveProperty("checked", true);
+
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "automatic");
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalledOnce());
+    expect(mockFromFile.mock.calls[0][0].audio_options).toBeNull();
+    expect(mockFromFile.mock.calls[0][0]).not.toHaveProperty("track_options");
+  });
+
   it("keeps Apply first source-bound and makes every other track choice independent", async () => {
     clearWorkspaceDrafts("convert");
     mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
@@ -420,6 +440,68 @@ describe("ConvertPage", () => {
     await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
     expect(savePreset.mock.calls[0][0].track_policy).toEqual({ kind: "audio", selection: { kind: "choose_per_file" } });
     expect(JSON.stringify(savePreset.mock.calls[0][0])).not.toMatch(/canonical_path|stream_index|inventory/);
+  });
+
+  it.each(["copy", "encode"] as const)("saves unresolved multi-track %s intent as Choose per file with an explanation", async (mode) => {
+    clearWorkspaceDrafts("convert");
+    const savePreset = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ presets: [], savePreset });
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), mode);
+
+    await userEvent.click(screen.getByRole("button", { name: "Save as preset" }));
+    expect(screen.getByText("Audio track will be chosen for each source.")).toBeDefined();
+    await userEvent.type(screen.getByLabelText("Preset name"), "Choose later");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
+    expect(savePreset.mock.calls[0][0].track_policy).toEqual({
+      kind: "audio",
+      selection: { kind: "choose_per_file" },
+    });
+  });
+
+  it("applies a schema-6 Choose-per-file preset as independently unresolved for every row", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    useAppStore.setState({
+      presets: [{
+        id: "choose-audio",
+        name: "Choose audio per file",
+        target: "m4a",
+        quality_preset: null,
+        resolution_cap: null,
+        compress_mode: null,
+        metadata_policy: null,
+        gif_options: null,
+        subtitle: null,
+        image_options: null,
+        video_options: null,
+        audio_options: { kind: "copy" },
+        track_policy: { kind: "audio", selection: { kind: "choose_per_file" } },
+        is_builtin: false,
+        created_at: 0n,
+      }],
+    });
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => expect(screen.getByText("first.mkv")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /Choose audio per file/ }));
+
+    expect(screen.getByLabelText("Audio processing")).toHaveProperty("value", "copy");
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
+    expect(screen.getByLabelText("Audio processing")).toHaveProperty("value", "copy");
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("checked", true);
+    await userEvent.click(screen.getByRole("button", { name: "Select first.mkv" }));
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", true);
   });
 
   it("shows error state with retry on probe failure", async () => {

@@ -395,20 +395,18 @@ pub async fn inspect_source(
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let (probe, track_source) = if backend_for_extension(extension) == BackendKind::Ffmpeg {
-        crate::track_options::probe_bound_source(
-            resolver,
-            path,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await?
-    } else {
-        (probe_source(resolver, path).await?, None)
-    };
-    let track_source_unavailable_reason = (backend_for_extension(extension) == BackendKind::Ffmpeg)
-        .then(|| crate::track_options::source_unavailable_reason(&probe, track_source.as_ref()))
-        .flatten()
-        .map(str::to_owned);
+    let (probe, track_source, track_source_unavailable_reason) =
+        if backend_for_extension(extension) == BackendKind::Ffmpeg {
+            crate::track_options::probe_bound_source_for_inspection(
+                resolver,
+                path,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?
+        } else {
+            (probe_source(resolver, path).await?, None, None)
+        };
+    let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
     let capabilities = capabilities_for_bound_source(&probe, None, track_source.as_ref());
     Ok(goop_core::ConversionInspection {
         probe,
@@ -498,20 +496,18 @@ pub async fn inspect_source_with_encoders(
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let (probe, track_source) = if backend_for_extension(extension) == BackendKind::Ffmpeg {
-        crate::track_options::probe_bound_source(
-            resolver,
-            path,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await?
-    } else {
-        (probe_source(resolver, path).await?, None)
-    };
-    let track_source_unavailable_reason = (backend_for_extension(extension) == BackendKind::Ffmpeg)
-        .then(|| crate::track_options::source_unavailable_reason(&probe, track_source.as_ref()))
-        .flatten()
-        .map(str::to_owned);
+    let (probe, track_source, track_source_unavailable_reason) =
+        if backend_for_extension(extension) == BackendKind::Ffmpeg {
+            crate::track_options::probe_bound_source_for_inspection(
+                resolver,
+                path,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?
+        } else {
+            (probe_source(resolver, path).await?, None, None)
+        };
+    let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
     let capabilities = capabilities_for_bound_source(&probe, Some(encoders), track_source.as_ref());
     Ok(goop_core::ConversionInspection {
         probe,

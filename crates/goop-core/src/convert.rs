@@ -289,6 +289,8 @@ pub struct ConvertRequest {
     pub track_options: Option<crate::tracks::TrackConvertOptions>,
 }
 
+/// Media probe facts. The bounded track inventory is absent when complete
+/// identity cannot be represented safely; legacy processing facts remain usable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ProbeResult {
@@ -338,6 +340,8 @@ pub struct ProbeResult {
     pub track_inventory: Option<crate::tracks::TrackInventory>,
 }
 
+/// Completed conversion measurements and optional explicit processing disclosures.
+/// Track execution remains absent for Automatic and legacy conversions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertResult {

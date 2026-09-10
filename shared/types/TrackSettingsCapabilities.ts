@@ -2,4 +2,7 @@
 import type { TrackChoiceCapability } from "./TrackChoiceCapability";
 import type { TrackSourceBinding } from "./TrackSourceBinding";
 
+/**
+ * Source binding and per-track audio choices returned by inspection.
+ */
 export type TrackSettingsCapabilities = { source: TrackSourceBinding, audio_choices: Array<TrackChoiceCapability>, };

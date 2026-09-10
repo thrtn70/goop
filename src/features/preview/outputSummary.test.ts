@@ -117,3 +117,35 @@ it("combines the chosen source track and deliberate omissions with audio process
   expect(summary).toContain("1 non-audio stream omitted");
   expect(summary).toContain("Audio copied (AAC)");
 });
+
+it("normalizes only track language while preserving a title that resembles a language code", () => {
+  const selected = {
+    index: 2,
+    codec_type: "audio",
+    codec_name: { kind: "value" as const, value: "aac" },
+    container_stream_id: { kind: "missing" as const },
+    language: { kind: "value" as const, value: "eng" },
+    title: { kind: "value" as const, value: "de" },
+    disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+  };
+  const binding = {
+    version: 1,
+    canonical_path: "/movie.mkv",
+    size_bytes: "100",
+    modified_unix_ns: "200",
+    inventory: { version: 1, streams: [selected] },
+  };
+  const summary = outputSummary(result({
+    track_execution: {
+      requested: { kind: "audio", source: binding, stream_index: 2 },
+      selected,
+      dropped_audio: [],
+      dropped_other: [],
+      output_stream_index: 0,
+      notices: [],
+    },
+  }));
+  expect(summary).toContain("English");
+  expect(summary).toContain("de");
+  expect(summary).not.toContain("German");
+});

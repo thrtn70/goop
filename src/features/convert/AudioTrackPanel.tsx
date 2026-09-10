@@ -35,7 +35,8 @@ export default function AudioTrackPanel({
   const groupName = useId();
   const enabled = mode !== "automatic";
   const effective = resolvedTrackOptions(value, settings);
-  const selected = selectedTrackChoice(settings, effective)?.track.index;
+  const selectedChoice = selectedTrackChoice(settings, effective);
+  const selected = enabled ? selectedChoice?.track.index : undefined;
 
   return (
     <section aria-label="Audio track" className="space-y-2 rounded-md bg-surface-0 p-3 text-xs">
@@ -49,7 +50,7 @@ export default function AudioTrackPanel({
         {unavailableReason && !settings && (
           <p role="alert" className="mt-1 text-warning">{unavailableReason}</p>
         )}
-        {value && settings && !selected && (
+        {enabled && value && settings && !selectedChoice && (
           <p role="alert" className="mt-1 text-warning">
             The source changed after track selection. Choose an audio track again.
           </p>

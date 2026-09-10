@@ -2,4 +2,7 @@
 import type { TrackDispositionFacts } from "./TrackDispositionFacts";
 import type { TrackTextFact } from "./TrackTextFact";
 
+/**
+ * Stable identity facts for one absolute container stream index.
+ */
 export type TrackIdentity = { index: number, codec_type: string, codec_name: TrackTextFact, container_stream_id: TrackTextFact, language: TrackTextFact, title: TrackTextFact, disposition: TrackDispositionFacts, };

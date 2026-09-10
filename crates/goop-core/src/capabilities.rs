@@ -2,6 +2,7 @@ use crate::TargetFormat;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Copy and encode availability for one source-bound audio track.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -11,6 +12,7 @@ pub struct TrackChoiceCapability {
     pub encode: crate::audio::AudioModeAvailability,
 }
 
+/// Source binding and per-track audio choices returned by inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -45,6 +47,8 @@ pub struct ImageSettingsCapabilities {
     pub preview_unavailable_reason: Option<String>,
 }
 
+/// Availability for one target, including optional source-bound track settings.
+/// Track settings remain absent for legacy or Automatic-only inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TargetCapability {
@@ -78,6 +82,11 @@ pub struct ConversionCapabilities {
 }
 
 /// A single source read and the capabilities derived from that exact probe.
+///
+/// `track_source` carries exact identity only when explicit selection is safe.
+/// When audio exists but identity enrichment hits a supported limit, the source
+/// stays absent and `track_source_unavailable_reason` explains the fail-closed
+/// Automatic-only result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConversionInspection {

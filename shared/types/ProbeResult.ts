@@ -4,6 +4,10 @@ import type { SourceKind } from "./SourceKind";
 import type { TrackInventory } from "./TrackInventory";
 import type { VideoProbeDetails } from "./VideoProbeDetails";
 
+/**
+ * Media probe facts. The bounded track inventory is absent when complete
+ * identity cannot be represented safely; legacy processing facts remain usable.
+ */
 export type ProbeResult = { video_details?: VideoProbeDetails | null, duration_ms: bigint, width: number | null, height: number | null, video_codec: string | null, audio_codec: string | null, file_size: bigint, container: string | null, has_video: boolean, has_audio: boolean, source_kind: SourceKind, color_space: string | null, image_format: string | null, 
 /**
  * True when the source carries at least one subtitle stream —

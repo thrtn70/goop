@@ -297,6 +297,72 @@ fn per_track_capabilities_follow_each_selected_codec() {
         .unwrap();
     assert!(mp3.copy.available);
     assert!(mp3.encode.available);
+
+    for choice in &settings.audio_choices {
+        let copy = request(
+            &probe,
+            TargetFormat::Mp3,
+            choice.track.index,
+            json!({"kind": "copy"}),
+        );
+        let encode = request(
+            &probe,
+            TargetFormat::Mp3,
+            choice.track.index,
+            json!({
+                "kind": "encode",
+                "bitrate": {"kind": "target", "kbps": 192},
+                "channels": {"kind": "preserve"},
+                "sample_rate": {"kind": "preserve"}
+            }),
+        );
+        assert_eq!(
+            choice.copy.available,
+            resolve_audio(&copy, &probe, &encoders()).is_ok()
+        );
+        assert_eq!(
+            choice.encode.available,
+            resolve_audio(&encode, &probe, &encoders()).is_ok()
+        );
+    }
+}
+
+#[test]
+fn maximum_inventory_preserves_one_capability_result_per_audio_stream() {
+    let streams = (0..goop_core::MAX_TRACK_STREAMS)
+        .map(|index| {
+            json!({
+                "index": index,
+                "codec_type": "audio",
+                "codec_name": if index % 2 == 0 { "aac" } else { "flac" },
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "sample_fmt": "fltp",
+                "time_base": "1/48000",
+                "duration": "2.0",
+                "tags": {"title": format!("Track {index}")},
+                "disposition": {"default": index == 0, "forced": false, "attached_pic": false}
+            })
+        })
+        .collect::<Vec<_>>();
+    let probe = parse_probe_json(
+        &serde_json::to_vec(&json!({
+            "format": {"duration": "2.0", "size": "4096", "format_name": "matroska"},
+            "streams": streams
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source = binding(&probe);
+    let settings = track_settings(&probe, TargetFormat::M4a, &encoders(), &source).unwrap();
+
+    assert_eq!(settings.audio_choices.len(), goop_core::MAX_TRACK_STREAMS);
+    for (index, choice) in settings.audio_choices.iter().enumerate() {
+        assert_eq!(choice.track.index, index as u32);
+        assert_eq!(choice.copy.available, index % 2 == 0);
+        assert!(choice.encode.available);
+    }
 }
 
 #[test]

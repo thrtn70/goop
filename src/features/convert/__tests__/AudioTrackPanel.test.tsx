@@ -76,6 +76,25 @@ it("keeps selection disabled in Automatic and explains how to enable it", () => 
   for (const option of screen.getAllByRole("radio")) expect(option).toHaveProperty("disabled", true);
 });
 
+it("hides a retained explicit draft when switching to Automatic", () => {
+  const value = { kind: "audio" as const, source: settings.source, stream_index: 2 };
+  const { rerender } = render(
+    <AudioTrackPanel settings={settings} audioDetails={details} mode="copy" value={value} onChange={() => {}} />,
+  );
+  expect(screen.getByRole("radio", { name: /commentary/i })).toHaveProperty("checked", true);
+
+  rerender(
+    <AudioTrackPanel settings={settings} audioDetails={details} mode="automatic" value={value} onChange={() => {}} />,
+  );
+  expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+  expect(screen.queryByText(/source changed after track selection/i)).toBeNull();
+
+  rerender(
+    <AudioTrackPanel settings={settings} audioDetails={details} mode="copy" value={value} onChange={() => {}} />,
+  );
+  expect(screen.getByRole("radio", { name: /commentary/i })).toHaveProperty("checked", true);
+});
+
 it("selects by absolute stream index and exposes the selected-mode reason", async () => {
   const onChange = vi.fn();
   render(<AudioTrackPanel settings={settings} audioDetails={details} mode="copy" value={null} onChange={onChange} />);

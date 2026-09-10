@@ -1,14 +1,27 @@
+//! Strict, versioned contracts for identifying and selecting container streams.
+//!
+//! A selection is intentionally bound to the canonical source path, size,
+//! modification time, and complete ordered inventory. Callers must reinspect
+//! rather than applying a binding to source facts that no longer match.
+
 use crate::{ConvertRequest, GoopError, TargetFormat};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
 
+/// Current serialized version of [`TrackInventory`].
 pub const TRACK_INVENTORY_VERSION: u32 = 1;
+/// Current serialized version of [`TrackSourceBinding`].
 pub const TRACK_SOURCE_BINDING_VERSION: u32 = 1;
+/// Maximum streams accepted in one complete inventory.
 pub const MAX_TRACK_STREAMS: usize = 128;
+/// Maximum UTF-8 byte length of one identity text value or disposition key.
 pub const MAX_TRACK_TEXT_BYTES: usize = 512;
+/// Maximum serialized byte length of a source binding.
 pub const MAX_TRACK_SOURCE_BINDING_BYTES: usize = 64 * 1024;
 
+/// A bounded text fact that preserves the difference between absent, valid,
+/// and malformed probe metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -38,6 +51,7 @@ impl<'de> Deserialize<'de> for TrackTextFact {
     }
 }
 
+/// Stream disposition facts captured as part of source identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TrackDispositionFacts {
@@ -73,6 +87,7 @@ impl<'de> Deserialize<'de> for TrackDispositionFacts {
     }
 }
 
+/// Stable identity facts for one absolute container stream index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TrackIdentity {
@@ -114,6 +129,7 @@ impl<'de> Deserialize<'de> for TrackIdentity {
     }
 }
 
+/// Complete, absolute-index-ordered stream identity for one source inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TrackInventory {
@@ -140,6 +156,10 @@ impl<'de> Deserialize<'de> for TrackInventory {
     }
 }
 
+/// Source facts to which an explicit track choice is bound.
+///
+/// `size_bytes` and `modified_unix_ns` are canonical unsigned decimal strings
+/// so JSON and JavaScript round trips cannot lose 64-bit integer precision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct TrackSourceBinding {
@@ -175,6 +195,7 @@ impl<'de> Deserialize<'de> for TrackSourceBinding {
     }
 }
 
+/// Source-bound track selection attached to a conversion request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -210,6 +231,7 @@ impl<'de> Deserialize<'de> for TrackConvertOptions {
     }
 }
 
+/// Portable preset intent that deliberately omits any source-specific identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -231,6 +253,7 @@ impl<'de> Deserialize<'de> for TrackPresetSelection {
     }
 }
 
+/// Portable preset policy for explicit per-file track selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -252,6 +275,7 @@ impl<'de> Deserialize<'de> for TrackPresetPolicy {
     }
 }
 
+/// Verified disclosure of the selected and omitted streams for one conversion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(deny_unknown_fields)]
@@ -264,30 +288,38 @@ pub struct TrackExecutionSummary {
     pub notices: Vec<String>,
 }
 
+/// Validate one bounded track text fact.
 pub fn validate_track_text_fact(fact: &TrackTextFact) -> Result<(), GoopError> {
     validate_track_text_fact_inner(fact).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate disposition keys and their bounded text representation.
 pub fn validate_track_disposition(facts: &TrackDispositionFacts) -> Result<(), GoopError> {
     validate_track_disposition_inner(facts).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate one stream identity and all bounded nested facts.
 pub fn validate_track_identity(identity: &TrackIdentity) -> Result<(), GoopError> {
     validate_track_identity_inner(identity).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate inventory version, ordering, uniqueness, count, and nested facts.
 pub fn validate_track_inventory(inventory: &TrackInventory) -> Result<(), GoopError> {
     validate_track_inventory_inner(inventory).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate the source-binding version, canonical decimal fields, inventory,
+/// and aggregate serialized size limit.
 pub fn validate_track_source_binding(source: &TrackSourceBinding) -> Result<(), GoopError> {
     validate_track_source_binding_inner(source).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate that an explicit selection names an audio stream in its binding.
 pub fn validate_track_options(options: &TrackConvertOptions) -> Result<(), GoopError> {
     validate_track_options_inner(options).map_err(GoopError::InvalidRequest)
 }
 
+/// Validate target and audio-mode compatibility for request track selection.
 pub fn validate_track_request(request: &ConvertRequest) -> Result<(), GoopError> {
     let Some(options) = &request.track_options else {
         return Ok(());

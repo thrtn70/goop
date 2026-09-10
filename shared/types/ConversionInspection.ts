@@ -5,5 +5,10 @@ import type { TrackSourceBinding } from "./TrackSourceBinding";
 
 /**
  * A single source read and the capabilities derived from that exact probe.
+ *
+ * `track_source` carries exact identity only when explicit selection is safe.
+ * When audio exists but identity enrichment hits a supported limit, the source
+ * stays absent and `track_source_unavailable_reason` explains the fail-closed
+ * Automatic-only result.
  */
 export type ConversionInspection = { probe: ProbeResult, capabilities: ConversionCapabilities, track_source?: TrackSourceBinding | null, track_source_unavailable_reason?: string | null, };

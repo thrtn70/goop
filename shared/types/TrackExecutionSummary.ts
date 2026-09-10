@@ -2,4 +2,7 @@
 import type { TrackConvertOptions } from "./TrackConvertOptions";
 import type { TrackIdentity } from "./TrackIdentity";
 
+/**
+ * Verified disclosure of the selected and omitted streams for one conversion.
+ */
 export type TrackExecutionSummary = { requested: TrackConvertOptions, selected: TrackIdentity, dropped_audio: Array<TrackIdentity>, dropped_other: Array<TrackIdentity>, output_stream_index: number, notices: Array<string>, };

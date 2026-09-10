@@ -83,17 +83,17 @@ export function audioExecutionText(summary: AudioExecutionSummary): string {
   return [...facts, ...summary.notices].join(" · ");
 }
 
-function trackFact(fact: TrackTextFact, fallback: string): string {
+function trackFact(fact: TrackTextFact, fallback: string, normalizeLanguage = false): string {
   if (fact.kind !== "value") return fallback;
   const language: Record<string, string> = { en: "English", eng: "English", es: "Spanish", spa: "Spanish", fr: "French", fra: "French", de: "German", deu: "German", ja: "Japanese", jpn: "Japanese" };
-  return language[fact.value.toLowerCase()] ?? fact.value;
+  return normalizeLanguage ? language[fact.value.toLowerCase()] ?? fact.value : fact.value;
 }
 
 export function trackExecutionText(summary: TrackExecutionSummary): string {
   const selected = summary.selected;
   const facts = [
     `Track ${selected.index}`,
-    trackFact(selected.language, "Language not reported"),
+    trackFact(selected.language, "Language not reported", true),
     trackFact(selected.title, "Title not reported"),
   ];
   if (summary.notices.length) facts.push(...summary.notices);

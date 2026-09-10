@@ -1,4 +1,4 @@
-use crate::encoders::DetectedEncoders;
+use crate::{backend::ConversionBackend, encoders::DetectedEncoders};
 use goop_core::{
     AudioStreamInfo, ConvertRequest, GoopError, ProbeResult, TargetFormat, TrackChoiceCapability,
     TrackConvertOptions, TrackExecutionSummary, TrackSettingsCapabilities, TrackSourceBinding,
@@ -17,44 +17,94 @@ struct SourceSnapshot {
     modified_unix_ns: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceIdentityLimit {
+    PreEpochModified,
+    ModifiedOutOfRange,
+    NonUtf8CanonicalPath,
+}
+
+impl SourceIdentityLimit {
+    fn strict_error(self) -> GoopError {
+        invalid(match self {
+            Self::PreEpochModified => {
+                "Track selection does not support pre-epoch modification times"
+            }
+            Self::ModifiedOutOfRange => "Source modification time is outside the supported range",
+            Self::NonUtf8CanonicalPath => "Track selection requires a UTF-8 source path",
+        })
+    }
+
+    fn unavailable_reason(self) -> &'static str {
+        match self {
+            Self::PreEpochModified => {
+                "Audio track selection is unavailable because the source modification time predates 1970; use Automatic"
+            }
+            Self::ModifiedOutOfRange => {
+                "Audio track selection is unavailable because the source modification time is outside the supported range; use Automatic"
+            }
+            Self::NonUtf8CanonicalPath => {
+                "Audio track selection is unavailable because the canonical source path is not valid UTF-8; use Automatic"
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SnapshotError {
+    IdentityLimit(SourceIdentityLimit),
+    Fatal(GoopError),
+}
+
+impl SnapshotError {
+    fn into_strict_error(self) -> GoopError {
+        match self {
+            Self::IdentityLimit(limit) => limit.strict_error(),
+            Self::Fatal(error) => error,
+        }
+    }
+}
+
 fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 
-async fn snapshot(path: &Path) -> Result<SourceSnapshot, GoopError> {
+async fn snapshot(path: &Path) -> Result<SourceSnapshot, SnapshotError> {
     let canonical = tokio::fs::canonicalize(path).await.map_err(|error| {
-        invalid(format!(
+        SnapshotError::Fatal(invalid(format!(
             "Could not inspect source {}: {error}",
             path.display()
-        ))
+        )))
     })?;
     let metadata = tokio::fs::metadata(&canonical).await.map_err(|error| {
-        invalid(format!(
+        SnapshotError::Fatal(invalid(format!(
             "Could not inspect source {}: {error}",
             canonical.display()
-        ))
+        )))
     })?;
     if !metadata.is_file() {
-        return Err(invalid(format!(
+        return Err(SnapshotError::Fatal(invalid(format!(
             "Track selection requires a file source: {}",
             path.display()
-        )));
+        ))));
     }
     let modified = metadata.modified().map_err(|error| {
-        invalid(format!(
+        SnapshotError::Fatal(invalid(format!(
             "Could not read source modification time for {}: {error}",
             canonical.display()
-        ))
+        )))
     })?;
     let modified_ns = modified
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| invalid("Track selection does not support pre-epoch modification times"))?
+        .map_err(|_| SnapshotError::IdentityLimit(SourceIdentityLimit::PreEpochModified))?
         .as_nanos();
     let modified_ns = u64::try_from(modified_ns)
-        .map_err(|_| invalid("Source modification time is outside the supported range"))?;
+        .map_err(|_| SnapshotError::IdentityLimit(SourceIdentityLimit::ModifiedOutOfRange))?;
     let canonical_path = canonical
         .to_str()
-        .ok_or_else(|| invalid("Track selection requires a UTF-8 source path"))?
+        .ok_or(SnapshotError::IdentityLimit(
+            SourceIdentityLimit::NonUtf8CanonicalPath,
+        ))?
         .to_owned();
 
     Ok(SourceSnapshot {
@@ -102,6 +152,10 @@ fn inventory_has_malformed_identity(inventory: &goop_core::TrackInventory) -> bo
     })
 }
 
+/// Explain why a probe with audio cannot publish an explicit-selection binding.
+///
+/// A missing inventory, malformed identity, or aggregate binding overflow keeps
+/// legacy Automatic conversion usable while disabling explicit track settings.
 pub fn source_unavailable_reason(
     probe: &ProbeResult,
     binding: Option<&TrackSourceBinding>,
@@ -131,9 +185,13 @@ async fn probe_bound_source_with<F>(
 where
     F: Future<Output = Result<ProbeResult, GoopError>>,
 {
-    let before = snapshot(path).await?;
+    let before = snapshot(path)
+        .await
+        .map_err(SnapshotError::into_strict_error)?;
     let probe = probe_future.await?;
-    let after = snapshot(path).await?;
+    let after = snapshot(path)
+        .await
+        .map_err(SnapshotError::into_strict_error)?;
     if before != after {
         return Err(invalid(
             "The source changed during inspection; reinspect it before selecting a track",
@@ -143,6 +201,90 @@ where
     Ok((probe, binding))
 }
 
+async fn legacy_inspection_after_limit(
+    resolver: &BinaryResolver,
+    path: &Path,
+    reason: &'static str,
+    cancel: &CancellationToken,
+) -> Result<
+    (
+        ProbeResult,
+        Option<TrackSourceBinding>,
+        Option<&'static str>,
+    ),
+    GoopError,
+> {
+    let probe = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(GoopError::Cancelled),
+        probe = crate::FfmpegBackend::probe(resolver, path) => probe?,
+    };
+    let reason = probe.has_audio.then_some(reason);
+    Ok((probe, None, reason))
+}
+
+pub(crate) async fn probe_bound_source_for_inspection(
+    resolver: &BinaryResolver,
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<
+    (
+        ProbeResult,
+        Option<TrackSourceBinding>,
+        Option<&'static str>,
+    ),
+    GoopError,
+> {
+    let before = match snapshot(path).await {
+        Ok(snapshot) => snapshot,
+        Err(SnapshotError::IdentityLimit(limit)) => {
+            return legacy_inspection_after_limit(
+                resolver,
+                path,
+                limit.unavailable_reason(),
+                cancel,
+            )
+            .await;
+        }
+        Err(SnapshotError::Fatal(error)) => return Err(error),
+    };
+    let probe = match crate::FfmpegBackend::probe_with_cancel(resolver, path, cancel).await {
+        Ok(probe) => probe,
+        Err(error) => {
+            let reason = match crate::bounded_process::query_limit(&error, "ffprobe") {
+                Some(crate::bounded_process::QueryLimit::Output) => {
+                    "Audio track selection is unavailable because ffprobe exceeded its 1 MiB inspection output limit; use Automatic"
+                }
+                Some(crate::bounded_process::QueryLimit::Deadline) => {
+                    "Audio track selection is unavailable because ffprobe exceeded its 5 second inspection deadline; use Automatic"
+                }
+                None => return Err(error),
+            };
+            return legacy_inspection_after_limit(resolver, path, reason, cancel).await;
+        }
+    };
+    let after = match snapshot(path).await {
+        Ok(snapshot) => snapshot,
+        Err(SnapshotError::IdentityLimit(limit)) => {
+            let reason = probe.has_audio.then_some(limit.unavailable_reason());
+            return Ok((probe, None, reason));
+        }
+        Err(SnapshotError::Fatal(error)) => return Err(error),
+    };
+    if before != after {
+        return Err(invalid(
+            "The source changed during inspection; reinspect it before selecting a track",
+        ));
+    }
+    let binding = binding_from_snapshot(after, &probe)?;
+    let reason = source_unavailable_reason(&probe, binding.as_ref());
+    Ok((probe, binding, reason))
+}
+
+/// Probe a source and bind its complete track inventory to stable file identity.
+///
+/// Unlike inspection enrichment, this explicit path is strict: bounded-query
+/// limits and unsupported file identity are returned as errors.
 pub async fn probe_bound_source(
     resolver: &BinaryResolver,
     path: &Path,
@@ -155,6 +297,7 @@ pub async fn probe_bound_source(
     .await
 }
 
+/// Require an exact match between a previously admitted binding and fresh facts.
 pub fn verify_source_binding(
     expected: &TrackSourceBinding,
     actual: Option<&TrackSourceBinding>,
@@ -168,14 +311,16 @@ pub fn verify_source_binding(
     Ok(())
 }
 
-pub fn resolve(
-    request: &ConvertRequest,
-    probe: &ProbeResult,
-) -> Result<Option<TrackExecutionSummary>, GoopError> {
-    let Some(TrackConvertOptions::Audio {
-        source,
-        stream_index,
-    }) = request.track_options.as_ref()
+fn selected_track<'a>(
+    request: &'a ConvertRequest,
+    probe: &'a ProbeResult,
+) -> Result<Option<(&'a TrackConvertOptions, &'a goop_core::TrackIdentity)>, GoopError> {
+    let Some(
+        options @ TrackConvertOptions::Audio {
+            source,
+            stream_index,
+        },
+    ) = request.track_options.as_ref()
     else {
         return Ok(None);
     };
@@ -193,14 +338,26 @@ pub fn resolve(
         .streams
         .iter()
         .find(|stream| stream.index == *stream_index && stream.codec_type == "audio")
-        .cloned()
         .ok_or_else(|| {
             invalid("The selected audio track is no longer present; reinspect the source")
         })?;
+    Ok(Some((options, selected)))
+}
+
+/// Resolve an explicit selection into its verified execution disclosure.
+pub fn resolve(
+    request: &ConvertRequest,
+    probe: &ProbeResult,
+) -> Result<Option<TrackExecutionSummary>, GoopError> {
+    let Some((requested, selected)) = selected_track(request, probe)? else {
+        return Ok(None);
+    };
+    let TrackConvertOptions::Audio { source, .. } = requested;
+    let inventory = &source.inventory;
     let dropped_audio = inventory
         .streams
         .iter()
-        .filter(|stream| stream.codec_type == "audio" && stream.index != *stream_index)
+        .filter(|stream| stream.codec_type == "audio" && stream.index != selected.index)
         .cloned()
         .collect::<Vec<_>>();
     let dropped_other = inventory
@@ -234,8 +391,8 @@ pub fn resolve(
     }
 
     Ok(Some(TrackExecutionSummary {
-        requested: request.track_options.clone().expect("checked above"),
-        selected,
+        requested: requested.clone(),
+        selected: selected.clone(),
         dropped_audio,
         dropped_other,
         output_stream_index: 0,
@@ -243,6 +400,7 @@ pub fn resolve(
     }))
 }
 
+/// Return borrowed processing facts for the exact selected audio stream.
 pub fn selected_audio_stream<'a>(
     request: &ConvertRequest,
     probe: &'a ProbeResult,
@@ -250,8 +408,7 @@ pub fn selected_audio_stream<'a>(
     let details = probe.audio_details.as_ref().ok_or_else(|| {
         invalid("Explicit audio settings require complete fresh audio stream facts")
     })?;
-    let Some(TrackConvertOptions::Audio { stream_index, .. }) = request.track_options.as_ref()
-    else {
+    let Some((_, selected)) = selected_track(request, probe)? else {
         if details.streams.len() != 1 {
             return Err(invalid(
                 "Choose Automatic until an audio track has been selected",
@@ -260,16 +417,16 @@ pub fn selected_audio_stream<'a>(
         return Ok(&details.streams[0]);
     };
 
-    resolve(request, probe)?;
     details
         .streams
         .iter()
-        .find(|stream| stream.index == *stream_index)
+        .find(|stream| stream.index == selected.index)
         .ok_or_else(|| {
             invalid("Fresh processing facts for the selected audio track are unavailable; reinspect the source")
         })
 }
 
+/// Compute per-track Copy and Custom availability from one validated binding.
 pub fn settings(
     probe: &ProbeResult,
     target: TargetFormat,
@@ -283,23 +440,25 @@ pub fn settings(
         ));
     }
     let mut audio_choices = Vec::new();
+    let audio_details = probe.audio_details.as_ref();
     for track in source
         .inventory
         .streams
         .iter()
         .filter(|track| track.codec_type == "audio")
     {
-        let capabilities = crate::audio_options::capabilities_for_track(
-            probe,
-            target,
-            encoders,
-            source,
-            track.index,
-        );
+        let stream = audio_details.and_then(|details| {
+            details
+                .streams
+                .iter()
+                .find(|stream| stream.index == track.index)
+        });
+        let (copy, encode) =
+            crate::audio_options::mode_availability_for_stream(stream, target, encoders);
         audio_choices.push(TrackChoiceCapability {
             track: track.clone(),
-            copy: capabilities.copy,
-            encode: capabilities.encode,
+            copy,
+            encode,
         });
     }
     Ok(TrackSettingsCapabilities {
@@ -308,6 +467,7 @@ pub fn settings(
     })
 }
 
+/// Verify that completed output contains only the disclosed selected audio stream.
 pub fn validate_output_against_selection(
     expected: &TrackExecutionSummary,
     actual: &ProbeResult,
@@ -474,6 +634,23 @@ mod tests {
         assert!(source_unavailable_reason(&oversized, None)
             .unwrap()
             .contains("64 KiB"));
+    }
+
+    #[tokio::test]
+    async fn inspection_fallback_never_swallows_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_path_buf());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = legacy_inspection_after_limit(
+            &resolver,
+            Path::new("unused.mkv"),
+            "selection unavailable",
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, GoopError::Cancelled));
     }
 
     #[test]

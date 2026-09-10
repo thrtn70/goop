@@ -279,7 +279,7 @@ export default function ConvertActionBar({
           gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
           image_options: cloneImageOptions(presetFile?.imageOptions),
           audio_options: cloneAudioOptions(presetFile?.audioOptions),
-          track_policy: presetFile?.audioOptions && presetFile.trackOptions !== undefined
+          track_policy: presetFile?.audioOptions && presetFile.trackSettings
             ? ({ kind: "audio", selection: { kind: "choose_per_file" } } satisfies TrackPresetPolicy)
             : null,
           subtitle: presetFile?.subtitle ? { ...presetFile.subtitle } : null,

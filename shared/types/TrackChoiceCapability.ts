@@ -2,4 +2,7 @@
 import type { AudioModeAvailability } from "./AudioModeAvailability";
 import type { TrackIdentity } from "./TrackIdentity";
 
+/**
+ * Copy and encode availability for one source-bound audio track.
+ */
 export type TrackChoiceCapability = { track: TrackIdentity, copy: AudioModeAvailability, encode: AudioModeAvailability, };

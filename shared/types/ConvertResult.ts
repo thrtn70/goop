@@ -3,4 +3,8 @@ import type { AudioExecutionSummary } from "./AudioExecutionSummary";
 import type { TrackExecutionSummary } from "./TrackExecutionSummary";
 import type { VideoExecutionSummary } from "./VideoExecutionSummary";
 
+/**
+ * Completed conversion measurements and optional explicit processing disclosures.
+ * Track execution remains absent for Automatic and legacy conversions.
+ */
 export type ConvertResult = { audio_execution?: AudioExecutionSummary | null, video_execution?: VideoExecutionSummary | null, track_execution?: TrackExecutionSummary | null, source_bytes?: bigint | null, target_bytes?: bigint | null, output_path: string, bytes: bigint, duration_ms: bigint, reencoded: boolean, };

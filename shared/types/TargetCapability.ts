@@ -6,4 +6,8 @@ import type { TargetFormat } from "./TargetFormat";
 import type { TrackSettingsCapabilities } from "./TrackSettingsCapabilities";
 import type { VideoSettingsCapabilities } from "./VideoSettingsCapabilities";
 
+/**
+ * Availability for one target, including optional source-bound track settings.
+ * Track settings remain absent for legacy or Automatic-only inspection.
+ */
 export type TargetCapability = { audio_settings?: AudioSettingsCapabilities | null, video_settings?: VideoSettingsCapabilities | null, track_settings?: TrackSettingsCapabilities | null, compression?: CompressionCapabilities | null, image_settings?: ImageSettingsCapabilities | null, target: TargetFormat, available: boolean, reason: string | null, preserves_metadata: boolean, metadata_warning: string | null, };
