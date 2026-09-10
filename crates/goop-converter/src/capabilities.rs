@@ -118,6 +118,22 @@ fn capabilities_for_bound_source(
                 Some("The first subtitle stream is bitmap-based or unknown. Text extraction requires a supported text subtitle stream; bitmap subtitles need OCR.".into())
             } else { None };
             TargetCapability {
+                video_track_settings: if probe.source_kind == SourceKind::Video
+                    && matches!(target, Mp4 | Mov | Mkv)
+                {
+                    let empty = crate::DetectedEncoders::empty();
+                    track_source.and_then(|source| {
+                        crate::video_track_options::settings(
+                            probe,
+                            target,
+                            encoders.unwrap_or(&empty),
+                            source,
+                        )
+                        .ok()
+                    })
+                } else {
+                    None
+                },
                 audio_settings: if matches!(target, Mp3 | M4a | Aac | Wav | Flac) {
                     let empty = crate::DetectedEncoders::empty();
                     Some(crate::audio_options::capabilities(
@@ -430,13 +446,16 @@ pub async fn resolve_video_request_source(
             "Explicit video settings require a source routed to the video converter".into(),
         ));
     }
-    let probe = FfmpegBackend::probe_with_cancel(
-        resolver,
-        &path,
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
-    Ok(crate::video_options::resolve(req, &probe, encoders)?.summary)
+    let cancel = tokio_util::sync::CancellationToken::new();
+    if let Some(goop_core::TrackConvertOptions::Video { source, .. }) = req.track_options.as_ref() {
+        let (probe, actual) =
+            crate::track_options::probe_bound_source(resolver, &path, &cancel).await?;
+        crate::track_options::verify_source_binding(source, actual.as_ref())?;
+        Ok(crate::video_track_options::resolve(req, &probe, encoders)?.video_summary)
+    } else {
+        let probe = FfmpegBackend::probe_with_cancel(resolver, &path, &cancel).await?;
+        Ok(crate::video_options::resolve(req, &probe, encoders)?.summary)
+    }
 }
 
 /// Fresh admission for explicit audio controls, shared by planning and enqueue.

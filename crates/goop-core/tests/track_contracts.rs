@@ -758,6 +758,23 @@ fn video_track_summary_and_capability_contracts_roundtrip_strictly() {
     invalid_summary.retained[0].output_stream_index = 2;
     assert!(serde_json::to_value(invalid_summary).is_err());
 
+    let drop_all_summary = VideoTrackExecutionSummary {
+        requested: TrackConvertOptions::Video {
+            source: capability.source.clone(),
+            audio: TrackStreamPolicy::None,
+            subtitles: TrackStreamPolicy::None,
+        },
+        retained: vec![],
+        omitted_audio: vec![serde_json::from_value(stream(1, "audio", "Main")).unwrap()],
+        omitted_subtitles: vec![serde_json::from_value(stream(2, "subtitle", "English")).unwrap()],
+        notices: vec![],
+    };
+    let drop_all_value = serde_json::to_value(&drop_all_summary).unwrap();
+    assert_eq!(
+        serde_json::from_value::<VideoTrackExecutionSummary>(drop_all_value).unwrap(),
+        drop_all_summary
+    );
+
     let encoded = json!({"kind": "encoded_aac", "bitrate_kbps": 192});
     let parsed: VideoTrackProcessing = serde_json::from_value(encoded.clone()).unwrap();
     assert_eq!(serde_json::to_value(parsed).unwrap(), encoded);

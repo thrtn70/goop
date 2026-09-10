@@ -15,7 +15,10 @@ fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 
-fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
+fn streams_for_mode(
+    probe: &ProbeResult,
+    allow_auxiliary_streams: bool,
+) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
     if probe.source_kind != SourceKind::Video {
         return Err(invalid("Explicit video settings require a video source"));
     }
@@ -43,6 +46,8 @@ fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStream
         }
         match stream.codec_type.as_str() {
             "video" if video.is_none() => video = Some(stream),
+            "audio" if allow_auxiliary_streams => {}
+            "subtitle" if allow_auxiliary_streams => {}
             "audio" if audio.is_none() => audio = Some(stream),
             kind => {
                 return Err(invalid(format!(
@@ -58,6 +63,10 @@ fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStream
         ));
     }
     Ok((video, audio))
+}
+
+fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
+    streams_for_mode(probe, false)
 }
 fn dimensions(probe: &ProbeResult, video: &VideoStreamInfo) -> Result<(u32, u32), GoopError> {
     let (mut w, mut h) = probe
@@ -249,12 +258,31 @@ pub fn resolve(
     probe: &ProbeResult,
     encoders: &DetectedEncoders,
 ) -> Result<ResolvedVideoPlan, GoopError> {
+    resolve_inner(req, probe, encoders, false)
+}
+
+/// Resolve only the primary video stream. The dedicated multi-stream resolver
+/// appends every admitted auxiliary map and its indexed codec settings.
+pub(crate) fn resolve_without_auxiliary(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+    encoders: &DetectedEncoders,
+) -> Result<ResolvedVideoPlan, GoopError> {
+    resolve_inner(req, probe, encoders, true)
+}
+
+fn resolve_inner(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+    encoders: &DetectedEncoders,
+    allow_auxiliary_streams: bool,
+) -> Result<ResolvedVideoPlan, GoopError> {
     validate_video_request(req)?;
     let options = req
         .video_options
         .as_ref()
         .ok_or_else(|| invalid("Explicit video settings are required"))?;
-    let (video, audio) = streams(probe)?;
+    let (video, audio) = streams_for_mode(probe, allow_auxiliary_streams)?;
     let (mut width, mut height) = dimensions(probe, video)?;
     if probe.duration_ms == 0 || probe.file_size == 0 {
         return Err(invalid(
