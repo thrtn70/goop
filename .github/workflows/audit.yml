@@ -327,8 +327,8 @@ jobs:
           CARGO_INCREMENTAL=0 cargo test -p goop-core --test video_contracts
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --list | tee video-controls-tests.txt
           case "$RUNNER_OS" in
-            macOS) expected_video_controls=38 ;;
-            Windows) expected_video_controls=35 ;;
+            macOS) expected_video_controls=39 ;;
+            Windows) expected_video_controls=36 ;;
             *) echo "::error::unexpected runner OS: $RUNNER_OS"; exit 1 ;;
           esac
           test "$(grep -c ': test$' video-controls-tests.txt)" -eq "$expected_video_controls"
