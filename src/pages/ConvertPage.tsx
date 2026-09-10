@@ -608,7 +608,7 @@ function ConvertPage() {
               {selected.videoOptions && <section aria-label="Video processing summary" className="mt-4 text-xs text-fg-secondary">
                 {videoPlan?.busy && <p>Checking video processing…</p>}
                 {videoPlan?.error && <p role="alert" className="text-warning">{videoPlan?.error}</p>}
-                {videoPlan?.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan?.summary)}</p>}
+                {videoPlan?.summary && <p>{selected.target.toUpperCase()} · {videoExecutionText(videoPlan?.summary, selectedPlanned?.trackOptions?.kind !== "video")}</p>}
               </section>}
               {selectedPlanned?.audioOptions && selectedPlanned.trackOptions && <section aria-label="Audio processing summary" className="mt-4 text-xs text-fg-secondary">
                 {audioPlan?.busy && <p>Checking audio processing…</p>}
@@ -682,7 +682,7 @@ function ConvertPage() {
               return <li key={file.id ?? file.path}>
                 <p className="font-medium text-fg" title={file.path}>{sourceName(file.path)}</p>
                 <p className={problems[i] || plan?.error ? "text-warning" : "text-fg-secondary"}>
-                  {problem ?? (plan?.summary && file.target.toUpperCase() + " · " + videoExecutionText(plan.summary))}
+                  {problem ?? (plan?.summary && file.target.toUpperCase() + " · " + videoExecutionText(plan.summary, videoFiles[i]?.trackOptions?.kind !== "video"))}
                 </p>
               </li>;
             })}

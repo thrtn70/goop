@@ -81,6 +81,23 @@ vi.mock("@/ipc/commands", () => ({
                   {frame_rate:{kind:"constant",numerator:60,denominator:1},label:"60 fps"},
                 ],...(path === "/tmp/no-timing.mp4" ? {average_frame_rate:{kind:"malformed"}} : {average_frame_rate:{kind:"exact",numerator:30000,denominator:1001},base_frame_rate:{kind:"exact",numerator:30,denominator:1},time_base:{kind:"exact",numerator:1,denominator:90000}})}
               } : null,
+              video_track_settings: trackSource && p.source_kind === "video" && ["mp4","mov","mkv"].includes(target) ? {
+                source: trackSource,
+                audio_tracks: trackSource.inventory.streams.filter((track: {codec_type:string}) => track.codec_type === "audio").map((track: object) => ({
+                  track, copy: {available:true,reason:null}, custom: {available:true,reason:null},
+                })),
+                subtitle_tracks: trackSource.inventory.streams.filter((track: {codec_type:string}) => track.codec_type === "subtitle").map((track: object) => ({
+                  track, copy: {available:true,reason:null}, custom: {available:true,reason:null},
+                })),
+                audio_policy: {
+                  copy: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                  custom: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                },
+                subtitle_policy: {
+                  copy: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                  custom: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                },
+              } : null,
               audio_settings: trackSource && ["mp3","m4a","aac","wav","flac"].includes(target) ? {
                 copy:{available:true},encode:{available:true},target_codec:target === "m4a" || target === "aac" ? "aac" : target,
                 encoder:target === "m4a" || target === "aac" ? "aac" : target,bitrate_choices_kbps:[64,96,128,160,192,256],default_bitrate_kbps:192,
@@ -183,6 +200,32 @@ const multiTrackProbe: ProbeResult = {
     streams: [
       { index: 1, codec_name: "aac", sample_rate_hz: { kind: "exact", value: 48_000 }, channels: { kind: "exact", value: 2 }, channel_layout: "stereo" },
       { index: 3, codec_name: "aac", sample_rate_hz: { kind: "exact", value: 48_000 }, channels: { kind: "exact", value: 2 }, channel_layout: "stereo" },
+    ],
+  },
+};
+
+const videoTrackIdentity = (index: number, codec_type: "video" | "audio" | "subtitle", codec: string, title: string) => ({
+  index,
+  codec_type,
+  codec_name: trackFact(codec),
+  container_stream_id: { kind: "missing" as const },
+  language: trackFact(codec_type === "audio" ? "eng" : codec_type === "subtitle" ? "fra" : "und"),
+  title: trackFact(title),
+  disposition: { default: index <= 1, forced: index === 3, attached_pic: false, other: {}, malformed: false },
+});
+const multiVideoProbe: ProbeResult = {
+  ...mp4Probe,
+  container: "matroska",
+  has_subtitles: true,
+  subtitle_codecs: ["subrip"],
+  audio_codecs: ["aac", "aac"],
+  track_inventory: {
+    version: 1,
+    streams: [
+      videoTrackIdentity(0, "video", "h264", "Picture"),
+      videoTrackIdentity(1, "audio", "aac", "Main"),
+      videoTrackIdentity(2, "audio", "aac", "Commentary"),
+      videoTrackIdentity(3, "subtitle", "subrip", "French"),
     ],
   },
 };
@@ -1095,6 +1138,28 @@ describe("explicit video inspector", () => {
   beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
   afterEach(cleanup);
   async function stage() { renderPage(); await userEvent.click(screen.getByRole("button",{name:"Add files"})); await screen.findByLabelText("Processing"); }
+  const noAudioPlan = {
+    requested: {kind:"copy" as const}, video_codec:"h264" as const, video_stream_index:0,
+    audio_stream_index:null, audio_codec:null, audio_copied:false, width:1920, height:1080, notices:[],
+  };
+  it("keeps the legacy No audio fact for an ordinary silent-video plan", async () => {
+    mockProbe.mockResolvedValue({...mp4Probe,has_audio:false,audio_codec:null,audio_codecs:[]});
+    mockVideoPlan.mockResolvedValueOnce(noAudioPlan);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
+    await waitFor(() => expect(screen.getAllByText(/No audio/).length).toBeGreaterThanOrEqual(2));
+  });
+  it("omits the legacy No audio fact from both source-bound track-policy summaries", async () => {
+    mockOpen.mockResolvedValue(["/tmp/multi-video.mkv"]);
+    mockProbe.mockResolvedValue(multiVideoProbe);
+    mockVideoPlan.mockResolvedValueOnce(noAudioPlan);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
+    await waitFor(() => expect(screen.getAllByText(/Video copied/).length).toBeGreaterThanOrEqual(2));
+    expect(screen.queryByText(/No audio/)).toBeNull();
+    expect(screen.getByRole("radio",{name:"Keep all audio streams"})).toHaveProperty("checked",true);
+    expect(screen.getByRole("radio",{name:"Keep all subtitle streams"})).toHaveProperty("checked",true);
+  });
   it("defaults a new Custom entry to independent dimensions and exact frame timing", async () => {
     await stage();
     await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");

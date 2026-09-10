@@ -18,7 +18,7 @@ function rateName(numerator: number, denominator: number): string {
   return names[`${numerator}/${denominator}`] ?? `${numerator}/${denominator}`;
 }
 
-export function videoExecutionText(summary: VideoExecutionSummary): string {
+export function videoExecutionText(summary: VideoExecutionSummary, includeAudio = true): string {
   const codec = summary.video_codec === "h264" ? "H.264" : "HEVC";
   const options = summary.requested;
   const facts = options.kind === "copy" ? ["Video copied (" + codec + ")"] : [
@@ -53,7 +53,9 @@ export function videoExecutionText(summary: VideoExecutionSummary): string {
     }
   }
   facts.push((options.kind === "encode" && (summary.requested_resize ?? options.resize) ? "resolved " : "") + summary.width + " × " + summary.height + " px upright");
-  facts.push(summary.audio_stream_index == null ? "No audio" : summary.audio_copied ? "Audio copied (" + (summary.audio_codec ?? "codec unavailable") + ")" : summary.audio_codec === "aac" ? "Audio: AAC 192 kbps" : "Audio: " + (summary.audio_codec ?? "codec unavailable"));
+  if (includeAudio) {
+    facts.push(summary.audio_stream_index == null ? "No audio" : summary.audio_copied ? "Audio copied (" + (summary.audio_codec ?? "codec unavailable") + ")" : summary.audio_codec === "aac" ? "Audio: AAC 192 kbps" : "Audio: " + (summary.audio_codec ?? "codec unavailable"));
+  }
   return [...facts, ...summary.notices].join(" · ");
 }
 
@@ -144,7 +146,7 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
   if (result.track_execution) facts.push(trackExecutionText(result.track_execution));
   if (result.video_track_execution) facts.push(videoTrackExecutionText(result.video_track_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
-  else if (result.video_execution) facts.push(videoExecutionText(result.video_execution));
+  else if (result.video_execution) facts.push(videoExecutionText(result.video_execution, !result.video_track_execution));
   else if (!result.track_execution && !result.video_track_execution) {
     if (result.reencoded === false) facts.push("No re-encode reported");
     const payload = job?.payload;
