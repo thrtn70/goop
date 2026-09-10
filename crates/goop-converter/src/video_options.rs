@@ -652,6 +652,25 @@ pub fn capabilities(
     target: TargetFormat,
     encoders: &DetectedEncoders,
 ) -> VideoSettingsCapabilities {
+    capabilities_inner(probe, target, encoders, false)
+}
+
+/// Advertise primary-video modes when a source-bound stream policy will own
+/// every auxiliary audio and subtitle stream.
+pub fn capabilities_with_auxiliary(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+) -> VideoSettingsCapabilities {
+    capabilities_inner(probe, target, encoders, true)
+}
+
+fn capabilities_inner(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+    allow_auxiliary_streams: bool,
+) -> VideoSettingsCapabilities {
     let request = |options| ConvertRequest {
         audio_options: None,
         track_options: None,
@@ -675,29 +694,23 @@ pub fn capabilities(
             reason,
         }
     };
-    let copy = mode(resolve(
-        &request(VideoConvertOptions::Copy),
-        probe,
-        encoders,
-    ));
+    let resolve_mode =
+        |options| resolve_inner(&request(options), probe, encoders, allow_auxiliary_streams);
+    let copy = mode(resolve_mode(VideoConvertOptions::Copy));
     let codecs: Vec<_> = [
         (VideoCodec::H264, "libx264", 23),
         (VideoCodec::Hevc, "libx265", 28),
     ]
     .into_iter()
     .map(|(codec, encoder, recommended_crf)| {
-        let state = mode(resolve(
-            &request(VideoConvertOptions::Encode {
-                codec,
-                rate_control: VideoRateControl::ConstantQuality { crf: 23 },
-                speed: VideoSpeed::Medium,
-                processor: VideoProcessor::Software,
-                resize: None,
-                frame_rate: None,
-            }),
-            probe,
-            encoders,
-        ));
+        let state = mode(resolve_mode(VideoConvertOptions::Encode {
+            codec,
+            rate_control: VideoRateControl::ConstantQuality { crf: 23 },
+            speed: VideoSpeed::Medium,
+            processor: VideoProcessor::Software,
+            resize: None,
+            frame_rate: None,
+        }));
         VideoCodecCapability {
             codec,
             encoder: encoder.into(),
@@ -711,7 +724,8 @@ pub fn capabilities(
     let resize_reason = (!available)
         .then(|| codecs.first().and_then(|codec| codec.reason.clone()))
         .flatten();
-    let timing_reason = streams(probe)
+    let stream_facts = || streams_for_mode(probe, allow_auxiliary_streams);
+    let timing_reason = stream_facts()
         .ok()
         .and_then(|(video, audio)| source_timing_unavailable_reason(video, audio));
     let frame_rate_reason = if !available {
@@ -753,13 +767,13 @@ pub fn capabilities(
             reason: frame_rate_reason,
             default: frame_rate_available.then_some(VideoFrameRate::Preserve),
             constant_choices: constant_frame_rates(),
-            average_frame_rate: streams(probe)
+            average_frame_rate: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.average_frame_rate.clone()),
-            base_frame_rate: streams(probe)
+            base_frame_rate: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.base_frame_rate.clone()),
-            time_base: streams(probe)
+            time_base: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.time_base.clone()),
         }),

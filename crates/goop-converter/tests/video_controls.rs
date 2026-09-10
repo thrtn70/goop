@@ -1,7 +1,10 @@
 use goop_converter::{
     encoders::{parse_encoders, DetectedEncoders},
     parse_probe_json,
-    video_options::{capabilities, resolve, validate_output, validate_output_against_source},
+    video_options::{
+        capabilities, capabilities_with_auxiliary, resolve, validate_output,
+        validate_output_against_source,
+    },
 };
 use goop_core::*;
 use serde_json::{json, Value};
@@ -701,6 +704,25 @@ fn output_validation_and_capabilities() {
     assert!(!caps.encode.available);
     assert!(!caps.preview_available);
     assert_eq!((caps.crf_min, caps.crf_max, caps.default_crf), (1, 51, 23));
+}
+
+#[test]
+fn track_aware_capabilities_keep_explicit_modes_reachable_for_auxiliary_streams() {
+    let mut value = source_json();
+    value["streams"].as_array_mut().unwrap().extend([
+        json!({"index":7,"codec_type":"audio","codec_name":"aac","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}}),
+        json!({"index":9,"codec_type":"subtitle","codec_name":"subrip","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}}),
+    ]);
+    let source = probe(value);
+
+    let legacy = capabilities(&source, TargetFormat::Mp4, &inventory());
+    assert!(!legacy.copy.available);
+    assert!(!legacy.encode.available);
+
+    let track_aware = capabilities_with_auxiliary(&source, TargetFormat::Mp4, &inventory());
+    assert!(track_aware.copy.available);
+    assert!(track_aware.encode.available);
+    assert!(track_aware.codecs.iter().all(|codec| codec.available));
 }
 #[tokio::test]
 async fn preview_rejected_before_path_or_session_work() {

@@ -117,48 +117,55 @@ fn capabilities_for_bound_source(
             } else if target.is_subtitle() && !first_subtitle_is_text {
                 Some("The first subtitle stream is bitmap-based or unknown. Text extraction requires a supported text subtitle stream; bitmap subtitles need OCR.".into())
             } else { None };
+            let empty = crate::DetectedEncoders::empty();
+            let encoder_inventory = encoders.unwrap_or(&empty);
+            let video_track_settings = if probe.source_kind == SourceKind::Video
+                && matches!(target, Mp4 | Mov | Mkv)
+            {
+                track_source.and_then(|source| {
+                    crate::video_track_options::settings(
+                        probe,
+                        target,
+                        encoder_inventory,
+                        source,
+                    )
+                    .ok()
+                })
+            } else {
+                None
+            };
             TargetCapability {
-                video_track_settings: if probe.source_kind == SourceKind::Video
-                    && matches!(target, Mp4 | Mov | Mkv)
-                {
-                    let empty = crate::DetectedEncoders::empty();
-                    track_source.and_then(|source| {
-                        crate::video_track_options::settings(
-                            probe,
-                            target,
-                            encoders.unwrap_or(&empty),
-                            source,
-                        )
-                        .ok()
-                    })
-                } else {
-                    None
-                },
+                video_track_settings: video_track_settings.clone(),
                 audio_settings: if matches!(target, Mp3 | M4a | Aac | Wav | Flac) {
-                    let empty = crate::DetectedEncoders::empty();
                     Some(crate::audio_options::capabilities(
                         probe,
                         target,
-                        encoders.unwrap_or(&empty),
+                        encoder_inventory,
                     ))
                 } else {
                     None
                 },
                 video_settings: if probe.source_kind == SourceKind::Video && matches!(target, Mp4 | Mov | Mkv) {
-                    let empty = crate::DetectedEncoders::empty();
-                    let mut settings = crate::video_options::capabilities(probe, target, encoders.unwrap_or(&empty));
+                    let mut settings = if video_track_settings.is_some() {
+                        crate::video_options::capabilities_with_auxiliary(
+                            probe,
+                            target,
+                            encoder_inventory,
+                        )
+                    } else {
+                        crate::video_options::capabilities(probe, target, encoder_inventory)
+                    };
                     if encoders.is_none() {
                         settings.copy = goop_core::VideoModeAvailability { available: false, reason: Some("Explicit video settings require an encoder inventory and fresh inspection".into()) };
                     }
                     Some(settings)
                 } else { None },
                 track_settings: if matches!(target, Mp3 | M4a | Aac | Wav | Flac) {
-                    let empty = crate::DetectedEncoders::empty();
                     track_source.and_then(|source| {
                         crate::track_options::settings(
                             probe,
                             target,
-                            encoders.unwrap_or(&empty),
+                            encoder_inventory,
                             source,
                         )
                         .ok()
@@ -534,4 +541,88 @@ pub async fn inspect_source_with_encoders(
         track_source,
         track_source_unavailable_reason,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{parse_probe_json, DetectedEncoders};
+    use goop_core::TRACK_SOURCE_BINDING_VERSION;
+    use serde_json::json;
+
+    #[test]
+    fn bound_video_track_capabilities_keep_explicit_modes_reachable() {
+        let probe = parse_probe_json(
+            &serde_json::to_vec(&json!({
+                "format": {
+                    "duration": "2.0",
+                    "size": "4096",
+                    "format_name": "matroska"
+                },
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "width": 1920,
+                        "height": 1080,
+                        "pix_fmt": "yuv420p",
+                        "field_order": "progressive",
+                        "sample_aspect_ratio": "1:1",
+                        "avg_frame_rate": "24/1",
+                        "r_frame_rate": "24/1",
+                        "time_base": "1/24000",
+                        "start_time": "0",
+                        "duration": "2",
+                        "disposition": {"default": 1, "forced": 0, "attached_pic": 0}
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "start_time": "0",
+                        "duration": "2",
+                        "disposition": {"default": 1, "forced": 0, "attached_pic": 0}
+                    },
+                    {
+                        "index": 2,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "start_time": "0",
+                        "duration": "2",
+                        "disposition": {"default": 0, "forced": 0, "attached_pic": 0}
+                    },
+                    {
+                        "index": 3,
+                        "codec_type": "subtitle",
+                        "codec_name": "subrip",
+                        "start_time": "0",
+                        "duration": "2",
+                        "disposition": {"default": 0, "forced": 0, "attached_pic": 0}
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let source = TrackSourceBinding {
+            version: TRACK_SOURCE_BINDING_VERSION,
+            canonical_path: "/tmp/source.mkv".into(),
+            size_bytes: "4096".into(),
+            modified_unix_ns: "1700000000000000000".into(),
+            inventory: probe.track_inventory.clone().unwrap(),
+        };
+        let encoders = DetectedEncoders::from_names(["libx264", "libx265", "aac"]);
+
+        let capabilities = capabilities_for_bound_source(&probe, Some(&encoders), Some(&source));
+        let mp4 = capabilities
+            .targets
+            .iter()
+            .find(|candidate| candidate.target == TargetFormat::Mp4)
+            .unwrap();
+        assert!(mp4.video_track_settings.is_some());
+        let video = mp4.video_settings.as_ref().unwrap();
+        assert!(video.copy.available);
+        assert!(video.encode.available);
+    }
 }
