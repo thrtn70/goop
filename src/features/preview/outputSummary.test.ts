@@ -149,3 +149,35 @@ it("normalizes only track language while preserving a title that resembles a lan
   expect(summary).toContain("de");
   expect(summary).not.toContain("German");
 });
+
+it("reports authoritative multi-stream video provenance", () => {
+  const stream = (index: number, codec_type: string) => ({ index, codec_type,
+    codec_name: { kind: "value" as const, value: codec_type === "audio" ? "aac" : "subrip" },
+    container_stream_id: { kind: "missing" as const }, language: { kind: "value" as const, value: "eng" },
+    title: { kind: "value" as const, value: `Track ${index}` },
+    disposition: { default: index === 1, forced: index === 3, attached_pic: false, other: {}, malformed: false } });
+  const audio = stream(1, "audio");
+  const subtitle = stream(3, "subtitle");
+  const binding = { version: 1 as const, canonical_path: "/movie.mkv", size_bytes: "100", modified_unix_ns: "200", inventory: { version: 1 as const, streams: [audio, subtitle] } };
+  const summary = outputSummary(result({
+    video_execution: {
+      requested: { kind: "copy" }, video_codec: "h264", video_stream_index: 0,
+      audio_stream_index: null, audio_codec: null, audio_copied: false,
+      width: 1920, height: 1080, notices: [],
+    },
+    video_track_execution: {
+    requested: { kind: "video", source: binding, audio: { kind: "keep_all" }, subtitles: { kind: "none" } },
+    retained: [{ source: audio, output_stream_index: 1, output_type_index: 0, processing: { kind: "copied" },
+      source_codec_tag: { kind: "value", value: "mp4a" }, output_codec_name: { kind: "value", value: "aac" }, output_codec_tag: { kind: "value", value: "mp4a" },
+      output_language: { kind: "value", value: "eng" }, output_title: { kind: "value", value: "Track 1" }, output_default: true, output_forced: false }],
+    omitted_audio: [], omitted_subtitles: [subtitle], notices: ["Subtitle stream 3 omitted"],
+  } }));
+  expect(summary).toContain("Audio stream 1 copied");
+  expect(summary).toContain("output 1");
+  expect(summary).toContain("source tag mp4a");
+  expect(summary).toContain("output AAC (mp4a)");
+  expect(summary).toContain("English · Track 1 · Default · Not forced");
+  expect(summary).toContain("1 subtitle stream omitted");
+  expect(summary).toContain("Subtitle stream 3 omitted");
+  expect(summary).not.toContain("No audio");
+});

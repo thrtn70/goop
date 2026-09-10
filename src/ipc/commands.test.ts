@@ -455,3 +455,40 @@ it.each(["audioPlan", "fromFile"] as const)("owns the complete track binding bef
   expect(sent.source.inventory.streams[0].title.value).toBe("Commentary");
   expect(sent.source.inventory.streams[0].disposition.other).toEqual({});
 });
+
+it.each(["videoPlan", "fromFile"] as const)("owns every video track policy before %s IPC", async (method) => {
+  invokeMock.mockClear();
+  const track_options = {
+    kind: "video" as const,
+    source: {
+      version: 1 as const, canonical_path: "/media/movie.mkv", size_bytes: "4096", modified_unix_ns: "7",
+      inventory: { version: 1 as const, streams: [] },
+    },
+    audio: { kind: "choose" as const, stream_indices: [1, 2] },
+    subtitles: { kind: "choose" as const, stream_indices: [3] },
+  };
+  const req = { input_path: "/media/movie.mkv", output_path: "", target: "mkv" as const,
+    quality_preset: null, resolution_cap: null, compress_mode: null, batch_id: null,
+    metadata_policy: null, subtitle: null, gif_options: null,
+    video_options: { kind: "copy" as const }, audio_options: null, track_options };
+
+  if (method === "videoPlan") await api.convert.videoPlan(req);
+  else await api.convert.fromFile(req);
+  const sent = invokeMock.mock.calls[0][1].req.track_options;
+  track_options.audio.stream_indices.push(9);
+  track_options.subtitles.stream_indices[0] = 8;
+  expect(sent.audio.stream_indices).toEqual([1, 2]);
+  expect(sent.subtitles.stream_indices).toEqual([3]);
+});
+
+it("owns portable video track policy before preset IPC", async () => {
+  invokeMock.mockClear();
+  const track_policy = { kind: "video" as const, audio: { kind: "choose_per_file" as const }, subtitles: { kind: "none" as const } };
+  await api.preset.save({ id: "video", name: "Video", target: "mkv", quality_preset: null,
+    resolution_cap: null, compress_mode: null, image_options: null, video_options: { kind: "copy" },
+    audio_options: null, track_policy, is_builtin: false, created_at: 123n });
+  const sent = invokeMock.mock.calls[0][1].preset.track_policy;
+  track_policy.audio.kind = "choose_per_file";
+  expect(sent).toEqual({ kind: "video", audio: { kind: "choose_per_file" }, subtitles: { kind: "none" } });
+  expect(sent).not.toBe(track_policy);
+});

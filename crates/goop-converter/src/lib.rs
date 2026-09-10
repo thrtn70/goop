@@ -39,3 +39,4 @@ pub mod preview;
 
 mod bounded_process;
 pub mod video_options;
+pub mod video_track_options;

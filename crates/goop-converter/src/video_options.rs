@@ -15,7 +15,10 @@ fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 
-fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
+fn streams_for_mode(
+    probe: &ProbeResult,
+    allow_auxiliary_streams: bool,
+) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
     if probe.source_kind != SourceKind::Video {
         return Err(invalid("Explicit video settings require a video source"));
     }
@@ -43,6 +46,8 @@ fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStream
         }
         match stream.codec_type.as_str() {
             "video" if video.is_none() => video = Some(stream),
+            "audio" if allow_auxiliary_streams => {}
+            "subtitle" if allow_auxiliary_streams => {}
             "audio" if audio.is_none() => audio = Some(stream),
             kind => {
                 return Err(invalid(format!(
@@ -58,6 +63,10 @@ fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStream
         ));
     }
     Ok((video, audio))
+}
+
+fn streams(probe: &ProbeResult) -> Result<(&VideoStreamInfo, Option<&VideoStreamInfo>), GoopError> {
+    streams_for_mode(probe, false)
 }
 fn dimensions(probe: &ProbeResult, video: &VideoStreamInfo) -> Result<(u32, u32), GoopError> {
     let (mut w, mut h) = probe
@@ -249,12 +258,31 @@ pub fn resolve(
     probe: &ProbeResult,
     encoders: &DetectedEncoders,
 ) -> Result<ResolvedVideoPlan, GoopError> {
+    resolve_inner(req, probe, encoders, false)
+}
+
+/// Resolve only the primary video stream. The dedicated multi-stream resolver
+/// appends every admitted auxiliary map and its indexed codec settings.
+pub(crate) fn resolve_without_auxiliary(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+    encoders: &DetectedEncoders,
+) -> Result<ResolvedVideoPlan, GoopError> {
+    resolve_inner(req, probe, encoders, true)
+}
+
+fn resolve_inner(
+    req: &ConvertRequest,
+    probe: &ProbeResult,
+    encoders: &DetectedEncoders,
+    allow_auxiliary_streams: bool,
+) -> Result<ResolvedVideoPlan, GoopError> {
     validate_video_request(req)?;
     let options = req
         .video_options
         .as_ref()
         .ok_or_else(|| invalid("Explicit video settings are required"))?;
-    let (video, audio) = streams(probe)?;
+    let (video, audio) = streams_for_mode(probe, allow_auxiliary_streams)?;
     let (mut width, mut height) = dimensions(probe, video)?;
     if probe.duration_ms == 0 || probe.file_size == 0 {
         return Err(invalid(
@@ -624,6 +652,25 @@ pub fn capabilities(
     target: TargetFormat,
     encoders: &DetectedEncoders,
 ) -> VideoSettingsCapabilities {
+    capabilities_inner(probe, target, encoders, false)
+}
+
+/// Advertise primary-video modes when a source-bound stream policy will own
+/// every auxiliary audio and subtitle stream.
+pub fn capabilities_with_auxiliary(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+) -> VideoSettingsCapabilities {
+    capabilities_inner(probe, target, encoders, true)
+}
+
+fn capabilities_inner(
+    probe: &ProbeResult,
+    target: TargetFormat,
+    encoders: &DetectedEncoders,
+    allow_auxiliary_streams: bool,
+) -> VideoSettingsCapabilities {
     let request = |options| ConvertRequest {
         audio_options: None,
         track_options: None,
@@ -647,29 +694,23 @@ pub fn capabilities(
             reason,
         }
     };
-    let copy = mode(resolve(
-        &request(VideoConvertOptions::Copy),
-        probe,
-        encoders,
-    ));
+    let resolve_mode =
+        |options| resolve_inner(&request(options), probe, encoders, allow_auxiliary_streams);
+    let copy = mode(resolve_mode(VideoConvertOptions::Copy));
     let codecs: Vec<_> = [
         (VideoCodec::H264, "libx264", 23),
         (VideoCodec::Hevc, "libx265", 28),
     ]
     .into_iter()
     .map(|(codec, encoder, recommended_crf)| {
-        let state = mode(resolve(
-            &request(VideoConvertOptions::Encode {
-                codec,
-                rate_control: VideoRateControl::ConstantQuality { crf: 23 },
-                speed: VideoSpeed::Medium,
-                processor: VideoProcessor::Software,
-                resize: None,
-                frame_rate: None,
-            }),
-            probe,
-            encoders,
-        ));
+        let state = mode(resolve_mode(VideoConvertOptions::Encode {
+            codec,
+            rate_control: VideoRateControl::ConstantQuality { crf: 23 },
+            speed: VideoSpeed::Medium,
+            processor: VideoProcessor::Software,
+            resize: None,
+            frame_rate: None,
+        }));
         VideoCodecCapability {
             codec,
             encoder: encoder.into(),
@@ -683,7 +724,8 @@ pub fn capabilities(
     let resize_reason = (!available)
         .then(|| codecs.first().and_then(|codec| codec.reason.clone()))
         .flatten();
-    let timing_reason = streams(probe)
+    let stream_facts = || streams_for_mode(probe, allow_auxiliary_streams);
+    let timing_reason = stream_facts()
         .ok()
         .and_then(|(video, audio)| source_timing_unavailable_reason(video, audio));
     let frame_rate_reason = if !available {
@@ -725,13 +767,13 @@ pub fn capabilities(
             reason: frame_rate_reason,
             default: frame_rate_available.then_some(VideoFrameRate::Preserve),
             constant_choices: constant_frame_rates(),
-            average_frame_rate: streams(probe)
+            average_frame_rate: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.average_frame_rate.clone()),
-            base_frame_rate: streams(probe)
+            base_frame_rate: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.base_frame_rate.clone()),
-            time_base: streams(probe)
+            time_base: stream_facts()
                 .ok()
                 .and_then(|(video, _)| video.time_base.clone()),
         }),

@@ -12,6 +12,7 @@ import {
 } from "./trackOptions";
 
 type Mode = "automatic" | "copy" | "encode";
+type AudioTrackOptions = Extract<TrackConvertOptions, { kind: "audio" }>;
 
 export default function AudioTrackPanel({
   settings,
@@ -26,10 +27,10 @@ export default function AudioTrackPanel({
   settings?: TrackSettingsCapabilities | null;
   audioDetails?: AudioProbeDetails | null;
   mode: Mode;
-  value?: TrackConvertOptions | null;
+  value?: AudioTrackOptions | null;
   unavailableReason?: string | null;
   planError?: string | null;
-  onChange: (value: TrackConvertOptions) => void;
+  onChange: (value: AudioTrackOptions) => void;
   onReinspect?: () => void;
 }) {
   const groupName = useId();

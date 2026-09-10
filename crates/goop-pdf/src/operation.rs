@@ -138,6 +138,7 @@ pub async fn run(
         track_execution: None,
         audio_execution: None,
         video_execution: None,
+        video_track_execution: None,
         output_path: Some(output.path.to_string_lossy().into_owned()),
         bytes: Some(output.bytes),
         duration_ms: started.elapsed().as_millis() as u64,

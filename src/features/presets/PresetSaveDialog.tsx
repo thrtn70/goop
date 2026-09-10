@@ -5,6 +5,7 @@ import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions
 import { useAppStore } from "@/store/appStore";
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
+import { cloneTrackPresetPolicy } from "@/features/convert/videoTrackOptions";
 
 interface PresetSaveDialogProps {
   open: boolean;
@@ -54,7 +55,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
       captured.current = { ...snapshot,
         video_options: cloneVideoOptions(snapshot.video_options),
         audio_options: cloneAudioOptions(snapshot.audio_options),
-        track_policy: snapshot.track_policy ? { kind: "audio", selection: { kind: "choose_per_file" } } : null,
+        track_policy: cloneTrackPresetPolicy(snapshot.track_policy),
         compress_mode: snapshot.compress_mode ? { ...snapshot.compress_mode } : null,
         gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
         subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
@@ -136,7 +137,9 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         </p>
         {(captured.current?.track_policy ?? snapshot.track_policy) && (
           <p className="mt-2 text-xs text-fg-secondary">
-            Audio track will be chosen for each source.
+            {(captured.current?.track_policy ?? snapshot.track_policy)?.kind === "video"
+              ? "Audio and subtitle policies will be resolved for each source."
+              : "Audio track will be chosen for each source."}
           </p>
         )}
         <input

@@ -165,3 +165,56 @@ describe("selected audio track draft persistence", () => {
     expect(decodeDraftEntries(raw)).toEqual({ [validKey]: { value: "cw90" } });
   });
 });
+
+describe("video track policy draft persistence", () => {
+  const missing = { kind: "missing" as const };
+  const identity = (index: number, codec_type: string) => ({
+    index, codec_type, codec_name: { kind: "value" as const, value: codec_type === "video" ? "h264" : "aac" },
+    container_stream_id: missing, language: missing, title: missing,
+    disposition: { default: false, forced: false, attached_pic: false, other: {}, malformed: false },
+  });
+  const source = { version: 1 as const, canonical_path: "/media/movie.mkv", size_bytes: "4096", modified_unix_ns: "7",
+    inventory: { version: 1 as const, streams: [identity(0, "video"), identity(1, "audio"), identity(2, "audio"), identity(3, "subtitle")] } };
+  const trackOptions = { kind: "video" as const, source, audio: { kind: "choose" as const, stream_indices: [1, 2] }, subtitles: { kind: "none" as const } };
+  const fileKey = JSON.stringify(["convert", "ConvertPage.files"]);
+
+  it("roundtrips an independently owned exact source-bound policy", () => {
+    const entries = { [fileKey]: { value: [{ path: "/media/movie.mkv", sourceDir: "/media", target: "mkv", videoOptions: { kind: "copy" }, trackOptions }] } };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored).toEqual(entries);
+    const owned = (restored[fileKey].value as typeof entries[typeof fileKey]["value"])[0].trackOptions;
+    expect(owned).not.toBe(trackOptions);
+    expect(owned.audio.stream_indices).not.toBe(trackOptions.audio.stream_indices);
+    expect(owned.source).not.toBe(source);
+  });
+
+  it.each([
+    { ...trackOptions, audio: { kind: "choose", stream_indices: [] } },
+    { ...trackOptions, audio: { kind: "choose", stream_indices: [2, 1] } },
+    { ...trackOptions, subtitles: { kind: "choose", stream_indices: [1] } },
+    { ...trackOptions, extra: true },
+  ])("rejects malformed nested policy without erasing a valid sibling entry", (candidate) => {
+    const goodKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+    const raw = JSON.stringify({ version: 1, entries: {
+      [fileKey]: { value: [{ path: "/media/movie.mkv", sourceDir: "/media", target: "mkv", videoOptions: { kind: "copy" }, trackOptions: candidate }] },
+      [goodKey]: { value: "cw90" },
+    } });
+    expect(decodeDraftEntries(raw)).toEqual({ [goodKey]: { value: "cw90" } });
+  });
+
+  it("retains unresolved Choose per file intent across restart and rejects exact indices in it", () => {
+    const pendingTrackPolicy = { kind: "video" as const, audio: { kind: "choose_per_file" as const }, subtitles: { kind: "keep_all" as const } };
+    const entries = { [fileKey]: { value: [{ path: "/media/movie.mkv", sourceDir: "/media", target: "mkv", videoOptions: { kind: "copy" }, trackOptions: null, pendingTrackPolicy }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+    const malformed = structuredClone(entries);
+    (malformed[fileKey].value[0].pendingTrackPolicy.audio as Record<string, unknown>).stream_indices = [1];
+    expect(decodeDraftEntries(encodeDraftEntries(malformed))).toEqual({});
+  });
+
+  it("retains a source-bound partial UI choice without treating it as wire options", () => {
+    const pendingTrackPolicy = { kind: "video" as const, audio: { kind: "choose_per_file" as const }, subtitles: { kind: "choose_per_file" as const } };
+    const videoTrackPolicyDraft = { source, audio: { kind: "choose" as const, stream_indices: [1] }, subtitles: { kind: "choose" as const, stream_indices: [] } };
+    const entries = { [fileKey]: { value: [{ path: "/media/movie.mkv", sourceDir: "/media", target: "mkv", videoOptions: { kind: "copy" }, trackOptions: null, pendingTrackPolicy, videoTrackPolicyDraft }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+  });
+});

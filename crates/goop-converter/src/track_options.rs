@@ -352,7 +352,9 @@ pub fn resolve(
     let Some((requested, selected)) = selected_track(request, probe)? else {
         return Ok(None);
     };
-    let TrackConvertOptions::Audio { source, .. } = requested;
+    let TrackConvertOptions::Audio { source, .. } = requested else {
+        return Ok(None);
+    };
     let inventory = &source.inventory;
     let dropped_audio = inventory
         .streams

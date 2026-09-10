@@ -3,6 +3,7 @@ import type { AudioExecutionSummary } from "./AudioExecutionSummary";
 import type { ResultKind } from "./ResultKind";
 import type { TrackExecutionSummary } from "./TrackExecutionSummary";
 import type { VideoExecutionSummary } from "./VideoExecutionSummary";
+import type { VideoTrackExecutionSummary } from "./VideoTrackExecutionSummary";
 
 export type JobResult = { video_execution?: VideoExecutionSummary | null, source_bytes?: bigint | null, target_bytes?: bigint | null, reencoded?: boolean | null, output_path: string | null, bytes: bigint | null, duration_ms: bigint, 
 /**
@@ -14,4 +15,4 @@ result_kind: ResultKind,
  * Number of files produced. `1` for `File` results; `N` for
  * `Folder` results. Defaults to `1` for backward compatibility.
  */
-file_count: number, audio_execution?: AudioExecutionSummary | null, track_execution?: TrackExecutionSummary | null, };
+file_count: number, audio_execution?: AudioExecutionSummary | null, track_execution?: TrackExecutionSummary | null, video_track_execution?: VideoTrackExecutionSummary | null, };

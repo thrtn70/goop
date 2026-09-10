@@ -327,8 +327,8 @@ jobs:
           CARGO_INCREMENTAL=0 cargo test -p goop-core --test video_contracts
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_controls -- --list | tee video-controls-tests.txt
           case "$RUNNER_OS" in
-            macOS) expected_video_controls=38 ;;
-            Windows) expected_video_controls=35 ;;
+            macOS) expected_video_controls=39 ;;
+            Windows) expected_video_controls=36 ;;
             *) echo "::error::unexpected runner OS: $RUNNER_OS"; exit 1 ;;
           esac
           test "$(grep -c ': test$' video-controls-tests.txt)" -eq "$expected_video_controls"
@@ -380,6 +380,30 @@ jobs:
             grep -q "^${test_name}: test$" track-selection-tests.txt
           done
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test track_selection_ffmpeg -- --include-ignored --test-threads=1
+      - name: Video stream policies (real ffmpeg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test track_contracts
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_track_options -- --list | tee video-track-options-tests.txt
+          test "$(grep -c ': test$' video-track-options-tests.txt)" -eq 13
+          for test_name in \
+            bundled_ffmpeg_proves_fixtureable_subtitle_copy_pairs \
+            bundled_ffmpeg_rechecks_bound_source_before_run_and_publication \
+            bundled_ffmpeg_verifies_mixed_audio_outcomes_payload_and_tones \
+            capabilities_report_per_stream_reasons_and_policy_availability \
+            copy_is_all_or_refuse_but_dropped_incompatible_streams_do_not_block \
+            exact_maps_preserve_cross_family_source_order_and_independent_audio_processing \
+            legacy_single_audio_video_plan_remains_unindexed_and_byte_stable \
+            malformed_or_out_of_scope_source_facts_refuse_without_policy_narrowing \
+            missing_codecs_cannot_be_hidden_by_none_and_capabilities_match_refusal \
+            mp4_capabilities_require_a_supported_source_default_audio_stream \
+            staged_timing_accepts_primary_start_normalization \
+            staged_validation_checks_exact_count_order_metadata_disposition_and_timing \
+            subtitle_copy_matrix_is_exact_for_copy_and_custom; do
+            grep -q "^${test_name}: test$" video-track-options-tests.txt
+          done
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_track_options -- --include-ignored --test-threads=1
       # The PDF surface, against the real mutool / gs / tesseract. Until now
       # nothing ran these: the only `--ignored` jobs were goop-converter's, so
       # every shipped PDF path — compress, OCR, page thumbnails, text and image

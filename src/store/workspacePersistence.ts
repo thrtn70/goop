@@ -1,7 +1,7 @@
 import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoOptions";
 import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { parsePresetBundle } from "@/features/presets/io";
-import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackSourceBinding, TrackTextFact } from "@/types";
+import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
@@ -94,7 +94,29 @@ function trackSource(value: unknown): TrackSourceBinding {
 
 export function validateTrackOptions(value: unknown): TrackConvertOptions | null {
   if (value == null) return null;
-  if (!object(value) || !exactKeys(value, ["kind", "source", "stream_index"]) || value.kind !== "audio" ||
+  if (!object(value) || typeof value.kind !== "string") throw new Error("invalid track options");
+  if (value.kind === "video") {
+    if (!exactKeys(value, ["kind", "source", "audio", "subtitles"])) throw new Error("invalid video track options");
+    const source = trackSource(value.source);
+    const ordinaryVideos = source.inventory.streams.filter(stream => stream.codec_type === "video" && stream.disposition.attached_pic !== true);
+    if (ordinaryVideos.length !== 1) throw new Error("video track options require exactly one ordinary video stream");
+    const policy = (candidate: unknown, family: "audio" | "subtitle"): TrackStreamPolicy => {
+      if (!object(candidate) || typeof candidate.kind !== "string") throw new Error("invalid video track policy");
+      if (candidate.kind === "keep_all" || candidate.kind === "none") {
+        if (!exactKeys(candidate, ["kind"])) throw new Error("invalid video track policy fields");
+        return { kind: candidate.kind };
+      }
+      if (candidate.kind !== "choose" || !exactKeys(candidate, ["kind", "stream_indices"]) || !Array.isArray(candidate.stream_indices) || candidate.stream_indices.length === 0 ||
+        candidate.stream_indices.some(index => !Number.isInteger(index) || Number(index) < 0 || Number(index) > 0xffff_ffff)) throw new Error("invalid video track choice");
+      const indices = candidate.stream_indices.map(Number);
+      if (new Set(indices).size !== indices.length) throw new Error("duplicate video track choice");
+      const selected = source.inventory.streams.filter(stream => stream.codec_type === family && indices.includes(stream.index)).map(stream => stream.index);
+      if (selected.length !== indices.length || selected.some((index, position) => index !== indices[position])) throw new Error("video track choice must name its family in source order");
+      return { kind: "choose", stream_indices: indices };
+    };
+    return { kind: "video", source, audio: policy(value.audio, "audio"), subtitles: policy(value.subtitles, "subtitle") };
+  }
+  if (!exactKeys(value, ["kind", "source", "stream_index"]) || value.kind !== "audio" ||
     !Number.isInteger(value.stream_index) || Number(value.stream_index) < 0 || Number(value.stream_index) > 0xffff_ffff) throw new Error("invalid track options");
   const source = trackSource(value.source);
   const selected = source.inventory.streams.find(stream => stream.index === value.stream_index);
@@ -102,8 +124,36 @@ export function validateTrackOptions(value: unknown): TrackConvertOptions | null
   return { kind: "audio", source, stream_index: Number(value.stream_index) };
 }
 
+function validateVideoTrackPolicyDraft(value: unknown): void {
+  if (value == null) return;
+  if (!object(value) || !exactKeys(value, ["source", "audio", "subtitles"])) throw new Error("invalid video track policy draft");
+  const withKind = { kind: "video", source: value.source, audio: value.audio, subtitles: value.subtitles };
+  const allowEmpty = (candidate: unknown) => object(candidate) && exactKeys(candidate, ["kind", "stream_indices"]) && candidate.kind === "choose" && Array.isArray(candidate.stream_indices) && candidate.stream_indices.length === 0;
+  if (allowEmpty(value.audio) || allowEmpty(value.subtitles)) {
+    const replacement = (candidate: unknown) => allowEmpty(candidate) ? { kind: "none" } : candidate;
+    validateTrackOptions({ ...withKind, audio: replacement(value.audio), subtitles: replacement(value.subtitles) });
+  } else {
+    validateTrackOptions(withKind);
+  }
+}
+
 export function cloneTrackOptions(value: TrackConvertOptions | null | undefined): TrackConvertOptions | null {
   return validateTrackOptions(value);
+}
+
+function validateTrackPolicy(value: unknown): TrackPresetPolicy | null {
+  if (value == null) return null;
+  if (!object(value) || typeof value.kind !== "string") throw new Error("invalid pending track policy");
+  if (value.kind === "audio") {
+    if (!exactKeys(value, ["kind", "selection"]) || !object(value.selection) || !exactKeys(value.selection, ["kind"]) || value.selection.kind !== "choose_per_file") throw new Error("invalid pending audio policy");
+    return { kind: "audio", selection: { kind: "choose_per_file" } };
+  }
+  if (value.kind !== "video" || !exactKeys(value, ["kind", "audio", "subtitles"])) throw new Error("invalid pending video policy");
+  const stream = (candidate: unknown) => {
+    if (!object(candidate) || !exactKeys(candidate, ["kind"]) || !["keep_all", "choose_per_file", "none"].includes(String(candidate.kind))) throw new Error("invalid pending video stream policy");
+    return { kind: candidate.kind as "keep_all" | "choose_per_file" | "none" };
+  };
+  return { kind: "video", audio: stream(value.audio), subtitles: stream(value.subtitles) };
 }
 
 function bounded(value: unknown, depth = 0): boolean {
@@ -130,6 +180,9 @@ function validFiles(value: unknown, compress: boolean): boolean {
       validateAudioOptions(file.audioOptions);
       validateVideoOptions(file.videoOptions);
       validateTrackOptions(file.trackOptions);
+      validateTrackPolicy(file.pendingTrackPolicy);
+      validateVideoTrackPolicyDraft(file.videoTrackPolicyDraft);
+      if (file.videoTrackOptionsEnabled !== undefined && typeof file.videoTrackOptionsEnabled !== "boolean") throw new Error("invalid video track opt-in marker");
       return !compress || file.mode != null;
     } catch { return false; }
   });

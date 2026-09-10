@@ -150,6 +150,16 @@ describe("PresetChips", () => {
     expect(applied.track_policy).not.toBe(policy);
   });
 
+  it("preserves independent video track families when applying a chip", async () => {
+    const policy = { kind: "video" as const, audio: { kind: "choose_per_file" as const }, subtitles: { kind: "none" as const } };
+    resetStore({ presets: [makePreset({ id: "video-tracks", name: "Video tracks", target: "mkv", video_options: { kind: "copy" }, track_policy: policy })] });
+    const onApply = vi.fn();
+    render(<PresetChips kind="convert" onApply={onApply} />);
+    await userEvent.click(screen.getByRole("button", { name: /Video tracks/ }));
+    expect(onApply.mock.calls[0][0].track_policy).toEqual(policy);
+    expect(onApply.mock.calls[0][0].track_policy).not.toBe(policy);
+  });
+
   it("exposes named preset buttons in list items with native keyboard activation", async () => {
     const preset = makePreset({
       id: "gif-social",
@@ -379,6 +389,22 @@ describe("audio track preset snapshots", () => {
     const saved = vi.mocked(api.preset.save).mock.calls[0][0];
     expect(saved.track_policy).toEqual({ kind: "audio", selection: { kind: "choose_per_file" } });
     expect(JSON.stringify(saved)).not.toMatch(/canonical_path|stream_index|inventory/);
+  });
+});
+
+describe("video track preset snapshots", () => {
+  afterEach(cleanup);
+  beforeEach(() => { vi.clearAllMocks(); resetStore(); });
+
+  it("explains and saves independent portable family policies", async () => {
+    const { default: Dialog } = await import("../PresetSaveDialog");
+    const policy = { kind: "video" as const, audio: { kind: "choose_per_file" as const }, subtitles: { kind: "none" as const } };
+    render(<Dialog open onClose={() => {}} snapshot={{ target: "mkv", video_options: { kind: "copy" }, track_policy: policy }} />);
+    expect(screen.getByText("Audio and subtitle policies will be resolved for each source.")).toBeDefined();
+    await userEvent.type(screen.getByRole("textbox", { name: "Preset name" }), "Video tracks");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(api.preset.save).toHaveBeenCalledOnce());
+    expect(vi.mocked(api.preset.save).mock.calls[0][0].track_policy).toEqual(policy);
   });
 });
 

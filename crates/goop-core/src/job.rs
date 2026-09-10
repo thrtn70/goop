@@ -114,6 +114,9 @@ pub struct JobResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub track_execution: Option<crate::tracks::TrackExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub video_track_execution: Option<crate::tracks::VideoTrackExecutionSummary>,
 }
 
 fn default_file_count() -> u32 {

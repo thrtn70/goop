@@ -67,30 +67,54 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
     goop_core::validate_audio_request(&request)
         .and_then(|()| goop_core::validate_video_request(&request))
         .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
-        .and_then(|()| {
-            if preset.track_policy.is_none() {
-                return Ok(());
+        .and_then(|()| match preset.track_policy.as_ref() {
+            None => Ok(()),
+            Some(goop_core::TrackPresetPolicy::Audio { .. }) => {
+                if preset.audio_options.is_none() {
+                    return Err(GoopError::Config(format!(
+                        "Preset \"{}\": audio track selection requires Copy audio or Custom encode",
+                        preset.name
+                    )));
+                }
+                if !matches!(
+                    preset.target,
+                    TargetFormat::Mp3
+                        | TargetFormat::M4a
+                        | TargetFormat::Aac
+                        | TargetFormat::Wav
+                        | TargetFormat::Flac
+                ) {
+                    return Err(GoopError::Config(format!(
+                        "Preset \"{}\": audio track selection requires MP3, M4A, AAC, WAV or FLAC output",
+                        preset.name
+                    )));
+                }
+                Ok(())
             }
-            if preset.audio_options.is_none() {
-                return Err(GoopError::Config(format!(
-                    "Preset \"{}\": audio track selection requires Copy audio or Custom encode",
-                    preset.name
-                )));
+            Some(goop_core::TrackPresetPolicy::Video { .. }) => {
+                if preset.video_options.is_none() {
+                    return Err(GoopError::Config(format!(
+                        "Preset \"{}\": video track policies require explicit Copy or Custom video settings",
+                        preset.name
+                    )));
+                }
+                if preset.audio_options.is_some() {
+                    return Err(GoopError::Config(format!(
+                        "Preset \"{}\": video track policies cannot be combined with audio-only processing",
+                        preset.name
+                    )));
+                }
+                if !matches!(
+                    preset.target,
+                    TargetFormat::Mp4 | TargetFormat::Mov | TargetFormat::Mkv
+                ) {
+                    return Err(GoopError::Config(format!(
+                        "Preset \"{}\": video track policies require MP4, MOV or MKV output",
+                        preset.name
+                    )));
+                }
+                Ok(())
             }
-            if !matches!(
-                preset.target,
-                TargetFormat::Mp3
-                    | TargetFormat::M4a
-                    | TargetFormat::Aac
-                    | TargetFormat::Wav
-                    | TargetFormat::Flac
-            ) {
-                return Err(GoopError::Config(format!(
-                    "Preset \"{}\": audio track selection requires MP3, M4A, AAC, WAV or FLAC output",
-                    preset.name
-                )));
-            }
-            Ok(())
         })
 }
 
@@ -305,6 +329,54 @@ mod tests {
         assert!(validate(&preset).is_err());
         preset.audio_options = Some(goop_core::AudioConvertOptions::Copy);
         assert!(validate(&preset).is_ok());
+    }
+
+    #[test]
+    fn portable_video_track_policies_roundtrip_without_source_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("video-tracks", "Keep video tracks");
+        preset.quality_preset = None;
+        preset.video_options = Some(goop_core::VideoConvertOptions::Copy);
+        preset.track_policy = Some(goop_core::TrackPresetPolicy::Video {
+            audio: goop_core::TrackPresetStreamPolicy::KeepAll,
+            subtitles: goop_core::TrackPresetStreamPolicy::ChoosePerFile,
+        });
+
+        save(&path, std::slice::from_ref(&preset)).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![preset]);
+        let stored = std::fs::read_to_string(path).unwrap();
+        assert!(stored.contains("keep_all"));
+        assert!(stored.contains("choose_per_file"));
+        assert!(!stored.contains("canonical_path"));
+        assert!(!stored.contains("stream_index"));
+        assert!(!stored.contains("inventory"));
+    }
+
+    #[test]
+    fn video_track_policy_requires_supported_explicit_video_intent() {
+        let mut preset = sample("video-tracks", "Video tracks");
+        preset.track_policy = Some(goop_core::TrackPresetPolicy::Video {
+            audio: goop_core::TrackPresetStreamPolicy::None,
+            subtitles: goop_core::TrackPresetStreamPolicy::KeepAll,
+        });
+        assert!(validate(&preset).is_err());
+
+        preset.quality_preset = None;
+        preset.video_options = Some(goop_core::VideoConvertOptions::Copy);
+        assert!(validate(&preset).is_ok());
+
+        preset.target = TargetFormat::Webm;
+        assert!(validate(&preset).is_err());
+        preset.target = TargetFormat::Mp4;
+        preset.audio_options = Some(goop_core::AudioConvertOptions::Copy);
+        assert!(validate(&preset).is_err());
+        preset.audio_options = None;
+        preset.subtitle = Some(goop_core::SubtitleOptions {
+            source_path: "sub.srt".into(),
+            mode: goop_core::SubtitleMode::Soft,
+        });
+        assert!(validate(&preset).is_err());
     }
 
     #[test]

@@ -4,16 +4,24 @@ import type {
   TrackChoiceCapability,
   TrackConvertOptions,
   TrackSettingsCapabilities,
+  TrackPresetPolicy,
   TrackSourceBinding,
   TrackTextFact,
+  VideoTrackSettingsCapabilities,
 } from "@/types";
+import type { VideoTrackPolicyDraft } from "./videoTrackOptions";
 
 export interface TrackDraftFile {
   audioOptions?: AudioConvertOptions | null;
   trackOptions?: TrackConvertOptions | null;
   trackSettings?: TrackSettingsCapabilities | null;
+  videoTrackSettings?: VideoTrackSettingsCapabilities | null;
+  pendingTrackPolicy?: TrackPresetPolicy | null;
+  videoTrackOptionsEnabled?: boolean;
+  videoTrackPolicyDraft?: VideoTrackPolicyDraft | null;
   trackSourceUnavailableReason?: string | null;
 }
+type AudioTrackOptions = Extract<TrackConvertOptions, { kind: "audio" }>;
 
 function cloneTextFact(fact: TrackTextFact): TrackTextFact {
   return fact.kind === "value" ? { kind: "value", value: fact.value } : { kind: fact.kind };
@@ -43,6 +51,18 @@ export function cloneTrackOptions(
   options: TrackConvertOptions | null | undefined,
 ): TrackConvertOptions | null {
   if (!options) return null;
+  if (options.kind === "video") {
+    return {
+      kind: "video",
+      source: cloneTrackSource(options.source),
+      audio: options.audio.kind === "choose"
+        ? { kind: "choose", stream_indices: [...options.audio.stream_indices] }
+        : { kind: options.audio.kind },
+      subtitles: options.subtitles.kind === "choose"
+        ? { kind: "choose", stream_indices: [...options.subtitles.stream_indices] }
+        : { kind: options.subtitles.kind },
+    };
+  }
   return {
     kind: "audio",
     source: cloneTrackSource(options.source),
@@ -61,15 +81,15 @@ export function selectedTrackChoice(
   settings: TrackSettingsCapabilities | null | undefined,
   options: TrackConvertOptions | null | undefined,
 ): TrackChoiceCapability | null {
-  if (!settings || !options || !sameTrackSource(settings.source, options.source)) return null;
+  if (!settings || options?.kind !== "audio" || !sameTrackSource(settings.source, options.source)) return null;
   return settings.audio_choices.find((choice) => choice.track.index === options.stream_index) ?? null;
 }
 
 export function resolvedTrackOptions(
   options: TrackConvertOptions | null | undefined,
   settings: TrackSettingsCapabilities | null | undefined,
-): TrackConvertOptions | null {
-  if (options) return cloneTrackOptions(options);
+): AudioTrackOptions | null {
+  if (options?.kind === "audio") return cloneTrackOptions(options) as AudioTrackOptions;
   if (!settings || settings.audio_choices.length !== 1) return null;
   return {
     kind: "audio",
@@ -81,7 +101,7 @@ export function resolvedTrackOptions(
 /** A different canonical file is a new choice; same-path mutations stay visible as stale. */
 export function trackOptionsAfterSourceReplacement(
   options: TrackConvertOptions | null | undefined,
-  settings: TrackSettingsCapabilities | null | undefined,
+  settings: Pick<TrackSettingsCapabilities, "source"> | null | undefined,
 ): TrackConvertOptions | null | undefined {
   if (!options || !settings) return options;
   return options.source.canonical_path === settings.source.canonical_path ? options : null;

@@ -356,6 +356,9 @@ pub struct ConvertResult {
     pub track_execution: Option<crate::tracks::TrackExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub video_track_execution: Option<crate::tracks::VideoTrackExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,
     #[serde(default)]
     #[ts(optional = nullable)]
