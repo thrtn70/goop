@@ -269,6 +269,7 @@ mod tests {
                 track_execution: None,
                 audio_execution: None,
                 video_execution: None,
+                video_track_execution: None,
                 output_path: Some(output.to_string_lossy().into()),
                 bytes: Some(6),
                 duration_ms: 0,

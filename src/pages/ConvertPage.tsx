@@ -53,6 +53,14 @@ import {
   trackRequestOptions,
   trackSelectionProblem,
 } from "@/features/convert/trackOptions";
+import {
+  resolvedVideoTrackOptions,
+  videoTrackOptionsProblem,
+  videoTrackOptionsFromPreset,
+  videoTrackPolicyForPreset,
+  cloneVideoTrackPolicyDraft,
+  appliedVideoTrackState,
+} from "@/features/convert/videoTrackOptions";
 
 import { useAppStore } from "@/store/appStore";
 import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
@@ -91,12 +99,18 @@ function ConvertPage() {
     const targetCapability = state.capabilities.targets.find(c => c.target === file.target);
     const audioSettings = targetCapability?.audio_settings;
     const trackSettings = targetCapability?.track_settings;
+    const videoTrackSettings = targetCapability?.video_track_settings;
     const probe = state.probe;
-    const sourceScopedOptions = trackOptionsAfterSourceReplacement(file.trackOptions, trackSettings);
-    const effectiveTrackOptions = file.audioOptions
-      ? resolvedTrackOptions(sourceScopedOptions, trackSettings)
-      : cloneTrackOptions(sourceScopedOptions);
-    const selectedChoice = selectedTrackChoice(trackSettings, effectiveTrackOptions);
+    const sourceScopedOptions = trackOptionsAfterSourceReplacement(file.trackOptions, file.videoOptions ? videoTrackSettings : trackSettings);
+    const videoTrackEnabled = file.videoTrackOptionsEnabled === true || sourceScopedOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video";
+    const effectiveTrackOptions = file.videoOptions && videoTrackEnabled
+      ? file.pendingTrackPolicy?.kind === "video"
+        ? videoTrackOptionsFromPreset(file.pendingTrackPolicy, videoTrackSettings)
+        : resolvedVideoTrackOptions(sourceScopedOptions, videoTrackSettings)
+      : file.audioOptions
+        ? resolvedTrackOptions(sourceScopedOptions, trackSettings)
+        : cloneTrackOptions(sourceScopedOptions);
+    const selectedChoice = selectedTrackChoice(trackSettings, effectiveTrackOptions?.kind === "audio" ? effectiveTrackOptions : null);
     const baseAvailability = audioAvailability(audioSettings, targetCapability?.available ?? false, targetCapability?.reason);
     const copyChoices = trackSettings?.audio_choices.filter(choice => choice.copy.available) ?? [];
     const encodeChoices = trackSettings?.audio_choices.filter(choice => choice.encode.available) ?? [];
@@ -118,6 +132,8 @@ function ConvertPage() {
         ? {}
         : { trackOptions: effectiveTrackOptions }),
       trackSettings,
+      videoTrackSettings,
+      videoTrackOptionsEnabled: file.videoTrackOptionsEnabled,
       trackSourceUnavailableReason: state.track_source_unavailable_reason ?? null,
       audioAvailability: {
         ...baseAvailability,
@@ -171,15 +187,17 @@ function ConvertPage() {
     setFiles((previous) => {
       let changed = false;
       const next = previous.map((file) => {
-        if (!file.trackOptions) return file;
+        const boundSource = file.trackOptions?.source ?? file.videoTrackPolicyDraft?.source;
+        if (!boundSource) return file;
         const state = byId[file.id ?? ""];
         if (state?.phase !== "ready") return file;
-        const currentSource = state.capabilities.targets.find(
-          (target) => target.target === file.target,
-        )?.track_settings?.source;
-        if (!currentSource || currentSource.canonical_path === file.trackOptions.source.canonical_path) return file;
+        const target = state.capabilities.targets.find(candidate => candidate.target === file.target);
+        const currentSource = file.trackOptions?.kind === "video" || file.videoTrackPolicyDraft
+          ? target?.video_track_settings?.source
+          : target?.track_settings?.source;
+        if (!currentSource || currentSource.canonical_path === boundSource.canonical_path) return file;
         changed = true;
-        return { ...file, trackOptions: null, revision: (file.revision ?? 0) + 1 };
+        return { ...file, trackOptions: null, pendingTrackPolicy: null, videoTrackPolicyDraft: null, revision: (file.revision ?? 0) + 1 };
       });
       return changed ? next : previous;
     });
@@ -188,12 +206,13 @@ function ConvertPage() {
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
   const selectedVideo = videoFiles.find(file => file.id === selected?.id);
   const planEntries = videoFiles.flatMap(file => {
-    if (!file.id || !file.videoOptions || !file.optionsReady || videoOptionsError(file)) return [];
+    const videoTrackEnabled = file.videoTrackOptionsEnabled === true || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video";
+    if (!file.id || !file.videoOptions || !file.optionsReady || videoOptionsError(file) || (videoTrackEnabled && videoTrackOptionsProblem({ options: file.trackOptions, settings: file.videoTrackSettings, mode: file.videoOptions.kind === "copy" ? "copy" : "custom", unavailableReason: file.trackSourceUnavailableReason, pendingPolicy: file.pendingTrackPolicy }))) return [];
     return [{
-      id: file.id, sourceIdentity: JSON.stringify([file.id, file.revision]),
+      id: file.id, sourceIdentity: JSON.stringify([file.id, file.revision, file.trackOptions]),
       request: {
         input_path: file.path, output_path: "", target: file.target,
-        video_options: videoRequestOptions(file), quality_preset: null, resolution_cap: file.resolutionCap,
+        video_options: videoRequestOptions(file), ...(file.trackOptions === undefined ? {} : { track_options: cloneTrackOptions(file.trackOptions) }), quality_preset: null, resolution_cap: file.resolutionCap,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
         subtitle: file.subtitle, gif_options: file.gifOptions, image_options: cloneImageOptions(file.imageOptions),
       },
@@ -230,6 +249,11 @@ function ConvertPage() {
   const audioPlan = audioPlans[selected?.id ?? ""];
   const planProblem = (file: FileEntry) => {
     if (file.videoOptions) {
+      const videoTrackEnabled = file.videoTrackOptionsEnabled === true || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video";
+      const trackProblem = videoTrackEnabled ? videoTrackOptionsProblem({ options: file.trackOptions, settings: file.videoTrackSettings,
+        mode: file.videoOptions.kind === "copy" ? "copy" : "custom", unavailableReason: file.trackSourceUnavailableReason,
+        pendingPolicy: file.pendingTrackPolicy }) : null;
+      if (trackProblem) return trackProblem;
       const plan = videoPlans[file.id ?? ""];
       return plan?.summary ? null : plan?.error ?? "Checking video processing…";
     }
@@ -381,6 +405,11 @@ function ConvertPage() {
                 videoOptions: cloneVideoOptions(opts.videoOptions),
                 audioOptions: cloneAudioOptions(opts.audioOptions),
                 ...(opts.trackOptions === undefined ? {} : { trackOptions: cloneTrackOptions(opts.trackOptions) }),
+                ...(opts.pendingTrackPolicy === undefined ? {} : { pendingTrackPolicy: opts.pendingTrackPolicy ? structuredClone(opts.pendingTrackPolicy) : null }),
+                ...(opts.videoTrackPolicyDraft === undefined ? {} : { videoTrackPolicyDraft: cloneVideoTrackPolicyDraft(opts.videoTrackPolicyDraft) }),
+                videoTrackOptionsEnabled: current?.videoTrackOptionsEnabled === true
+                  || (current?.videoOptions == null && opts.videoOptions != null && Boolean((opts.videoTrackSettings?.audio_tracks.length ?? 0) > 1 || opts.videoTrackSettings?.subtitle_tracks.length))
+                  || opts.trackOptions?.kind === "video" || opts.pendingTrackPolicy?.kind === "video" || Boolean(opts.videoTrackPolicyDraft),
                 metadataPolicy: opts.metadataPolicy,
                 subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
@@ -407,28 +436,47 @@ function ConvertPage() {
   // Validate the whole proposed batch before changing any entry or raw editor.
   const applySettings = (settings: FileRowOptions, sourceId?: string) => {
     const carriesTrackIntent = settings.trackOptions !== undefined;
-    const next = files.map(file => ({
+    const portableVideoPolicy = settings.pendingTrackPolicy?.kind === "video"
+      ? settings.pendingTrackPolicy
+      : videoTrackPolicyForPreset(settings.trackOptions);
+    const next = files.map(file => {
+      const state = byId[file.id ?? ""];
+      const videoTrackSettings = state?.phase === "ready"
+        ? state.capabilities.targets.find(target => target.target === settings.target)?.video_track_settings
+        : null;
+      const preservedSourceVideo = sourceId === file.id && settings.trackOptions?.kind === "video"
+        ? cloneTrackOptions(settings.trackOptions)
+        : null;
+      const resolvedVideo = preservedSourceVideo
+        ?? (portableVideoPolicy ? videoTrackOptionsFromPreset(portableVideoPolicy, videoTrackSettings) : null);
+      return ({
       ...file,
       target: settings.target, metadataPolicy: settings.metadataPolicy,
       qualityPreset: settings.qualityPreset ?? null,
       resolutionCap: settings.resolutionCap ?? null,
       optionsReady: true,
+      videoTrackOptionsEnabled: settings.videoTrackOptionsEnabled === true || settings.trackOptions?.kind === "video" || settings.pendingTrackPolicy?.kind === "video",
       revision: (file.revision ?? 0) + 1,
       imageOptions: cloneImageOptions(settings.imageOptions),
       videoOptions: cloneVideoOptions(settings.videoOptions),
       audioOptions: cloneAudioOptions(settings.audioOptions),
       ...(carriesTrackIntent
-        ? { trackOptions: sourceId === file.id && settings.trackOptions
-          ? cloneTrackOptions(settings.trackOptions)
-          : null }
-        : { trackOptions: undefined }),
+        ? portableVideoPolicy
+          ? appliedVideoTrackState({ policy: portableVideoPolicy, settings: videoTrackSettings, preserved: resolvedVideo })
+          : { trackOptions: sourceId === file.id && settings.trackOptions
+            ? cloneTrackOptions(settings.trackOptions)
+            : null, pendingTrackPolicy: null, videoTrackPolicyDraft: null }
+        : { trackOptions: undefined, pendingTrackPolicy: undefined, videoTrackPolicyDraft: undefined }),
       gifOptions: settings.gifOptions ? { ...settings.gifOptions } : null,
       subtitle: settings.subtitle ? { ...settings.subtitle } : null,
-    }));
+      });
+    });
     const incompatible = next.map(withAudioInspection).flatMap(file => {
       const state = byId[file.id ?? ""] ?? PROBING;
       const capability = state.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null;
-      const problem = audioOptionsProblem(file) ?? videoOptionsError({...file, videoCapability:capability}) ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state);
+      const problem = audioOptionsProblem(file)
+        ?? videoOptionsError({...file, videoCapability:capability})
+        ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state);
       return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
     });
     if (incompatible.length) {
@@ -453,6 +501,8 @@ function ConvertPage() {
       qualityPreset: preset.quality_preset,
       resolutionCap: preset.resolution_cap,
       trackOptions: preset.track_policy ? null : undefined,
+      pendingTrackPolicy: preset.track_policy ?? undefined,
+      videoTrackOptionsEnabled: preset.track_policy?.kind === "video" || undefined,
     });
   };
 
@@ -490,7 +540,11 @@ function ConvertPage() {
   const baseProblems = files.map((f, i) =>
     audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
   );
-  const problems = plannedFiles.map((file, index) => trackSelectionProblem(file) ?? baseProblems[index]);
+  const problems = plannedFiles.map((file, index) => (file.videoOptions && (file.videoTrackOptionsEnabled || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video") ? videoTrackOptionsProblem({
+    options: file.trackOptions, settings: file.videoTrackSettings,
+    mode: file.videoOptions.kind === "copy" ? "copy" : "custom",
+    unavailableReason: file.trackSourceUnavailableReason, pendingPolicy: file.pendingTrackPolicy,
+  }) : trackSelectionProblem(file)) ?? baseProblems[index]);
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
     <WorkspaceFrame

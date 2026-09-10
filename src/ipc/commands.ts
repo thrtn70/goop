@@ -47,28 +47,38 @@ import type {
 
 function cloneTrackOptions(options: TrackConvertOptions | null | undefined): TrackConvertOptions | null {
   if (!options) return null;
+  const source = {
+    ...options.source,
+    inventory: {
+      ...options.source.inventory,
+      streams: options.source.inventory.streams.map(stream => ({
+        ...stream,
+        codec_name: { ...stream.codec_name },
+        container_stream_id: { ...stream.container_stream_id },
+        language: { ...stream.language },
+        title: { ...stream.title },
+        disposition: { ...stream.disposition, other: { ...stream.disposition.other } },
+      })),
+    },
+  };
+  if (options.kind === "video") return {
+    kind: "video",
+    source,
+    audio: options.audio.kind === "choose" ? { kind: "choose", stream_indices: [...options.audio.stream_indices] } : { kind: options.audio.kind },
+    subtitles: options.subtitles.kind === "choose" ? { kind: "choose", stream_indices: [...options.subtitles.stream_indices] } : { kind: options.subtitles.kind },
+  };
   return {
     kind: "audio",
     stream_index: options.stream_index,
-    source: {
-      ...options.source,
-      inventory: {
-        ...options.source.inventory,
-        streams: options.source.inventory.streams.map(stream => ({
-          ...stream,
-          codec_name: { ...stream.codec_name },
-          container_stream_id: { ...stream.container_stream_id },
-          language: { ...stream.language },
-          title: { ...stream.title },
-          disposition: { ...stream.disposition, other: { ...stream.disposition.other } },
-        })),
-      },
-    },
+    source,
   };
 }
 
 function cloneTrackPolicy(policy: TrackPresetPolicy | null | undefined): TrackPresetPolicy | null {
-  return policy ? { kind: "audio", selection: { kind: "choose_per_file" } } : null;
+  if (!policy) return null;
+  return policy.kind === "audio"
+    ? { kind: "audio", selection: { kind: "choose_per_file" } }
+    : { kind: "video", audio: { kind: policy.audio.kind }, subtitles: { kind: policy.subtitles.kind } };
 }
 
 // The ts-rs-generated `CompressMode` declares `value: bigint` for
@@ -162,7 +172,7 @@ export const api = {
     cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
   },
   convert: {
-    videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), gif_options: gifToIpc(req.gif_options) } }),
+    videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), ...(req.track_options === undefined ? {} : {track_options: cloneTrackOptions(req.track_options)}), gif_options: gifToIpc(req.gif_options) } }),
     audioPlan: (req: ConvertRequest) => invoke<AudioExecutionSummary>("convert_audio_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), ...(req.track_options === undefined ? {} : {track_options: cloneTrackOptions(req.track_options)}), gif_options: gifToIpc(req.gif_options) } }),
     inspect: (path: string) => invoke<ConversionInspection>("convert_inspect", { path }),
     capabilities: (path: string) => invoke<ConversionCapabilities>("convert_capabilities", { path }),

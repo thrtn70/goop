@@ -14,7 +14,7 @@ import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/vide
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 6 as const;
+export const PRESET_BUNDLE_VERSION = 7 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -167,13 +167,27 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function cloneTrackPolicy(value: TrackPresetPolicy | null | undefined): TrackPresetPolicy | null {
-  return value ? { kind: "audio", selection: { kind: "choose_per_file" } } : null;
+  if (!value) return null;
+  return value.kind === "audio"
+    ? { kind: "audio", selection: { kind: "choose_per_file" } }
+    : { kind: "video", audio: { kind: value.audio.kind }, subtitles: { kind: value.subtitles.kind } };
 }
 
-function validateTrackPolicy(value: unknown): TrackPresetPolicy | null {
+function validateTrackPolicy(value: unknown, version: number): TrackPresetPolicy | null {
   if (value == null) return null;
-  if (!isObject(value) || !hasExactKeys(value, ["kind", "selection"]) || value.kind !== "audio") {
-    throw new Error("track_policy must be the portable audio Choose per file policy");
+  if (!isObject(value) || typeof value.kind !== "string") throw new Error("track_policy is malformed");
+  if (value.kind === "video") {
+    if (version < 7 || !hasExactKeys(value, ["kind", "audio", "subtitles"])) throw new Error("track_policy video policy requires schema 7");
+    const streamPolicy = (candidate: unknown) => {
+      if (!isObject(candidate) || !hasExactKeys(candidate, ["kind"]) || !["keep_all", "choose_per_file", "none"].includes(String(candidate.kind))) {
+        throw new Error("track_policy video stream policy is malformed");
+      }
+      return { kind: candidate.kind as "keep_all" | "choose_per_file" | "none" };
+    };
+    return { kind: "video", audio: streamPolicy(value.audio), subtitles: streamPolicy(value.subtitles) };
+  }
+  if (!hasExactKeys(value, ["kind", "selection"]) || value.kind !== "audio") {
+    throw new Error("track_policy must be a portable audio or video policy");
   }
   const selection = value.selection;
   if (!isObject(selection) || !hasExactKeys(selection, ["kind"]) || selection.kind !== "choose_per_file") {
@@ -280,12 +294,15 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     if (version < 5 && v.audio_options != null) throw new Error("audio_options is not allowed before schema 5");
     audioOptions = validateAudioRequest({ ...requestEntry, target: v.target as TargetFormat });
     if (version < 6 && v.track_policy != null) throw new Error("track_policy is not allowed before schema 6");
-    trackPolicy = validateTrackPolicy(v.track_policy);
-    if (trackPolicy !== null && audioOptions === null) {
+    trackPolicy = validateTrackPolicy(v.track_policy, version);
+    if (trackPolicy?.kind === "audio" && audioOptions === null) {
       throw new Error("track_policy requires Copy audio or Custom encode");
     }
-    if (trackPolicy !== null && !["mp3", "m4a", "aac", "wav", "flac"].includes(String(v.target))) {
+    if (trackPolicy?.kind === "audio" && !["mp3", "m4a", "aac", "wav", "flac"].includes(String(v.target))) {
       throw new Error("track_policy requires MP3, M4A, AAC, WAV or FLAC output");
+    }
+    if (trackPolicy?.kind === "video" && (videoOptions === null || !["mp4", "mov", "mkv"].includes(String(v.target)))) {
+      throw new Error("video track_policy requires explicit MP4, MOV or MKV video settings");
     }
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
@@ -326,15 +343,15 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== PRESET_BUNDLE_VERSION) {
+  if (![1, 2, 3, 4, 5, 6, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
     throw new PresetParseError(
-      `unsupported bundle version: ${String(parsed.version)} (expected 1, 2, 3, 4, 5 or ${PRESET_BUNDLE_VERSION})`,
+      `unsupported bundle version: ${String(parsed.version)} (expected 1 through ${PRESET_BUNDLE_VERSION})`,
     );
   }
   if (!Array.isArray(parsed.presets)) {
     throw new PresetParseError("file is missing the `presets` array");
   }
-  const version = parsed.version;
+  const version = Number(parsed.version);
   return parsed.presets.map((entry, idx) => validateEntry(entry, idx, version));
 }
 

@@ -1,6 +1,7 @@
 import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { useAppStore } from "@/store/appStore";
 import type { Preset } from "@/types";
+import { cloneTrackPresetPolicy } from "@/features/convert/videoTrackOptions";
 
 interface PresetChipsProps {
   kind: "convert" | "compress";
@@ -31,16 +32,14 @@ export default function PresetChips({ kind, onApply }: PresetChipsProps) {
               ...p,
               ...(p.video_options === undefined ? {} : {video_options: cloneVideoOptions(p.video_options)}),
               ...(p.track_policy === undefined ? {} : {
-                track_policy: p.track_policy
-                  ? { kind: "audio", selection: { kind: "choose_per_file" } }
-                  : null,
+                track_policy: cloneTrackPresetPolicy(p.track_policy),
               }),
             })}
             title={p.name}
             className="btn-press rounded-full border border-subtle bg-surface-1 px-3 py-1 text-xs text-fg-secondary transition duration-fast ease-out hover:border-accent hover:text-accent"
           >
             {p.name}
-            {p.track_policy && <span className="ml-1 text-fg-muted">· Choose track</span>}
+            {p.track_policy && <span className="ml-1 text-fg-muted">· {p.track_policy.kind === "video" ? "Video tracks" : "Choose track"}</span>}
           </button>
         </li>
       ))}

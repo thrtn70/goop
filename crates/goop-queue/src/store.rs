@@ -1578,6 +1578,7 @@ mod tests {
             });
             if explicit_null {
                 legacy_result["video_execution"] = serde_json::Value::Null;
+                legacy_result["video_track_execution"] = serde_json::Value::Null;
             }
             store
                 .conn
@@ -1600,6 +1601,7 @@ mod tests {
             assert_eq!(result.bytes, Some(4242));
             assert_eq!(result.duration_ms, 2000);
             assert_eq!(result.video_execution, None);
+            assert_eq!(result.video_track_execution, None);
         }
     }
 
@@ -2116,6 +2118,7 @@ mod tests {
             track_execution: None,
             audio_execution: None,
             video_execution: None,
+            video_track_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,

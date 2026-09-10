@@ -230,7 +230,7 @@ fn subtitle_copy_matrix_is_exact_for_copy_and_custom() {
         (TargetFormat::Mov, "mov_text", true),
         (TargetFormat::Mkv, "subrip", true),
         (TargetFormat::Mkv, "ass", true),
-        (TargetFormat::Mkv, "ssa", true),
+        (TargetFormat::Mkv, "ssa", false),
         (TargetFormat::Mkv, "webvtt", true),
         (TargetFormat::Mp4, "subrip", false),
         (TargetFormat::Mkv, "srt", false),

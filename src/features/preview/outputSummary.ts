@@ -1,4 +1,4 @@
-import type { AudioExecutionSummary, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary } from "@/types";
+import type { AudioExecutionSummary, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary, VideoTrackExecutionSummary } from "@/types";
 
 function rational(fact: VideoRationalFact | null | undefined): string | null {
   return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
@@ -108,6 +108,24 @@ export function trackExecutionText(summary: TrackExecutionSummary): string {
   return facts.join(" · ");
 }
 
+export function videoTrackExecutionText(summary: VideoTrackExecutionSummary): string {
+  const facts = summary.retained.map(outcome => {
+    const family = outcome.source.codec_type === "audio" ? "Audio" : "Subtitle";
+    const processing = outcome.processing.kind === "copied" ? "copied" : `encoded AAC ${outcome.processing.bitrate_kbps} kbps`;
+    const sourceTag = trackFact(outcome.source_codec_tag, "source tag not reported");
+    const outputCodec = trackFact(outcome.output_codec_name, "codec not reported").toUpperCase();
+    const outputTag = trackFact(outcome.output_codec_tag, "tag not reported");
+    const language = trackFact(outcome.output_language, "Language not reported", true);
+    const title = trackFact(outcome.output_title, "Title not reported");
+    const defaultFact = outcome.output_default == null ? "Default not reported" : outcome.output_default ? "Default" : "Not default";
+    const forcedFact = outcome.output_forced == null ? "Forced not reported" : outcome.output_forced ? "Forced" : "Not forced";
+    return `${family} stream ${outcome.source.index} ${processing} → output ${outcome.output_stream_index} · source tag ${sourceTag} · output ${outputCodec} (${outputTag}) · ${language} · ${title} · ${defaultFact} · ${forcedFact}`;
+  });
+  if (summary.omitted_audio.length) facts.push(`${summary.omitted_audio.length} audio ${summary.omitted_audio.length === 1 ? "stream" : "streams"} omitted`);
+  if (summary.omitted_subtitles.length) facts.push(`${summary.omitted_subtitles.length} subtitle ${summary.omitted_subtitles.length === 1 ? "stream" : "streams"} omitted`);
+  return [...facts, ...summary.notices].join(" · ");
+}
+
 /** Measured results only; old history entries do not imply zero source bytes. */
 export function outputSummary(result: JobResult | null | undefined, job?: Pick<Job, "kind" | "payload">): string | null {
   if (!result) return null;
@@ -124,9 +142,10 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
     facts.push(output <= target ? "Target met" : "Target missed");
   }
   if (result.track_execution) facts.push(trackExecutionText(result.track_execution));
+  if (result.video_track_execution) facts.push(videoTrackExecutionText(result.video_track_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
   else if (result.video_execution) facts.push(videoExecutionText(result.video_execution));
-  else if (!result.track_execution) {
+  else if (!result.track_execution && !result.video_track_execution) {
     if (result.reencoded === false) facts.push("No re-encode reported");
     const payload = job?.payload;
     const target = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.target : null;

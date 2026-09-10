@@ -427,7 +427,7 @@ describe("schema 6 portable track policy", () => {
     });
     const raw = serializePresets([preset]);
     const wire = JSON.parse(raw);
-    expect(wire.version).toBe(6);
+    expect(wire.version).toBe(7);
     expect(wire.presets[0].track_policy).toEqual(choosePerFile);
     expect(raw).not.toContain("canonical_path");
     expect(raw).not.toContain("stream_index");
@@ -471,5 +471,35 @@ describe("schema 6 portable track policy", () => {
       version: 6,
       presets: [{ name: "Wrong target", target, audio_options: { kind: "copy" }, track_policy: choosePerFile }],
     }))).toThrow(/Wrong target.*(track_policy|Explicit audio)/);
+  });
+});
+
+describe("schema 7 portable video track policy", () => {
+  const policy = { kind: "video", audio: { kind: "choose_per_file" }, subtitles: { kind: "none" } } as const;
+
+  it("roundtrips independent families without source identity", () => {
+    const preset = makePreset({ target: "mkv", quality_preset: null, resolution_cap: null, video_options: { kind: "copy" }, track_policy: policy });
+    const raw = serializePresets([preset]);
+    expect(JSON.parse(raw).version).toBe(7);
+    expect(entriesToPresets(parsePresetBundle(raw), [])[0].track_policy).toEqual(policy);
+    expect(raw).not.toMatch(/canonical_path|stream_indices|inventory/);
+  });
+
+  it.each([
+    { ...policy, extra: true },
+    { kind: "video", audio: { kind: "choose", stream_indices: [1] }, subtitles: { kind: "none" } },
+    { kind: "video", audio: { kind: "keep_all" }, subtitles: { kind: "unknown" } },
+  ])("rejects malformed video policy: %j", (track_policy) => {
+    expect(() => parsePresetBundle(JSON.stringify({ version: 7, presets: [
+      { name: "Bad video policy", target: "mkv", video_options: { kind: "copy" }, track_policy },
+    ] }))).toThrow(/Bad video policy.*track_policy/);
+  });
+
+  it("rejects video policy in schema 6 and for non-video explicit targets", () => {
+    for (const [version, target] of [[6, "mkv"], [7, "webm"], [7, "mp3"]] as const) {
+      expect(() => parsePresetBundle(JSON.stringify({ version, presets: [
+        { name: "Wrong scope", target, video_options: { kind: "copy" }, track_policy: policy },
+      ] }))).toThrow(/Wrong scope/);
+    }
   });
 });

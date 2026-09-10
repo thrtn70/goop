@@ -21,6 +21,8 @@ import type {
   ProbeResult,
   TrackConvertOptions,
   TrackSettingsCapabilities,
+  VideoTrackSettingsCapabilities,
+  TrackPresetPolicy,
 } from "@/types";
 import VideoOptionsPanel from "./VideoOptionsPanel";
 import AudioOptionsPanel from "./AudioOptionsPanel";
@@ -30,6 +32,8 @@ import { cloneImageOptions, imageOptionsProblem } from "./imageOptions";
 import GifOptionsPanel from "./GifOptionsPanel";
 import SubtitleField, { subtitleSupport } from "./SubtitleField";
 import AudioTrackPanel from "./AudioTrackPanel";
+import VideoTrackPanel from "./VideoTrackPanel";
+import { cloneVideoTrackPolicyDraft, completeVideoTrackOptions, defaultVideoTrackOptions, shouldOfferVideoTrackOptions, videoTrackPolicyForPreset, type VideoTrackPolicyDraft } from "./videoTrackOptions";
 
 interface RowOptionsState {
   target: TargetFormat;
@@ -40,6 +44,10 @@ interface RowOptionsState {
   audioAvailability?: AudioAvailability | null;
   trackOptions?: TrackConvertOptions | null;
   trackSettings?: TrackSettingsCapabilities | null;
+  videoTrackSettings?: VideoTrackSettingsCapabilities | null;
+  pendingTrackPolicy?: TrackPresetPolicy | null;
+  videoTrackOptionsEnabled?: boolean;
+  videoTrackPolicyDraft?: VideoTrackPolicyDraft | null;
   trackSourceUnavailableReason?: string | null;
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
@@ -57,6 +65,10 @@ export interface FileRowOptions {
   audioAvailability?: AudioAvailability | null;
   trackOptions?: TrackConvertOptions | null;
   trackSettings?: TrackSettingsCapabilities | null;
+  videoTrackSettings?: VideoTrackSettingsCapabilities | null;
+  pendingTrackPolicy?: TrackPresetPolicy | null;
+  videoTrackOptionsEnabled?: boolean;
+  videoTrackPolicyDraft?: VideoTrackPolicyDraft | null;
   trackSourceUnavailableReason?: string | null;
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
@@ -127,6 +139,10 @@ export function ConvertSettingsPanel({
       audioAvailability: opts.audioAvailability,
       trackOptions: partial.trackOptions !== undefined ? partial.trackOptions : opts.trackOptions,
       trackSettings: opts.trackSettings,
+      videoTrackSettings: opts.videoTrackSettings,
+      pendingTrackPolicy: partial.pendingTrackPolicy !== undefined ? partial.pendingTrackPolicy : opts.pendingTrackPolicy,
+      videoTrackOptionsEnabled: partial.videoTrackOptionsEnabled ?? opts.videoTrackOptionsEnabled,
+      videoTrackPolicyDraft: partial.videoTrackPolicyDraft !== undefined ? cloneVideoTrackPolicyDraft(partial.videoTrackPolicyDraft) : cloneVideoTrackPolicyDraft(opts.videoTrackPolicyDraft),
       trackSourceUnavailableReason: opts.trackSourceUnavailableReason,
       audioPlanError: opts.audioPlanError,
       imageOptions: cloneImageOptions(partial.imageOptions !== undefined ? partial.imageOptions : opts.imageOptions),
@@ -160,7 +176,7 @@ export function ConvertSettingsPanel({
     p.audio_details,
     p.audio_codecs?.length ?? (p.has_audio ? 1 : 0),
     p.has_video || p.has_subtitles,
-    opts.trackOptions?.stream_index,
+    opts.trackOptions?.kind === "audio" ? opts.trackOptions.stream_index : undefined,
   );
   const imageCapability = state.capabilities.targets.find(c => c.target === target)?.image_settings;
   const imageProblem = imageOptionsProblem(opts.imageOptions, imageCapability);
@@ -190,6 +206,21 @@ export function ConvertSettingsPanel({
       || opts.trackSourceUnavailableReason
       || (trackSettings?.audio_choices.length ?? 0) > 1,
   );
+  const videoTrackSettings = targetCapability?.video_track_settings ?? opts.videoTrackSettings;
+  const videoTrackEnabled = opts.videoTrackOptionsEnabled === true || opts.trackOptions?.kind === "video" || opts.pendingTrackPolicy?.kind === "video" || Boolean(opts.videoTrackPolicyDraft);
+  const videoTrackOptions = opts.trackOptions?.kind === "video"
+    ? opts.trackOptions
+    : opts.videoTrackPolicyDraft
+      ? { kind: "video" as const, ...cloneVideoTrackPolicyDraft(opts.videoTrackPolicyDraft)! }
+    : videoTrackSettings ? {
+        ...defaultVideoTrackOptions(videoTrackSettings),
+        ...(opts.pendingTrackPolicy?.kind === "video" ? {
+          audio: opts.pendingTrackPolicy.audio.kind === "choose_per_file" ? { kind: "choose" as const, stream_indices: [] } : { kind: opts.pendingTrackPolicy.audio.kind },
+          subtitles: opts.pendingTrackPolicy.subtitles.kind === "choose_per_file" ? { kind: "choose" as const, stream_indices: [] } : { kind: opts.pendingTrackPolicy.subtitles.kind },
+        } : {}),
+      } : null;
+  const showVideoTrackSettings = shouldOfferVideoTrackOptions({ target, explicit, enabled: videoTrackEnabled,
+    settings: videoTrackSettings, options: opts.trackOptions, pendingPolicy: opts.pendingTrackPolicy });
 
   return (
     <div className="space-y-4">
@@ -228,12 +259,26 @@ export function ConvertSettingsPanel({
       {(videoCapability || explicit) && <WorkspaceDraftProvider scope={draftIdentity ? [draftIdentity] : []}>
         <VideoOptionsPanel file={opts} capability={videoCapability} sourceSize={sourceSize} onChange={videoOptions => update({videoOptions})} onOriginalResolution={() => update({resolutionCap:"original"})} onReplaceLegacyResolution={videoOptions => update({resolutionCap:"original",videoOptions})} onDraftEdit={onDraftEdit}/>
       </WorkspaceDraftProvider>}
+      {showVideoTrackSettings && videoTrackSettings && videoTrackOptions && (
+        <VideoTrackPanel
+          settings={videoTrackSettings}
+          mode={opts.videoOptions?.kind === "copy" ? "copy" : "custom"}
+          value={videoTrackOptions}
+          onChange={(trackOptions) => {
+            const draft = { source: trackOptions.source, audio: trackOptions.audio, subtitles: trackOptions.subtitles };
+            const complete = completeVideoTrackOptions(draft);
+            update(complete
+              ? { trackOptions: complete, pendingTrackPolicy: null, videoTrackPolicyDraft: null }
+              : { trackOptions: null, pendingTrackPolicy: videoTrackPolicyForPreset(trackOptions), videoTrackPolicyDraft: draft });
+          }}
+        />
+      )}
       {showTrackSettings && (
         <AudioTrackPanel
           settings={trackSettings}
           audioDetails={p.audio_details}
           mode={opts.audioOptions?.kind ?? "automatic"}
-          value={opts.trackOptions}
+          value={opts.trackOptions?.kind === "audio" ? opts.trackOptions : null}
           unavailableReason={opts.trackSourceUnavailableReason}
           planError={opts.audioPlanError}
           onChange={(trackOptions) => update({ trackOptions })}

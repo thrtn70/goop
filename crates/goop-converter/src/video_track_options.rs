@@ -279,7 +279,7 @@ fn policy_retains(policy: &TrackStreamPolicy, index: u32) -> bool {
 fn subtitle_copyable(target: TargetFormat, codec: &str) -> bool {
     match target {
         TargetFormat::Mp4 | TargetFormat::Mov => codec == "mov_text",
-        TargetFormat::Mkv => ["subrip", "ass", "ssa", "webvtt"].contains(&codec),
+        TargetFormat::Mkv => ["subrip", "ass", "webvtt"].contains(&codec),
         _ => false,
     }
 }
