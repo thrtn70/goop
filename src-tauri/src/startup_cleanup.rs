@@ -270,6 +270,8 @@ mod tests {
                 audio_execution: None,
                 video_execution: None,
                 video_track_execution: None,
+                image_metadata_execution: None,
+                compression_execution: None,
                 output_path: Some(output.to_string_lossy().into()),
                 bytes: Some(6),
                 duration_ms: 0,

@@ -4,10 +4,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 fn invalid() -> GoopError {
-    GoopError::InvalidRequest(
-        "Cannot safely preserve malformed or ambiguous EXIF metadata; choose Strip all metadata."
-            .into(),
-    )
+    GoopError::InvalidRequest("Cannot safely process malformed or ambiguous EXIF metadata.".into())
 }
 #[derive(Clone, Copy)]
 struct Tiff<'a> {
@@ -73,30 +70,70 @@ fn scalar_orientation(
         .ok_or_else(invalid)
 }
 
-/// Read only the bounded IFD0 scalar Orientation, with the same accepted
-/// representation and value checks used when normalizing preserved metadata.
-pub(crate) fn orientation(exif: &[u8]) -> Result<image::metadata::Orientation, GoopError> {
-    let tiff = header(exif)?;
-    let offset = tiff.u32(4)? as usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrientationStatus {
+    Absent,
+    Valid(image::metadata::Orientation),
+    Malformed,
+    Ambiguous,
+}
+
+/// Inspect only the bounded IFD0 scalar Orientation while preserving the
+/// distinction the capability UI needs between absent, malformed and
+/// multiply-defined data.
+pub(crate) fn orientation_status(exif: &[u8]) -> OrientationStatus {
+    let tiff = match header(exif) {
+        Ok(value) => value,
+        Err(_) => return OrientationStatus::Malformed,
+    };
+    let offset = match tiff.u32(4) {
+        Ok(value) => value as usize,
+        Err(_) => return OrientationStatus::Malformed,
+    };
     if offset < 8 {
-        return Err(invalid());
+        return OrientationStatus::Malformed;
     }
-    let count = usize::from(tiff.u16(offset)?);
+    let count = match tiff.u16(offset) {
+        Ok(value) => usize::from(value),
+        Err(_) => return OrientationStatus::Malformed,
+    };
     if count > 4096 {
-        return Err(invalid());
+        return OrientationStatus::Malformed;
     }
-    tiff.range(offset, count * 12 + 6)?;
+    let Some(table_len) = count.checked_mul(12).and_then(|value| value.checked_add(6)) else {
+        return OrientationStatus::Malformed;
+    };
+    if tiff.range(offset, table_len).is_err() {
+        return OrientationStatus::Malformed;
+    }
     let mut orientation = None;
     for i in 0..count {
         let entry = offset + 2 + i * 12;
-        if tiff.u16(entry)? == 0x0112 {
+        let tag = match tiff.u16(entry) {
+            Ok(value) => value,
+            Err(_) => return OrientationStatus::Malformed,
+        };
+        if tag == 0x0112 {
             if orientation.is_some() {
-                return Err(invalid());
+                return OrientationStatus::Ambiguous;
             }
-            orientation = Some(scalar_orientation(tiff, entry)?);
+            orientation = match scalar_orientation(tiff, entry) {
+                Ok(value) => Some(value),
+                Err(_) => return OrientationStatus::Malformed,
+            };
         }
     }
-    Ok(orientation.unwrap_or(image::metadata::Orientation::NoTransforms))
+    orientation.map_or(OrientationStatus::Absent, OrientationStatus::Valid)
+}
+
+/// Read only the bounded IFD0 scalar Orientation, with the same accepted
+/// representation and value checks used when normalizing preserved metadata.
+pub(crate) fn orientation(exif: &[u8]) -> Result<image::metadata::Orientation, GoopError> {
+    match orientation_status(exif) {
+        OrientationStatus::Absent => Ok(image::metadata::Orientation::NoTransforms),
+        OrientationStatus::Valid(value) => Ok(value),
+        OrientationStatus::Malformed | OrientationStatus::Ambiguous => Err(invalid()),
+    }
 }
 
 struct Patch {
@@ -258,6 +295,19 @@ pub(crate) fn normalize(exif: &[u8], width: u32, height: u32) -> Result<Vec<u8>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn orientation_fixture(value: u16) -> Vec<u8> {
+        let mut bytes = b"II".to_vec();
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0112u16.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
     fn fixture(little: bool) -> Vec<u8> {
         let mut bytes = if little {
             b"II".to_vec()
@@ -377,5 +427,29 @@ mod tests {
         too_many[..8].copy_from_slice(&bytes[..8]);
         too_many[8..10].copy_from_slice(&4097u16.to_le_bytes());
         assert!(normalize(&too_many, 1, 1).is_err());
+    }
+
+    #[test]
+    fn orientation_accepts_every_exif_value_once_and_rejects_invalid_values() {
+        for value in 1..=8 {
+            assert_eq!(
+                orientation(&orientation_fixture(value)).unwrap().to_exif(),
+                value as u8
+            );
+        }
+        for value in [0, 9, u16::MAX] {
+            assert!(orientation(&orientation_fixture(value)).is_err());
+        }
+
+        let mut duplicate = orientation_fixture(1);
+        duplicate[8..10].copy_from_slice(&2u16.to_le_bytes());
+        let mut second = Vec::new();
+        second.extend_from_slice(&0x0112u16.to_le_bytes());
+        second.extend_from_slice(&3u16.to_le_bytes());
+        second.extend_from_slice(&1u32.to_le_bytes());
+        second.extend_from_slice(&6u16.to_le_bytes());
+        second.extend_from_slice(&[0, 0]);
+        duplicate.splice(22..22, second);
+        assert!(orientation(&duplicate).is_err());
     }
 }

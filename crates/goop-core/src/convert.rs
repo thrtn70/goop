@@ -215,24 +215,68 @@ pub enum CompressMode {
 }
 
 /// What to do with the source image's metadata (EXIF + ICC profile)
-/// during a convert / compress op. Two policies as of v0.2.6:
+/// during a convert / compress op.
 ///
 /// * `Preserve` — copy EXIF + ICC chunks from the input to the output
 ///   when both formats support them (currently JPEG↔JPEG and PNG↔PNG).
 ///   For cross-format converts (e.g. JPEG → AVIF) the metadata is
-///   dropped. Broadening the supported matrix is a v0.2.7+ candidate.
+///   dropped.
+/// * `RemovePersonal` — drop EXIF and other source ancillary metadata,
+///   retaining an exact ICC profile only on engine-proven paths.
 /// * `StripAll` — drop all metadata regardless. Privacy default for
 ///   shared photos; also gives the smallest output bytes.
-///
-/// `StripExifKeepIcc` (drop EXIF but keep the colour profile) is a
-/// v0.2.7+ candidate per the explicit per-format-fragility trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, Default)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataPolicy {
     #[default]
     Preserve,
+    RemovePersonal,
     StripAll,
+}
+
+/// How the completed image output represents color. These values describe
+/// verified handling, not perceptual equivalence between viewers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ImageColorHandling {
+    ExactProfileRetained,
+    RendererSdrSrgb,
+    Untagged,
+    NoProfile,
+}
+
+/// Verified metadata outcome for a completed image conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct ImageMetadataExecution {
+    pub requested_policy: MetadataPolicy,
+    pub exif_retained: bool,
+    pub icc_retained: bool,
+    pub orientation_normalized: bool,
+    pub color_handling: ImageColorHandling,
+    pub notices: Vec<String>,
+}
+
+/// Measured compression outcome. Image target-size execution fills every
+/// measurement from the same final metadata-bearing candidate it publishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct CompressionExecution {
+    pub requested_mode: CompressMode,
+    pub attempts: u8,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub selected_quality: Option<u8>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub target_bytes: Option<u64>,
+    pub final_bytes: u64,
+    pub target_met: bool,
+    pub metadata_policy: MetadataPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -357,6 +401,12 @@ pub struct ConvertResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_track_execution: Option<crate::tracks::VideoTrackExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_metadata_execution: Option<ImageMetadataExecution>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub compression_execution: Option<CompressionExecution>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,

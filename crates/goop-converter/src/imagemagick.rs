@@ -3,8 +3,9 @@ use crate::imagemagick_probe::probe_image;
 use crate::metadata;
 use crate::naming::{allocate_output_path, stem_of};
 use goop_core::{
-    CompressMode, ConvertRequest, ConvertResult, EventSink, GoopError, JobId, ProbeResult,
-    ProgressEvent, TargetFormat,
+    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, EventSink, GoopError,
+    ImageColorHandling, ImageMetadataExecution, JobId, MetadataPolicy, ProbeResult, ProgressEvent,
+    TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
@@ -77,8 +78,11 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             _ => None,
         };
         let explicit_request = req.image_options.as_ref().map(|_| req.clone());
+        let outcome_slot = Arc::new(std::sync::Mutex::new(None));
+        let worker_outcome = Arc::clone(&outcome_slot);
+        let worker_cancel = cancel.clone();
         let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
-            if let Some(request) = &explicit_request {
+            let outcome = if let Some(request) = &explicit_request {
                 let source =
                     crate::jpeg_controls::prepare(&input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
                 let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
@@ -92,13 +96,34 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
                         source.as_ref(),
                     )?;
                 }
+                ImageProcessingOutcome {
+                    image_metadata: source
+                        .as_ref()
+                        .map(|source| jpeg_metadata_execution(source, metadata_policy, true))
+                        .transpose()?,
+                    compression: None,
+                }
             } else {
-                process_image(&input, out, target, compress_mode)?;
-                metadata::apply(&input, out, metadata_policy)?;
-            }
+                process_image_with_metadata(
+                    &input,
+                    out,
+                    target,
+                    compress_mode,
+                    metadata_policy,
+                    &worker_cancel,
+                )?
+            };
+            *worker_outcome
+                .lock()
+                .map_err(|_| image_error("image outcome lock is unavailable"))? = Some(outcome);
             Ok(())
         })
         .await?;
+        let outcome = outcome_slot
+            .lock()
+            .map_err(|_| image_error("image outcome lock is unavailable"))?
+            .take()
+            .ok_or_else(|| image_error("image processing completed without an outcome"))?;
 
         self.sink.emit_progress(ProgressEvent {
             job_id,
@@ -110,6 +135,8 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
+            compression_execution: outcome.compression,
+            image_metadata_execution: outcome.image_metadata,
             video_track_execution: None,
             audio_execution: None,
             video_execution: None,
@@ -122,6 +149,52 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             reencoded: true,
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct ImageProcessingOutcome {
+    image_metadata: Option<ImageMetadataExecution>,
+    compression: Option<CompressionExecution>,
+}
+
+fn jpeg_metadata_execution(
+    source: &crate::jpeg_controls::JpegSource,
+    policy: MetadataPolicy,
+    normalize_preserve_orientation: bool,
+) -> Result<ImageMetadataExecution, GoopError> {
+    let inspection = source.inspect_metadata(metadata::JpegOutputColor::Rgb)?;
+    let icc_retained = inspection.source_has_icc && policy == MetadataPolicy::Preserve;
+    let exif_retained = inspection.source_has_exif && policy == MetadataPolicy::Preserve;
+    let orientation_normalized = (policy != MetadataPolicy::Preserve
+        || normalize_preserve_orientation)
+        && matches!(
+            inspection.orientation,
+            crate::exif_geometry::OrientationStatus::Valid(value)
+                if value != image::metadata::Orientation::NoTransforms
+        );
+    let color_handling = if icc_retained {
+        ImageColorHandling::ExactProfileRetained
+    } else if policy == MetadataPolicy::StripAll {
+        ImageColorHandling::NoProfile
+    } else {
+        ImageColorHandling::Untagged
+    };
+    let notice = match policy {
+        MetadataPolicy::Preserve if icc_retained => {
+            "Supported metadata and the exact ICC profile were retained."
+        }
+        MetadataPolicy::Preserve => "The source had no ICC profile to retain.",
+        MetadataPolicy::RemovePersonal => "Personal metadata removed from an untagged JPEG.",
+        MetadataPolicy::StripAll => "All metadata removed; no color profile retained.",
+    };
+    Ok(ImageMetadataExecution {
+        requested_policy: policy,
+        exif_retained,
+        icc_retained,
+        orientation_normalized,
+        color_handling,
+        notices: vec![notice.into()],
+    })
 }
 
 fn image_error(message: impl Into<String>) -> GoopError {
@@ -278,6 +351,118 @@ fn process_image(
         compress_image(input, output, target, mode)
     } else {
         convert_image(input, output, target)
+    }
+}
+
+fn process_image_with_metadata(
+    input: &Path,
+    output: &Path,
+    target: TargetFormat,
+    compress_mode: Option<CompressMode>,
+    policy: MetadataPolicy,
+    cancel: &CancellationToken,
+) -> Result<ImageProcessingOutcome, GoopError> {
+    if target == TargetFormat::Jpeg {
+        if let Some(source) =
+            crate::jpeg_controls::prepare(input, crate::jpeg_controls::MAX_INPUT_BYTES)?
+        {
+            let is_jpeg = source.bytes.starts_with(&[0xff, 0xd8, 0xff]);
+            let needs_snapshot_path = is_jpeg;
+            if needs_snapshot_path {
+                return process_snapshot_jpeg(
+                    &source,
+                    input,
+                    output,
+                    compress_mode,
+                    policy,
+                    cancel,
+                );
+            }
+        }
+    }
+    if policy == MetadataPolicy::RemovePersonal {
+        return Err(GoopError::InvalidRequest(
+            "Remove personal data is currently available only for JPEG to JPEG processing.".into(),
+        ));
+    }
+    process_image(input, output, target, compress_mode)?;
+    metadata::apply(input, output, policy)?;
+    Ok(ImageProcessingOutcome::default())
+}
+
+fn process_snapshot_jpeg(
+    source: &crate::jpeg_controls::JpegSource,
+    input: &Path,
+    output: &Path,
+    compress_mode: Option<CompressMode>,
+    policy: MetadataPolicy,
+    cancel: &CancellationToken,
+) -> Result<ImageProcessingOutcome, GoopError> {
+    let (pixels, plan) =
+        source.decode_with_target_metadata_plan(policy, metadata::JpegOutputColor::Rgb)?;
+    let (bytes, compression) = match compress_mode {
+        Some(CompressMode::LosslessReoptimize) => {
+            return Err(image_error(
+                "JPEG lossless reoptimization is unavailable; choose Quality or Target Size for lossy recompression",
+            ))
+        }
+        Some(CompressMode::TargetSizeBytes(target_bytes)) => {
+            let selected = target_size_search(
+                &pixels,
+                target_bytes,
+                |image, quality| plan.assemble_candidate(encode_jpeg(image, quality)?),
+                || {
+                    if cancel.is_cancelled() {
+                        Err(GoopError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .map_err(|error| match error {
+                GoopError::Cancelled => GoopError::Cancelled,
+                other => image_error(format!(
+                    "{}; metadata policy: {}",
+                    other.user_message(),
+                    metadata_policy_name(policy)
+                )),
+            })?;
+            let final_bytes = selected.bytes.len() as u64;
+            let execution = CompressionExecution {
+                requested_mode: CompressMode::TargetSizeBytes(target_bytes),
+                attempts: selected.attempts,
+                selected_quality: Some(selected.quality),
+                target_bytes: Some(target_bytes),
+                final_bytes,
+                target_met: final_bytes <= target_bytes,
+                metadata_policy: policy,
+            };
+            (selected.bytes, Some(execution))
+        }
+        Some(CompressMode::Quality(quality)) => (
+            plan.assemble_candidate(encode_jpeg(&pixels, quality.clamp(1, 100))?)?,
+            None,
+        ),
+        None => (plan.assemble_candidate(encode_jpeg(&pixels, 75)?)?, None),
+    };
+    plan.verify_candidate(&bytes)?;
+    std::fs::write(output, &bytes).map_err(|error| {
+        image_error(format!(
+            "failed to write metadata-verified JPEG output: {error}"
+        ))
+    })?;
+    source.verify_unchanged(input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
+    Ok(ImageProcessingOutcome {
+        image_metadata: Some(jpeg_metadata_execution(source, policy, false)?),
+        compression,
+    })
+}
+
+fn metadata_policy_name(policy: MetadataPolicy) -> &'static str {
+    match policy {
+        MetadataPolicy::Preserve => "preserve",
+        MetadataPolicy::RemovePersonal => "remove personal data",
+        MetadataPolicy::StripAll => "remove all",
     }
 }
 
@@ -678,32 +863,44 @@ fn encode_webp(img: &image::DynamicImage) -> Result<Vec<u8>, GoopError> {
     Ok(buf)
 }
 
-/// Search quality 1..=100, returning only an encode within the requested size.
-fn target_size_search<F>(
+#[derive(Debug)]
+struct TargetSizeEncoding {
+    bytes: Vec<u8>,
+    quality: u8,
+    attempts: u8,
+}
+
+/// Search from quality 100 down to 1. Every candidate supplied by `encode`
+/// must already include its final metadata/container bytes, so the first fit
+/// is the highest proven fitting quality without assuming size monotonicity.
+fn target_size_search<F, C>(
     img: &image::DynamicImage,
     target_bytes: u64,
     mut encode: F,
-) -> Result<Vec<u8>, GoopError>
+    mut checkpoint: C,
+) -> Result<TargetSizeEncoding, GoopError>
 where
     F: FnMut(&image::DynamicImage, u8) -> Result<Vec<u8>, GoopError>,
+    C: FnMut() -> Result<(), GoopError>,
 {
-    let mut best = encode(img, 1)?;
-    if best.len() as u64 > target_bytes {
-        return Err(image_error(format!("target size requested {target_bytes} bytes; minimum encoded size at quality 1 is {} bytes before metadata", best.len())));
-    }
-    let mut low = 2u8;
-    let mut high = 100u8;
-    while low <= high {
-        let q = low + (high - low) / 2;
-        let buf = encode(img, q)?;
+    let mut smallest = u64::MAX;
+    for (index, quality) in (1u8..=100).rev().enumerate() {
+        checkpoint()?;
+        let buf = encode(img, quality)?;
+        checkpoint()?;
+        let size = buf.len() as u64;
+        smallest = smallest.min(size);
         if buf.len() as u64 <= target_bytes {
-            best = buf;
-            low = q + 1;
-        } else {
-            high = q - 1;
+            return Ok(TargetSizeEncoding {
+                bytes: buf,
+                quality,
+                attempts: (index + 1) as u8,
+            });
         }
     }
-    Ok(best)
+    Err(image_error(format!(
+        "target size requested {target_bytes} bytes; smallest attempted final size was {smallest} bytes after 100 attempts"
+    )))
 }
 
 fn compress_jpeg(input: &Path, output: &Path, mode: CompressMode) -> Result<(), GoopError> {
@@ -717,7 +914,9 @@ fn compress_jpeg(input: &Path, output: &Path, mode: CompressMode) -> Result<(), 
 
     let buf = match mode {
         CompressMode::Quality(q) => encode_jpeg(&img, q.clamp(1, 100))?,
-        CompressMode::TargetSizeBytes(bytes) => target_size_search(&img, bytes, encode_jpeg)?,
+        CompressMode::TargetSizeBytes(bytes) => {
+            target_size_search(&img, bytes, encode_jpeg, || Ok(()))?.bytes
+        }
         CompressMode::LosslessReoptimize => unreachable!("rejected before decoding"),
     };
 
@@ -779,6 +978,36 @@ mod tests {
         let img: RgbImage =
             ImageBuffer::from_fn(64, 64, |x, y| Rgb([x as u8, y as u8, ((x + y) as u8) / 2]));
         img.save(path).unwrap();
+    }
+
+    fn orientation_exif(value: u16) -> Vec<u8> {
+        let mut bytes = b"II".to_vec();
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0112u16.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    fn write_oriented_untagged_jpeg(path: &Path) {
+        use image::{Rgb, RgbImage};
+        use img_parts::{jpeg::Jpeg, ImageEXIF};
+
+        let image = RgbImage::from_fn(160, 120, |x, y| match (x < 80, y < 60) {
+            (true, true) => Rgb([240, 20, 20]),
+            (false, true) => Rgb([20, 240, 20]),
+            (true, false) => Rgb([20, 20, 240]),
+            (false, false) => Rgb([240, 240, 20]),
+        });
+        image.save(path).unwrap();
+        let mut jpeg = Jpeg::from_bytes(std::fs::read(path).unwrap().into()).unwrap();
+        jpeg.set_exif(Some(orientation_exif(6).into()));
+        std::fs::write(path, jpeg.encoder().bytes()).unwrap();
     }
 
     fn tmp_dir(label: &str) -> PathBuf {
@@ -882,6 +1111,240 @@ mod tests {
         assert_eq!(std::fs::read(&input).unwrap(), original);
         assert!(!sink.0.lock().unwrap().contains(&100.0));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn target_size_result_counts_final_metadata_bytes_and_reports_execution() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("output.jpg");
+        write_test_jpeg(&input);
+        let mut profile = vec![0; 4_000];
+        profile[..4].copy_from_slice(&4_000u32.to_be_bytes());
+        profile[16..20].copy_from_slice(b"RGB ");
+        profile[36..40].copy_from_slice(b"acsp");
+        let mut jpeg =
+            img_parts::jpeg::Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        use img_parts::ImageICC;
+        jpeg.set_icc_profile(Some(profile.clone().into()));
+        std::fs::write(&input, jpeg.encoder().bytes()).unwrap();
+
+        let source = crate::jpeg_controls::prepare(&input, crate::jpeg_controls::MAX_INPUT_BYTES)
+            .unwrap()
+            .unwrap();
+        let (pixels, plan) = source
+            .decode_with_target_metadata_plan(
+                MetadataPolicy::Preserve,
+                metadata::JpegOutputColor::Rgb,
+            )
+            .unwrap();
+        let mut candidates = Vec::new();
+        for quality in (1..=100).rev() {
+            let raw = encode_jpeg(&pixels, quality).unwrap();
+            let final_bytes = plan.assemble_candidate(raw.clone()).unwrap();
+            candidates.push((quality, raw.len() as u64, final_bytes.len() as u64));
+        }
+        let (target, expected_quality, raw_quality) = candidates
+            .iter()
+            .map(|(_, _, final_bytes)| *final_bytes)
+            .find_map(|target| {
+                let expected = candidates
+                    .iter()
+                    .find(|(_, _, final_bytes)| *final_bytes <= target)?
+                    .0;
+                let raw = candidates
+                    .iter()
+                    .find(|(_, raw_bytes, _)| *raw_bytes <= target)?
+                    .0;
+                (raw > expected).then_some((target, expected, raw))
+            })
+            .expect("fixture must distinguish raw and metadata-bearing candidate sizes");
+
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Jpeg,
+            "compress_mode": CompressMode::TargetSizeBytes(target),
+            "metadata_policy": MetadataPolicy::Preserve,
+        }))
+        .unwrap();
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+        let execution = result.compression_execution.unwrap();
+        assert_eq!(execution.selected_quality, Some(expected_quality));
+        assert!(raw_quality > expected_quality);
+        assert_eq!(execution.attempts, 101 - expected_quality);
+        assert_eq!(execution.final_bytes, result.bytes);
+        assert!(execution.target_met);
+        assert!(result.bytes <= target);
+        assert_eq!(std::fs::metadata(&output).unwrap().len(), result.bytes);
+        assert_eq!(metadata::read(&output).unwrap().1.unwrap(), profile);
+        let metadata_execution = result.image_metadata_execution.unwrap();
+        assert_eq!(
+            metadata_execution.requested_policy,
+            MetadataPolicy::Preserve
+        );
+        assert!(metadata_execution.icc_retained);
+        assert!(!metadata_execution.orientation_normalized);
+    }
+
+    #[tokio::test]
+    async fn remove_personal_target_size_normalizes_and_publishes_verified_private_jpeg() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("output.jpg");
+        write_oriented_untagged_jpeg(&input);
+        let original = std::fs::read(&input).unwrap();
+
+        let source = crate::jpeg_controls::prepare(&input, crate::jpeg_controls::MAX_INPUT_BYTES)
+            .unwrap()
+            .unwrap();
+        let (pixels, plan) = source
+            .decode_with_target_metadata_plan(
+                MetadataPolicy::RemovePersonal,
+                metadata::JpegOutputColor::Rgb,
+            )
+            .unwrap();
+        let target = plan
+            .assemble_candidate(encode_jpeg(&pixels, 75).unwrap())
+            .unwrap()
+            .len() as u64;
+        let expected_quality = (1..=100)
+            .rev()
+            .find(|quality| {
+                plan.assemble_candidate(encode_jpeg(&pixels, *quality).unwrap())
+                    .unwrap()
+                    .len() as u64
+                    <= target
+            })
+            .unwrap();
+
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Jpeg,
+            "compress_mode": CompressMode::TargetSizeBytes(target),
+            "metadata_policy": MetadataPolicy::RemovePersonal,
+        }))
+        .unwrap();
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(image::image_dimensions(&output).unwrap(), (120, 160));
+        let rendered = image::open(&output).unwrap().to_rgb8();
+        assert!(rendered.get_pixel(30, 40)[2] > 180);
+        assert!(rendered.get_pixel(90, 40)[0] > 180);
+        assert!(rendered.get_pixel(30, 120)[0] > 180);
+        assert!(rendered.get_pixel(30, 120)[1] > 180);
+        assert!(rendered.get_pixel(90, 120)[1] > 180);
+        let (exif, icc) = metadata::read(&output).unwrap();
+        assert!(exif.is_none());
+        assert!(icc.is_none());
+
+        let compression = result.compression_execution.unwrap();
+        assert_eq!(compression.selected_quality, Some(expected_quality));
+        assert_eq!(compression.attempts, 101 - expected_quality);
+        assert_eq!(compression.final_bytes, result.bytes);
+        assert!(compression.target_met);
+        assert!(result.bytes <= target);
+        let metadata = result.image_metadata_execution.unwrap();
+        assert_eq!(metadata.requested_policy, MetadataPolicy::RemovePersonal);
+        assert!(!metadata.exif_retained);
+        assert!(!metadata.icc_retained);
+        assert!(metadata.orientation_normalized);
+        assert_eq!(metadata.color_handling, ImageColorHandling::Untagged);
+    }
+
+    #[tokio::test]
+    async fn ordinary_jpeg_preserve_reports_verified_metadata_execution() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("output.jpg");
+        write_test_jpeg(&input);
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Jpeg,
+            "metadata_policy": MetadataPolicy::Preserve,
+        }))
+        .unwrap();
+
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+        let execution = result
+            .image_metadata_execution
+            .expect("JPEG Preserve must report a verified metadata outcome");
+        assert_eq!(execution.requested_policy, MetadataPolicy::Preserve);
+        assert!(!execution.exif_retained);
+        assert!(!execution.icc_retained);
+        assert_eq!(execution.color_handling, ImageColorHandling::Untagged);
+        assert_eq!(result.bytes, std::fs::metadata(&output).unwrap().len());
+    }
+
+    #[tokio::test]
+    async fn impossible_target_size_publishes_nothing() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("output.jpg");
+        write_test_jpeg(&input);
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Jpeg,
+            "compress_mode": CompressMode::TargetSizeBytes(1),
+            "metadata_policy": MetadataPolicy::StripAll,
+        }))
+        .unwrap();
+        let error = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("after 100 attempts"));
+        assert!(error.to_string().contains("remove all"));
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]
@@ -1210,12 +1673,63 @@ mod tests {
     }
 
     #[test]
-    fn target_search_rejects_impossible_and_checks_quality_one() {
+    fn target_search_checks_final_candidates_from_highest_quality_down() {
         let img = image::DynamicImage::new_rgb8(1, 1);
-        let err = target_size_search(&img, 1, |_, q| Ok(vec![0; q as usize + 10])).unwrap_err();
-        assert!(err.to_string().contains("11"));
-        let bytes = target_size_search(&img, 11, |_, q| Ok(vec![0; q as usize + 10])).unwrap();
-        assert_eq!(bytes.len(), 11);
+        let result = target_size_search(
+            &img,
+            50,
+            |_, quality| {
+                let size = match quality {
+                    100 => 60,
+                    99 => 40,
+                    98 => 45,
+                    _ => 10,
+                };
+                Ok(vec![0; size])
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.quality, 99);
+        assert_eq!(result.attempts, 2);
+        assert_eq!(result.bytes.len(), 40);
+    }
+
+    #[test]
+    fn target_search_reports_smallest_final_candidate_when_none_fit() {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let err = target_size_search(
+            &img,
+            5,
+            |_, quality| Ok(vec![0; if quality == 37 { 7 } else { 20 }]),
+            || Ok(()),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("smallest attempted final size was 7 bytes"));
+        assert!(message.contains("after 100 attempts"));
+    }
+
+    #[test]
+    fn target_search_checks_cancellation_between_attempts() {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let mut checkpoints = 0;
+        let err = target_size_search(
+            &img,
+            1,
+            |_, _| Ok(vec![0; 20]),
+            || {
+                checkpoints += 1;
+                if checkpoints == 4 {
+                    Err(GoopError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, GoopError::Cancelled));
+        assert_eq!(checkpoints, 4);
     }
 
     #[test]

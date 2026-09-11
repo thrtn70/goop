@@ -181,3 +181,52 @@ it("reports authoritative multi-stream video provenance", () => {
   expect(summary).toContain("Subtitle stream 3 omitted");
   expect(summary).not.toContain("No audio");
 });
+
+it("reports metadata privacy, color profile, orientation, and exact target-size execution", () => {
+  const summary = outputSummary(result({
+    bytes: 96n,
+    target_bytes: 100n,
+    image_metadata_execution: {
+      requested_policy: "remove_personal",
+      exif_retained: false,
+      icc_retained: true,
+      orientation_normalized: true,
+      color_handling: "exact_profile_retained",
+      notices: ["Personal metadata removed; color profile retained."],
+    },
+    compression_execution: {
+      requested_mode: { kind: "target_size_bytes", value: 100 },
+      attempts: 7,
+      selected_quality: 94,
+      target_bytes: 100n,
+      final_bytes: 96n,
+      target_met: true,
+      metadata_policy: "remove_personal",
+    },
+  }));
+  expect(summary).toContain("Personal metadata removed");
+  expect(summary).toContain("Exact ICC profile retained");
+  expect(summary).toContain("orientation normalized");
+  expect(summary).toContain("Target-size search (7 attempts)");
+  expect(summary).toContain("quality 94");
+  expect(summary).toContain("Target met (96 / 100 bytes)");
+  expect(summary?.match(/Target met/g)).toHaveLength(1);
+});
+
+it.each([
+  ["renderer_sdr_srgb", "Rendered as SDR sRGB"],
+  ["untagged", "No ICC profile attached"],
+  ["no_profile", "ICC profile removed"],
+] as const)("reports %s color handling without inferring it from ICC retention", (color_handling, expected) => {
+  const summary = outputSummary(result({
+    image_metadata_execution: {
+      requested_policy: "remove_personal",
+      exif_retained: false,
+      icc_retained: false,
+      orientation_normalized: false,
+      color_handling,
+      notices: [],
+    },
+  }));
+  expect(summary).toContain(expected);
+});

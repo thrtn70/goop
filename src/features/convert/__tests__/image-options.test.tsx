@@ -17,9 +17,18 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open, save: mocks.save
 vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/features/presets/PresetChips", () => ({ default: ({ onApply }: { onApply: (p: Preset) => void }) => mocks.preset && <button onClick={() => onApply(mocks.preset!)}>Apply test preset</button> }));
 export const imageCapability = { available: true, reason: null, quality_min: 1, quality_max: 100, default_quality: 75, max_dimension: 32768, max_output_pixels: 100000000, fit_within: true, upscale: false, preview_original_available: true, preview_fit_within: false, preview_unavailable_reason: "Resized samples are unavailable" };
-const inspect = (video = false) => ({
-  probe: { source_kind: video ? "video" : "image", image_format: video ? null : "jpeg", image_has_alpha: false, video_codec: video ? "h264" : null, audio_codec: video ? "aac" : null, has_video: video, has_audio: video, duration_ms: 0, file_size: 100, width: 6048, height: 8064, audio_codecs: [], subtitle_codecs: [] },
-  capabilities: { targets: (video ? ["mp4"] : ["jpeg", "png"]).map(target => ({ target, available: true, reason: null, metadata_warning: null, image_settings: target === "jpeg" ? imageCapability : null })), compression: { quality: true, target_size: false, lossless: false, reason: null } },
+const inspect = (video = false, sourceFormat = "jpeg") => ({
+  probe: { source_kind: video ? "video" : "image", image_format: video ? null : sourceFormat, image_has_alpha: false, video_codec: video ? "h264" : null, audio_codec: video ? "aac" : null, has_video: video, has_audio: video, duration_ms: 0, file_size: 100, width: 6048, height: 8064, audio_codecs: [], subtitle_codecs: [] },
+  capabilities: { targets: (video ? ["mp4"] : ["jpeg", "png"]).map(target => ({ target, available: true, reason: null, metadata_warning: null, image_settings: target === "jpeg" ? imageCapability : null,
+    image_metadata: video ? null : {
+      preserve: { available: true, reason: null, summary: "Metadata retained." },
+      remove_personal: sourceFormat === "jpeg" && target === "jpeg"
+        ? { available: true, reason: null, summary: "Personal metadata removed." }
+        : { available: false, reason: "Remove personal data is currently available only for JPEG to JPEG processing.", summary: "Unavailable" },
+      strip_all: { available: true, reason: null, summary: "All metadata removed." },
+      source_has_exif: false, source_has_icc: false, orientation: "absent",
+    },
+  })), compression: { quality: true, target_size: false, lossless: false, reason: null } },
 });
 const fit = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 2048, height: 2048 } };
 const preset = (image_options: Preset["image_options"] = fit) => ({ name: "Photo", target: "jpeg", image_options, quality_preset: null, resolution_cap: null, compress_mode: null, gif_options: null, subtitle: null, metadata_policy: "preserve" }) as Preset;
@@ -134,6 +143,39 @@ it("Compress refuses a preset carrying meaningful image intent", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
   expect(screen.getByRole("alert").textContent).toMatch(/image settings.*Compress/i);
   expect((screen.getByRole("slider") as HTMLInputElement).value).toBe("75");
+});
+
+it.each(["convert", "compress"] as const)("%s keeps safe metadata choices visible when legacy capabilities omit image metadata", async (tool) => {
+  const legacy = inspect();
+  for (const target of legacy.capabilities.targets) delete (target as { image_metadata?: unknown }).image_metadata;
+  mocks.inspect.mockResolvedValue(legacy);
+  render(<MemoryRouter>{tool === "convert" ? <ConvertPage /> : <CompressPage />}</MemoryRouter>);
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  expect(await screen.findByRole("button", { name: "Preserve" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Remove all" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Remove personal data" }).getAttribute("aria-disabled")).toBe("true");
+});
+
+it("Compress rejects mixed-source RemovePersonal preset and Apply first atomically", async () => {
+  mocks.open.mockResolvedValue(["/a.jpg", "/b.png"]);
+  mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(false, path.endsWith("png") ? "png" : "jpeg")));
+  mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 30 }, metadata_policy: "remove_personal" };
+  render(<MemoryRouter><CompressPage /></MemoryRouter>);
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await screen.findByRole("button", { name: "Select b.png" });
+  fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+  expect(screen.getByRole("alert").textContent).toContain("b.png");
+  fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
+  expect(screen.getByText("Output: PNG")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Preserve" }).getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove personal data" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+  expect(screen.getByRole("alert").textContent).toContain("b.png");
+  fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
+  expect(screen.getByText("Output: PNG")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Preserve" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 it("seeds the engine's default only for newly inspected applicable drafts", async () => {

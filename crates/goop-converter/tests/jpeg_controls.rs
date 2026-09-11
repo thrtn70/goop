@@ -306,7 +306,7 @@ async fn dimensions_original_no_upscale_portrait_landscape_and_quality_extremes(
 }
 
 #[tokio::test]
-async fn malformed_metadata_fails_preserve_but_strip_all_can_decode() {
+async fn malformed_metadata_fails_closed_for_preserve_and_privacy_modes() {
     let d = tempfile::tempdir().unwrap();
     let input = d.path().join("in.jpg");
     source(&input, 32, 24);
@@ -327,12 +327,9 @@ async fn malformed_metadata_fails_preserve_but_strip_all_can_decode() {
     assert!(!Path::new(&req.output_path).exists());
     req.output_path = d.path().join("strip.jpg").to_string_lossy().into_owned();
     req.metadata_policy = Some(MetadataPolicy::StripAll);
-    let out = convert(&req).await.unwrap();
-    assert_eq!(
-        goop_converter::metadata::read(Path::new(&out.output_path)).unwrap(),
-        (None, None)
-    );
-    assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 2);
+    assert!(convert(&req).await.is_err());
+    assert!(!Path::new(&req.output_path).exists());
+    assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
 }
 
 #[tokio::test]
@@ -674,7 +671,7 @@ async fn long_orientation_matches_upright_probe_and_encoded_quadrants_in_both_en
     }
 }
 #[tokio::test]
-async fn invalid_orientation_refuses_preserve_but_strip_all_still_decodes() {
+async fn invalid_orientation_refuses_preserve_and_privacy_modes() {
     for little in [true, false] {
         for kind in [3, 4] {
             for orientation in [0, 9, 255] {
@@ -697,7 +694,8 @@ async fn invalid_orientation_refuses_preserve_but_strip_all_still_decodes() {
                 assert!(!Path::new(&req.output_path).exists());
                 req.output_path = d.path().join("strip.jpg").to_string_lossy().into_owned();
                 req.metadata_policy = Some(MetadataPolicy::StripAll);
-                assert!(convert(&req).await.is_ok());
+                assert!(convert(&req).await.is_err());
+                assert!(!Path::new(&req.output_path).exists());
             }
         }
     }

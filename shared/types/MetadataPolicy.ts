@@ -2,16 +2,15 @@
 
 /**
  * What to do with the source image's metadata (EXIF + ICC profile)
- * during a convert / compress op. Two policies as of v0.2.6:
+ * during a convert / compress op.
  *
  * * `Preserve` — copy EXIF + ICC chunks from the input to the output
  *   when both formats support them (currently JPEG↔JPEG and PNG↔PNG).
  *   For cross-format converts (e.g. JPEG → AVIF) the metadata is
- *   dropped. Broadening the supported matrix is a v0.2.7+ candidate.
+ *   dropped.
+ * * `RemovePersonal` — drop EXIF and other source ancillary metadata,
+ *   retaining an exact ICC profile only on engine-proven paths.
  * * `StripAll` — drop all metadata regardless. Privacy default for
  *   shared photos; also gives the smallest output bytes.
- *
- * `StripExifKeepIcc` (drop EXIF but keep the colour profile) is a
- * v0.2.7+ candidate per the explicit per-format-fragility trigger.
  */
-export type MetadataPolicy = "preserve" | "strip_all";
+export type MetadataPolicy = "preserve" | "remove_personal" | "strip_all";

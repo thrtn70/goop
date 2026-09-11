@@ -245,6 +245,13 @@ it("roundtrips all supported settings including safe numeric GIF trims", () => {
     gif_options: { size_preset: "small", trim_start_ms: 1000, trim_end_ms: 2500 } });
 });
 
+it("accepts remove_personal only in schema 8 and preserves legacy defaults", () => {
+  const entry = { name: "Private JPEG", target: "jpeg", metadata_policy: "remove_personal" };
+  expect(parsePresetBundle(JSON.stringify({ version: 8, presets: [entry] }))[0].metadata_policy).toBe("remove_personal");
+  expect(() => parsePresetBundle(JSON.stringify({ version: 7, presets: [entry] }))).toThrow(PresetParseError);
+  expect(parsePresetBundle(JSON.stringify({ version: 7, presets: [{ name: "Legacy", target: "jpeg" }] }))[0].metadata_policy).toBeNull();
+});
+
 it.each([
   { compress_mode: { kind: "quality", value: 101 } },
   { compress_mode: { kind: "target_size_bytes", value: 0 } },
@@ -427,7 +434,7 @@ describe("schema 6 portable track policy", () => {
     });
     const raw = serializePresets([preset]);
     const wire = JSON.parse(raw);
-    expect(wire.version).toBe(7);
+    expect(wire.version).toBe(8);
     expect(wire.presets[0].track_policy).toEqual(choosePerFile);
     expect(raw).not.toContain("canonical_path");
     expect(raw).not.toContain("stream_index");
@@ -480,7 +487,7 @@ describe("schema 7 portable video track policy", () => {
   it("roundtrips independent families without source identity", () => {
     const preset = makePreset({ target: "mkv", quality_preset: null, resolution_cap: null, video_options: { kind: "copy" }, track_policy: policy });
     const raw = serializePresets([preset]);
-    expect(JSON.parse(raw).version).toBe(7);
+    expect(JSON.parse(raw).version).toBe(8);
     expect(entriesToPresets(parsePresetBundle(raw), [])[0].track_policy).toEqual(policy);
     expect(raw).not.toMatch(/canonical_path|stream_indices|inventory/);
   });

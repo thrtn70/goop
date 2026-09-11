@@ -14,7 +14,7 @@ import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/vide
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 7 as const;
+export const PRESET_BUNDLE_VERSION = 8 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -217,9 +217,10 @@ function validateCompressMode(v: unknown): CompressMode | null {
   throw new PresetParseError(`unsupported compress_mode kind: ${String(v.kind)}`);
 }
 
-function validateMetadata(value: unknown): MetadataPolicy | null {
+function validateMetadata(value: unknown, version: number): MetadataPolicy | null {
   if (value == null) return null;
   if (value === "preserve" || value === "strip_all") return value;
+  if (value === "remove_personal" && version >= 8) return value;
   throw new PresetParseError("metadata_policy is not recognized");
 }
 function validateGif(value: unknown): GifOptions | null {
@@ -316,7 +317,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     quality_preset: (v.quality_preset as QualityPreset | null | undefined) ?? null,
     resolution_cap: (v.resolution_cap as ResolutionCap | null | undefined) ?? null,
     compress_mode: validateCompressMode(v.compress_mode),
-    metadata_policy: validateMetadata(v.metadata_policy),
+    metadata_policy: validateMetadata(v.metadata_policy, version),
     gif_options: validateGif(v.gif_options),
     subtitle: validateSubtitle(v.subtitle),
     image_options: imageOptions,
@@ -343,7 +344,7 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (![1, 2, 3, 4, 5, 6, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
+  if (![1, 2, 3, 4, 5, 6, 7, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
     throw new PresetParseError(
       `unsupported bundle version: ${String(parsed.version)} (expected 1 through ${PRESET_BUNDLE_VERSION})`,
     );

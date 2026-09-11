@@ -427,6 +427,8 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         }
         let published = staged.publish(&destination, target_bytes, false, &cancel)?;
         Ok(ConvertResult {
+            compression_execution: None,
+            image_metadata_execution: None,
             audio_execution,
             video_execution,
             track_execution,

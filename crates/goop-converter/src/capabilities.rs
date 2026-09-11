@@ -4,7 +4,8 @@ use crate::{
 };
 use goop_core::{
     CompressMode, CompressionCapabilities, ConversionCapabilities, ConvertRequest, GoopError,
-    ImageResize, ImageSettingsCapabilities, ProbeResult, SourceKind, TargetCapability,
+    ImageMetadataCapabilities, ImageOrientationStatus, ImageResize, ImageSettingsCapabilities,
+    MetadataPolicy, MetadataPolicyAvailability, ProbeResult, SourceKind, TargetCapability,
     TargetFormat, TrackSourceBinding,
 };
 use goop_sidecar::BinaryResolver;
@@ -135,6 +136,10 @@ fn capabilities_for_bound_source(
                 None
             };
             TargetCapability {
+                image_metadata: image.then(|| base_image_metadata_capabilities(
+                    preserves_metadata,
+                    source_target == Some(Jpeg) && target == Jpeg,
+                )),
                 video_track_settings: video_track_settings.clone(),
                 audio_settings: if matches!(target, Mp3 | M4a | Aac | Wav | Flac) {
                     Some(crate::audio_options::capabilities(
@@ -187,6 +192,181 @@ fn capabilities_for_bound_source(
             }
         }).collect(),
         compression,
+    }
+}
+
+fn policy_availability(
+    available: bool,
+    summary: impl Into<String>,
+    reason: Option<String>,
+) -> MetadataPolicyAvailability {
+    MetadataPolicyAvailability {
+        available,
+        reason,
+        summary: summary.into(),
+    }
+}
+
+fn base_image_metadata_capabilities(
+    preserves_metadata: bool,
+    jpeg_pair: bool,
+) -> ImageMetadataCapabilities {
+    ImageMetadataCapabilities {
+        preserve: policy_availability(
+            true,
+            if preserves_metadata {
+                "Supported source EXIF and ICC metadata will be retained."
+            } else {
+                "This output path does not retain source EXIF or ICC metadata."
+            },
+            None,
+        ),
+        remove_personal: policy_availability(
+            false,
+            "Remove personal data is unavailable for this source and output.",
+            Some(if jpeg_pair {
+                "Fresh JPEG metadata inspection is required before personal data can be removed."
+                    .into()
+            } else {
+                "Remove personal data is currently available only for JPEG to JPEG processing."
+                    .into()
+            }),
+        ),
+        strip_all: policy_availability(
+            true,
+            "All source metadata and the ICC color profile will be removed.",
+            None,
+        ),
+        source_has_exif: None,
+        source_has_icc: None,
+        orientation: ImageOrientationStatus::Uninspected,
+    }
+}
+
+fn enrich_jpeg_metadata_capabilities(
+    inspection: Option<&crate::metadata::JpegMetadataInspection>,
+    capabilities: &mut ConversionCapabilities,
+) {
+    let Some(inspection) = inspection else {
+        return;
+    };
+    let orientation = match inspection.orientation {
+        crate::exif_geometry::OrientationStatus::Absent => ImageOrientationStatus::Absent,
+        crate::exif_geometry::OrientationStatus::Valid(_) => ImageOrientationStatus::Valid,
+        crate::exif_geometry::OrientationStatus::Malformed => ImageOrientationStatus::Malformed,
+        crate::exif_geometry::OrientationStatus::Ambiguous => ImageOrientationStatus::Ambiguous,
+    };
+    let orientation_reason = match orientation {
+        ImageOrientationStatus::Malformed => Some(
+            "JPEG orientation metadata is malformed, so privacy modes cannot safely normalize the image."
+                .into(),
+        ),
+        ImageOrientationStatus::Ambiguous => Some(
+            "JPEG orientation metadata is ambiguous, so privacy modes cannot safely normalize the image."
+                .into(),
+        ),
+        ImageOrientationStatus::Uninspected => Some(
+            "JPEG orientation metadata was not inspected, so privacy modes cannot safely normalize the image."
+                .into(),
+        ),
+        ImageOrientationStatus::Absent | ImageOrientationStatus::Valid => None,
+    };
+    for target in &mut capabilities.targets {
+        let Some(metadata) = target.image_metadata.as_mut() else {
+            continue;
+        };
+        metadata.source_has_exif = Some(inspection.source_has_exif);
+        metadata.source_has_icc = Some(inspection.source_has_icc);
+        metadata.orientation = orientation;
+        if target.target == TargetFormat::Jpeg {
+            metadata.preserve = policy_availability(
+                inspection.preserve_unavailable_reason.is_none(),
+                "Supported source EXIF and ICC metadata will be retained.",
+                inspection.preserve_unavailable_reason.clone(),
+            );
+            let remove_reason = orientation_reason
+                .clone()
+                .or_else(|| inspection.remove_personal_unavailable_reason.clone());
+            metadata.remove_personal = policy_availability(
+                remove_reason.is_none(),
+                "Personal metadata will be removed from this untagged JPEG.",
+                remove_reason,
+            );
+            metadata.strip_all = policy_availability(
+                inspection.strip_all_unavailable_reason.is_none() && orientation_reason.is_none(),
+                "All source metadata and the ICC color profile will be removed.",
+                orientation_reason
+                    .clone()
+                    .or_else(|| inspection.strip_all_unavailable_reason.clone()),
+            );
+        }
+    }
+}
+
+struct ImageSourceInspection {
+    probe: ProbeResult,
+    jpeg_metadata: Option<crate::metadata::JpegMetadataInspection>,
+    explicit_preserve_unavailable_reason: Option<String>,
+}
+
+async fn inspect_image_source_snapshot(path: &Path) -> Result<ImageSourceInspection, GoopError> {
+    let inspection_path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let source =
+            crate::jpeg_controls::prepare(&inspection_path, crate::jpeg_controls::MAX_INPUT_BYTES)?;
+        let probe = crate::jpeg_controls::probe_prepared(&inspection_path, source.as_ref())?;
+        let jpeg_metadata = source
+            .as_ref()
+            .map(|source| source.inspect_metadata(crate::metadata::JpegOutputColor::Rgb))
+            .transpose()?;
+        let explicit_preserve_unavailable_reason = source.as_ref().and_then(|source| {
+            crate::metadata::prepare_jpeg_plan(
+                source.bytes.clone(),
+                MetadataPolicy::Preserve,
+                crate::metadata::JpegOutputColor::Rgb,
+            )
+            .err()
+            .map(|error| error.user_message())
+        });
+        Ok(ImageSourceInspection {
+            probe,
+            jpeg_metadata,
+            explicit_preserve_unavailable_reason,
+        })
+    })
+    .await
+    .map_err(|error| GoopError::InvalidRequest(format!("Image inspection task failed: {error}")))?
+}
+
+fn validate_metadata_policy(
+    req: &ConvertRequest,
+    capabilities: &ConversionCapabilities,
+) -> Result<(), GoopError> {
+    let policy = req.metadata_policy.unwrap_or_default();
+    let metadata = capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == req.target)
+        .and_then(|target| target.image_metadata.as_ref())
+        .ok_or_else(|| {
+            GoopError::InvalidRequest(
+                "Metadata policy is unavailable for this source and output.".into(),
+            )
+        })?;
+    let availability = match policy {
+        MetadataPolicy::Preserve => &metadata.preserve,
+        MetadataPolicy::RemovePersonal => &metadata.remove_personal,
+        MetadataPolicy::StripAll => &metadata.strip_all,
+    };
+    if availability.available {
+        Ok(())
+    } else {
+        Err(GoopError::InvalidRequest(
+            availability
+                .reason
+                .clone()
+                .unwrap_or_else(|| availability.summary.clone()),
+        ))
     }
 }
 
@@ -388,25 +568,48 @@ pub async fn validate_request_source(
         return Ok(());
     }
     let path = goop_core::path::expand(&req.input_path);
-    let probe = if req.image_options.is_some() {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("");
-        if backend_for_extension(extension) != BackendKind::ImageMagick {
-            return Err(GoopError::InvalidRequest(
-                "Image settings require a source routed to the image converter.".into(),
-            ));
-        }
-        tokio::task::spawn_blocking(move || {
-            crate::jpeg_controls::probe_explicit(&path, crate::jpeg_controls::MAX_INPUT_BYTES)
-        })
-        .await
-        .map_err(|e| GoopError::InvalidRequest(format!("Image admission task failed: {e}")))??
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let backend = backend_for_extension(extension);
+    if req.image_options.is_some() && backend != BackendKind::ImageMagick {
+        return Err(GoopError::InvalidRequest(
+            "Image settings require a source routed to the image converter.".into(),
+        ));
+    }
+    let image_inspection = if backend == BackendKind::ImageMagick {
+        Some(inspect_image_source_snapshot(&path).await?)
+    } else {
+        None
+    };
+    let probe = if let Some(inspection) = image_inspection.as_ref() {
+        inspection.probe.clone()
     } else {
         probe_source(resolver, &path).await?
     };
-    validate_request(req, &probe)
+    validate_request(req, &probe)?;
+    if probe.source_kind == SourceKind::Image {
+        let mut capabilities = capabilities_for(&probe);
+        enrich_jpeg_metadata_capabilities(
+            image_inspection
+                .as_ref()
+                .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
+            &mut capabilities,
+        );
+        if req.image_options.is_some()
+            && req.metadata_policy.unwrap_or_default() == MetadataPolicy::Preserve
+        {
+            if let Some(reason) = image_inspection
+                .as_ref()
+                .and_then(|inspection| inspection.explicit_preserve_unavailable_reason.as_ref())
+            {
+                return Err(GoopError::InvalidRequest(reason.clone()));
+            }
+        }
+        validate_metadata_policy(req, &capabilities)?;
+    }
+    Ok(())
 }
 
 /// Inspect once so dimensions and available operations describe the same source read.
@@ -418,19 +621,38 @@ pub async fn inspect_source(
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let (probe, track_source, track_source_unavailable_reason) =
-        if backend_for_extension(extension) == BackendKind::Ffmpeg {
-            crate::track_options::probe_bound_source_for_inspection(
-                resolver,
-                path,
-                &tokio_util::sync::CancellationToken::new(),
-            )
-            .await?
-        } else {
-            (probe_source(resolver, path).await?, None, None)
-        };
+    let backend = backend_for_extension(extension);
+    let image_inspection = if backend == BackendKind::ImageMagick {
+        Some(inspect_image_source_snapshot(path).await?)
+    } else {
+        None
+    };
+    let (probe, track_source, track_source_unavailable_reason) = if backend == BackendKind::Ffmpeg {
+        crate::track_options::probe_bound_source_for_inspection(
+            resolver,
+            path,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?
+    } else {
+        (
+            image_inspection
+                .as_ref()
+                .ok_or_else(|| GoopError::InvalidRequest("Image inspection is unavailable".into()))?
+                .probe
+                .clone(),
+            None,
+            None,
+        )
+    };
     let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
-    let capabilities = capabilities_for_bound_source(&probe, None, track_source.as_ref());
+    let mut capabilities = capabilities_for_bound_source(&probe, None, track_source.as_ref());
+    enrich_jpeg_metadata_capabilities(
+        image_inspection
+            .as_ref()
+            .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
+        &mut capabilities,
+    );
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
@@ -522,19 +744,39 @@ pub async fn inspect_source_with_encoders(
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let (probe, track_source, track_source_unavailable_reason) =
-        if backend_for_extension(extension) == BackendKind::Ffmpeg {
-            crate::track_options::probe_bound_source_for_inspection(
-                resolver,
-                path,
-                &tokio_util::sync::CancellationToken::new(),
-            )
-            .await?
-        } else {
-            (probe_source(resolver, path).await?, None, None)
-        };
+    let backend = backend_for_extension(extension);
+    let image_inspection = if backend == BackendKind::ImageMagick {
+        Some(inspect_image_source_snapshot(path).await?)
+    } else {
+        None
+    };
+    let (probe, track_source, track_source_unavailable_reason) = if backend == BackendKind::Ffmpeg {
+        crate::track_options::probe_bound_source_for_inspection(
+            resolver,
+            path,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?
+    } else {
+        (
+            image_inspection
+                .as_ref()
+                .ok_or_else(|| GoopError::InvalidRequest("Image inspection is unavailable".into()))?
+                .probe
+                .clone(),
+            None,
+            None,
+        )
+    };
     let track_source_unavailable_reason = track_source_unavailable_reason.map(str::to_owned);
-    let capabilities = capabilities_for_bound_source(&probe, Some(encoders), track_source.as_ref());
+    let mut capabilities =
+        capabilities_for_bound_source(&probe, Some(encoders), track_source.as_ref());
+    enrich_jpeg_metadata_capabilities(
+        image_inspection
+            .as_ref()
+            .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
+        &mut capabilities,
+    );
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
