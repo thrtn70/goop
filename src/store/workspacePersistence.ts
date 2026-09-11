@@ -1,6 +1,6 @@
 import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoOptions";
 import { validateAudioOptions } from "@/features/convert/audioOptions";
-import { parsePresetBundle } from "@/features/presets/io";
+import { parsePresetBundle, PRESET_BUNDLE_VERSION } from "@/features/presets/io";
 import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 
 export type DraftEntries = Record<string, { value: unknown }>;
@@ -171,7 +171,7 @@ function validFiles(value: unknown, compress: boolean): boolean {
   return value.every(file => {
     if (!object(file) || typeof file.path !== "string" || !file.path || typeof file.sourceDir !== "string" || (file.id != null && typeof file.id !== "string") || (file.revision != null && (!Number.isSafeInteger(file.revision) || Number(file.revision) < 0))) return false;
     try {
-      parsePresetBundle(JSON.stringify({version:2, presets:[{name:"Draft", target:file.target,
+      parsePresetBundle(JSON.stringify({version:PRESET_BUNDLE_VERSION, presets:[{name:"Draft", target:file.target,
         quality_preset:file.qualityPreset, resolution_cap:file.resolutionCap,
         compress_mode:compress ? file.mode : null, gif_options:file.gifOptions,
         metadata_policy:file.metadataPolicy, subtitle:file.subtitle, image_options:file.imageOptions}]}));
@@ -214,6 +214,25 @@ function validSlot(slot: string, value: unknown): boolean {
   return typeof value === "string";
 }
 
+function normalizeSlotValue(slot: string, value: unknown): unknown {
+  if (!["ConvertPage.files", "CompressPage.files"].includes(slot) || !Array.isArray(value)) return value;
+  return value.map((file) => {
+    if (!object(file)) return file;
+    const imageTarget = ["png", "jpeg", "webp", "bmp", "tiff", "avif", "jpeg_xl"].includes(String(file.target));
+    const normalized = {
+      ...file,
+      ...(imageTarget && file.metadataPolicy == null ? { metadataPolicy: "preserve" } : {}),
+    };
+    if (slot !== "CompressPage.files" || !object(file.mode) || file.mode.kind !== "target_size_bytes") {
+      return normalized;
+    }
+    return {
+      ...normalized,
+      mode: { kind: "target_size_bytes", value: BigInt(file.mode.value as number) },
+    };
+  });
+}
+
 export function encodeDraftEntries(entries: DraftEntries): string {
   const raw = JSON.stringify({version:1, entries}, (_key, value: unknown) => {
     if (typeof value === "bigint") {
@@ -240,7 +259,9 @@ export function decodeDraftEntries(raw: string): DraftEntries {
       if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) continue;
       const slot = parts[parts.length - 1];
       if (!SLOTS.has(slot) || !object(entry) || !bounded(entry.value) || !validSlot(slot, entry.value)) continue;
-      const value = slot === "ImageAppIconFlow.selected" ? new Set((entry.value as {set:string[]}).set) : entry.value;
+      const value = slot === "ImageAppIconFlow.selected"
+        ? new Set((entry.value as {set:string[]}).set)
+        : normalizeSlotValue(slot, entry.value);
       entries[key] = {value};
     }
     return entries;

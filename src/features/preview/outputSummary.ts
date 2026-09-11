@@ -1,4 +1,4 @@
-import type { AudioExecutionSummary, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary, VideoTrackExecutionSummary } from "@/types";
+import type { AudioExecutionSummary, CompressionExecution, ImageMetadataExecution, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary, VideoTrackExecutionSummary } from "@/types";
 
 function rational(fact: VideoRationalFact | null | undefined): string | null {
   return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
@@ -128,6 +128,33 @@ export function videoTrackExecutionText(summary: VideoTrackExecutionSummary): st
   return [...facts, ...summary.notices].join(" · ");
 }
 
+export function imageMetadataExecutionText(summary: ImageMetadataExecution): string {
+  const policy = summary.requested_policy === "remove_personal"
+    ? "Personal metadata removed"
+    : summary.requested_policy === "strip_all"
+      ? "All metadata removed"
+      : "Metadata preserved";
+  const color: Record<ImageMetadataExecution["color_handling"], string> = {
+    exact_profile_retained: "Exact ICC profile retained",
+    renderer_sdr_srgb: "Rendered as SDR sRGB",
+    untagged: "No ICC profile attached",
+    no_profile: "ICC profile removed",
+  };
+  const orientation = summary.orientation_normalized ? "orientation normalized" : null;
+  return [policy, color[summary.color_handling], orientation, ...summary.notices].filter(Boolean).join(" · ");
+}
+
+export function compressionExecutionText(summary: CompressionExecution): string {
+  const mode = summary.requested_mode.kind === "target_size_bytes"
+    ? `Target-size search (${summary.attempts} ${summary.attempts === 1 ? "attempt" : "attempts"})`
+    : summary.requested_mode.kind === "quality"
+      ? `Quality ${summary.requested_mode.value}`
+      : "Lossless reoptimization";
+  const quality = summary.selected_quality == null ? null : `quality ${summary.selected_quality}`;
+  const target = summary.target_bytes == null ? null : `${summary.target_met ? "Target met" : "Target missed"} (${summary.final_bytes} / ${summary.target_bytes} bytes)`;
+  return [mode, quality, target, `Final ${summary.final_bytes} bytes`].filter(Boolean).join(" · ");
+}
+
 /** Measured results only; old history entries do not imply zero source bytes. */
 export function outputSummary(result: JobResult | null | undefined, job?: Pick<Job, "kind" | "payload">): string | null {
   if (!result) return null;
@@ -140,11 +167,13 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
     const percent = Math.abs((source - output) / source * 100);
     facts.push(output === source ? "Same size as source" : `${Number(percent.toFixed(1))}% ${output < source ? "smaller" : "larger"} than source`);
   }
-  if (measured && output != null && target != null && Number.isSafeInteger(target) && target > 0) {
+  if (!result.compression_execution && measured && output != null && target != null && Number.isSafeInteger(target) && target > 0) {
     facts.push(output <= target ? "Target met" : "Target missed");
   }
   if (result.track_execution) facts.push(trackExecutionText(result.track_execution));
   if (result.video_track_execution) facts.push(videoTrackExecutionText(result.video_track_execution));
+  if (result.image_metadata_execution) facts.push(imageMetadataExecutionText(result.image_metadata_execution));
+  if (result.compression_execution) facts.push(compressionExecutionText(result.compression_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
   else if (result.video_execution) facts.push(videoExecutionText(result.video_execution, !result.video_track_execution));
   else if (!result.track_execution && !result.video_track_execution) {

@@ -31,6 +31,7 @@ import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
 import { useAppStore } from "@/store/appStore";
 import type { Preset, TargetFormat } from "@/types";
+import { metadataPolicyProblem } from "@/features/metadata/MetadataPolicyControl";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -91,6 +92,8 @@ function CompressPage() {
     null,
   );
   const { byId, retry } = useSourceInspections(files);
+  const policy =
+    useAppStore((s) => s.settings?.default_metadata_policy) ?? "preserve";
   useEffect(() => {
     if (files.some((f) => !f.id))
       setFiles((previous) =>
@@ -155,12 +158,13 @@ function CompressPage() {
               target: targetFromPath(p),
               sourceDir: dirname(p),
               mode: { kind: "quality", value: 75 },
+              metadataPolicy: policy,
             }));
           return [...prev, ...fresh];
         });
       }
     },
-    [setFiles, setPdfs],
+    [policy, setFiles, setPdfs],
   );
 
   useEffect(() => {
@@ -175,10 +179,11 @@ function CompressPage() {
       setFiles(previous => previous.some(file => file.path === path) ? previous : [...previous, {
         ...identity, path, target: targetFromPath(path), sourceDir: dirname(path),
         mode: {kind:"quality",value:75},
+        metadataPolicy: policy,
       }]);
     }
     nav(location.pathname, {replace:true,state:null});
-  }, [location, nav, files, setFiles, setPdfs, setSelectedId]);
+  }, [location, nav, files, policy, setFiles, setPdfs, setSelectedId]);
 
   // Partial text is still a newer edit, even before blur commits request fields.
   const handleDraftEdit = useCallback(
@@ -195,7 +200,7 @@ function CompressPage() {
   );
 
   const handleOptionsChange = useCallback(
-    (id: string, opts: CompressRowOptions & { metadataPolicy?: import("@/types").MetadataPolicy }) => {
+    (id: string, opts: CompressRowOptions) => {
       setFiles((prev) =>
         prev.map((f) =>
           f.id === id
@@ -203,7 +208,7 @@ function CompressPage() {
                 ...f,
                 revision: (f.revision ?? 0) + 1,
                 mode: opts.mode,
-                metadataPolicy: opts.metadataPolicy ?? f.metadataPolicy,
+                metadataPolicy: opts.metadataPolicy,
                 optionsReady: true,
               }
             : f,
@@ -225,44 +230,59 @@ function CompressPage() {
   );
 
   const [applicationError, setApplicationError] = useState<string | null>(null);
+  const applyCompressionSettings = useCallback(
+    (mode: CompressFileEntry["mode"], target: TargetFormat, metadataPolicy: NonNullable<CompressFileEntry["metadataPolicy"]>) => {
+      const next = files.map((file) => ({
+        ...file,
+        revision: (file.revision ?? 0) + 1,
+        mode,
+        target,
+        metadataPolicy,
+        optionsReady: true,
+      }));
+      const incompatible = next.flatMap((file) => {
+        const state = byId[file.id ?? ""] ?? PROBING;
+        const compression = compressionProblem(file.mode, state, file.target);
+        const metadata = state.phase === "ready" && state.probe.source_kind === "image"
+          ? metadataPolicyProblem(
+              file.metadataPolicy ?? "preserve",
+              state.capabilities.targets.find((candidate) => candidate.target === file.target)?.image_metadata,
+              "rgb_reencode",
+            )
+          : null;
+        const problem = compression ?? metadata;
+        return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
+      });
+      if (incompatible.length) {
+        setApplicationError(`Settings were not applied. ${incompatible.join(" ")}`);
+        return;
+      }
+      setApplicationError(null);
+      setFiles(next);
+    },
+    [byId, files, setFiles],
+  );
   const applyPreset = useCallback(
     (preset: Preset) => {
       if (preset.image_options) { setApplicationError("Image settings cannot be applied in Compress. Use Convert for JPEG quality and dimensions."); return; }
       if (!preset.compress_mode) return;
-      setApplicationError(null);
-      const mode = preset.compress_mode;
-      setFiles((prev) =>
-        prev.map((f) => ({
-          ...f,
-          revision: (f.revision ?? 0) + 1,
-          mode,
-          target: preset.target,
-          metadataPolicy: preset.metadata_policy ?? "preserve",
-          optionsReady: true,
-        })),
+      applyCompressionSettings(
+        preset.compress_mode,
+        preset.target,
+        preset.metadata_policy ?? "preserve",
       );
     },
-    [setFiles],
+    [applyCompressionSettings],
   );
 
   const applyFirstToAll = useCallback(() => {
-    setFiles((prev) => {
-      if (prev.length < 2) return prev;
-      const headMode = prev[0].mode;
-      return prev.map((f, i) =>
-        i === 0
-          ? f
-          : {
-              ...f,
-              revision: (f.revision ?? 0) + 1,
-              mode: headMode,
-              target: prev[0].target,
-              metadataPolicy: prev[0].metadataPolicy,
-              optionsReady: true,
-            },
-      );
-    });
-  }, [setFiles]);
+    if (files.length < 2) return;
+    applyCompressionSettings(
+      files[0].mode,
+      files[0].target,
+      files[0].metadataPolicy ?? "preserve",
+    );
+  }, [applyCompressionSettings, files]);
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -290,9 +310,17 @@ function CompressPage() {
     }
   }, [pickerToken, handleBrowse, location.pathname]);
 
-  const problems = files.map((f) =>
-    f.imageOptions ? "Image settings cannot be used in Compress." : compressionProblem(f.mode, byId[f.id ?? ""] ?? PROBING, f.target),
-  );
+  const problems = files.map((f) => {
+    const state = byId[f.id ?? ""] ?? PROBING;
+    if (f.imageOptions) return "Image settings cannot be used in Compress.";
+    const compression = compressionProblem(f.mode, state, f.target);
+    if (compression) return compression;
+    if (state.phase === "ready" && state.probe.source_kind === "image") {
+      const imageMetadata = state.capabilities.targets.find(c => c.target === f.target)?.image_metadata;
+      return metadataPolicyProblem(f.metadataPolicy ?? "preserve", imageMetadata, "rgb_reencode");
+    }
+    return null;
+  });
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   return (
     <WorkspaceFrame
@@ -338,19 +366,16 @@ function CompressPage() {
           selected.optionsReady ? (
             <WorkspaceDraftProvider scope={["source", selected.path]}>
               <p className="mb-3 text-xs text-fg-secondary">Output: {selected.target.toUpperCase()}</p>
-              {selectedState.probe.source_kind === "image" && <label className="mb-3 flex items-center gap-2 text-xs text-fg-secondary">Metadata
-                <select aria-label="Compression metadata" value={selected.metadataPolicy ?? "preserve"} onChange={event => selected.id && handleOptionsChange(selected.id, {mode: selected.mode, metadataPolicy: event.target.value === "strip_all" ? "strip_all" : "preserve"})} className="rounded-md bg-surface-2 px-2 py-1">
-                  <option value="preserve">Preserve when supported</option><option value="strip_all">Strip</option>
-                </select>
-              </label>}
               <CompressSettingsPanel
                 target={selected.target}
                 onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
                 state={selectedState}
                 mode={selected.mode}
                 onChange={(mode) =>
-                  selected.id && handleOptionsChange(selected.id, { mode })
+                  selected.id && handleOptionsChange(selected.id, { mode, metadataPolicy: selected.metadataPolicy ?? "preserve" })
                 }
+                metadataPolicy={selected.metadataPolicy ?? "preserve"}
+                onMetadataChange={(metadataPolicy) => selected.id && handleOptionsChange(selected.id, { mode: selected.mode, metadataPolicy })}
               />
               <SettingsPreview request={{input_path:selected.path,target:selected.target,
                 quality_preset:null,resolution_cap:null,compress_mode:selected.mode,

@@ -7,7 +7,8 @@ pub use audio::{
 pub mod capabilities;
 pub use capabilities::{
     CompressionCapabilities, ConversionCapabilities, ConversionInspection,
-    ImageSettingsCapabilities, TargetCapability, TrackChoiceCapability, TrackModeAvailability,
+    ImageMetadataCapabilities, ImageOrientationStatus, ImageSettingsCapabilities,
+    MetadataPolicyAvailability, TargetCapability, TrackChoiceCapability, TrackModeAvailability,
     TrackSettingsCapabilities, VideoTrackChoiceCapability, VideoTrackPolicyCapabilities,
     VideoTrackPolicyModeCapabilities, VideoTrackSettingsCapabilities,
 };
@@ -29,9 +30,10 @@ pub mod tracks;
 pub mod update;
 
 pub use convert::{
-    CompressMode, ConvertRequest, ConvertResult, GifOptions, GifSizePreset, ImageConvertOptions,
-    ImageResize, MetadataPolicy, ProbeResult, QualityPreset, ResolutionCap, SourceKind,
-    SubtitleMode, SubtitleOptions, TargetFormat,
+    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, GifOptions, GifSizePreset,
+    ImageColorHandling, ImageConvertOptions, ImageMetadataExecution, ImageResize, MetadataPolicy,
+    ProbeResult, QualityPreset, ResolutionCap, SourceKind, SubtitleMode, SubtitleOptions,
+    TargetFormat,
 };
 pub use error::{
     both_failed, friendly_message, is_access_blocked_stderr, is_cookie_db_error,

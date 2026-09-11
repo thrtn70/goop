@@ -2119,6 +2119,8 @@ mod tests {
             audio_execution: None,
             video_execution: None,
             video_track_execution: None,
+            image_metadata_execution: None,
+            compression_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,

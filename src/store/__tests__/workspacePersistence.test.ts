@@ -5,7 +5,8 @@ describe("durable editable drafts", () => {
   it("roundtrips editable source lists and app-icon sets", () => {
     const entries = { [key("ImagePage.files")]: {value:["/photo.png"]},
       [key("ImageAppIconFlow.selected")]: {value:new Set(["macos", "windows"])} };
-    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored).toEqual(entries);
   });
   it("rejects corruption, unknown versions and oversized snapshots", () => {
     expect(decodeDraftEntries("{")).toEqual({});
@@ -45,7 +46,10 @@ describe("JPEG draft persistence", () => {
       [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.heightDraft"])]: { value: "" },
       [JSON.stringify(["convert", "file", "photo-2", "ImageOptionsPanel.qualityDraft"])]: { value: "1e" },
       [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.appliedWidth"])]: { value: "2048" } };
-    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({
+      ...entries,
+      [fileKey]: { value: [{ ...file, metadataPolicy: "preserve" }] },
+    });
   });
   it("drops malformed options instead of restoring an ineffective draft", () => {
     const entries = { [fileKey]: { value: [{ ...file, imageOptions: { jpeg_quality: -1, resize: { kind: "original" } } }] } };
@@ -53,7 +57,33 @@ describe("JPEG draft persistence", () => {
   });
   it("continues restoring legacy drafts without image options", () => {
     const entries = { [fileKey]: { value: [{ ...file, imageOptions: undefined }] } };
-    expect(decodeDraftEntries(encodeDraftEntries(entries))[fileKey]).toEqual(entries[fileKey]);
+    const { imageOptions: _imageOptions, ...withoutImageOptions } = file;
+    expect(decodeDraftEntries(encodeDraftEntries(entries))[fileKey]).toEqual({
+      value: [{ ...withoutImageOptions, metadataPolicy: "preserve" }],
+    });
+  });
+  it.each([true, undefined])("normalizes legacy metadata absence to Preserve when optionsReady is %s", (optionsReady) => {
+    const legacy = { ...file, optionsReady };
+    delete (legacy as { metadataPolicy?: unknown }).metadataPolicy;
+    const entries = { [fileKey]: { value: [legacy] } };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect((restored[fileKey].value as Array<{ metadataPolicy: string }>)[0].metadataPolicy).toBe("preserve");
+  });
+  it("restores remove-personal intent for both Convert and Compress", () => {
+    const compressKey = JSON.stringify(["compress", "CompressPage.files"]);
+    const entries = {
+      [fileKey]: { value: [{ ...file, metadataPolicy: "remove_personal" }] },
+      [compressKey]: { value: [{
+        ...file,
+        imageOptions: null,
+        metadataPolicy: "remove_personal",
+        mode: { kind: "target_size_bytes", value: 2000n },
+      }] },
+    };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored).toEqual(entries);
+    const files = restored[compressKey].value as Array<{ mode: { kind: string; value: unknown } }>;
+    expect(typeof files[0].mode.value).toBe("bigint");
   });
   it("rejects compression drafts carrying meaningful image options", () => {
     const entries = { [JSON.stringify(["compress", "CompressPage.files"])]: {

@@ -34,6 +34,7 @@ import SubtitleField, { subtitleSupport } from "./SubtitleField";
 import AudioTrackPanel from "./AudioTrackPanel";
 import VideoTrackPanel from "./VideoTrackPanel";
 import { cloneVideoTrackPolicyDraft, completeVideoTrackOptions, defaultVideoTrackOptions, shouldOfferVideoTrackOptions, videoTrackPolicyForPreset, type VideoTrackPolicyDraft } from "./videoTrackOptions";
+import MetadataPolicyControl from "@/features/metadata/MetadataPolicyControl";
 
 interface RowOptionsState {
   target: TargetFormat;
@@ -195,6 +196,7 @@ export function ConvertSettingsPanel({
     !explicit && !showVideoResolution &&
     opts.resolutionCap != null &&
     opts.resolutionCap !== "original";
+  const metadataCapabilities = targetCapability?.image_metadata;
   const showMetadataPolicy = p.source_kind === "image";
   const subSupport = subtitleSupport(target);
   const showSubtitle =
@@ -414,35 +416,13 @@ export function ConvertSettingsPanel({
           </p>
         )}
       {showMetadataPolicy && (
-        <div className="mt-2 flex items-center gap-2 text-xs">
-          <span className="text-fg-muted">Metadata:</span>
-          <button
-            type="button"
-            aria-pressed={metadataPolicy === "preserve"}
-            onClick={() => update({ metadataPolicy: "preserve" })}
-            className={`btn-press rounded-md px-2 py-1 transition duration-fast ease-out ${
-              metadataPolicy === "preserve"
-                ? "bg-accent text-accent-fg"
-                : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
-            }`}
-            title="Copy EXIF + ICC from source (JPEG↔JPEG and PNG↔PNG only)"
-          >
-            Preserve
-          </button>
-          <button
-            type="button"
-            aria-pressed={metadataPolicy === "strip_all"}
-            onClick={() => update({ metadataPolicy: "strip_all" })}
-            className={`btn-press rounded-md px-2 py-1 transition duration-fast ease-out ${
-              metadataPolicy === "strip_all"
-                ? "bg-accent text-accent-fg"
-                : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
-            }`}
-            title="Drop EXIF + ICC (smaller output, no GPS/camera info)"
-          >
-            Strip
-          </button>
-        </div>
+        <MetadataPolicyControl
+          value={metadataPolicy}
+          capabilities={metadataCapabilities}
+          preserveMode={opts.imageOptions ? "channel_aware" : "rgb_reencode"}
+          onChange={(next) => update({ metadataPolicy: next })}
+          onDraftEdit={onDraftEdit}
+        />
       )}
     </div>
   );

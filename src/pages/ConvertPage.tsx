@@ -64,6 +64,7 @@ import {
 
 import { useAppStore } from "@/store/appStore";
 import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
+import { metadataPolicyProblem } from "@/features/metadata/MetadataPolicyControl";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -474,9 +475,17 @@ function ConvertPage() {
     const incompatible = next.map(withAudioInspection).flatMap(file => {
       const state = byId[file.id ?? ""] ?? PROBING;
       const capability = state.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null;
+      const metadataProblem = state.phase === "ready" && state.probe.source_kind === "image"
+        ? metadataPolicyProblem(
+            file.metadataPolicy ?? "preserve",
+            state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
+            file.imageOptions ? "channel_aware" : "rgb_reencode",
+          )
+        : null;
       const problem = audioOptionsProblem(file)
         ?? videoOptionsError({...file, videoCapability:capability})
-        ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state);
+        ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state)
+        ?? metadataProblem;
       return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
     });
     if (incompatible.length) {
@@ -507,7 +516,7 @@ function ConvertPage() {
   };
 
   const applyFirstToAll = () => {
-    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean)) return;
+    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean) || metadataProblems.some(Boolean)) return;
     applySettings({...plannedFiles[0],audioOptions:audioRequestOptions(plannedFiles[0]),videoOptions:videoRequestOptions(plannedFiles[0])}, files[0].id);
   };
 
@@ -537,8 +546,17 @@ function ConvertPage() {
     }
   }, [pickerToken, handleBrowse, location.pathname]);
 
+  const metadataProblems = plannedFiles.map((file) => {
+    const state = byId[file.id ?? ""] ?? PROBING;
+    if (state.phase !== "ready" || state.probe.source_kind !== "image") return null;
+    return metadataPolicyProblem(
+      file.metadataPolicy ?? "preserve",
+      state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
+      file.imageOptions ? "channel_aware" : "rgb_reencode",
+    );
+  });
   const baseProblems = files.map((f, i) =>
-    audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i],
+    audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i] ?? metadataProblems[i],
   );
   const problems = plannedFiles.map((file, index) => (file.videoOptions && (file.videoTrackOptionsEnabled || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video") ? videoTrackOptionsProblem({
     options: file.trackOptions, settings: file.videoTrackSettings,

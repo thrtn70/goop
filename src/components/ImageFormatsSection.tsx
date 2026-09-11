@@ -15,7 +15,8 @@ import type { ImageDecoderStatus, MetadataPolicy } from "@/types";
  * libs ship inside the installer.
  *
  * The bottom of the section hosts the global default `MetadataPolicy`
- * toggle (Preserve / Strip All) which seeds new FileRow image rows.
+ * selector (Preserve / Remove personal data / Remove all) which seeds new
+ * FileRow image rows.
  */
 export default function ImageFormatsSection() {
   const [status, setStatus] = useState<ImageDecoderStatus | null>(null);
@@ -120,6 +121,18 @@ export default function ImageFormatsSection() {
             </button>
             <button
               type="button"
+              aria-pressed={policy === "remove_personal"}
+              onClick={() => void setPolicy("remove_personal")}
+              className={`btn-press rounded-md px-3 py-1.5 text-xs transition duration-fast ease-out ${
+                policy === "remove_personal"
+                  ? "bg-accent text-accent-fg"
+                  : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
+              }`}
+            >
+              Remove personal data
+            </button>
+            <button
+              type="button"
               aria-pressed={policy === "strip_all"}
               onClick={() => void setPolicy("strip_all")}
               className={`btn-press rounded-md px-3 py-1.5 text-xs transition duration-fast ease-out ${
@@ -128,7 +141,7 @@ export default function ImageFormatsSection() {
                   : "bg-surface-2 text-fg-secondary hover:bg-surface-3 hover:text-fg"
               }`}
             >
-              Strip
+              Remove all
             </button>
           </div>
         </div>

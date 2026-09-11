@@ -2,7 +2,8 @@ use goop_converter::capabilities::{capabilities_for, validate_request};
 use goop_converter::image_options::{output_dimensions, validate_options};
 use goop_core::{
     CompressMode, ConvertRequest, GifOptions, GifSizePreset, ImageConvertOptions, ImageResize,
-    ProbeResult, QualityPreset, ResolutionCap, SubtitleMode, SubtitleOptions, TargetFormat,
+    MetadataPolicy, ProbeResult, QualityPreset, ResolutionCap, SubtitleMode, SubtitleOptions,
+    TargetFormat,
 };
 fn probe(format: &str) -> ProbeResult {
     serde_json::from_value(serde_json::json!({"duration_ms":0,"width":2,"height":2,"video_codec":null,"audio_codec":null,"file_size":4,"container":null,"has_video":false,"has_audio":false,"source_kind":"image","color_space":null,"image_format":format})).unwrap()
@@ -286,6 +287,53 @@ async fn admission_revalidates_actual_source_instead_of_claimed_format() {
     assert!(validate_request_source(&resolver, &req).await.is_err());
 }
 
+#[tokio::test]
+async fn admission_enforces_source_bound_metadata_policy_availability() {
+    use goop_converter::capabilities::validate_request_source;
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let jpeg = dir.path().join("source.jpg");
+    let png = dir.path().join("source.png");
+    image::RgbImage::new(8, 8).save(&jpeg).unwrap();
+    image::RgbImage::new(8, 8).save(&png).unwrap();
+
+    let mut req = request(TargetFormat::Jpeg, None);
+    req.metadata_policy = Some(MetadataPolicy::RemovePersonal);
+    req.input_path = jpeg.to_string_lossy().into_owned();
+    assert!(validate_request_source(&resolver, &req).await.is_ok());
+
+    req.input_path = png.to_string_lossy().into_owned();
+    let error = validate_request_source(&resolver, &req).await.unwrap_err();
+    assert!(error.user_message().contains("JPEG to JPEG"));
+}
+
+#[tokio::test]
+async fn ordinary_and_target_size_preserve_admission_keep_legacy_duplicate_exif_compatibility() {
+    use goop_converter::capabilities::validate_request_source;
+    use img_parts::{jpeg::Jpeg, jpeg::JpegSegment, Bytes};
+
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("duplicate-exif.jpg");
+    image::RgbImage::new(8, 8).save(&source).unwrap();
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&source).unwrap().into()).unwrap();
+    for value in [1u16, 6] {
+        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+        exif.extend_from_slice(&value.to_le_bytes());
+        exif.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        jpeg.segments_mut()
+            .insert(1, JpegSegment::new_with_contents(0xe1, Bytes::from(exif)));
+    }
+    std::fs::write(&source, jpeg.encoder().bytes()).unwrap();
+
+    for mode in [None, Some(CompressMode::TargetSizeBytes(10_000))] {
+        let mut req = request(TargetFormat::Jpeg, mode);
+        req.input_path = source.to_string_lossy().into_owned();
+        req.metadata_policy = Some(MetadataPolicy::Preserve);
+        assert!(validate_request_source(&resolver, &req).await.is_ok());
+    }
+}
+
 #[test]
 fn image_presets_never_silently_ignore_video_settings() {
     let mut req = request(TargetFormat::Jpeg, None);
@@ -348,6 +396,201 @@ async fn inspection_returns_consistent_probe_and_capabilities() {
     assert_eq!(inspection.probe.height, Some(5));
     assert_eq!(inspection.capabilities, capabilities_for(&inspection.probe));
     assert!(inspection.capabilities.compression.lossless);
+    let png = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Png)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        png.orientation,
+        goop_core::ImageOrientationStatus::Uninspected
+    );
+}
+
+#[tokio::test]
+async fn jpeg_inspection_reports_source_bound_metadata_policy_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("source.jpg");
+    image::RgbImage::new(3, 5).save(&source).unwrap();
+
+    let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap();
+    let jpeg = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert!(jpeg.preserve.available);
+    assert!(jpeg.rgb_reencode_preserve.available);
+    assert!(jpeg.remove_personal.available);
+    assert!(jpeg.strip_all.available);
+    assert_eq!(jpeg.source_has_exif, Some(false));
+    assert_eq!(jpeg.source_has_icc, Some(false));
+    assert_eq!(jpeg.orientation, goop_core::ImageOrientationStatus::Absent);
+
+    let png = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Png)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert!(png.preserve.available);
+    assert!(png.rgb_reencode_preserve.available);
+    assert!(!png.remove_personal.available);
+    assert!(png
+        .remove_personal
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("JPEG to JPEG"));
+    assert!(png.strip_all.available);
+}
+
+#[tokio::test]
+async fn grayscale_jpeg_reports_channel_aware_preserve_separately_from_rgb_reencode() {
+    use img_parts::{jpeg::Jpeg, Bytes, ImageICC};
+
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("gray.jpg");
+    image::GrayImage::new(3, 5).save(&source).unwrap();
+    let mut profile = vec![0u8; 128];
+    profile[..4].copy_from_slice(&128u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"GRAY");
+    profile[36..40].copy_from_slice(b"acsp");
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&source).unwrap().into()).unwrap();
+    jpeg.set_icc_profile(Some(Bytes::from(profile)));
+    std::fs::write(&source, jpeg.encoder().bytes()).unwrap();
+
+    let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap();
+    let metadata = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert!(metadata.preserve.available);
+    assert!(!metadata.rgb_reencode_preserve.available);
+    assert!(metadata
+        .rgb_reencode_preserve
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("RGB ICC profile"));
+}
+
+#[tokio::test]
+async fn jpeg_with_opaque_icc_refuses_remove_personal_but_keeps_other_policies_available() {
+    use img_parts::{jpeg::Jpeg, Bytes, ImageICC};
+
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("source.jpg");
+    image::RgbImage::new(3, 5).save(&source).unwrap();
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&source).unwrap().into()).unwrap();
+    let mut profile = vec![0u8; 256];
+    profile[..4].copy_from_slice(&256u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"RGB ");
+    profile[36..40].copy_from_slice(b"acsp");
+    profile[128..].copy_from_slice(&[b'P'; 128]);
+    jpeg.set_icc_profile(Some(Bytes::from(profile)));
+    std::fs::write(&source, jpeg.encoder().bytes()).unwrap();
+
+    let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap();
+    let metadata = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert!(metadata.preserve.available);
+    assert!(metadata.rgb_reencode_preserve.available);
+    assert!(!metadata.remove_personal.available);
+    assert!(metadata
+        .remove_personal
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("ICC profile"));
+    assert!(metadata.strip_all.available);
+}
+
+#[tokio::test]
+async fn malformed_jpeg_orientation_reports_a_privacy_reason_without_unavailable_advice() {
+    use img_parts::{jpeg::Jpeg, Bytes, ImageEXIF};
+
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("malformed-orientation.jpg");
+    image::RgbImage::new(3, 5).save(&source).unwrap();
+    let mut exif = b"II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    exif.extend_from_slice(&9u16.to_le_bytes());
+    exif.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&source).unwrap().into()).unwrap();
+    jpeg.set_exif(Some(Bytes::from(exif)));
+    std::fs::write(&source, jpeg.encoder().bytes()).unwrap();
+
+    let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap();
+    let metadata = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    for availability in [&metadata.remove_personal, &metadata.strip_all] {
+        let reason = availability.reason.as_deref().unwrap();
+        assert!(reason.contains("privacy modes cannot safely normalize"));
+        assert!(!reason.contains("choose Strip all"));
+    }
+}
+
+#[tokio::test]
+async fn fragmented_jpeg_metadata_is_refused_before_capability_parsing() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("fragmented.jpg");
+    image::RgbImage::new(3, 5).save(&source).unwrap();
+    let jpeg = std::fs::read(&source).unwrap();
+    let mut fragmented = Vec::with_capacity(jpeg.len() + 20_000 * 4);
+    fragmented.extend_from_slice(&jpeg[..2]);
+    for _ in 0..20_000 {
+        fragmented.extend_from_slice(&[0xff, 0xe2, 0x00, 0x02]);
+    }
+    fragmented.extend_from_slice(&jpeg[2..]);
+    std::fs::write(&source, fragmented).unwrap();
+
+    let error = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap_err();
+    assert!(error.user_message().contains("segment safety limit"));
 }
 
 #[test]

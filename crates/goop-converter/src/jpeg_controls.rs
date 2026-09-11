@@ -41,11 +41,7 @@ pub(crate) fn prepare(input: &Path, limit: u64) -> Result<Option<JpegSource>, Go
     let mut file = File::open(input)?;
     let mut signature = Vec::with_capacity(3);
     (&mut file).take(3).read_to_end(&mut signature)?;
-    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let native = crate::raw::is_raw_extension(ext)
-        || ext.eq_ignore_ascii_case("heic")
-        || ext.eq_ignore_ascii_case("heif");
-    if native && signature != [0xff, 0xd8, 0xff] {
+    if signature != [0xff, 0xd8, 0xff] {
         return Ok(None);
     }
     // Keep the same open stream after sniffing, including JPEGs with a non-JPEG suffix.
@@ -101,6 +97,75 @@ impl JpegSource {
             self.bytes.len() as u64,
         ))
     }
+
+    /// Decode pixels and derive metadata from the same immutable source bytes.
+    /// Pixels are made upright exactly once for every policy. Preserve then
+    /// normalizes its reattached EXIF orientation, matching the legacy renderer.
+    pub(crate) fn decode_with_metadata_plan(
+        &self,
+        policy: MetadataPolicy,
+        output_color: crate::metadata::JpegOutputColor,
+    ) -> Result<(DynamicImage, crate::metadata::JpegMetadataPlan), GoopError> {
+        let plan = crate::metadata::prepare_jpeg_plan(self.bytes.clone(), policy, output_color)?;
+        let decoder = self.decoder()?;
+        let mut pixels =
+            DynamicImage::from_decoder(decoder).map_err(|e| error(format!("JPEG pixels: {e}")))?;
+        pixels.apply_orientation(plan.orientation());
+        Ok((pixels, plan))
+    }
+
+    /// Target-size Preserve keeps the legacy stored-pixel representation and
+    /// exact EXIF bytes. Privacy policies still normalize pixels before EXIF
+    /// removal.
+    pub(crate) fn decode_with_target_metadata_plan(
+        &self,
+        policy: MetadataPolicy,
+        output_color: crate::metadata::JpegOutputColor,
+    ) -> Result<(DynamicImage, crate::metadata::JpegMetadataPlan), GoopError> {
+        if policy != MetadataPolicy::Preserve {
+            return self.decode_with_metadata_plan(policy, output_color);
+        }
+        let plan = crate::metadata::prepare_jpeg_target_plan(self.bytes.clone())?;
+        let decoder = self.decoder()?;
+        let pixels =
+            DynamicImage::from_decoder(decoder).map_err(|e| error(format!("JPEG pixels: {e}")))?;
+        Ok((pixels, plan))
+    }
+
+    pub(crate) fn inspect_metadata(
+        &self,
+        output_color: crate::metadata::JpegOutputColor,
+    ) -> Result<crate::metadata::JpegMetadataInspection, GoopError> {
+        crate::metadata::inspect_jpeg_metadata(self.bytes.clone(), output_color)
+    }
+
+    /// Refuse publication when the live path no longer contains the exact
+    /// bytes used for decode and metadata decisions. The reread is bounded by
+    /// the same cap as the original snapshot.
+    pub(crate) fn verify_unchanged(&self, input: &Path, limit: u64) -> Result<(), GoopError> {
+        let changed = || {
+            error("The source changed during image processing; inspect it again before retrying")
+        };
+        if self.bytes.len() as u64 > limit {
+            return Err(changed());
+        }
+        let mut file = File::open(input)?;
+        let mut offset = 0usize;
+        let mut buffer = [0u8; 64 * 1024];
+        while offset < self.bytes.len() {
+            let remaining = self.bytes.len() - offset;
+            let requested = remaining.min(buffer.len());
+            let count = file.read(&mut buffer[..requested])?;
+            if count == 0 || buffer[..count] != self.bytes[offset..offset.saturating_add(count)] {
+                return Err(changed());
+            }
+            offset += count;
+        }
+        if file.read(&mut buffer[..1])? != 0 {
+            return Err(changed());
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn probe_prepared(
@@ -111,14 +176,6 @@ pub(crate) fn probe_prepared(
         Some(jpeg) => jpeg.probe(),
         None => crate::imagemagick_probe::probe_image(input),
     }
-}
-
-pub(crate) fn probe_explicit(
-    input: &Path,
-    limit: u64,
-) -> Result<goop_core::ProbeResult, GoopError> {
-    let source = prepare(input, limit)?;
-    probe_prepared(input, source.as_ref())
 }
 
 fn error(message: impl Into<String>) -> GoopError {
@@ -155,19 +212,34 @@ pub(crate) fn render_prepared(
     source: Option<&JpegSource>,
 ) -> Result<(), GoopError> {
     crate::image_options::validate_options(options)?;
+    let mut prepared_privacy_pixels = None;
+    let privacy_plan = match (source, policy) {
+        (Some(source), MetadataPolicy::RemovePersonal | MetadataPolicy::StripAll) => {
+            let (pixels, plan) = source.decode_with_metadata_plan(
+                policy,
+                crate::metadata::JpegOutputColor::Rgb,
+            )?;
+            prepared_privacy_pixels = Some(pixels);
+            Some(plan)
+        }
+        (None, MetadataPolicy::RemovePersonal) => {
+            return Err(error(
+                "Remove personal data currently requires a JPEG source with proven RGB metadata compatibility",
+            ))
+        }
+        _ => None,
+    };
     let mut pixels = if let Some(source) = source {
-        let mut decoder = source.decoder()?;
-        let orientation = match JpegSource::orientation(&mut decoder) {
-            Ok(value) => value,
-            Err(_) if policy == MetadataPolicy::StripAll => {
-                image::metadata::Orientation::NoTransforms
-            }
-            Err(error) => return Err(error),
-        };
-        let mut image =
-            DynamicImage::from_decoder(decoder).map_err(|e| error(format!("JPEG pixels: {e}")))?;
-        image.apply_orientation(orientation);
-        image
+        if let Some(pixels) = prepared_privacy_pixels.take() {
+            pixels
+        } else {
+            let mut decoder = source.decoder()?;
+            let orientation = JpegSource::orientation(&mut decoder)?;
+            let mut image = DynamicImage::from_decoder(decoder)
+                .map_err(|e| error(format!("JPEG pixels: {e}")))?;
+            image.apply_orientation(orientation);
+            image
+        }
     } else {
         let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
         if crate::raw::is_raw_extension(ext) {
@@ -208,12 +280,29 @@ pub(crate) fn render_prepared(
     .map_err(|e| error(format!("JPEG encode: {e}")))?;
     std::io::Write::flush(&mut output_file)?;
     drop(output_file);
-    crate::metadata::apply_rendered_jpeg(source, output, width, height, policy)
+    if let Some(plan) = privacy_plan {
+        let source = source.ok_or_else(|| {
+            error("A prepared JPEG source is required to verify the privacy result")
+        })?;
+        let candidate = std::fs::read(output)?;
+        let finished = plan.assemble_candidate(candidate)?;
+        std::fs::write(output, &finished)?;
+        plan.verify_candidate(&finished)?;
+        source.verify_unchanged(input, MAX_INPUT_BYTES)
+    } else {
+        crate::metadata::apply_rendered_jpeg(source, output, width, height, policy)?;
+        if let Some(source) = source {
+            source.verify_unchanged(input, MAX_INPUT_BYTES)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use img_parts::jpeg::JpegSegment;
+    use img_parts::{ImageEXIF, ImageICC};
     #[test]
     fn oversized_stream_stops_at_cap_plus_one() {
         struct Count<R> {
@@ -252,11 +341,14 @@ mod tests {
             &[0; 8192],
         )
         .unwrap();
-        let failure = probe_explicit(&path, limit).unwrap_err();
+        let failure = match prepare(&path, limit) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized encoded JPEG must be refused"),
+        };
         assert!(failure.to_string().contains("Encoded JPEG input"));
     }
     #[test]
-    fn snapshot_keeps_probe_pixels_and_preserved_metadata_after_source_removal() {
+    fn preserve_render_uses_snapshot_but_refuses_source_removal_before_returning() {
         use img_parts::{jpeg::Jpeg, ImageEXIF, ImageICC};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("actual.png");
@@ -271,7 +363,7 @@ mod tests {
             ]
             .into(),
         ));
-        jpeg.set_icc_profile(Some(vec![37; 128].into()));
+        jpeg.set_icc_profile(Some(rgb_icc().into()));
         jpeg.encoder()
             .write_to(File::create(&path).unwrap())
             .unwrap();
@@ -282,7 +374,7 @@ mod tests {
         let probe = probe_prepared(&path, Some(&snapshot)).unwrap();
         assert_eq!(probe.width.zip(probe.height), Some((8, 16)));
         let out = dir.path().join("out.jpg");
-        render_prepared(
+        let error = render_prepared(
             &path,
             &out,
             &ImageConvertOptions {
@@ -292,11 +384,204 @@ mod tests {
             MetadataPolicy::Preserve,
             Some(&snapshot),
         )
-        .unwrap();
-        assert_eq!(image::image_dimensions(&out).unwrap(), (8, 16));
-        assert!(image::open(&out).unwrap().to_rgb8().get_pixel(3, 3)[0] > 220);
-        let (exif, icc) = crate::metadata::read(&out).unwrap();
-        assert_eq!(icc.unwrap(), vec![37; 128]);
-        assert_eq!(exif.unwrap()[18], 1);
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GoopError::Io(ref source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    fn orientation_exif(value: u16) -> Vec<u8> {
+        let mut bytes = b"II".to_vec();
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0112u16.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
+
+    fn rgb_icc() -> Vec<u8> {
+        let mut profile = vec![0; 128];
+        profile[..4].copy_from_slice(&128u32.to_be_bytes());
+        profile[16..20].copy_from_slice(b"RGB ");
+        profile[36..40].copy_from_slice(b"acsp");
+        profile
+    }
+
+    fn write_oriented_source(path: &Path, orientation: u16) {
+        let image = image::RgbImage::from_fn(80, 60, |x, y| match (x < 40, y < 30) {
+            (true, true) => image::Rgb([240, 20, 20]),
+            (false, true) => image::Rgb([20, 230, 30]),
+            (true, false) => image::Rgb([20, 30, 230]),
+            (false, false) => image::Rgb([235, 225, 20]),
+        });
+        image
+            .save_with_format(path, image::ImageFormat::Jpeg)
+            .unwrap();
+        let mut jpeg =
+            img_parts::jpeg::Jpeg::from_bytes(std::fs::read(path).unwrap().into()).unwrap();
+        jpeg.set_exif(Some(orientation_exif(orientation).into()));
+        jpeg.encoder()
+            .write_to(File::create(path).unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn target_size_preserve_keeps_stored_pixels_and_exact_exif() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        write_oriented_source(&input, 6);
+        let mut jpeg =
+            img_parts::jpeg::Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        jpeg.set_icc_profile(Some(rgb_icc().into()));
+        jpeg.encoder()
+            .write_to(File::create(&input).unwrap())
+            .unwrap();
+        let source = prepare(&input, MAX_INPUT_BYTES).unwrap().unwrap();
+        let original_exif = crate::metadata::read(&input).unwrap().0.unwrap();
+
+        let (pixels, plan) = source
+            .decode_with_target_metadata_plan(
+                MetadataPolicy::Preserve,
+                crate::metadata::JpegOutputColor::Rgb,
+            )
+            .unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (80, 60));
+        let candidate = plan
+            .assemble_candidate({
+                let mut bytes = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+                    .encode_image(&pixels)
+                    .unwrap();
+                bytes
+            })
+            .unwrap();
+        let output = dir.path().join("output.jpg");
+        std::fs::write(&output, candidate).unwrap();
+        let (exif, icc) = crate::metadata::read(&output).unwrap();
+        assert_eq!(exif.unwrap(), original_exif);
+        assert_eq!(icc.unwrap(), rgb_icc());
+    }
+
+    #[test]
+    fn preparing_a_non_jpeg_does_not_snapshot_the_full_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.png");
+        image::RgbImage::new(8, 8).save(&input).unwrap();
+        assert!(prepare(&input, MAX_INPUT_BYTES).unwrap().is_none());
+    }
+
+    #[test]
+    fn both_privacy_policies_apply_each_orientation_exactly_once() {
+        for orientation in 1..=8 {
+            for policy in [MetadataPolicy::RemovePersonal, MetadataPolicy::StripAll] {
+                let dir = tempfile::tempdir().unwrap();
+                let input = dir.path().join("source.jpg");
+                let output = dir.path().join("output.jpg");
+                write_oriented_source(&input, orientation);
+                let source = prepare(&input, MAX_INPUT_BYTES).unwrap().unwrap();
+                let mut expected = DynamicImage::from_decoder(source.decoder().unwrap()).unwrap();
+                expected.apply_orientation(
+                    image::metadata::Orientation::from_exif(orientation as u8).unwrap(),
+                );
+
+                render_prepared(
+                    &input,
+                    &output,
+                    &ImageConvertOptions {
+                        jpeg_quality: 100,
+                        resize: ImageResize::Original,
+                    },
+                    policy,
+                    Some(&source),
+                )
+                .unwrap();
+
+                let actual = image::open(&output).unwrap().to_rgb8();
+                let expected = expected.to_rgb8();
+                assert_eq!(
+                    actual.dimensions(),
+                    expected.dimensions(),
+                    "orientation {orientation}"
+                );
+                for (x, y) in [
+                    (actual.width() / 4, actual.height() / 4),
+                    (actual.width() * 3 / 4, actual.height() / 4),
+                    (actual.width() / 4, actual.height() * 3 / 4),
+                    (actual.width() * 3 / 4, actual.height() * 3 / 4),
+                ] {
+                    let got = actual.get_pixel(x, y);
+                    let want = expected.get_pixel(x, y);
+                    for channel in 0..3 {
+                        assert!(
+                            got[channel].abs_diff(want[channel]) <= 12,
+                            "orientation {orientation} policy {policy:?} at {x},{y} channel {channel}: {} != {}",
+                            got[channel],
+                            want[channel]
+                        );
+                    }
+                }
+                let (exif, icc) = crate::metadata::read(&output).unwrap();
+                assert!(exif.is_none());
+                assert!(icc.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn privacy_render_refuses_changed_live_source_before_returning_staged_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("staged.jpg");
+        write_oriented_source(&input, 1);
+        let source = prepare(&input, MAX_INPUT_BYTES).unwrap().unwrap();
+        std::fs::write(&input, b"changed after snapshot").unwrap();
+        let error = render_prepared(
+            &input,
+            &output,
+            &ImageConvertOptions {
+                jpeg_quality: 90,
+                resize: ImageResize::Original,
+            },
+            MetadataPolicy::RemovePersonal,
+            Some(&source),
+        )
+        .unwrap_err();
+        assert!(error.user_message().contains("source changed"));
+    }
+
+    #[test]
+    fn privacy_render_refuses_ambiguous_exif_before_creating_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.jpg");
+        let output = dir.path().join("output.jpg");
+        write_oriented_source(&input, 1);
+        let mut jpeg =
+            img_parts::jpeg::Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        let mut contents = b"Exif\0\0".to_vec();
+        contents.extend_from_slice(&orientation_exif(6));
+        jpeg.segments_mut()
+            .insert(1, JpegSegment::new_with_contents(0xe1, contents.into()));
+        jpeg.encoder()
+            .write_to(File::create(&input).unwrap())
+            .unwrap();
+        let source = prepare(&input, MAX_INPUT_BYTES).unwrap().unwrap();
+        assert!(render_prepared(
+            &input,
+            &output,
+            &ImageConvertOptions {
+                jpeg_quality: 90,
+                resize: ImageResize::Original,
+            },
+            MetadataPolicy::StripAll,
+            Some(&source),
+        )
+        .is_err());
+        assert!(!output.exists());
     }
 }

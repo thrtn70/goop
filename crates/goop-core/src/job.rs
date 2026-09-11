@@ -117,6 +117,12 @@ pub struct JobResult {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_track_execution: Option<crate::tracks::VideoTrackExecutionSummary>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_metadata_execution: Option<crate::convert::ImageMetadataExecution>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub compression_execution: Option<crate::convert::CompressionExecution>,
 }
 
 fn default_file_count() -> u32 {

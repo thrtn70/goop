@@ -174,6 +174,47 @@ pub struct ImageSettingsCapabilities {
     pub preview_unavailable_reason: Option<String>,
 }
 
+/// Whether one metadata policy can be applied to a source/target pair and the
+/// engine-owned explanation shown to clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct MetadataPolicyAvailability {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub summary: String,
+}
+
+/// Source orientation state established by bounded metadata inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOrientationStatus {
+    Uninspected,
+    Absent,
+    Valid,
+    Malformed,
+    Ambiguous,
+}
+
+/// Metadata policy availability and source facts for one image target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct ImageMetadataCapabilities {
+    pub preserve: MetadataPolicyAvailability,
+    pub rgb_reencode_preserve: MetadataPolicyAvailability,
+    pub remove_personal: MetadataPolicyAvailability,
+    pub strip_all: MetadataPolicyAvailability,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_has_exif: Option<bool>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_has_icc: Option<bool>,
+    pub orientation: ImageOrientationStatus,
+}
+
 /// Availability for one target, including optional source-bound track settings.
 /// Track settings remain absent for legacy or Automatic-only inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -197,6 +238,9 @@ pub struct TargetCapability {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub image_settings: Option<ImageSettingsCapabilities>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_metadata: Option<ImageMetadataCapabilities>,
     pub target: TargetFormat,
     pub available: bool,
     pub reason: Option<String>,
