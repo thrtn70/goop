@@ -385,7 +385,10 @@ mod tests {
             Some(&snapshot),
         )
         .unwrap_err();
-        assert!(error.user_message().contains("No such file"));
+        assert!(matches!(
+            error,
+            GoopError::Io(ref source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 
     fn orientation_exif(value: u16) -> Vec<u8> {
