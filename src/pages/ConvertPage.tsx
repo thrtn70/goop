@@ -479,6 +479,7 @@ function ConvertPage() {
         ? metadataPolicyProblem(
             file.metadataPolicy ?? "preserve",
             state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
+            file.imageOptions ? "channel_aware" : "rgb_reencode",
           )
         : null;
       const problem = audioOptionsProblem(file)
@@ -551,6 +552,7 @@ function ConvertPage() {
     return metadataPolicyProblem(
       file.metadataPolicy ?? "preserve",
       state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
+      file.imageOptions ? "channel_aware" : "rgb_reencode",
     );
   });
   const baseProblems = files.map((f, i) =>

@@ -2,6 +2,7 @@ import type { ImageMetadataCapabilities, MetadataPolicy } from "@/types";
 import { useId } from "react";
 
 type PolicyAvailability = { available: boolean; reason: string | null; summary: string };
+export type MetadataPreserveMode = "channel_aware" | "rgb_reencode";
 
 export interface MetadataPolicyControlProps {
   value: MetadataPolicy;
@@ -9,6 +10,7 @@ export interface MetadataPolicyControlProps {
   onChange: (value: MetadataPolicy) => void;
   onDraftEdit?: () => void;
   label?: string;
+  preserveMode?: MetadataPreserveMode;
 }
 
 const choices: Array<{ value: MetadataPolicy; label: string }> = [
@@ -20,8 +22,14 @@ const choices: Array<{ value: MetadataPolicy; label: string }> = [
 function availabilityFor(
   capabilities: ImageMetadataCapabilities | null | undefined,
   policy: MetadataPolicy,
+  preserveMode: MetadataPreserveMode,
 ): PolicyAvailability {
-  if (capabilities) return capabilities[policy];
+  if (capabilities) {
+    if (policy === "preserve" && preserveMode === "rgb_reencode") {
+      return capabilities.rgb_reencode_preserve;
+    }
+    return capabilities[policy];
+  }
   if (policy === "remove_personal") {
     return {
       available: false,
@@ -39,8 +47,9 @@ function availabilityFor(
 export function metadataPolicyProblem(
   policy: MetadataPolicy,
   capabilities: ImageMetadataCapabilities | null | undefined,
+  preserveMode: MetadataPreserveMode = "channel_aware",
 ): string | null {
-  const availability = availabilityFor(capabilities, policy);
+  const availability = availabilityFor(capabilities, policy, preserveMode);
   return availability.available ? null : availability.reason || `${policy} is unavailable for this source and target.`;
 }
 
@@ -50,6 +59,7 @@ export default function MetadataPolicyControl({
   onChange,
   onDraftEdit,
   label = "Metadata",
+  preserveMode = "channel_aware",
 }: MetadataPolicyControlProps) {
   const reasonIdPrefix = useId();
   return (
@@ -57,7 +67,7 @@ export default function MetadataPolicyControl({
       <span className="text-fg-muted">{label}</span>
       <div className="flex flex-wrap gap-2">
         {choices.map((choice) => {
-          const availability = availabilityFor(capabilities, choice.value);
+          const availability = availabilityFor(capabilities, choice.value, preserveMode);
           const disabled = !availability.available;
           const reasonId = `${reasonIdPrefix}-${choice.value}-reason`;
           return (
@@ -85,7 +95,7 @@ export default function MetadataPolicyControl({
         })}
       </div>
       {choices.map((choice) => {
-        const availability = availabilityFor(capabilities, choice.value);
+        const availability = availabilityFor(capabilities, choice.value, preserveMode);
         if (availability.available) return null;
         return (
           <p
@@ -98,16 +108,16 @@ export default function MetadataPolicyControl({
         );
       })}
       <p className="text-fg-secondary" role="status">
-        {availabilityFor(capabilities, value).summary}
+        {availabilityFor(capabilities, value, preserveMode).summary}
       </p>
       {value === "strip_all" && (
         <p className="text-warning" role="status">
           Removes ICC color data; output color may differ.
         </p>
       )}
-      {metadataPolicyProblem(value, capabilities) && (
+      {metadataPolicyProblem(value, capabilities, preserveMode) && (
         <p className="text-warning" role="alert">
-          {metadataPolicyProblem(value, capabilities)}
+          {metadataPolicyProblem(value, capabilities, preserveMode)}
         </p>
       )}
     </div>

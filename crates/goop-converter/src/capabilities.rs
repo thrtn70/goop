@@ -221,6 +221,15 @@ fn base_image_metadata_capabilities(
             },
             None,
         ),
+        rgb_reencode_preserve: policy_availability(
+            true,
+            if preserves_metadata {
+                "Supported source EXIF and RGB ICC metadata will be retained."
+            } else {
+                "This output path does not retain source EXIF or ICC metadata."
+            },
+            None,
+        ),
         remove_personal: policy_availability(
             false,
             "Remove personal data is unavailable for this source and output.",
@@ -284,6 +293,13 @@ fn enrich_jpeg_metadata_capabilities(
                 "Supported source EXIF and ICC metadata will be retained.",
                 inspection.preserve_unavailable_reason.clone(),
             );
+            metadata.rgb_reencode_preserve = policy_availability(
+                inspection
+                    .rgb_reencode_preserve_unavailable_reason
+                    .is_none(),
+                "Supported source EXIF and RGB ICC metadata will be retained.",
+                inspection.rgb_reencode_preserve_unavailable_reason.clone(),
+            );
             let remove_reason = orientation_reason
                 .clone()
                 .or_else(|| inspection.remove_personal_unavailable_reason.clone());
@@ -306,7 +322,6 @@ fn enrich_jpeg_metadata_capabilities(
 struct ImageSourceInspection {
     probe: ProbeResult,
     jpeg_metadata: Option<crate::metadata::JpegMetadataInspection>,
-    explicit_preserve_unavailable_reason: Option<String>,
 }
 
 async fn inspect_image_source_snapshot(path: &Path) -> Result<ImageSourceInspection, GoopError> {
@@ -319,19 +334,9 @@ async fn inspect_image_source_snapshot(path: &Path) -> Result<ImageSourceInspect
             .as_ref()
             .map(|source| source.inspect_metadata(crate::metadata::JpegOutputColor::Rgb))
             .transpose()?;
-        let explicit_preserve_unavailable_reason = source.as_ref().and_then(|source| {
-            crate::metadata::prepare_jpeg_plan(
-                source.bytes.clone(),
-                MetadataPolicy::Preserve,
-                crate::metadata::JpegOutputColor::Rgb,
-            )
-            .err()
-            .map(|error| error.user_message())
-        });
         Ok(ImageSourceInspection {
             probe,
             jpeg_metadata,
-            explicit_preserve_unavailable_reason,
         })
     })
     .await
@@ -354,6 +359,7 @@ fn validate_metadata_policy(
             )
         })?;
     let availability = match policy {
+        MetadataPolicy::Preserve if req.image_options.is_none() => &metadata.rgb_reencode_preserve,
         MetadataPolicy::Preserve => &metadata.preserve,
         MetadataPolicy::RemovePersonal => &metadata.remove_personal,
         MetadataPolicy::StripAll => &metadata.strip_all,
@@ -597,16 +603,6 @@ pub async fn validate_request_source(
                 .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
             &mut capabilities,
         );
-        if req.image_options.is_some()
-            && req.metadata_policy.unwrap_or_default() == MetadataPolicy::Preserve
-        {
-            if let Some(reason) = image_inspection
-                .as_ref()
-                .and_then(|inspection| inspection.explicit_preserve_unavailable_reason.as_ref())
-            {
-                return Err(GoopError::InvalidRequest(reason.clone()));
-            }
-        }
         validate_metadata_policy(req, &capabilities)?;
     }
     Ok(())

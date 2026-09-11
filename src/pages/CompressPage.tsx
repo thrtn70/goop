@@ -247,6 +247,7 @@ function CompressPage() {
           ? metadataPolicyProblem(
               file.metadataPolicy ?? "preserve",
               state.capabilities.targets.find((candidate) => candidate.target === file.target)?.image_metadata,
+              "rgb_reencode",
             )
           : null;
         const problem = compression ?? metadata;
@@ -316,7 +317,7 @@ function CompressPage() {
     if (compression) return compression;
     if (state.phase === "ready" && state.probe.source_kind === "image") {
       const imageMetadata = state.capabilities.targets.find(c => c.target === f.target)?.image_metadata;
-      return metadataPolicyProblem(f.metadataPolicy ?? "preserve", imageMetadata);
+      return metadataPolicyProblem(f.metadataPolicy ?? "preserve", imageMetadata, "rgb_reencode");
     }
     return null;
   });

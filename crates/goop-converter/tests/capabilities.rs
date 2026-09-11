@@ -431,6 +431,7 @@ async fn jpeg_inspection_reports_source_bound_metadata_policy_capabilities() {
         .as_ref()
         .unwrap();
     assert!(jpeg.preserve.available);
+    assert!(jpeg.rgb_reencode_preserve.available);
     assert!(jpeg.remove_personal.available);
     assert!(jpeg.strip_all.available);
     assert_eq!(jpeg.source_has_exif, Some(false));
@@ -447,6 +448,7 @@ async fn jpeg_inspection_reports_source_bound_metadata_policy_capabilities() {
         .as_ref()
         .unwrap();
     assert!(png.preserve.available);
+    assert!(png.rgb_reencode_preserve.available);
     assert!(!png.remove_personal.available);
     assert!(png
         .remove_personal
@@ -455,6 +457,44 @@ async fn jpeg_inspection_reports_source_bound_metadata_policy_capabilities() {
         .unwrap()
         .contains("JPEG to JPEG"));
     assert!(png.strip_all.available);
+}
+
+#[tokio::test]
+async fn grayscale_jpeg_reports_channel_aware_preserve_separately_from_rgb_reencode() {
+    use img_parts::{jpeg::Jpeg, Bytes, ImageICC};
+
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+    let source = dir.path().join("gray.jpg");
+    image::GrayImage::new(3, 5).save(&source).unwrap();
+    let mut profile = vec![0u8; 128];
+    profile[..4].copy_from_slice(&128u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"GRAY");
+    profile[36..40].copy_from_slice(b"acsp");
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&source).unwrap().into()).unwrap();
+    jpeg.set_icc_profile(Some(Bytes::from(profile)));
+    std::fs::write(&source, jpeg.encoder().bytes()).unwrap();
+
+    let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
+        .await
+        .unwrap();
+    let metadata = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_metadata
+        .as_ref()
+        .unwrap();
+    assert!(metadata.preserve.available);
+    assert!(!metadata.rgb_reencode_preserve.available);
+    assert!(metadata
+        .rgb_reencode_preserve
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("RGB ICC profile"));
 }
 
 #[tokio::test]
@@ -487,6 +527,7 @@ async fn jpeg_with_opaque_icc_refuses_remove_personal_but_keeps_other_policies_a
         .as_ref()
         .unwrap();
     assert!(metadata.preserve.available);
+    assert!(metadata.rgb_reencode_preserve.available);
     assert!(!metadata.remove_personal.available);
     assert!(metadata
         .remove_personal

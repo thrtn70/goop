@@ -30,6 +30,11 @@ fn metadata_capabilities_round_trip_strictly() {
             reason: None,
             summary: "Supported EXIF and ICC metadata will be retained.".into(),
         },
+        rgb_reencode_preserve: MetadataPolicyAvailability {
+            available: true,
+            reason: None,
+            summary: "Supported EXIF and RGB ICC metadata will be retained.".into(),
+        },
         remove_personal: MetadataPolicyAvailability {
             available: true,
             reason: None,
@@ -47,6 +52,7 @@ fn metadata_capabilities_round_trip_strictly() {
     };
     let value = serde_json::to_value(&capability).unwrap();
     assert_eq!(value["orientation"], json!("valid"));
+    assert_eq!(value["rgb_reencode_preserve"]["available"], json!(true));
     assert_eq!(
         serde_json::from_value::<ImageMetadataCapabilities>(value.clone()).unwrap(),
         capability

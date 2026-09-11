@@ -22,6 +22,7 @@ const inspect = (video = false, sourceFormat = "jpeg") => ({
   capabilities: { targets: (video ? ["mp4"] : ["jpeg", "png"]).map(target => ({ target, available: true, reason: null, metadata_warning: null, image_settings: target === "jpeg" ? imageCapability : null,
     image_metadata: video ? null : {
       preserve: { available: true, reason: null, summary: "Metadata retained." },
+      rgb_reencode_preserve: { available: true, reason: null, summary: "Metadata retained." },
       remove_personal: sourceFormat === "jpeg" && target === "jpeg"
         ? { available: true, reason: null, summary: "Personal metadata removed." }
         : { available: false, reason: "Remove personal data is currently available only for JPEG to JPEG processing.", summary: "Unavailable" },

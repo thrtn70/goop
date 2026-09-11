@@ -7,6 +7,11 @@ afterEach(cleanup);
 
 const capabilities: ImageMetadataCapabilities = {
   preserve: { available: true, reason: null, summary: "Metadata retained." },
+  rgb_reencode_preserve: {
+    available: false,
+    reason: "RGB re-encoding requires an RGB ICC profile.",
+    summary: "Unavailable",
+  },
   remove_personal: {
     available: false,
     reason: "Remove personal data is currently available only for JPEG to JPEG processing.",
@@ -54,5 +59,23 @@ describe("MetadataPolicyControl", () => {
     expect(screen.getByText(/output color may differ/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Preserve" }));
     expect(onChange).toHaveBeenCalledWith("preserve");
+  });
+
+  it("disables Preserve only for RGB re-encoding and ignores disabled clicks", () => {
+    const onChange = vi.fn();
+    render(
+      <MetadataPolicyControl
+        value="strip_all"
+        capabilities={capabilities}
+        preserveMode="rgb_reencode"
+        onChange={onChange}
+      />,
+    );
+    const preserve = screen.getByRole("button", { name: "Preserve" });
+    expect(preserve.getAttribute("aria-disabled")).toBe("true");
+    expect(metadataPolicyProblem("preserve", capabilities)).toBeNull();
+    expect(metadataPolicyProblem("preserve", capabilities, "rgb_reencode")).toContain("RGB ICC");
+    fireEvent.click(preserve);
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

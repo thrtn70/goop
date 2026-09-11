@@ -1,7 +1,8 @@
 mod common;
 use goop_converter::{ConversionBackend, ImageMagickBackend};
 use goop_core::{
-    ConvertRequest, ImageConvertOptions, ImageResize, JobId, MetadataPolicy, TargetFormat,
+    CompressMode, ConvertRequest, ImageConvertOptions, ImageResize, JobId, MetadataPolicy,
+    TargetFormat,
 };
 use img_parts::{jpeg::Jpeg, ImageEXIF, ImageICC};
 use std::{path::Path, sync::Arc};
@@ -102,6 +103,10 @@ async fn verify_retained_jpeg_channel_layout(resize: ImageResize, expected: (u32
             resize.clone(),
         );
         req.metadata_policy = Some(MetadataPolicy::Preserve);
+        let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
+        goop_converter::capabilities::validate_request_source(&resolver, &req)
+            .await
+            .unwrap();
         let out = convert(&req).await.unwrap();
         let decoder = image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(
             std::fs::File::open(&out.output_path).unwrap(),
@@ -204,7 +209,11 @@ async fn orientation_six_is_applied_once_before_fitting_and_preserve_normalizes_
     .unwrap();
     let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
     jpeg.set_exif(Some(orientation_exif().into()));
-    jpeg.set_icc_profile(Some(vec![17; 128].into()));
+    let mut profile = vec![0; 128];
+    profile[..4].copy_from_slice(&128u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"RGB ");
+    profile[36..40].copy_from_slice(b"acsp");
+    jpeg.set_icc_profile(Some(profile.clone().into()));
     jpeg.encoder()
         .write_to(std::fs::File::create(&input).unwrap())
         .unwrap();
@@ -238,7 +247,7 @@ async fn orientation_six_is_applied_once_before_fitting_and_preserve_normalizes_
         assert_eq!(&exif[offset..offset + 4], &value.to_le_bytes());
     }
     assert_eq!(&exif[122..], &orientation_exif()[122..]);
-    assert_eq!(icc.unwrap(), vec![17; 128]);
+    assert_eq!(icc.unwrap(), profile);
 }
 
 #[tokio::test]
@@ -530,6 +539,85 @@ async fn duplicate_exif_segments_are_ambiguous_under_preserve() {
     req.metadata_policy = Some(MetadataPolicy::Preserve);
     assert!(convert(&req).await.is_err());
     assert!(!Path::new(&req.output_path).exists());
+}
+
+#[tokio::test]
+async fn rgb_reencoding_preserve_refuses_non_rgb_icc_before_publication() {
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("in.jpg");
+    source(&input, 32, 24);
+    let mut profile = vec![0; 128];
+    profile[..4].copy_from_slice(&128u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"CMYK");
+    profile[36..40].copy_from_slice(b"acsp");
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+    jpeg.set_icc_profile(Some(profile.into()));
+    jpeg.encoder()
+        .write_to(std::fs::File::create(&input).unwrap())
+        .unwrap();
+
+    let resolver = goop_sidecar::BinaryResolver::new(d.path().to_owned());
+    for (name, mode) in [
+        ("ordinary", None),
+        ("quality", Some(CompressMode::Quality(75))),
+        ("target", Some(CompressMode::TargetSizeBytes(100_000))),
+    ] {
+        let output = d.path().join(format!("{name}.jpg"));
+        let mut req = request(&input, &output, 75, ImageResize::Original);
+        req.image_options = None;
+        req.compress_mode = mode;
+        req.metadata_policy = Some(MetadataPolicy::Preserve);
+
+        let admission = goop_converter::capabilities::validate_request_source(&resolver, &req)
+            .await
+            .unwrap_err();
+        assert!(admission.user_message().contains("RGB ICC profile"));
+        let execution = convert(&req).await.unwrap_err();
+        assert!(execution.user_message().contains("RGB ICC profile"));
+        assert!(!output.exists());
+    }
+}
+
+#[tokio::test]
+async fn explicit_preserve_refuses_cmyk_source_before_publication() {
+    let d = tempfile::tempdir().unwrap();
+    let input = d.path().join("cmyk.jpg");
+    source(&input, 32, 24);
+    let mut profile = vec![0; 128];
+    profile[..4].copy_from_slice(&128u32.to_be_bytes());
+    profile[16..20].copy_from_slice(b"CMYK");
+    profile[36..40].copy_from_slice(b"acsp");
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+    let frame = jpeg
+        .segments_mut()
+        .iter_mut()
+        .find(|segment| {
+            (0xc0..=0xcf).contains(&segment.marker())
+                && !matches!(segment.marker(), 0xc4 | 0xc8 | 0xcc)
+        })
+        .unwrap();
+    let marker = frame.marker();
+    let mut contents = frame.contents().to_vec();
+    contents[5] = 4;
+    contents.extend_from_slice(&[4, 0x11, 0]);
+    *frame = img_parts::jpeg::JpegSegment::new_with_contents(marker, contents.into());
+    jpeg.set_icc_profile(Some(profile.into()));
+    jpeg.encoder()
+        .write_to(std::fs::File::create(&input).unwrap())
+        .unwrap();
+
+    let output = d.path().join("out.jpg");
+    let mut req = request(&input, &output, 75, ImageResize::Original);
+    req.metadata_policy = Some(MetadataPolicy::Preserve);
+    let resolver = goop_sidecar::BinaryResolver::new(d.path().to_owned());
+
+    let admission = goop_converter::capabilities::validate_request_source(&resolver, &req)
+        .await
+        .unwrap_err();
+    assert!(admission.user_message().contains("converted to RGB"));
+    let execution = convert(&req).await.unwrap_err();
+    assert!(execution.user_message().contains("converted to RGB"));
+    assert!(!output.exists());
 }
 
 #[tokio::test]

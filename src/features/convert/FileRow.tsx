@@ -419,6 +419,7 @@ export function ConvertSettingsPanel({
         <MetadataPolicyControl
           value={metadataPolicy}
           capabilities={metadataCapabilities}
+          preserveMode={opts.imageOptions ? "channel_aware" : "rgb_reencode"}
           onChange={(next) => update({ metadataPolicy: next })}
           onDraftEdit={onDraftEdit}
         />

@@ -5,4 +5,4 @@ import type { MetadataPolicyAvailability } from "./MetadataPolicyAvailability";
 /**
  * Metadata policy availability and source facts for one image target.
  */
-export type ImageMetadataCapabilities = { preserve: MetadataPolicyAvailability, remove_personal: MetadataPolicyAvailability, strip_all: MetadataPolicyAvailability, source_has_exif?: boolean | null, source_has_icc?: boolean | null, orientation: ImageOrientationStatus, };
+export type ImageMetadataCapabilities = { preserve: MetadataPolicyAvailability, rgb_reencode_preserve: MetadataPolicyAvailability, remove_personal: MetadataPolicyAvailability, strip_all: MetadataPolicyAvailability, source_has_exif?: boolean | null, source_has_icc?: boolean | null, orientation: ImageOrientationStatus, };

@@ -363,7 +363,7 @@ mod tests {
             ]
             .into(),
         ));
-        jpeg.set_icc_profile(Some(vec![37; 128].into()));
+        jpeg.set_icc_profile(Some(rgb_icc().into()));
         jpeg.encoder()
             .write_to(File::create(&path).unwrap())
             .unwrap();

@@ -78,6 +78,7 @@ pub(crate) struct JpegMetadataInspection {
     pub(crate) source_has_icc: bool,
     pub(crate) orientation: crate::exif_geometry::OrientationStatus,
     pub(crate) preserve_unavailable_reason: Option<String>,
+    pub(crate) rgb_reencode_preserve_unavailable_reason: Option<String>,
     pub(crate) remove_personal_unavailable_reason: Option<String>,
     pub(crate) strip_all_unavailable_reason: Option<String>,
 }
@@ -126,8 +127,8 @@ impl JpegMetadataPlan {
     /// an expected present/absent boolean accidentally.
     pub(crate) fn verify_candidate(&self, bytes: &[u8]) -> Result<(), GoopError> {
         if self.policy == MetadataPolicy::Preserve {
-            // Preserve intentionally retains legacy opaque-ICC behavior. The
-            // strict ICC proof below belongs only to the privacy policies.
+            // Planning already validated source ICC structure and channel
+            // compatibility; this verifies exact metadata equality after encode.
             let jpeg = parse_jpeg(bytes.to_vec().into(), "finished JPEG candidate")?;
             let expected_exif = self.expected_exif(&jpeg)?;
             if jpeg.exif().as_deref() != expected_exif.as_deref() {
@@ -321,6 +322,36 @@ fn validate_icc_profile(profile: &[u8]) -> Result<(), GoopError> {
     Ok(())
 }
 
+fn validate_rgb_icc_profile(profile: &[u8]) -> Result<(), GoopError> {
+    validate_icc_profile(profile)?;
+    if profile.get(16..20) != Some(b"RGB ") {
+        return Err(metadata_invalid(
+            "JPEG re-encoding with Preserve requires an RGB ICC profile because the output is encoded as RGB",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_channel_aware_icc_profile(profile: &[u8], components: u8) -> Result<(), GoopError> {
+    validate_icc_profile(profile)?;
+    let expected = match components {
+        1 => b"GRAY".as_slice(),
+        3 => b"RGB ".as_slice(),
+        _ => {
+            return Err(metadata_invalid(
+                "JPEG Preserve cannot retain this ICC profile because the source color channels are converted to RGB",
+            ))
+        }
+    };
+    if profile.get(16..20) != Some(expected) {
+        return Err(metadata_invalid(format!(
+            "JPEG Preserve requires an {} ICC profile for this source channel layout",
+            String::from_utf8_lossy(expected).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn has_icc_segments(jpeg: &Jpeg) -> bool {
     jpeg.segments()
         .iter()
@@ -432,18 +463,11 @@ fn prepare_jpeg_plan_from_parsed(
     output_color: JpegOutputColor,
 ) -> Result<JpegMetadataPlan, GoopError> {
     if policy == MetadataPolicy::Preserve {
-        if jpeg
-            .segments()
-            .iter()
-            .filter(|segment| {
-                segment.marker() == 0xe1 && segment.contents().starts_with(JPEG_EXIF_PREFIX)
-            })
-            .count()
-            > 1
-        {
-            return Err(metadata_invalid("multiple EXIF segments are ambiguous"));
+        let parsed = strict_jpeg_metadata(jpeg)?;
+        if let Some(profile) = parsed.icc.as_deref() {
+            validate_channel_aware_icc_profile(profile, parsed.components)?;
         }
-        let source_exif = jpeg.exif().map(|bytes| bytes.to_vec());
+        let source_exif = parsed.exif;
         let orientation = source_exif
             .as_deref()
             .map(crate::exif_geometry::orientation)
@@ -452,7 +476,7 @@ fn prepare_jpeg_plan_from_parsed(
         return Ok(JpegMetadataPlan {
             policy,
             source_exif,
-            source_icc: collect_icc_profile(jpeg, false)?,
+            source_icc: parsed.icc,
             orientation,
             normalize_preserve_exif: true,
         });
@@ -509,10 +533,14 @@ pub(crate) fn prepare_jpeg_target_plan(source_bytes: Bytes) -> Result<JpegMetada
 }
 
 fn prepare_jpeg_target_plan_from_parsed(jpeg: &Jpeg) -> Result<JpegMetadataPlan, GoopError> {
+    let source_icc = collect_icc_profile(jpeg, true)?;
+    if let Some(profile) = source_icc.as_deref() {
+        validate_rgb_icc_profile(profile)?;
+    }
     Ok(JpegMetadataPlan {
         policy: MetadataPolicy::Preserve,
         source_exif: jpeg.exif().map(|bytes| bytes.to_vec()),
-        source_icc: collect_icc_profile(jpeg, false)?,
+        source_icc,
         orientation: image::metadata::Orientation::NoTransforms,
         normalize_preserve_exif: false,
     })
@@ -540,7 +568,11 @@ pub(crate) fn inspect_jpeg_metadata(
         [exif] => crate::exif_geometry::orientation_status(exif),
         _ => crate::exif_geometry::OrientationStatus::Ambiguous,
     };
-    let preserve_unavailable_reason = prepare_jpeg_target_plan_from_parsed(&jpeg)
+    let preserve_unavailable_reason =
+        prepare_jpeg_plan_from_parsed(&jpeg, MetadataPolicy::Preserve, output_color)
+            .err()
+            .map(|error| error.user_message());
+    let rgb_reencode_preserve_unavailable_reason = prepare_jpeg_target_plan_from_parsed(&jpeg)
         .err()
         .map(|error| error.user_message());
     let remove_personal_unavailable_reason =
@@ -556,6 +588,7 @@ pub(crate) fn inspect_jpeg_metadata(
         source_has_icc,
         orientation,
         preserve_unavailable_reason,
+        rgb_reencode_preserve_unavailable_reason,
         remove_personal_unavailable_reason,
         strip_all_unavailable_reason,
     })
@@ -1207,11 +1240,9 @@ mod tests {
     }
 
     #[test]
-    fn preserve_plan_keeps_legacy_nonconforming_icc_and_normalizes_orientation() {
-        // Legacy Preserve treats ICC as opaque bytes. In particular, existing
-        // users can carry profiles that predate the stricter privacy proof.
-        let legacy_icc = vec![37; 4_000];
-        let source = jpeg_with_segments(vec![exif_segment(6), icc_segment(1, 1, &legacy_icc)]);
+    fn preserve_plan_validates_icc_and_normalizes_orientation() {
+        let profile = rgb_icc(128);
+        let source = jpeg_with_segments(vec![exif_segment(6), icc_segment(1, 1, &profile)]);
         let plan = prepare_jpeg_plan(
             source.into(),
             MetadataPolicy::Preserve,
@@ -1222,13 +1253,22 @@ mod tests {
         plan.verify_candidate(&candidate).unwrap();
 
         let parsed = Jpeg::from_bytes(candidate.into()).unwrap();
-        assert_eq!(parsed.icc_profile().unwrap().as_ref(), legacy_icc);
+        assert_eq!(parsed.icc_profile().unwrap().as_ref(), profile);
         assert_eq!(
             crate::exif_geometry::orientation(parsed.exif().unwrap().as_ref())
                 .unwrap()
                 .to_exif(),
             1
         );
+
+        let malformed = vec![37; 4_000];
+        let source = jpeg_with_segments(vec![icc_segment(1, 1, &malformed)]);
+        assert!(prepare_jpeg_plan(
+            source.into(),
+            MetadataPolicy::Preserve,
+            JpegOutputColor::Rgb,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1246,5 +1286,17 @@ mod tests {
         let candidate = plan.assemble_candidate(base_jpeg()).unwrap();
         let parsed = Jpeg::from_bytes(candidate.into()).unwrap();
         assert_eq!(parsed.exif().unwrap().as_ref(), first);
+    }
+
+    #[test]
+    fn target_preserve_rejects_icc_profiles_for_non_rgb_pixels() {
+        for data_space in [b"GRAY", b"CMYK"] {
+            let mut profile = rgb_icc(128);
+            profile[16..20].copy_from_slice(data_space);
+            let source = jpeg_with_segments(vec![icc_segment(1, 1, &profile)]);
+
+            let error = prepare_jpeg_target_plan(source.into()).unwrap_err();
+            assert!(error.user_message().contains("RGB ICC profile"), "{error}");
+        }
     }
 }

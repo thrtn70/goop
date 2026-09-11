@@ -43,7 +43,7 @@ export function CompressSettingsPanel({
   return (
     <>
       {state.probe.source_kind === "image" && metadataPolicy && onMetadataChange && (
-        <MetadataPolicyControl value={metadataPolicy} capabilities={imageMetadata} onChange={onMetadataChange} onDraftEdit={onDraftEdit} />
+        <MetadataPolicyControl value={metadataPolicy} capabilities={imageMetadata} preserveMode="rgb_reencode" onChange={onMetadataChange} onDraftEdit={onDraftEdit} />
       )}
       <CompressControls
         capabilities={state.capabilities.targets.find(c => c.target === target)?.compression ?? state.capabilities.compression}

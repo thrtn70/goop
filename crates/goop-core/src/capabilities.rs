@@ -203,6 +203,7 @@ pub enum ImageOrientationStatus {
 #[serde(deny_unknown_fields)]
 pub struct ImageMetadataCapabilities {
     pub preserve: MetadataPolicyAvailability,
+    pub rgb_reencode_preserve: MetadataPolicyAvailability,
     pub remove_personal: MetadataPolicyAvailability,
     pub strip_all: MetadataPolicyAvailability,
     #[serde(default)]
