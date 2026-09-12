@@ -20,3 +20,19 @@ test("macOS Homebrew sidecars fail closed on installation and version drift", ()
   assert.match(script, /^MACOS_MUPDF_VERSION="1\.28\.3"$/m);
   assert.match(script, /^MACOS_TESSERACT_VERSION="5\.5\.3"$/m);
 });
+
+test("macOS Homebrew sidecars refresh and upgrade preinstalled runner formulas", () => {
+  assert.match(script, /"\$GS_BREW" update --quiet/);
+  assert.match(script, /"\$GS_BREW" upgrade --quiet "\$formula"/);
+  for (const formula of ["ghostscript", "mupdf-tools", "tesseract"]) {
+    assert.match(script, new RegExp(`install_current_brew_formula ${formula}`));
+  }
+});
+
+test("Ghostscript resources are replaced after a formula upgrade", () => {
+  assert.doesNotMatch(script, /if \[ ! -d "\$OUT_DIR\/gs-resources\/Resource" \]/);
+  assert.match(
+    script,
+    /rm -rf "\$OUT_DIR\/gs-resources"\n\s+GS_SHARE="\$GS_PREFIX\/share\/ghostscript"/,
+  );
+});

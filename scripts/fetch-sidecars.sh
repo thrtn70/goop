@@ -209,7 +209,19 @@ case "$TARGET" in
     # Ghostscript — via Homebrew. macos-14 ships with arm64 Homebrew at
     # /opt/homebrew. Apple Silicon only — Intel Mac was dropped in v0.2.0.
     GS_BREW=/opt/homebrew/bin/brew
-    "$GS_BREW" install --quiet ghostscript
+    # Hosted runners can carry an older preinstalled formula even after the
+    # repository metadata has advanced. Refresh once, then explicitly upgrade
+    # existing formulae so the exact version checks below see reviewed bytes.
+    "$GS_BREW" update --quiet
+    install_current_brew_formula() {
+      local formula="$1"
+      if "$GS_BREW" list --versions "$formula" >/dev/null 2>&1; then
+        "$GS_BREW" upgrade --quiet "$formula"
+      else
+        "$GS_BREW" install --quiet "$formula"
+      fi
+    }
+    install_current_brew_formula ghostscript
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
     GS_ACTUAL_VERSION="$("$GS_PREFIX/bin/gs" --version)"
     [ "$GS_ACTUAL_VERSION" = "$MACOS_GHOSTSCRIPT_VERSION" ] || {
@@ -234,27 +246,26 @@ case "$TARGET" in
     # extended attributes across the bundle before signing. A read-only
     # sidecar makes that step fail with "failed to run xattr" and no mention
     # of which file, killing the whole build after a full release compile.
-    # Copy the full share tree (Resource/, lib/, iccprofiles/) — only once,
-    # it's architecture-agnostic. Homebrew's layout varies: newer
+    # Replace the full share tree (Resource/, lib/, iccprofiles/) on every
+    # run so a formula upgrade cannot leave resources from the old binary.
+    # Homebrew's layout varies: newer
     # ghostscript drops the version subdirectory and puts Resource/, lib/,
     # iccprofiles/ directly under share/ghostscript/. Older layouts nest
     # them one level deeper. Handle both.
-    if [ ! -d "$OUT_DIR/gs-resources/Resource" ]; then
-      GS_SHARE="$GS_PREFIX/share/ghostscript"
-      if [ -d "$GS_SHARE/Resource" ]; then
-        GS_SHARE_VER="$GS_SHARE/"
-      else
-        GS_SHARE_VER="$(ls -d "$GS_SHARE"/*/ | head -1)"
-      fi
-      mkdir -p "$OUT_DIR/gs-resources"
-      cp -R "${GS_SHARE_VER}Resource" "$OUT_DIR/gs-resources/"
-      [ -d "${GS_SHARE_VER}lib" ] && cp -R "${GS_SHARE_VER}lib" "$OUT_DIR/gs-resources/"
-      [ -d "${GS_SHARE_VER}iccprofiles" ] && cp -R "${GS_SHARE_VER}iccprofiles" "$OUT_DIR/gs-resources/"
+    rm -rf "$OUT_DIR/gs-resources"
+    GS_SHARE="$GS_PREFIX/share/ghostscript"
+    if [ -d "$GS_SHARE/Resource" ]; then
+      GS_SHARE_VER="$GS_SHARE/"
+    else
+      GS_SHARE_VER="$(ls -d "$GS_SHARE"/*/ | head -1)"
     fi
+    mkdir -p "$OUT_DIR/gs-resources"
+    cp -R "${GS_SHARE_VER}Resource" "$OUT_DIR/gs-resources/"
+    [ -d "${GS_SHARE_VER}lib" ] && cp -R "${GS_SHARE_VER}lib" "$OUT_DIR/gs-resources/"
+    [ -d "${GS_SHARE_VER}iccprofiles" ] && cp -R "${GS_SHARE_VER}iccprofiles" "$OUT_DIR/gs-resources/"
     # mutool — via Homebrew's mupdf-tools formula. Conflicts with the
     # `mupdf` formula (same binaries), so we install one or the other.
-    # macos-14 runners ship fresh — no pre-existing mupdf to collide.
-    "$GS_BREW" install --quiet mupdf-tools
+    install_current_brew_formula mupdf-tools
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
     MUPDF_ACTUAL_VERSION="$("$MUPDF_PREFIX/bin/mutool" -v 2>&1 | awk 'NR == 1 { print $3 }')"
     [ "$MUPDF_ACTUAL_VERSION" = "$MACOS_MUPDF_VERSION" ] || {
@@ -274,7 +285,7 @@ case "$TARGET" in
     # dylib graph next to the sidecar, rewrites every load command to
     # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
     # tesseract resolves and loads them as siblings at runtime.
-    "$GS_BREW" install --quiet tesseract
+    install_current_brew_formula tesseract
     TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
     TESS_ACTUAL_VERSION="$("$TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
     [ "$TESS_ACTUAL_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
