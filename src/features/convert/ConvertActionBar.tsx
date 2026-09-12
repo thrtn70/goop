@@ -28,7 +28,7 @@ import { cloneImageOptions } from "./imageOptions";
 import { subtitleForTarget } from "./FileRow";
 import {
   cloneTrackOptions,
-  trackRequestOptions,
+  activeTrackRequestOptions,
   trackSelectionProblem,
   type TrackDraftFile,
 } from "./trackOptions";
@@ -162,7 +162,7 @@ export default function ConvertActionBar({
       const snapshot = files.map((file) => ({
         ...file,
         audioOptions: audioRequestOptions(file),
-        trackOptions: cloneTrackOptions(file.videoOptions ? file.trackOptions : trackRequestOptions(file)),
+        trackOptions: activeTrackRequestOptions(file),
         videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,

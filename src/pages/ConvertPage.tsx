@@ -47,6 +47,7 @@ import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
 import {
   cloneTrackOptions,
+  activeTrackRequestOptions,
   resolvedTrackOptions,
   selectedTrackChoice,
   trackOptionsAfterSourceReplacement,
@@ -56,6 +57,7 @@ import {
 import {
   resolvedVideoTrackOptions,
   videoTrackOptionsProblem,
+  videoTrackPresetPolicyProblem,
   videoTrackOptionsFromPreset,
   videoTrackPolicyForPreset,
   cloneVideoTrackPolicyDraft,
@@ -209,11 +211,12 @@ function ConvertPage() {
   const planEntries = videoFiles.flatMap(file => {
     const videoTrackEnabled = file.videoTrackOptionsEnabled === true || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video";
     if (!file.id || !file.videoOptions || !file.optionsReady || videoOptionsError(file) || (videoTrackEnabled && videoTrackOptionsProblem({ options: file.trackOptions, settings: file.videoTrackSettings, mode: file.videoOptions.kind === "copy" ? "copy" : "custom", unavailableReason: file.trackSourceUnavailableReason, pendingPolicy: file.pendingTrackPolicy }))) return [];
+    const trackOptions = activeTrackRequestOptions(file);
     return [{
       id: file.id, sourceIdentity: JSON.stringify([file.id, file.revision, file.trackOptions]),
       request: {
         input_path: file.path, output_path: "", target: file.target,
-        video_options: videoRequestOptions(file), ...(file.trackOptions === undefined ? {} : { track_options: cloneTrackOptions(file.trackOptions) }), quality_preset: null, resolution_cap: file.resolutionCap,
+        video_options: videoRequestOptions(file), ...(trackOptions ? { track_options: trackOptions } : {}), quality_preset: null, resolution_cap: file.resolutionCap,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
         subtitle: file.subtitle, gif_options: file.gifOptions, image_options: cloneImageOptions(file.imageOptions),
       },
@@ -482,8 +485,30 @@ function ConvertPage() {
             file.imageOptions ? "channel_aware" : "rgb_reencode",
           )
         : null;
+      const videoTrackEnabled = file.videoOptions
+        && (file.videoTrackOptionsEnabled || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video");
+      const choosesTracksPerFile = file.pendingTrackPolicy?.kind === "video"
+        && (file.pendingTrackPolicy.audio.kind === "choose_per_file"
+          || file.pendingTrackPolicy.subtitles.kind === "choose_per_file");
+      const videoTrackProblem = videoTrackEnabled
+        ? choosesTracksPerFile
+          ? videoTrackPresetPolicyProblem({
+              policy: file.pendingTrackPolicy,
+              settings: file.videoTrackSettings,
+              mode: file.videoOptions!.kind === "copy" ? "copy" : "custom",
+              unavailableReason: file.trackSourceUnavailableReason,
+            })
+          : videoTrackOptionsProblem({
+            options: file.trackOptions,
+            settings: file.videoTrackSettings,
+            mode: file.videoOptions!.kind === "copy" ? "copy" : "custom",
+            unavailableReason: file.trackSourceUnavailableReason,
+            pendingPolicy: file.pendingTrackPolicy,
+          })
+        : null;
       const problem = audioOptionsProblem(file)
         ?? videoOptionsError({...file, videoCapability:capability})
+        ?? videoTrackProblem
         ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state)
         ?? metadataProblem;
       return problem ? [`${sourceName(file.path)}: ${problem}`] : [];

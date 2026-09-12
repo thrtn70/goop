@@ -143,7 +143,15 @@ fn cleanup_completed_downloads(jobs: &[Job]) {
     }
 }
 
-pub(crate) fn cleanup_orphaned_downloads(store: &QueueStore, settings: &cfg::Settings) {
+fn schedule_cleanup_worker(work: impl FnOnce() + Send + 'static) {
+    tauri::async_runtime::spawn_blocking(work);
+}
+
+pub(crate) fn schedule_orphaned_download_cleanup(store: QueueStore, settings: cfg::Settings) {
+    schedule_cleanup_worker(move || cleanup_orphaned_downloads(&store, &settings));
+}
+
+fn cleanup_orphaned_downloads(store: &QueueStore, settings: &cfg::Settings) {
     let jobs = match store.list_extract_jobs() {
         Ok(jobs) => jobs,
         Err(e) => {
@@ -230,6 +238,35 @@ mod tests {
         let mut job = Job::new(JobKind::Extract, serde_json::to_value(request).unwrap());
         job.state = state;
         job
+    }
+
+    #[test]
+    fn scheduled_cleanup_returns_before_blocking_worker_finishes() {
+        let (worker_started_tx, worker_started_rx) = std::sync::mpsc::channel();
+        let (release_worker_tx, release_worker_rx) = std::sync::mpsc::channel();
+        let (worker_finished_tx, worker_finished_rx) = std::sync::mpsc::channel();
+        let (caller_returned_tx, caller_returned_rx) = std::sync::mpsc::channel();
+
+        let caller = std::thread::spawn(move || {
+            schedule_cleanup_worker(move || {
+                worker_started_tx.send(()).unwrap();
+                release_worker_rx.recv().unwrap();
+                worker_finished_tx.send(()).unwrap();
+            });
+            caller_returned_tx.send(()).unwrap();
+        });
+
+        let timeout = std::time::Duration::from_secs(1);
+        let worker_started = worker_started_rx.recv_timeout(timeout);
+        let caller_returned = caller_returned_rx.recv_timeout(timeout);
+
+        let _ = release_worker_tx.send(());
+        let worker_finished = worker_finished_rx.recv_timeout(timeout);
+        caller.join().unwrap();
+
+        worker_started.expect("cleanup worker did not start");
+        caller_returned.expect("cleanup scheduling blocked until the worker finished");
+        worker_finished.expect("cleanup worker did not finish after release");
     }
 
     #[test]

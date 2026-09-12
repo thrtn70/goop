@@ -664,6 +664,7 @@ pub async fn resolve_video_request_source(
     encoders: &crate::DetectedEncoders,
 ) -> Result<goop_core::VideoExecutionSummary, GoopError> {
     goop_core::validate_video_request(req)?;
+    goop_core::validate_track_request(req)?;
     let path = goop_core::path::expand(&req.input_path);
     let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
     if backend_for_extension(extension) != BackendKind::Ffmpeg {
@@ -862,5 +863,54 @@ mod tests {
         let video = mp4.video_settings.as_ref().unwrap();
         assert!(video.copy.available);
         assert!(video.encode.available);
+    }
+
+    #[tokio::test]
+    async fn video_admission_rejects_audio_only_track_options_before_sidecar_work() {
+        let source = TrackSourceBinding {
+            version: TRACK_SOURCE_BINDING_VERSION,
+            canonical_path: "/tmp/source.mp4".into(),
+            size_bytes: "4096".into(),
+            modified_unix_ns: "1700000000000000000".into(),
+            inventory: serde_json::from_value(json!({
+                "version": 1,
+                "streams": [{
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": {"kind": "value", "value": "aac"},
+                    "container_stream_id": {"kind": "missing"},
+                    "language": {"kind": "missing"},
+                    "title": {"kind": "missing"},
+                    "disposition": {
+                        "default": true,
+                        "forced": false,
+                        "attached_pic": false,
+                        "other": {},
+                        "malformed": false
+                    }
+                }]
+            }))
+            .unwrap(),
+        };
+        let request: ConvertRequest = serde_json::from_value(json!({
+            "input_path": "/tmp/source.mp4",
+            "output_path": "/tmp/output.mp4",
+            "target": "mp4",
+            "video_options": {"kind": "copy"},
+            "track_options": {"kind": "audio", "source": source, "stream_index": 1}
+        }))
+        .unwrap();
+        let resolver = BinaryResolver::new(std::env::temp_dir().join("missing-goop-sidecars"));
+
+        let error = resolve_video_request_source(&resolver, &request, &DetectedEncoders::empty())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .user_message()
+                .contains("Audio track selection requires MP3, M4A, AAC, WAV or FLAC output"),
+            "{error:?}"
+        );
     }
 }

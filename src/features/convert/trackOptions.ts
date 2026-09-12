@@ -7,12 +7,14 @@ import type {
   TrackPresetPolicy,
   TrackSourceBinding,
   TrackTextFact,
+  VideoConvertOptions,
   VideoTrackSettingsCapabilities,
 } from "@/types";
 import type { VideoTrackPolicyDraft } from "./videoTrackOptions";
 
 export interface TrackDraftFile {
   audioOptions?: AudioConvertOptions | null;
+  videoOptions?: VideoConvertOptions | null;
   trackOptions?: TrackConvertOptions | null;
   trackSettings?: TrackSettingsCapabilities | null;
   videoTrackSettings?: VideoTrackSettingsCapabilities | null;
@@ -150,6 +152,13 @@ export function trackRequestOptions(file: TrackDraftFile): TrackConvertOptions |
   if (problem) throw new Error(problem);
   if (!file.audioOptions) return null;
   return resolvedTrackOptions(file.trackOptions, file.trackSettings);
+}
+
+export function activeTrackRequestOptions(file: TrackDraftFile): TrackConvertOptions | null {
+  if (file.videoOptions) {
+    return file.trackOptions?.kind === "video" ? cloneTrackOptions(file.trackOptions) : null;
+  }
+  return trackRequestOptions(file);
 }
 
 const LANGUAGE_NAMES: Record<string, string> = {

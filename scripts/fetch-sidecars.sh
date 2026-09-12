@@ -84,6 +84,13 @@ TESSDATA_VER="4.1.0"
 TESSDATA_BASE="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_VER}"
 TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
 
+# Homebrew is used only for the macOS builds that have no suitable upstream
+# arm64 bundle. Keep the reviewed formula outputs version-pinned: a formula
+# bump must fail the release until its CLI and dylib closure are rechecked.
+MACOS_GHOSTSCRIPT_VERSION="10.08.0"
+MACOS_MUPDF_VERSION="1.28.3"
+MACOS_TESSERACT_VERSION="5.5.3"
+
 case "$TARGET" in
   x86_64-pc-windows-msvc)
     # ffmpeg — Gyan essentials (LGPL)
@@ -202,8 +209,13 @@ case "$TARGET" in
     # Ghostscript — via Homebrew. macos-14 ships with arm64 Homebrew at
     # /opt/homebrew. Apple Silicon only — Intel Mac was dropped in v0.2.0.
     GS_BREW=/opt/homebrew/bin/brew
-    "$GS_BREW" install --quiet ghostscript || true
+    "$GS_BREW" install --quiet ghostscript
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
+    GS_ACTUAL_VERSION="$("$GS_PREFIX/bin/gs" --version)"
+    [ "$GS_ACTUAL_VERSION" = "$MACOS_GHOSTSCRIPT_VERSION" ] || {
+      echo "::error::Ghostscript version drift: expected $MACOS_GHOSTSCRIPT_VERSION, got $GS_ACTUAL_VERSION" >&2
+      exit 1
+    }
     rm -f "$OUT_DIR/gs-$TARGET"
     cp "$GS_PREFIX/bin/gs" "$OUT_DIR/gs-$TARGET"
     # gs links its imaging/font dylibs (libtiff, libpng16, libjpeg, liblcms2,
@@ -242,8 +254,13 @@ case "$TARGET" in
     # mutool — via Homebrew's mupdf-tools formula. Conflicts with the
     # `mupdf` formula (same binaries), so we install one or the other.
     # macos-14 runners ship fresh — no pre-existing mupdf to collide.
-    "$GS_BREW" install --quiet mupdf-tools || true
+    "$GS_BREW" install --quiet mupdf-tools
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
+    MUPDF_ACTUAL_VERSION="$("$MUPDF_PREFIX/bin/mutool" -v 2>&1 | awk 'NR == 1 { print $3 }')"
+    [ "$MUPDF_ACTUAL_VERSION" = "$MACOS_MUPDF_VERSION" ] || {
+      echo "::error::MuPDF version drift: expected $MACOS_MUPDF_VERSION, got $MUPDF_ACTUAL_VERSION" >&2
+      exit 1
+    }
     rm -f "$OUT_DIR/mutool-$TARGET"
     cp "$MUPDF_PREFIX/bin/mutool" "$OUT_DIR/mutool-$TARGET"
     # `u+w` and not just `+x`: the Homebrew copy is already 555, so `+x` alone
@@ -257,8 +274,13 @@ case "$TARGET" in
     # dylib graph next to the sidecar, rewrites every load command to
     # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
     # tesseract resolves and loads them as siblings at runtime.
-    "$GS_BREW" install --quiet tesseract || true
+    "$GS_BREW" install --quiet tesseract
     TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
+    TESS_ACTUAL_VERSION="$("$TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
+    [ "$TESS_ACTUAL_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
+      echo "::error::Tesseract version drift: expected $MACOS_TESSERACT_VERSION, got $TESS_ACTUAL_VERSION" >&2
+      exit 1
+    }
     rm -f "$OUT_DIR/tesseract-$TARGET"
     cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
     chmod +wx "$OUT_DIR/tesseract-$TARGET"

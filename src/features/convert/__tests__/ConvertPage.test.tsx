@@ -90,11 +90,11 @@ vi.mock("@/ipc/commands", () => ({
                   track, copy: {available:true,reason:null}, custom: {available:true,reason:null},
                 })),
                 audio_policy: {
-                  copy: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                  copy: {keep_all:{available:path !== "/tmp/unsupported-tracks.mkv",reason:path === "/tmp/unsupported-tracks.mkv" ? "Not every audio stream can be copied" : null},choose:{available:true,reason:null},none:{available:true,reason:null}},
                   custom: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
                 },
                 subtitle_policy: {
-                  copy: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
+                  copy: {keep_all:{available:path !== "/tmp/unsupported-subtitles.mkv",reason:path === "/tmp/unsupported-subtitles.mkv" ? "Not every subtitle stream can be copied" : null},choose:{available:true,reason:null},none:{available:true,reason:null}},
                   custom: {keep_all:{available:true,reason:null},choose:{available:true,reason:null},none:{available:true,reason:null}},
                 },
               } : null,
@@ -226,6 +226,19 @@ const multiVideoProbe: ProbeResult = {
       videoTrackIdentity(1, "audio", "aac", "Main"),
       videoTrackIdentity(2, "audio", "aac", "Commentary"),
       videoTrackIdentity(3, "subtitle", "subrip", "French"),
+    ],
+  },
+};
+const singleAudioVideoProbe: ProbeResult = {
+  ...multiVideoProbe,
+  has_subtitles: false,
+  subtitle_codecs: [],
+  audio_codecs: ["aac"],
+  track_inventory: {
+    version: 1,
+    streams: [
+      videoTrackIdentity(0, "video", "h264", "Picture"),
+      videoTrackIdentity(1, "audio", "aac", "Main"),
     ],
   },
 };
@@ -415,6 +428,34 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
     await waitFor(() => expect(mockFromFile).toHaveBeenCalledOnce());
     expect(mockFromFile.mock.calls[0][0].audio_options).toBeNull();
+    expect(mockFromFile.mock.calls[0][0]).not.toHaveProperty("track_options");
+  });
+
+  it("does not carry an audio-only track choice into video planning or enqueue", async () => {
+    clearWorkspaceDrafts("convert");
+    mockProbe.mockResolvedValue(singleAudioVideoProbe);
+    mockFromFile.mockResolvedValue("job-id-1");
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("test-video.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(mockAudioPlan.mock.calls.at(-1)?.[0].track_options).toMatchObject({
+      kind: "audio",
+      stream_index: 1,
+    }));
+
+    mockVideoPlan.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "MP4" }));
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
+    await waitFor(() => expect(mockVideoPlan).toHaveBeenCalled());
+    expect(mockVideoPlan.mock.calls.at(-1)?.[0]).not.toHaveProperty("track_options");
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalledOnce());
     expect(mockFromFile.mock.calls[0][0]).not.toHaveProperty("track_options");
   });
 
@@ -1283,6 +1324,32 @@ describe("explicit video inspector", () => {
     expect(screen.getByText(/Settings were not applied/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button",{name:"Select unsupported.mp4"}));
     expect(screen.getByLabelText("Processing")).toHaveProperty("value","automatic");
+  });
+  it("rejects a batch video-stream policy atomically when a later source cannot keep every audio stream", async () => {
+    mockOpen.mockResolvedValue(["/tmp/multi-video.mkv", "/tmp/unsupported-tracks.mkv"]);
+    mockProbe.mockResolvedValue(multiVideoProbe);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
+    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+    expect(screen.getByText(/Settings were not applied.*Not every audio stream can be copied/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Select unsupported-tracks.mkv" }));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value", "automatic");
+  });
+  it("validates concrete stream families when a preset leaves another family to choose per file", async () => {
+    mockOpen.mockResolvedValue(["/tmp/multi-video.mkv", "/tmp/unsupported-subtitles.mkv"]);
+    mockProbe.mockResolvedValue(multiVideoProbe);
+    useAppStore.setState({presets: [{
+      id: "mixed-tracks", name: "Choose audio later", target: "mkv",
+      video_options: {kind: "copy"},
+      track_policy: {kind: "video", audio: {kind: "choose_per_file"}, subtitles: {kind: "keep_all"}},
+      quality_preset: null, resolution_cap: null, compress_mode: null,
+      is_builtin: false, created_at: 0n,
+    }]});
+    await stage();
+    await userEvent.click(screen.getByRole("button", { name: /Choose audio later/ }));
+    expect(screen.getByText(/Settings were not applied.*Not every subtitle stream can be copied/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Select unsupported-subtitles.mkv" }));
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value", "automatic");
   });
   it("keeps invalid active and inactive raw text through remount and validates both rate ranges", async () => {
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
