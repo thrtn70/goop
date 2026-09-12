@@ -18,7 +18,7 @@ test("macOS Homebrew sidecars fail closed on installation and version drift", ()
   assert.match(script, /Tesseract version drift/);
   assert.match(script, /^MACOS_GHOSTSCRIPT_VERSION="10\.07\.1"$/m);
   assert.match(script, /^MACOS_MUPDF_VERSION="1\.28\.3"$/m);
-  assert.match(script, /^MACOS_TESSERACT_VERSION="5\.5\.2"$/m);
+  assert.match(script, /^MACOS_TESSERACT_VERSION="5\.5\.3"$/m);
 });
 
 test("macOS Homebrew sidecars preserve the reviewed runner formula set", () => {
