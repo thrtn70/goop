@@ -16,20 +16,22 @@ test("macOS Homebrew sidecars fail closed on installation and version drift", ()
   assert.match(script, /Ghostscript version drift/);
   assert.match(script, /MuPDF version drift/);
   assert.match(script, /Tesseract version drift/);
-  assert.match(script, /^MACOS_GHOSTSCRIPT_VERSION="10\.08\.0"$/m);
+  assert.match(script, /^MACOS_GHOSTSCRIPT_VERSION="10\.07\.1"$/m);
   assert.match(script, /^MACOS_MUPDF_VERSION="1\.28\.3"$/m);
-  assert.match(script, /^MACOS_TESSERACT_VERSION="5\.5\.3"$/m);
+  assert.match(script, /^MACOS_TESSERACT_VERSION="5\.5\.2"$/m);
 });
 
-test("macOS Homebrew sidecars refresh and upgrade preinstalled runner formulas", () => {
-  assert.match(script, /"\$GS_BREW" update --quiet/);
-  assert.match(script, /"\$GS_BREW" upgrade --quiet "\$formula"/);
+test("macOS Homebrew sidecars preserve the reviewed runner formula set", () => {
+  assert.doesNotMatch(script, /"\$GS_BREW" update/);
+  assert.doesNotMatch(script, /"\$GS_BREW" upgrade/);
+  assert.match(script, /if ! "\$GS_BREW" list --versions "\$formula"/);
+  assert.match(script, /"\$GS_BREW" install --quiet "\$formula"/);
   for (const formula of ["ghostscript", "mupdf-tools", "tesseract"]) {
-    assert.match(script, new RegExp(`install_current_brew_formula ${formula}`));
+    assert.match(script, new RegExp(`ensure_reviewed_brew_formula ${formula}`));
   }
 });
 
-test("Ghostscript resources are replaced after a formula upgrade", () => {
+test("Ghostscript resources are replaced on every run", () => {
   assert.doesNotMatch(script, /if \[ ! -d "\$OUT_DIR\/gs-resources\/Resource" \]/);
   assert.match(
     script,

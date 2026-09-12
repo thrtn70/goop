@@ -87,9 +87,9 @@ TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427
 # Homebrew is used only for the macOS builds that have no suitable upstream
 # arm64 bundle. Keep the reviewed formula outputs version-pinned: a formula
 # bump must fail the release until its CLI and dylib closure are rechecked.
-MACOS_GHOSTSCRIPT_VERSION="10.08.0"
+MACOS_GHOSTSCRIPT_VERSION="10.07.1"
 MACOS_MUPDF_VERSION="1.28.3"
-MACOS_TESSERACT_VERSION="5.5.3"
+MACOS_TESSERACT_VERSION="5.5.2"
 
 case "$TARGET" in
   x86_64-pc-windows-msvc)
@@ -209,19 +209,16 @@ case "$TARGET" in
     # Ghostscript — via Homebrew. macos-14 ships with arm64 Homebrew at
     # /opt/homebrew. Apple Silicon only — Intel Mac was dropped in v0.2.0.
     GS_BREW=/opt/homebrew/bin/brew
-    # Hosted runners can carry an older preinstalled formula even after the
-    # repository metadata has advanced. Refresh once, then explicitly upgrade
-    # existing formulae so the exact version checks below see reviewed bytes.
-    "$GS_BREW" update --quiet
-    install_current_brew_formula() {
+    # Preserve the runner's reviewed bottled set. Current Homebrew metadata can
+    # require source-only dependencies on this supported runner, so never update
+    # or upgrade here; the exact checks below fail closed if the image drifts.
+    ensure_reviewed_brew_formula() {
       local formula="$1"
-      if "$GS_BREW" list --versions "$formula" >/dev/null 2>&1; then
-        "$GS_BREW" upgrade --quiet "$formula"
-      else
+      if ! "$GS_BREW" list --versions "$formula" >/dev/null 2>&1; then
         "$GS_BREW" install --quiet "$formula"
       fi
     }
-    install_current_brew_formula ghostscript
+    ensure_reviewed_brew_formula ghostscript
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
     GS_ACTUAL_VERSION="$("$GS_PREFIX/bin/gs" --version)"
     [ "$GS_ACTUAL_VERSION" = "$MACOS_GHOSTSCRIPT_VERSION" ] || {
@@ -265,7 +262,7 @@ case "$TARGET" in
     [ -d "${GS_SHARE_VER}iccprofiles" ] && cp -R "${GS_SHARE_VER}iccprofiles" "$OUT_DIR/gs-resources/"
     # mutool — via Homebrew's mupdf-tools formula. Conflicts with the
     # `mupdf` formula (same binaries), so we install one or the other.
-    install_current_brew_formula mupdf-tools
+    ensure_reviewed_brew_formula mupdf-tools
     MUPDF_PREFIX="$("$GS_BREW" --prefix mupdf-tools)"
     MUPDF_ACTUAL_VERSION="$("$MUPDF_PREFIX/bin/mutool" -v 2>&1 | awk 'NR == 1 { print $3 }')"
     [ "$MUPDF_ACTUAL_VERSION" = "$MACOS_MUPDF_VERSION" ] || {
@@ -285,7 +282,7 @@ case "$TARGET" in
     # dylib graph next to the sidecar, rewrites every load command to
     # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
     # tesseract resolves and loads them as siblings at runtime.
-    install_current_brew_formula tesseract
+    ensure_reviewed_brew_formula tesseract
     TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
     TESS_ACTUAL_VERSION="$("$TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
     [ "$TESS_ACTUAL_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
