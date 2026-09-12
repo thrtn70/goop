@@ -85,6 +85,9 @@ impl<'a> FfmpegBackend<'a> {
         path: &Path,
         cancel: &CancellationToken,
     ) -> Result<ProbeResult, GoopError> {
+        if cancel.is_cancelled() {
+            return Err(GoopError::Cancelled);
+        }
         let bin = resolver.resolve("ffprobe")?;
         let out = crate::bounded_process::output(
             Command::new(&bin.path)

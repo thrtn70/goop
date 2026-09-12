@@ -43,6 +43,8 @@ run_step "tsc typecheck"     npm run --silent typecheck
 run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
 run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs
+run_step "release workflow"  node --test scripts/release-workflow.test.mjs
+run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   run_step "macOS baselines" node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs

@@ -4,20 +4,23 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Create the draft release once, before any matrix builder runs. tauri-action
-  # in a matrix has a known race: each runner does "find or create draft" and
-  # when several see "no draft yet" they each create one, leaving multiple
-  # drafts with the assets split across them. Pre-creating the release here
-  # gives every builder a stable releaseId to attach to.
-  create-release:
+  # Reject a tag whose manifests disagree before any expensive build starts.
+  # This job is read-only; draft creation happens only after both builders pass.
+  validate:
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ steps.upsert.outputs.result }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       # The tag is the only thing that says "0.3.0". The three manifest
       # versions are bumped by hand and nothing reconciles them with it.
       #
@@ -34,15 +37,16 @@ jobs:
       # version in the Goop_<version>_aarch64.dmg asset name); package.json's
       # is what the repo reports about itself.
       #
-      # This runs BEFORE the upsert step deliberately. A guard placed after it
-      # would abort having already created a draft release for the tag it just
-      # rejected, leaving an orphan draft to delete by hand before the retag.
+      # This runs before any release mutation deliberately. A rejected tag
+      # cannot leave an orphan draft behind.
       #
       # $GITHUB_REF_NAME rather than ${{ github.ref_name }}: git ref names may
       # contain $, backtick, (, ), ; and | — everything needed to turn an
-      # interpolated tag name into a command in a job holding contents: write.
+      # interpolated tag name into a command. The job remains read-only, but
+      # treating the ref as data keeps this guard safe if permissions drift.
       # The env var is inert.
       - name: Tag matches the version in every manifest
+        id: version
         run: |
           # Same strip the app does — app_update.rs's strip_v_prefix is
           # raw.strip_prefix('v').unwrap_or(raw).
@@ -82,34 +86,7 @@ jobs:
             exit 1
           fi
           echo "tag $GITHUB_REF_NAME matches version $want in package.json, src-tauri/tauri.conf.json and Cargo.toml"
-      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
-        id: upsert
-        with:
-          result-encoding: string
-          script: |
-            const tag = context.ref.replace('refs/tags/', '');
-            // If we're re-running the workflow for an existing tag, reuse any
-            // draft already attached to it instead of creating a duplicate.
-            const { data: releases } = await github.rest.repos.listReleases({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 50,
-            });
-            const existing = releases.find(r => r.tag_name === tag);
-            if (existing) {
-              core.info(`Reusing existing release ${existing.id} (${existing.html_url})`);
-              return existing.id.toString();
-            }
-            const { data: created } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              name: `Goop ${tag}`,
-              draft: true,
-              prerelease: false,
-            });
-            core.info(`Created draft release ${created.id} (${created.html_url})`);
-            return created.id.toString();
+          echo "version=$want" >> "$GITHUB_OUTPUT"
 
   # Mirror the audit workflow's `legal` job at release time so a tag push
   # can't ship without the AGPL firewall enforced. See LICENSING.md.
@@ -117,6 +94,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: Rust dep graph clear of mupdf-*
@@ -133,7 +112,7 @@ jobs:
           fi
 
   build:
-    needs: [create-release, legal]
+    needs: [validate, legal]
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +122,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { targets: "${{ matrix.target }}" }
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -210,10 +191,7 @@ jobs:
           [ -f "src-tauri/$ent" ] || { echo "::error::entitlements file 'src-tauri/$ent' (referenced by tauri.conf.json) is missing from the checkout — sidecars would be signed without disable-library-validation"; exit 1; }
           echo "entitlements present: src-tauri/$ent"
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
       # Smoke-test the PyInstaller sidecars INSIDE the signed .app. Tauri
       # ad-hoc-signs every sidecar with hardened runtime; the gallery-dl and
@@ -294,161 +272,204 @@ jobs:
           [ -s "$RUNNER_TEMP/gs-smoke.png" ] || { echo "::error::gs produced no PNG — the bundled gs-resources / GS_LIB path is broken"; exit 1; }
           echo "gs rendered $(wc -c < "$RUNNER_TEMP/gs-smoke.png" | tr -d ' ') bytes from the bundled resource tree"
 
-      # SHA-256 for the installers this runner just handed to tauri-action.
-      # Neither platform is signed with a real identity — macOS is ad-hoc,
-      # Windows is unsigned — so a published digest is the only way a user can
-      # tell a truncated or proxy-mangled download from a good one, and
-      # README's "Windows Defender flags the installer" entry tells them to do
-      # exactly that.
-      #
-      # One <asset>.sha256 per installer, never a shared SHA256SUMS.txt: both
-      # matrix legs write to ONE draft release, so a combined file is a
-      # read-modify-write race with no lock. Uploading without deleting 422s;
-      # deleting first means the last writer silently drops the other
-      # platform's lines. Per-asset names are derived from artifacts only this
-      # runner produced, so they cannot collide.
-      #
-      # Placed last on purpose. If this ran right after tauri-action and
-      # failed, every later step would be skipped — including the signed
-      # sidecar smoke test, which is the guard standing between us and
-      # shipping binaries that SIGKILL on launch. Last position means a
-      # checksum problem can never mask a correctness one.
-      - name: SHA-256 the installers
+      # Stage exact public names only after all platform-specific smoke checks
+      # pass. tauri-action creates the app archive without release credentials,
+      # but leaves it as Goop.app.tar.gz, so rename it before hashing.
+      - name: Stage release assets
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          mkdir -p release-assets
+          if [ "${{ matrix.os }}" = "macos-14" ]; then
+            dmg="target/${{ matrix.target }}/release/bundle/dmg/Goop_${RELEASE_VERSION}_aarch64.dmg"
+            app="target/${{ matrix.target }}/release/bundle/macos/Goop.app.tar.gz"
+            [ -s "$dmg" ] || { echo "::error::missing macOS installer $dmg"; exit 1; }
+            [ -s "$app" ] || { echo "::error::missing macOS app archive $app"; exit 1; }
+            cp "$dmg" "release-assets/Goop_${RELEASE_VERSION}_aarch64.dmg"
+            cp "$app" "release-assets/Goop_aarch64.app.tar.gz"
+          else
+            setup="target/${{ matrix.target }}/release/bundle/nsis/Goop_${RELEASE_VERSION}_x64-setup.exe"
+            msi="target/${{ matrix.target }}/release/bundle/msi/Goop_${RELEASE_VERSION}_x64_en-US.msi"
+            [ -s "$setup" ] || { echo "::error::missing Windows installer $setup"; exit 1; }
+            [ -s "$msi" ] || { echo "::error::missing Windows installer $msi"; exit 1; }
+            cp "$setup" "release-assets/Goop_${RELEASE_VERSION}_x64-setup.exe"
+            cp "$msi" "release-assets/Goop_${RELEASE_VERSION}_x64_en-US.msi"
+          fi
+
+      - name: SHA-256 the staged assets
         shell: bash
         run: |
-          mkdir -p checksums
-          # Same both-roots search, and the same `|| true`, as the sidecar step
-          # above: src-tauri/target does not exist, find exits 1 on a missing
-          # root, and -o pipefail would turn that into a silent step abort.
-          # The count guard below is the real check.
-          find target src-tauri/target -type f \
-            -path "*/${{ matrix.target }}/release/bundle/*" \
-            \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*.msi' \) \
-            2>/dev/null | sort > checksums/.list || true
-          count=$(wc -l < checksums/.list | tr -d ' ')
-          [ "$count" -gt 0 ] || { echo "::error::no installers found under (src-tauri/)target/${{ matrix.target }}/release/bundle — the release would publish checksums for nothing; check --bundles and the target dir layout"; exit 1; }
-          # macos-14 has shasum (Perl) and no GNU coreutils; Git Bash on
-          # windows-latest has sha256sum. Both emit the same two-space
-          # `<hash>  <name>` form that `shasum -a 256 -c` and `sha256sum -c`
-          # parse, so pick whichever exists rather than branching on the OS.
           if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
           elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
-          else echo "::error::neither sha256sum nor shasum is on PATH on ${{ matrix.os }} — checksums cannot be computed"; exit 1
+          else echo "::error::neither sha256sum nor shasum is on PATH on ${{ matrix.os }}"; exit 1
           fi
-          arch="${{ matrix.target }}"; arch="${arch%%-*}"
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            base=$(basename "$f")
-            # tauri-action renames exactly one artifact on upload: its
-            # getAssetName turns Goop.app.tar.gz into Goop_<arch>.app.tar.gz.
-            # Everything else keeps its on-disk name. File the digest under the
-            # PUBLISHED name, or we ship a checksum for a filename that isn't
-            # on the release. The upload step re-checks every name against the
-            # real asset list.
-            case "$base" in
-              *.app.tar.gz) name="${base%.app.tar.gz}_${arch}.app.tar.gz" ;;
-              *)            name="$base" ;;
-            esac
-            # `|| true` for the same reason as the find above: -o pipefail
-            # would abort the step at this assignment and the guard on the
-            # next line would never run, so a hashing failure would surface as
-            # a bare red step with no annotation. The tool's own complaint
-            # still reaches the log on stderr.
-            hash=$($SHA "$f" | awk '{print $1}' || true)
-            [ -n "$hash" ] || { echo "::error::$SHA produced no digest for $f"; exit 1; }
-            printf '%s  %s\n' "$hash" "$name" > "checksums/${name}.sha256"
-            # Prove the line we publish is one the tool users are told to run
-            # can actually consume — same `-c -` form as
-            # scripts/build-static-heif-deps.sh.
-            printf '%s  %s\n' "$hash" "$f" | $SHA -c - > /dev/null \
-              || { echo "::error::the digest for $name does not verify with '$SHA -c' — the published .sha256 would be unusable"; exit 1; }
-            echo "  $hash  $name"
-          done < checksums/.list
-          rm -f checksums/.list
-          echo "wrote $count checksum file(s) for ${{ matrix.target }}"
+          count=0
+          for file in release-assets/*; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file")
+            case "$name" in *.sha256) continue ;; esac
+            hash=$($SHA "$file" | awk '{print $1}')
+            [ -n "$hash" ] || { echo "::error::$SHA produced no digest for $file"; exit 1; }
+            printf '%s  %s\n' "$hash" "$name" > "release-assets/${name}.sha256"
+            printf '%s  %s\n' "$hash" "$file" | $SHA -c - >/dev/null
+            count=$((count + 1))
+          done
+          [ "$count" -eq 2 ] || { echo "::error::expected two staged assets for ${{ matrix.target }}, found $count"; exit 1; }
 
-      # Attach the digests to the SAME draft release tauri-action just uploaded
-      # the installers to. github-script + release_id rather than
-      # `gh release upload`: gh resolves a release by TAG, and a draft is not
-      # reachable at /releases/tags/<tag> — it works only through gh's
-      # draft-listing fallback, which is one more untested moving part on a
-      # step whose first real execution is the cut. The id is already threaded
-      # into this job and this action is already pinned above.
-      # Delete-then-upload mirrors tauri-action, so re-running the workflow
-      # (create-release reuses the draft) doesn't 422.
-      - name: Upload checksums to the draft release
+      - name: Upload verified build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          overwrite: true
+
+  # This is the only write-capable job. It receives already-built bytes from
+  # both read-only builders, validates their complete allowlist and digests,
+  # then creates or updates a draft. It never checks out or executes project
+  # code, dependencies, installers or sidecars.
+  publish:
+    needs: [validate, legal, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-assets-aarch64-apple-darwin
+          path: release-input/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-assets-x86_64-pc-windows-msvc
+          path: release-input/windows
+      - name: Validate and attach assets to draft release
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
             const { owner, repo } = context.repo;
-            const release_id = Number(process.env.RELEASE_ID);
-            const files = fs.readdirSync('checksums').filter(f => f.endsWith('.sha256')).sort();
-            if (files.length === 0) {
-              core.setFailed('no .sha256 files in ./checksums — the hashing step produced nothing to upload');
+            const version = process.env.RELEASE_VERSION;
+            const tag = context.ref.replace('refs/tags/', '');
+            const roots = ['release-input/macos', 'release-input/windows'];
+            const installers = [
+              `Goop_${version}_aarch64.dmg`,
+              'Goop_aarch64.app.tar.gz',
+              `Goop_${version}_x64-setup.exe`,
+              `Goop_${version}_x64_en-US.msi`,
+            ];
+            const expected = [...installers, ...installers.map(name => `${name}.sha256`)].sort();
+            const files = new Map();
+            for (const root of roots) {
+              for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+                if (!entry.isFile() || entry.isSymbolicLink()) {
+                  core.setFailed(`unexpected non-file release entry: ${path.join(root, entry.name)}`);
+                  return;
+                }
+                if (files.has(entry.name)) {
+                  core.setFailed(`duplicate release asset name: ${entry.name}`);
+                  return;
+                }
+                const full = path.join(root, entry.name);
+                if (fs.statSync(full).size === 0) {
+                  core.setFailed(`release asset is empty: ${entry.name}`);
+                  return;
+                }
+                files.set(entry.name, full);
+              }
+            }
+            const actual = [...files.keys()].sort();
+            if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+              core.setFailed(`release asset allowlist mismatch; expected ${expected.join(', ')}, got ${actual.join(', ')}`);
               return;
             }
-            const { data: assets } = await github.rest.repos.listReleaseAssets({
-              owner, repo, release_id, per_page: 100,
-            });
-            for (const file of files) {
-              // A digest names a release asset. If that asset is not on the
-              // release the digest is unusable, and the likely cause is
-              // tauri-action's getAssetName rewriting a name. Fail loud rather
-              // than publish a checksum for a file nobody can download.
-              const target = file.replace(/\.sha256$/, '');
-              if (!assets.some(a => a.name === target)) {
-                core.setFailed(`checksum ${file} names "${target}", which is not an asset on release ${release_id} — tauri-action's upload naming changed; fix the name mapping in the "SHA-256 the installers" step`);
+            for (const name of installers) {
+              const line = fs.readFileSync(files.get(`${name}.sha256`), 'utf8').trim();
+              const match = /^([0-9a-f]{64})  ([^/\\]+)$/.exec(line);
+              if (!match || match[2] !== name) {
+                core.setFailed(`invalid checksum file for ${name}`);
                 return;
               }
-              // Clear any asset already holding this name. Factored out
-              // because a retry has to repeat it: a client-side failure
-              // (timeout, dropped socket) can still leave the asset persisted
-              // server-side, and the next attempt would then 422 on the
-              // duplicate name — turning one recoverable upload into three
-              // reported failures.
-              const clearName = async (list) => {
-                const dupe = list.find(a => a.name === file);
-                if (dupe) {
-                  await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: dupe.id });
-                }
-              };
-              await clearName(assets);
-              const data = fs.readFileSync(`checksums/${file}`, 'utf8');
-              let err = null;
+              const digest = crypto.createHash('sha256').update(fs.readFileSync(files.get(name))).digest('hex');
+              if (digest !== match[1]) {
+                core.setFailed(`checksum mismatch for ${name}`);
+                return;
+              }
+            }
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            });
+            const matching = releases.filter(release => release.tag_name === tag);
+            if (matching.some(release => !release.draft)) {
+              core.setFailed(`release ${tag} is already published; refusing to replace its assets`);
+              return;
+            }
+            if (matching.length > 1) {
+              core.setFailed(`multiple draft releases exist for ${tag}; resolve them manually`);
+              return;
+            }
+            let release = matching[0];
+            if (!release) {
+              const created = await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `Goop ${tag}`, draft: true, prerelease: false,
+              });
+              release = created.data;
+              core.info(`created draft release ${release.id}`);
+            } else {
+              core.info(`reusing draft release ${release.id}`);
+            }
+
+            const currentAssets = async () => github.paginate(github.rest.repos.listReleaseAssets, {
+              owner, repo, release_id: release.id, per_page: 100,
+            });
+            const unexpected = (await currentAssets()).filter(asset => !expected.includes(asset.name));
+            if (unexpected.length > 0) {
+              core.setFailed(`draft release ${tag} has unexpected assets: ${unexpected.map(asset => asset.name).sort().join(', ')}`);
+              return;
+            }
+            for (const name of expected) {
+              let error = null;
               for (let attempt = 1; attempt <= 3; attempt++) {
+                const latest = await github.rest.repos.getRelease({ owner, repo, release_id: release.id });
+                if (!latest.data.draft) {
+                  core.setFailed(`release ${tag} was published while assets were uploading; refusing further mutation`);
+                  return;
+                }
+                for (const duplicate of (await currentAssets()).filter(asset => asset.name === name)) {
+                  await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: duplicate.id });
+                }
+                const full = files.get(name);
+                const size = fs.statSync(full).size;
                 try {
                   await github.rest.repos.uploadReleaseAsset({
-                    owner, repo, release_id, name: file, data,
+                    owner, repo, release_id: release.id, name,
+                    data: fs.createReadStream(full),
                     headers: {
-                      'content-type': 'text/plain',
-                      'content-length': Buffer.byteLength(data),
+                      'content-type': name.endsWith('.sha256') ? 'text/plain' : 'application/octet-stream',
+                      'content-length': size,
                     },
                   });
-                  err = null;
+                  error = null;
                   break;
-                } catch (e) {
-                  err = e;
-                  if (attempt === 3) break;
-                  await new Promise(r => setTimeout(r, 2000 * attempt));
-                  // Best effort: if this re-listing fails, the next upload
-                  // attempt surfaces the real error anyway.
-                  try {
-                    const { data: current } = await github.rest.repos.listReleaseAssets({
-                      owner, repo, release_id, per_page: 100,
-                    });
-                    await clearName(current);
-                  } catch (ignored) {
-                    core.info(`could not re-check assets before retrying ${file}: ${ignored.message}`);
-                  }
+                } catch (caught) {
+                  error = caught;
+                  if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
                 }
               }
-              if (err) {
-                core.setFailed(`uploading ${file} failed after 3 attempts: ${err.message} — the installers are already on the DRAFT release and are unaffected; re-run this workflow (create-release reuses the existing draft) before publishing`);
+              if (error) {
+                core.setFailed(`uploading ${name} failed after three attempts: ${error.message}`);
                 return;
               }
-              core.info(`uploaded ${file}`);
+              core.info(`uploaded ${name}`);
             }
-            core.info(`attached ${files.length} checksum file(s) to release ${release_id}`);
+            const finalNames = (await currentAssets()).map(asset => asset.name).sort();
+            if (JSON.stringify(finalNames) !== JSON.stringify(expected)) {
+              core.setFailed(`draft asset verification failed; expected ${expected.join(', ')}, got ${finalNames.join(', ')}`);
+              return;
+            }
+            core.info(`draft release ${release.id} now has ${expected.length} verified assets`);

@@ -119,6 +119,27 @@ export function videoTrackOptionsProblem({
     ?? policyProblem("subtitles", resolved.subtitles, settings, mode);
 }
 
+export function videoTrackPresetPolicyProblem({
+  policy,
+  settings,
+  mode,
+  unavailableReason,
+}: {
+  policy: TrackPresetPolicy | null | undefined;
+  settings: VideoTrackSettingsCapabilities | null | undefined;
+  mode: VideoTrackMode;
+  unavailableReason?: string | null;
+}): string | null {
+  if (policy?.kind !== "video") return null;
+  if (!settings) return unavailableReason ?? "Video track selection requires a fresh source inspection. Reinspect the source.";
+  const concreteProblem = (family: VideoTrackFamily, preset: TrackPresetStreamPolicy) =>
+    preset.kind === "choose_per_file"
+      ? null
+      : policyProblem(family, { kind: preset.kind }, settings, mode);
+  return concreteProblem("audio", policy.audio)
+    ?? concreteProblem("subtitles", policy.subtitles);
+}
+
 const portable = (policy: TrackStreamPolicy): TrackPresetStreamPolicy => policy.kind === "choose"
   ? { kind: "choose_per_file" }
   : { kind: policy.kind };

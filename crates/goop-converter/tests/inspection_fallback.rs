@@ -6,6 +6,7 @@ use goop_converter::{
 };
 use goop_core::GoopError;
 use goop_sidecar::BinaryResolver;
+use std::time::Duration;
 #[cfg(not(target_os = "macos"))]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
@@ -71,6 +72,28 @@ async fn bounded_probe_timeout_recovers_legacy_inspection_only() {
     assert_automatic_only(
         &inspection,
         "Audio track selection is unavailable because ffprobe exceeded its 5 second inspection deadline; use Automatic",
+    );
+}
+
+#[tokio::test]
+async fn repeated_probe_overflow_stays_bounded() {
+    let (_directory, resolver, source) = fixture("head -c 1052672 /dev/zero | tr '\\0' x");
+    let error = inspect_source(&resolver, &source).await.unwrap_err();
+    assert_eq!(
+        error.user_message(),
+        "ffprobe query exceeded its 1 MiB output limit"
+    );
+}
+
+#[tokio::test]
+async fn repeated_probe_timeout_stays_bounded() {
+    let (_directory, resolver, source) = fixture("exec sleep 20");
+    let result = tokio::time::timeout(Duration::from_secs(12), inspect_source(&resolver, &source))
+        .await
+        .expect("both inspection attempts must retain the five-second deadline");
+    assert_eq!(
+        result.unwrap_err().user_message(),
+        "ffprobe query exceeded its 5 second deadline"
     );
 }
 

@@ -20,7 +20,7 @@ use goop_extractor::ytdlp::ExtractRequest;
 
 use goop_queue::{QueueStore, Scheduler, SchedulerPidRegistry, WorkerFn};
 use goop_sidecar::BinaryResolver;
-use startup_cleanup::{cleanup_orphaned_downloads, persist_job_payload_field};
+use startup_cleanup::{persist_job_payload_field, schedule_orphaned_download_cleanup};
 use state::AppState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,7 +243,10 @@ pub fn run() {
             // never considered. Legacy marker files are obsolete and safe to
             // remove immediately; unclaimed current artifacts get a seven-day
             // grace period before cleanup.
-            cleanup_orphaned_downloads(&store, &settings);
+            // Output folders can live on cloud/network providers whose directory
+            // reads block in the kernel. Cleanup is best-effort startup hygiene,
+            // so it must not hold the macOS event loop before the window appears.
+            schedule_orphaned_download_cleanup(store.clone(), settings.clone());
             let app_handle = app.handle().clone();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app_handle.clone()));
 

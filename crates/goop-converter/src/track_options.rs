@@ -1,4 +1,4 @@
-use crate::{backend::ConversionBackend, encoders::DetectedEncoders};
+use crate::encoders::DetectedEncoders;
 use goop_core::{
     AudioStreamInfo, ConvertRequest, GoopError, ProbeResult, TargetFormat, TrackChoiceCapability,
     TrackConvertOptions, TrackExecutionSummary, TrackSettingsCapabilities, TrackSourceBinding,
@@ -214,11 +214,7 @@ async fn legacy_inspection_after_limit(
     ),
     GoopError,
 > {
-    let probe = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(GoopError::Cancelled),
-        probe = crate::FfmpegBackend::probe(resolver, path) => probe?,
-    };
+    let probe = crate::FfmpegBackend::probe_with_cancel(resolver, path, cancel).await?;
     let reason = probe.has_audio.then_some(reason);
     Ok((probe, None, reason))
 }
@@ -493,6 +489,8 @@ mod tests {
     use super::*;
     use goop_core::{SourceKind, TrackInventory};
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn probe() -> ProbeResult {
         ProbeResult {
@@ -653,6 +651,61 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, GoopError::Cancelled));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inspection_fallback_reaps_a_spawned_probe_before_returning_cancelled() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.mkv");
+        fs::write(&source, b"source").unwrap();
+        let pid_file = directory.path().join("fallback.pid");
+        let state_file = directory.path().join("probe.state");
+        let ffprobe = directory.path().join("ffprobe");
+        fs::write(
+            &ffprobe,
+            format!(
+                "#!/bin/sh\nif [ ! -f '{}' ]; then : > '{}'; head -c 1052672 /dev/zero | tr '\\0' x; exit 0; fi\necho $$ > '{}'\nexec sleep 20\n",
+                state_file.display(),
+                state_file.display(),
+                pid_file.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&ffprobe, fs::Permissions::from_mode(0o700)).unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_path_buf());
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_source = source.clone();
+        let task = tokio::spawn(async move {
+            probe_bound_source_for_inspection(&resolver, &task_source, &task_cancel).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fallback probe did not start");
+        cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("cancelled fallback did not finish")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, GoopError::Cancelled));
+
+        let pid = fs::read_to_string(pid_file).unwrap();
+        let status = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "fallback subprocess {pid:?} was not reaped"
+        );
     }
 
     #[test]
