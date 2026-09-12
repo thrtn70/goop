@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 
 const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 const lines = workflow.split("\n");
+const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
+const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
 
 function job(name) {
   const start = lines.findIndex((line) => line === `  ${name}:`);
@@ -60,6 +63,15 @@ const installers = [
 const expectedAssets = [...installers, ...installers.map((name) => `${name}.sha256`)].sort();
 const require = createRequire(import.meta.url);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+test("static website release fallbacks match the packaged version", () => {
+  assert.equal(packageVersion, version);
+  assert.match(siteScript, new RegExp(`version: ['"]v${version}['"]`));
+  assert.deepEqual(
+    [...siteHtml.matchAll(/data-latest-version>v([^<]+)</g)].map((match) => match[1]),
+    [version, version],
+  );
+});
 
 function inlinePublishScript() {
   const body = job("publish").split("\n");
