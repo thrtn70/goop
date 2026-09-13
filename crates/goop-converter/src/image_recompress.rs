@@ -7,11 +7,9 @@
 //! Per-input strategy:
 //! * JPEG / JPG: `image::codecs::jpeg::JpegEncoder` at the requested
 //!   quality.
-//! * WebP: re-save via the `image` crate default encoder. The
-//!   built-in encoder is currently lossless-only; the quality
-//!   parameter is accepted but only sanity-clamped. Matches the
-//!   behavior of `imagemagick::compress_webp` so the two surfaces
-//!   stay consistent.
+//! * WebP: re-save via the `image` crate's lossless encoder. The
+//!   persisted operation payload predates lossy WebP and carries no
+//!   mode discriminator, so its established lossless behavior remains.
 //! * Anything else: re-save via the matching `image::ImageFormat`
 //!   detected from the input extension. PNG / TIFF / BMP / GIF are
 //!   inherently lossless via the `image` crate's defaults; the
@@ -268,6 +266,32 @@ mod tests {
         assert!(!out_dir.exists());
         recompress(&[in_path.as_path()], &out_dir, 60).unwrap();
         assert!(out_dir.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recompress_webp_remains_lossless_for_legacy_payloads() {
+        let dir = tmp_dir("webp-lossless");
+        let input = dir.join("photo.webp");
+        let source: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(64, 64, |x, y| {
+            Rgba([
+                x as u8 * 4,
+                y as u8 * 4,
+                (x ^ y) as u8 * 4,
+                (x + y) as u8 * 2,
+            ])
+        });
+        source.save(&input).unwrap();
+        for quality in [1, 50, 100] {
+            let output = recompress(
+                &[input.as_path()],
+                &dir.join(format!("quality-{quality}")),
+                quality,
+            )
+            .unwrap();
+            let decoded = image::open(&output[0]).unwrap().to_rgba8();
+            assert_eq!(decoded, source);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

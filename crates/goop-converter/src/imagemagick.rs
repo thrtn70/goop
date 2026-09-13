@@ -386,7 +386,27 @@ fn process_image_with_metadata(
     }
     process_image_with_cancel(input, output, target, compress_mode, cancel)?;
     metadata::apply(input, output, policy)?;
-    Ok(ImageProcessingOutcome::default())
+    let image_metadata = (target == TargetFormat::Webp
+        && matches!(compress_mode, Some(CompressMode::Quality(_))))
+    .then(|| ImageMetadataExecution {
+        requested_policy: policy,
+        exif_retained: false,
+        icc_retained: false,
+        orientation_normalized: false,
+        color_handling: if policy == MetadataPolicy::StripAll {
+            ImageColorHandling::NoProfile
+        } else {
+            ImageColorHandling::Untagged
+        },
+        notices: vec![
+            "Lossy WebP output is untagged; source metadata was not retained. Color-managed conversion is not established yet."
+                .into(),
+        ],
+    });
+    Ok(ImageProcessingOutcome {
+        image_metadata,
+        compression: None,
+    })
 }
 
 fn process_snapshot_jpeg(
@@ -804,7 +824,7 @@ pub(crate) fn save_image(img: &image::DynamicImage, output: &Path) -> Result<(),
 
 /// Compress an image. Branches on (target_format, compress_mode):
 /// - JPEG: Quality (direct) or TargetSizeBytes (exhaustive quality 100 down to 1)
-/// - WebP: lossless re-encode only
+/// - WebP: Quality (lossy libwebp) or LosslessReoptimize (image crate)
 /// - PNG: LosslessReoptimize (re-save with max deflate via image crate defaults)
 /// - BMP: all modes rejected
 #[cfg(test)]
@@ -826,7 +846,7 @@ fn compress_image_with_cancel(
 ) -> Result<(), GoopError> {
     match target {
         TargetFormat::Jpeg => compress_jpeg_with_cancel(input, output, mode, cancel),
-        TargetFormat::Webp => compress_webp(input, output, mode),
+        TargetFormat::Webp => compress_webp(input, output, mode, cancel),
         TargetFormat::Png => match mode {
             CompressMode::LosslessReoptimize => convert_image(input, output, TargetFormat::Png),
             _ => Err(GoopError::SubprocessFailed {
@@ -1003,17 +1023,36 @@ fn compress_jpeg_with_cancel(
     write_jpeg_output(output, &buf, cancel, "failed to write output")
 }
 
-fn compress_webp(input: &Path, output: &Path, mode: CompressMode) -> Result<(), GoopError> {
-    if !matches!(mode, CompressMode::LosslessReoptimize) {
-        return Err(image_error("WebP supports only Lossless Re-optimize; Quality and Target Size require a lossy encoder"));
+fn compress_webp(
+    input: &Path,
+    output: &Path,
+    mode: CompressMode,
+    cancel: &CancellationToken,
+) -> Result<(), GoopError> {
+    if matches!(mode, CompressMode::TargetSizeBytes(_)) {
+        return Err(image_error(
+            "WebP Target Size is not available; choose Quality or Lossless",
+        ));
     }
-    let img = decode_any(input)?;
-    let buf = encode_webp(&img)?;
-
-    std::fs::write(output, &buf).map_err(|e| GoopError::SubprocessFailed {
-        binary: "image".into(),
-        stderr: format!("failed to write output: {e}"),
-    })
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let buf = match mode {
+        CompressMode::Quality(quality) => {
+            let source = crate::webp_lossy::WebpSource::capture(input, cancel)?;
+            let image = source.decode(cancel)?;
+            let bytes = crate::webp_lossy::encode(&image, quality, cancel)?;
+            write_jpeg_output(output, &bytes, cancel, "failed to write WebP output")?;
+            if let Err(error) = source.verify_unchanged(input, cancel) {
+                let _ = std::fs::remove_file(output);
+                return Err(error);
+            }
+            return Ok(());
+        }
+        CompressMode::LosslessReoptimize => encode_webp(&decode_any(input)?)?,
+        CompressMode::TargetSizeBytes(_) => unreachable!("rejected before decoding"),
+    };
+    write_jpeg_output(output, &buf, cancel, "failed to write WebP output")
 }
 
 fn resolve_output_path(
@@ -1812,13 +1851,100 @@ mod tests {
         write_test_png(&input, 16, 16);
         for (target, mode) in [
             (TargetFormat::Jpeg, CompressMode::LosslessReoptimize),
-            (TargetFormat::Webp, CompressMode::Quality(50)),
             (TargetFormat::Webp, CompressMode::TargetSizeBytes(100_000)),
         ] {
             let output = dir.path().join("out");
             assert!(compress_image(&input, &output, target, mode).is_err());
             assert!(!output.exists());
         }
+    }
+
+    #[test]
+    fn webp_quality_uses_lossy_encoder_preserves_alpha_and_reports_untagged_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.png");
+        let source = ImageBuffer::from_fn(64, 64, |x, y| {
+            Rgba([
+                x as u8 * 4,
+                y as u8 * 4,
+                (x ^ y) as u8 * 4,
+                (x + y) as u8 * 2,
+            ])
+        });
+        source.save(&input).unwrap();
+        let low = dir.path().join("low.webp");
+        let high = dir.path().join("high.webp");
+        compress_image(&input, &low, TargetFormat::Webp, CompressMode::Quality(1)).unwrap();
+        compress_image(
+            &input,
+            &high,
+            TargetFormat::Webp,
+            CompressMode::Quality(100),
+        )
+        .unwrap();
+        assert_ne!(
+            std::fs::metadata(&low).unwrap().len(),
+            std::fs::metadata(&high).unwrap().len()
+        );
+        for output in [&low, &high] {
+            let decoded = image::open(output).unwrap().to_rgba8();
+            assert!(source.as_raw().iter().skip(3).step_by(4).eq(decoded
+                .as_raw()
+                .iter()
+                .skip(3)
+                .step_by(4)));
+        }
+
+        let metadata_output = dir.path().join("metadata.webp");
+        let outcome = process_image_with_metadata(
+            &input,
+            &metadata_output,
+            TargetFormat::Webp,
+            Some(CompressMode::Quality(50)),
+            MetadataPolicy::Preserve,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let execution = outcome.image_metadata.unwrap();
+        assert_eq!(execution.color_handling, ImageColorHandling::Untagged);
+        assert!(!execution.icc_retained);
+        assert!(execution
+            .notices
+            .iter()
+            .any(|notice| notice.contains("untagged")));
+    }
+
+    #[test]
+    fn webp_quality_refuses_malformed_input_and_pre_cancel_without_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed = dir.path().join("malformed.png");
+        std::fs::write(&malformed, b"not an image").unwrap();
+        let malformed_output = dir.path().join("malformed.webp");
+        assert!(compress_image(
+            &malformed,
+            &malformed_output,
+            TargetFormat::Webp,
+            CompressMode::Quality(50),
+        )
+        .is_err());
+        assert!(!malformed_output.exists());
+
+        let input = dir.path().join("input.png");
+        write_test_png(&input, 16, 16);
+        let cancelled_output = dir.path().join("cancelled.webp");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            compress_image_with_cancel(
+                &input,
+                &cancelled_output,
+                TargetFormat::Webp,
+                CompressMode::Quality(50),
+                &cancel,
+            ),
+            Err(GoopError::Cancelled)
+        ));
+        assert!(!cancelled_output.exists());
     }
 
     #[test]
