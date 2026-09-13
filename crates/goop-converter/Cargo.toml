@@ -27,6 +27,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # changing the reviewed native source. Disabling the wrapper's defaults omits
 # only its optional `image` adapter.
 webp = { version = "=0.3.1", default-features = false }
+# COLOR-02A's dependency spike keeps Little CMS behind its safe Rust wrapper
+# and forces the vendored static native build on every target. The direct sys
+# pin prevents this ignored-lockfile repository from silently moving the C
+# source below the reviewed wrapper release.
+lcms2 = { version = "=6.2.0", default-features = false, features = ["static"] }
+lcms2-sys = { version = "=4.0.7", default-features = false, features = ["static"] }
 # JPEG-XL via jpegxl-rs's `vendored` feature: jpegxl-src builds libjxl
 # 0.11 from vendored source via cmake at build time, statically linking
 # the result into our binary. Avoids the per-platform libjxl version

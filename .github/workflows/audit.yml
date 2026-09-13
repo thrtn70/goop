@@ -337,6 +337,61 @@ jobs:
               ;;
           esac
           echo "lossy WebP static link guard passed."
+      - name: Portable color static link
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESOLVED=$(cargo tree -p lcms2@6.2.0 --depth 1 --prefix none)
+          echo "$RESOLVED"
+          grep -qx 'lcms2 v6.2.0' <<<"$RESOLVED"
+          grep -qx 'lcms2-sys v4.0.7' <<<"$RESOLVED"
+          # lcms2-sys gives LCMS2_LIB_DIR precedence over its static feature.
+          # Remove any cached sys artifact, then clear both override variables
+          # for the exact proof build so a host archive cannot be substituted.
+          cargo clean -p lcms2-sys
+          BIN=$(CARGO_INCREMENTAL=0 env -u LCMS2_LIB_DIR -u LCMS2_INCLUDE_DIR cargo test -p goop-converter --release --test lcms_static --no-run --message-format=json | python3 -c '
+          import json
+          import sys
+
+          paths = []
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              target = message.get("target", {})
+              if target.get("name") == "lcms_static" and message.get("executable"):
+                  paths.append(message["executable"])
+          if len(paths) != 1:
+              raise SystemExit(f"expected one lcms_static executable, found {paths!r}")
+          print(paths[0])
+          ')
+          "$BIN"
+          case "$RUNNER_OS" in
+            macOS)
+              stat -f 'portable color test binary: %z bytes' "$BIN"
+              LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
+              if [ -n "$LEAKS" ]; then
+                echo "::error::portable color test references non-system dylibs:"
+                echo "$LEAKS"
+                exit 1
+              fi
+              ;;
+            Windows)
+              echo "portable color test binary: $(stat -c %s "$BIN") bytes"
+              DEPS=$(objdump.exe -p "$BIN")
+              echo "$DEPS"
+              if echo "$DEPS" | grep -qiE 'lcms2[^ ]*\.dll'; then
+                echo "::error::portable color test dynamically depends on Little CMS"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unsupported runner OS: $RUNNER_OS"
+              exit 1
+              ;;
+          esac
+          echo "portable color static link guard passed."
       - name: Image conversion correctness
         shell: bash
         run: |

@@ -58,7 +58,9 @@
       "bin/tesseract-data/eng.traineddata": "tesseract-data/eng.traineddata",
       "../src/assets/fonts/bricolage-grotesque-OFL.txt": "licenses/fonts/bricolage-grotesque-OFL.txt",
       "../src/assets/fonts/figtree-OFL.txt": "licenses/fonts/figtree-OFL.txt",
-      "licenses/libwebp-COPYING.txt": "licenses/libwebp-COPYING.txt"
+      "licenses/libwebp-COPYING.txt": "licenses/libwebp-COPYING.txt",
+      "licenses/lcms2-LICENSE.txt": "licenses/lcms2-LICENSE.txt",
+      "licenses/littlecms-LICENSE.txt": "licenses/littlecms-LICENSE.txt"
     },
     "macOS": {
       "signingIdentity": "-",
