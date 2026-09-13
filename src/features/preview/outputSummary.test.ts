@@ -230,3 +230,38 @@ it.each([
   }));
   expect(summary).toContain(expected);
 });
+
+it("reports explicit sRGB handling and distinguishes generated profile metadata", () => {
+  const summary = outputSummary(result({
+    image_metadata_execution: {
+      requested_policy: "strip_all",
+      requested_color_policy: "assume_srgb",
+      exif_retained: false,
+      icc_retained: false,
+      destination_srgb_profile_attached: true,
+      orientation_normalized: false,
+      color_handling: "assumed_srgb",
+      notices: [],
+    },
+  }));
+  expect(summary).toContain("All source metadata removed");
+  expect(summary).toContain("Assumed and tagged as sRGB");
+  expect(summary).not.toContain("All metadata removed");
+});
+
+it("does not claim source metadata was preserved during explicit color conversion", () => {
+  const summary = outputSummary(result({
+    image_metadata_execution: {
+      requested_policy: "preserve",
+      requested_color_policy: "convert_to_srgb",
+      exif_retained: false,
+      icc_retained: false,
+      destination_srgb_profile_attached: true,
+      orientation_normalized: false,
+      color_handling: "converted_to_srgb",
+      notices: [],
+    },
+  }));
+  expect(summary).toContain("All source metadata removed");
+  expect(summary).not.toContain("Metadata preserved");
+});

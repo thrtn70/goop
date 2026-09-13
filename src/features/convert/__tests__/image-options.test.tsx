@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -28,6 +28,11 @@ const inspect = (video = false, sourceFormat = "jpeg") => ({
         : { available: false, reason: "Remove personal data is currently available only for JPEG to JPEG processing.", summary: "Unavailable" },
       strip_all: { available: true, reason: null, summary: "All metadata removed." },
       source_has_exif: false, source_has_icc: false, orientation: "absent",
+    },
+    image_color: video ? null : {
+      preserve: { available: true, reason: null, summary: "Keep existing color behavior." },
+      convert_to_srgb: { available: true, reason: null, summary: "Convert to tagged sRGB." },
+      assume_srgb: { available: false, reason: "The source already has a profile.", summary: "Assume untagged pixels are sRGB." },
     },
   })), compression: { quality: true, target_size: false, lossless: false, reason: null } },
 });
@@ -152,9 +157,10 @@ it.each(["convert", "compress"] as const)("%s keeps safe metadata choices visibl
   mocks.inspect.mockResolvedValue(legacy);
   render(<MemoryRouter>{tool === "convert" ? <ConvertPage /> : <CompressPage />}</MemoryRouter>);
   fireEvent.click(screen.getByRole("button", { name: "Add files" }));
-  expect(await screen.findByRole("button", { name: "Preserve" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Remove all" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Remove personal data" }).getAttribute("aria-disabled")).toBe("true");
+  const metadata = await screen.findByRole("group", { name: "Metadata" });
+  expect(within(metadata).getByRole("button", { name: "Preserve" })).toBeTruthy();
+  expect(within(metadata).getByRole("button", { name: "Remove all" })).toBeTruthy();
+  expect(within(metadata).getByRole("button", { name: "Remove personal data" }).getAttribute("aria-disabled")).toBe("true");
 });
 
 it("Compress rejects mixed-source RemovePersonal preset and Apply first atomically", async () => {
@@ -277,6 +283,51 @@ it("forwards selected JPEG quality to preview and disables Fit within with the e
   expect(screen.getByText(imageCapability.preview_unavailable_reason)).toBeTruthy();
   expect(screen.queryByAltText("Output sample")).toBeNull();
   expect(mocks.preview).toHaveBeenCalledTimes(1);
+});
+it("forwards a directly selected sRGB conversion to preview and conversion requests", async () => {
+  mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
+  render(page()); await add();
+  const color = within(screen.getByRole("group", { name: "Color handling" }));
+  await userEvent.setup().click(color.getByRole("button", { name: "Convert to sRGB" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  await screen.findByAltText("Output sample");
+  expect(mocks.preview.mock.calls[0][0]).toMatchObject({
+    target: "jpeg",
+    image_color_policy: "convert_to_srgb",
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({
+    target: "jpeg",
+    image_color_policy: "convert_to_srgb",
+  });
+});
+it("retains explicit color intent when a target makes it unavailable and blocks until cleared", async () => {
+  const inspected = inspect();
+  const png = inspected.capabilities.targets.find(target => target.target === "png")!;
+  const pngColor = png.image_color as { convert_to_srgb: { available: boolean; reason: string | null; summary: string } };
+  pngColor.convert_to_srgb = {
+    available: false,
+    reason: "This PNG path cannot transform the embedded profile.",
+    summary: "Color conversion unavailable.",
+  };
+  mocks.inspect.mockResolvedValue(inspected);
+  mocks.preset = preset(null);
+  render(page()); await add();
+  fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+  const color = within(screen.getByRole("group", { name: "Color handling" }));
+  await userEvent.setup().click(color.getByRole("button", { name: "Convert to sRGB" }));
+  fireEvent.click(screen.getByRole("button", { name: "PNG" }));
+
+  expect(color.getByRole("button", { name: "Convert to sRGB" }).getAttribute("aria-pressed")).toBe("true");
+  expect(color.getByRole("button", { name: "Convert to sRGB" }).getAttribute("aria-disabled")).toBe("true");
+  expect(color.getByText(/This PNG path cannot transform the embedded profile\./)).toBeTruthy();
+  expect(disabled("Convert 1 file")).toBe(true);
+
+  await userEvent.setup().click(color.getByRole("button", { name: "Preserve" }));
+  expect(disabled("Convert 1 file")).toBe(false);
 });
 it("retires an in-flight preview on a raw invalid edit and ignores its late response after correction", async () => {
   let resolve!: (value:unknown) => void;

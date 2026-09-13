@@ -83,6 +83,55 @@ describe("preset I/O — parse", () => {
     expect(entries[0].name).toBe("Roundtrip");
   });
 
+  it("round-trips explicit image color handling only in schema 9", () => {
+    const serialized = serializePresets([
+      makePreset({
+        name: "Tagged output",
+        target: "png",
+        quality_preset: null,
+        resolution_cap: null,
+        image_color_policy: "assume_srgb",
+      }),
+    ]);
+    expect(parsePresetBundle(serialized)[0].image_color_policy).toBe("assume_srgb");
+
+    const legacy = JSON.parse(serialized) as { version: number };
+    legacy.version = 8;
+    expect(() => parsePresetBundle(JSON.stringify(legacy))).toThrow(/image_color_policy/);
+  });
+
+  it("rejects explicit image color handling for non-image targets and compression", () => {
+    const wrongTarget = serializePresets([
+      makePreset({ image_color_policy: "convert_to_srgb" }),
+    ]);
+    expect(() => parsePresetBundle(wrongTarget)).toThrow(/JPEG or PNG/);
+
+    const compression = serializePresets([
+      makePreset({
+        target: "jpeg",
+        quality_preset: null,
+        resolution_cap: null,
+        image_color_policy: "assume_srgb",
+        compress_mode: { kind: "quality", value: 80 },
+      }),
+    ]);
+    expect(() => parsePresetBundle(compression)).toThrow(/Convert only/);
+  });
+
+  it.each([
+    { quality_preset: "balanced", resolution_cap: null },
+    { quality_preset: null, resolution_cap: "r1080p" },
+  ] as const)("rejects legacy quality controls combined with explicit image color handling: %j", (legacy) => {
+    const conflicting = serializePresets([
+      makePreset({
+        target: "jpeg",
+        image_color_policy: "convert_to_srgb",
+        ...legacy,
+      }),
+    ]);
+    expect(() => parsePresetBundle(conflicting)).toThrow(/quality or resolution/i);
+  });
+
   it.each(["srt", "vtt"] as const)("round-trips a %s subtitle preset", (target) => {
     const original = makePreset({
       name: "Subtitle",
@@ -96,7 +145,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
-      metadata_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null, track_policy: null,
+      metadata_policy: null, image_color_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null, track_policy: null,
     }]);
   });
 
@@ -434,7 +483,7 @@ describe("schema 6 portable track policy", () => {
     });
     const raw = serializePresets([preset]);
     const wire = JSON.parse(raw);
-    expect(wire.version).toBe(8);
+    expect(wire.version).toBe(9);
     expect(wire.presets[0].track_policy).toEqual(choosePerFile);
     expect(raw).not.toContain("canonical_path");
     expect(raw).not.toContain("stream_index");
@@ -487,7 +536,7 @@ describe("schema 7 portable video track policy", () => {
   it("roundtrips independent families without source identity", () => {
     const preset = makePreset({ target: "mkv", quality_preset: null, resolution_cap: null, video_options: { kind: "copy" }, track_policy: policy });
     const raw = serializePresets([preset]);
-    expect(JSON.parse(raw).version).toBe(8);
+    expect(JSON.parse(raw).version).toBe(9);
     expect(entriesToPresets(parsePresetBundle(raw), [])[0].track_policy).toEqual(policy);
     expect(raw).not.toMatch(/canonical_path|stream_indices|inventory/);
   });

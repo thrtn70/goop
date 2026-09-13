@@ -1071,6 +1071,7 @@ mod tests {
             "output_path": "converted.jpg",
             "target": "jpeg",
             "metadata_policy": "preserve",
+            "image_color_policy": "assume_srgb",
             "image_options": {
                 "jpeg_quality": 90,
                 "resize": {"kind": "fit_within", "width": 2048, "height": 2048}
@@ -1092,6 +1093,10 @@ mod tests {
             restored.payload["image_options"],
             job.payload["image_options"]
         );
+        assert_eq!(
+            request.image_color_policy,
+            Some(goop_core::ImageColorPolicy::AssumeSrgb)
+        );
 
         // Later UI defaults or edits must not replace the submitted request.
         draft.image_options = Some(goop_core::ImageConvertOptions {
@@ -1112,6 +1117,61 @@ mod tests {
         let retried_request: goop_core::ConvertRequest =
             serde_json::from_value(retry.payload).unwrap();
         assert_eq!(retried_request, submitted);
+    }
+
+    #[test]
+    fn explicit_color_and_metadata_policies_survive_reopen_and_retry() {
+        let (store, tmp) = temp_store();
+        let submitted: goop_core::ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": "tagged.jpg",
+            "output_path": "converted.jpg",
+            "target": "jpeg",
+            "metadata_policy": "remove_personal",
+            "image_color_policy": "convert_to_srgb",
+            "image_options": {
+                "jpeg_quality": 90,
+                "resize": {"kind": "original"}
+            }
+        }))
+        .unwrap();
+        let job = Job::new(JobKind::Convert, serde_json::to_value(&submitted).unwrap());
+        store.insert(&job).unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let store = QueueStore::open(&path).unwrap();
+        let restored = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        let restored_request: goop_core::ConvertRequest =
+            serde_json::from_value(restored.payload).unwrap();
+        assert_eq!(
+            restored_request.image_color_policy,
+            Some(goop_core::ImageColorPolicy::ConvertToSrgb)
+        );
+        assert_eq!(
+            restored_request.metadata_policy,
+            Some(goop_core::MetadataPolicy::RemovePersonal)
+        );
+        assert_eq!(restored_request, submitted);
+
+        assert_eq!(store.claim_queued(job.id, 1000).unwrap(), 1);
+        drop(store);
+        let store = QueueStore::open(&path).unwrap();
+        store.reconcile().unwrap();
+        assert_eq!(store.retry_errored(job.id).unwrap(), 1);
+        let retry = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.id, job.id);
+        assert_eq!(retry.attempts, 1);
+        let retried_request: goop_core::ConvertRequest =
+            serde_json::from_value(retry.payload).unwrap();
+        assert_eq!(retried_request, submitted);
+        assert_eq!(
+            retried_request.image_color_policy,
+            Some(goop_core::ImageColorPolicy::ConvertToSrgb)
+        );
+        assert_eq!(
+            retried_request.metadata_policy,
+            Some(goop_core::MetadataPolicy::RemovePersonal)
+        );
     }
 
     #[test]
@@ -1137,6 +1197,7 @@ mod tests {
             let request: goop_core::ConvertRequest =
                 serde_json::from_value(restored.payload).unwrap();
             assert_eq!(request.image_options, None);
+            assert_eq!(request.image_color_policy, None);
             store.reconcile().unwrap();
             assert_eq!(store.retry_errored(job.id).unwrap(), 1);
             let retry = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
@@ -1145,6 +1206,7 @@ mod tests {
             let retried_request: goop_core::ConvertRequest =
                 serde_json::from_value(retry.payload).unwrap();
             assert_eq!(retried_request.image_options, None);
+            assert_eq!(retried_request.image_color_policy, None);
             assert_eq!(retried_request, request);
         }
     }

@@ -65,3 +65,23 @@ it("uses the selected output compression capabilities for changed presets", () =
   expect(compressionProblem({kind:"lossless_reoptimize"},state,"png")).toBeNull();
   expect(compressionProblem({kind:"quality",value:75},state,"mp4")).toBeTruthy();
 });
+
+it("surfaces the selected target's explicit color readiness error", () => {
+  const state = {phase:"ready", probe:{source_kind:"image"}, capabilities:{
+    compression:{quality:false,target_size:false,lossless:true},
+    targets:[{target:"png",available:true,image_color:{
+      preserve:{available:true,reason:null,summary:"Keep existing color behavior."},
+      convert_to_srgb:{available:false,reason:"The embedded profile cannot be transformed.",summary:"Color conversion unavailable."},
+      assume_srgb:{available:false,reason:"The source already has a profile.",summary:"Assumption unavailable."},
+    }}],
+  }} as unknown as ProbeState;
+
+  expect(conversionProblem({
+    target:"png",
+    optionsReady:true,
+    qualityPreset:null,
+    resolutionCap:null,
+    subtitle:null,
+    imageColorPolicy:"convert_to_srgb",
+  }, state)).toBe("The embedded profile cannot be transformed.");
+});

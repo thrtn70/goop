@@ -61,6 +61,19 @@ describe("MetadataPolicyControl", () => {
     expect(onChange).toHaveBeenCalledWith("preserve");
   });
 
+  it("does not warn about color loss when explicit color handling attaches destination sRGB", () => {
+    render(
+      <MetadataPolicyControl
+        value="strip_all"
+        capabilities={capabilities}
+        retainsDestinationColorProfile
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/output color may differ/i)).toBeNull();
+    expect(screen.getByText("All metadata removed.")).toBeTruthy();
+  });
+
   it("disables Preserve only for RGB re-encoding and ignores disabled clicks", () => {
     const onChange = vi.fn();
     render(

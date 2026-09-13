@@ -17,6 +17,14 @@ pub(crate) struct JpegSource {
     pub(crate) bytes: Bytes,
 }
 
+impl JpegSource {
+    pub(crate) fn from_snapshot(bytes: Bytes) -> Option<Self> {
+        bytes
+            .starts_with(&[0xff, 0xd8, 0xff])
+            .then_some(Self { bytes })
+    }
+}
+
 fn read_snapshot(reader: impl Read, limit: u64) -> Result<Bytes, GoopError> {
     crate::image_read::read_snapshot(
         reader,

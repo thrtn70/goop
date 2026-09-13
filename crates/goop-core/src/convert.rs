@@ -1,3 +1,4 @@
+use crate::error::GoopError;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -223,8 +224,9 @@ pub enum CompressMode {
 ///   dropped.
 /// * `RemovePersonal` — drop EXIF and other source ancillary metadata,
 ///   retaining an exact ICC profile only on engine-proven paths.
-/// * `StripAll` — drop all metadata regardless. Privacy default for
-///   shared photos; also gives the smallest output bytes.
+/// * `StripAll` — drop all source metadata. Explicit color conversion may
+///   still attach a generated destination profile that describes the output
+///   pixels; the legacy Preserve color path attaches nothing new.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, Default)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]
@@ -235,6 +237,18 @@ pub enum MetadataPolicy {
     StripAll,
 }
 
+/// Explicit image color behavior. `Preserve` and an absent request field keep
+/// the legacy pixel and metadata paths unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, Default)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum ImageColorPolicy {
+    #[default]
+    Preserve,
+    ConvertToSrgb,
+    AssumeSrgb,
+}
+
 /// How the completed image output represents color. These values describe
 /// verified handling, not perceptual equivalence between viewers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -243,6 +257,8 @@ pub enum MetadataPolicy {
 pub enum ImageColorHandling {
     ExactProfileRetained,
     RendererSdrSrgb,
+    ConvertedToSrgb,
+    AssumedSrgb,
     Untagged,
     NoProfile,
 }
@@ -253,8 +269,12 @@ pub enum ImageColorHandling {
 #[serde(deny_unknown_fields)]
 pub struct ImageMetadataExecution {
     pub requested_policy: MetadataPolicy,
+    #[serde(default)]
+    pub requested_color_policy: ImageColorPolicy,
     pub exif_retained: bool,
     pub icc_retained: bool,
+    #[serde(default)]
+    pub destination_srgb_profile_attached: bool,
     pub orientation_normalized: bool,
     pub color_handling: ImageColorHandling,
     pub notices: Vec<String>,
@@ -317,6 +337,11 @@ pub struct ConvertRequest {
     /// `StripAll` opts in to scrubbing.
     #[serde(default)]
     pub metadata_policy: Option<MetadataPolicy>,
+    /// Explicit color conversion is opt-in. `None` is identical to
+    /// `Preserve` for older callers, presets and queued jobs.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_color_policy: Option<ImageColorPolicy>,
     /// External subtitle to soft-embed or burn in. `None` skips all
     /// subtitle handling, so pre-subtitle presets and queued job
     /// payloads keep deserializing unchanged.
@@ -331,6 +356,62 @@ pub struct ConvertRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub track_options: Option<crate::tracks::TrackConvertOptions>,
+}
+
+/// Reject source-independent explicit color combinations before any source I/O
+/// or native color work. Source layout/profile compatibility is validated from
+/// the engine-owned snapshot after this shape check passes.
+pub fn validate_image_color_request_shape(request: &ConvertRequest) -> Result<(), GoopError> {
+    if request.image_color_policy.unwrap_or_default() == ImageColorPolicy::Preserve {
+        return Ok(());
+    }
+    if !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Png) {
+        return Err(GoopError::InvalidRequest(
+            "Explicit image color handling requires JPEG or PNG output".into(),
+        ));
+    }
+    if request.compress_mode.is_some() {
+        return Err(GoopError::InvalidRequest(
+            "Explicit color handling is currently available in Convert only".into(),
+        ));
+    }
+    if request.video_options.is_some()
+        || request.audio_options.is_some()
+        || request.track_options.is_some()
+        || request.gif_options.is_some()
+        || request.subtitle.is_some()
+        || request
+            .quality_preset
+            .is_some_and(|value| value != QualityPreset::Original)
+        || request
+            .resolution_cap
+            .is_some_and(|value| value != ResolutionCap::Original)
+    {
+        return Err(GoopError::InvalidRequest(
+            "Explicit image color handling cannot be combined with media, GIF, subtitle, or video quality controls."
+                .into(),
+        ));
+    }
+    if let Some(options) = request.image_options.as_ref() {
+        if request.target != TargetFormat::Jpeg {
+            return Err(GoopError::InvalidRequest(
+                "Explicit JPEG quality and resize settings require JPEG output".into(),
+            ));
+        }
+        if !(1..=100).contains(&options.jpeg_quality) {
+            return Err(GoopError::InvalidRequest(
+                "JPEG quality must be 1–100".into(),
+            ));
+        }
+        if let ImageResize::FitWithin { width, height } = options.resize {
+            if width == 0 || height == 0 || width > 32_768 || height > 32_768 {
+                return Err(GoopError::InvalidRequest(
+                    "Fit dimensions must be 1–32768 pixels".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Media probe facts. The bounded track inventory is absent when complete
@@ -427,6 +508,46 @@ pub struct ConvertResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn color_request(target: TargetFormat) -> ConvertRequest {
+        ConvertRequest {
+            video_options: None,
+            input_path: String::new(),
+            output_path: String::new(),
+            target,
+            quality_preset: None,
+            resolution_cap: None,
+            gif_options: None,
+            compress_mode: None,
+            batch_id: None,
+            metadata_policy: None,
+            image_color_policy: Some(ImageColorPolicy::ConvertToSrgb),
+            subtitle: None,
+            image_options: None,
+            audio_options: None,
+            track_options: None,
+        }
+    }
+
+    #[test]
+    fn explicit_color_shape_validation_is_source_independent() {
+        let mut request = color_request(TargetFormat::Png);
+        assert!(validate_image_color_request_shape(&request).is_ok());
+
+        request.target = TargetFormat::Webp;
+        assert!(validate_image_color_request_shape(&request).is_err());
+        request.target = TargetFormat::Jpeg;
+        request.image_options = Some(ImageConvertOptions {
+            jpeg_quality: 0,
+            resize: ImageResize::Original,
+        });
+        assert!(validate_image_color_request_shape(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("quality must be 1–100"));
+        request.image_color_policy = None;
+        assert!(validate_image_color_request_shape(&request).is_ok());
+    }
 
     #[test]
     fn is_image_identifies_image_targets() {

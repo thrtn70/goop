@@ -4,8 +4,8 @@ use crate::metadata;
 use crate::naming::{allocate_output_path, stem_of};
 use goop_core::{
     CompressMode, CompressionExecution, ConvertRequest, ConvertResult, EventSink, GoopError,
-    ImageColorHandling, ImageMetadataExecution, JobId, MetadataPolicy, ProbeResult, ProgressEvent,
-    TargetFormat,
+    ImageColorHandling, ImageColorPolicy, ImageMetadataExecution, JobId, MetadataPolicy,
+    ProbeResult, ProgressEvent, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
@@ -77,31 +77,39 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             Some(CompressMode::TargetSizeBytes(bytes)) => Some(bytes),
             _ => None,
         };
-        let explicit_request = req.image_options.as_ref().map(|_| req.clone());
+        let explicit_request = (req.image_options.is_some()
+            || req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve)
+            .then(|| req.clone());
         let outcome_slot = Arc::new(std::sync::Mutex::new(None));
         let worker_outcome = Arc::clone(&outcome_slot);
         let worker_cancel = cancel.clone();
         let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
             let outcome = if let Some(request) = &explicit_request {
-                let source =
-                    crate::jpeg_controls::prepare(&input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
-                let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
-                crate::capabilities::validate_request(request, &probe)?;
-                if let Some(options) = &request.image_options {
-                    crate::jpeg_controls::render_prepared(
+                if request.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve {
+                    process_color_managed(&input, out, request, &worker_cancel)?
+                } else {
+                    let source = crate::jpeg_controls::prepare(
                         &input,
-                        out,
-                        options,
-                        metadata_policy,
-                        source.as_ref(),
+                        crate::jpeg_controls::MAX_INPUT_BYTES,
                     )?;
-                }
-                ImageProcessingOutcome {
-                    image_metadata: source
-                        .as_ref()
-                        .map(|source| jpeg_metadata_execution(source, metadata_policy, true))
-                        .transpose()?,
-                    compression: None,
+                    let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
+                    crate::capabilities::validate_request(request, &probe)?;
+                    if let Some(options) = &request.image_options {
+                        crate::jpeg_controls::render_prepared(
+                            &input,
+                            out,
+                            options,
+                            metadata_policy,
+                            source.as_ref(),
+                        )?;
+                    }
+                    ImageProcessingOutcome {
+                        image_metadata: source
+                            .as_ref()
+                            .map(|source| jpeg_metadata_execution(source, metadata_policy, true))
+                            .transpose()?,
+                        compression: None,
+                    }
                 }
             } else {
                 process_image_with_metadata(
@@ -151,6 +159,107 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
     }
 }
 
+fn process_color_managed(
+    input: &Path,
+    output: &Path,
+    request: &ConvertRequest,
+    cancel: &CancellationToken,
+) -> Result<ImageProcessingOutcome, GoopError> {
+    let policy = request.image_color_policy.unwrap_or_default();
+    if policy == ImageColorPolicy::Preserve {
+        return Err(GoopError::InvalidRequest(
+            "Preserve must use the legacy image path".into(),
+        ));
+    }
+    goop_core::validate_image_color_request_shape(request)?;
+    if let Some(options) = request.image_options.as_ref() {
+        crate::image_options::validate_options(options)?;
+    }
+    let _working_set = crate::color::acquire_working_set(cancel)?;
+    let prepared = crate::color::prepare_path(input, cancel)?;
+    crate::color::validate_policy(&prepared.inspection, request.target, policy)?;
+    let orientation_normalized =
+        prepared.inspection.orientation != image::metadata::Orientation::NoTransforms;
+    let source_had_exif = prepared.inspection.has_exif;
+    let pixels = prepared.decode()?;
+    let mut transformed = crate::color::transform_pixels(
+        pixels,
+        prepared.inspection.profile.clone(),
+        policy,
+        cancel,
+    )?;
+    if let Some(options) = request.image_options.as_ref() {
+        let dimensions = crate::image_options::output_dimensions(
+            transformed.pixels.dimensions(),
+            &options.resize,
+        )?;
+        if dimensions != transformed.pixels.dimensions() {
+            transformed.pixels = image::imageops::resize(
+                &transformed.pixels,
+                dimensions.0,
+                dimensions.1,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+    }
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let jpeg_quality = request
+        .image_options
+        .as_ref()
+        .map_or(75, |options| options.jpeg_quality);
+    let bytes = crate::color::encode_tagged(&transformed, request.target, jpeg_quality, cancel)?;
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    write_jpeg_output(
+        output,
+        &bytes,
+        cancel,
+        "failed to write verified color-managed image output",
+    )?;
+    prepared.verify_unchanged(input)?;
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let mut notices = vec![match policy {
+        ImageColorPolicy::ConvertToSrgb => {
+            "Pixels were converted from the embedded profile to sRGB; the source ICC profile was replaced."
+        }
+        ImageColorPolicy::AssumeSrgb => {
+            "The untagged source was explicitly assumed to be sRGB."
+        }
+        ImageColorPolicy::Preserve => unreachable!(),
+    }
+    .into()];
+    notices.push(if source_had_exif {
+        "Source EXIF was omitted so stale color and orientation tags cannot describe the transformed output."
+            .into()
+    } else {
+        "Only the canonical destination sRGB profile was attached.".into()
+    });
+    if request.metadata_policy.unwrap_or_default() == MetadataPolicy::StripAll {
+        notices.push(
+            "All source metadata was removed; the generated destination sRGB profile was retained to describe the output pixels."
+                .into(),
+        );
+    }
+    Ok(ImageProcessingOutcome {
+        image_metadata: Some(ImageMetadataExecution {
+            requested_policy: request.metadata_policy.unwrap_or_default(),
+            requested_color_policy: policy,
+            exif_retained: false,
+            icc_retained: false,
+            destination_srgb_profile_attached: true,
+            orientation_normalized,
+            color_handling: transformed.handling,
+            notices,
+        }),
+        compression: None,
+    })
+}
+
 #[derive(Debug, Default)]
 struct ImageProcessingOutcome {
     image_metadata: Option<ImageMetadataExecution>,
@@ -189,8 +298,10 @@ fn jpeg_metadata_execution(
     };
     Ok(ImageMetadataExecution {
         requested_policy: policy,
+        requested_color_policy: ImageColorPolicy::Preserve,
         exif_retained,
         icc_retained,
+        destination_srgb_profile_attached: false,
         orientation_normalized,
         color_handling,
         notices: vec![notice.into()],
@@ -390,8 +501,10 @@ fn process_image_with_metadata(
         && matches!(compress_mode, Some(CompressMode::Quality(_))))
     .then(|| ImageMetadataExecution {
         requested_policy: policy,
+        requested_color_policy: ImageColorPolicy::Preserve,
         exif_retained: false,
         icc_retained: false,
+        destination_srgb_profile_attached: false,
         orientation_normalized: false,
         color_handling: if policy == MetadataPolicy::StripAll {
             ImageColorHandling::NoProfile
@@ -1094,6 +1207,155 @@ mod tests {
         let img: RgbImage =
             ImageBuffer::from_fn(64, 64, |x, y| Rgb([x as u8, y as u8, ((x + y) as u8) / 2]));
         img.save(path).unwrap();
+    }
+
+    fn color_request(input: &Path, output: &Path, target: TargetFormat) -> ConvertRequest {
+        serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": target,
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": null,
+            "metadata_policy": "preserve",
+            "image_color_policy": "assume_srgb",
+            "subtitle": null,
+            "image_options": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn assume_srgb_writes_verified_rgb_with_destination_profile() {
+        use image::{Rgb, RgbImage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.png");
+        let output = directory.path().join("output.jpg");
+        RgbImage::from_fn(8, 6, |x, y| Rgb([x as u8 * 20, y as u8 * 30, 90]))
+            .save(&input)
+            .unwrap();
+        let request = color_request(&input, &output, TargetFormat::Jpeg);
+        let outcome =
+            process_color_managed(&input, &output, &request, &CancellationToken::new()).unwrap();
+        let execution = outcome.image_metadata.unwrap();
+        assert_eq!(
+            execution.requested_color_policy,
+            ImageColorPolicy::AssumeSrgb
+        );
+        assert_eq!(execution.color_handling, ImageColorHandling::AssumedSrgb);
+        assert!(!execution.icc_retained);
+        assert!(execution.destination_srgb_profile_attached);
+        let inspected =
+            crate::color::inspect_bytes(std::fs::read(&output).unwrap().into()).unwrap();
+        assert!(inspected.profile.is_some());
+        assert!(!inspected.has_exif);
+    }
+
+    #[test]
+    fn convert_to_srgb_executes_tagged_rgb_product_path() {
+        use image::{Rgb, RgbImage};
+        use img_parts::{png::Png, ImageICC};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("tagged.png");
+        let output = directory.path().join("output.png");
+        let expected = RgbImage::from_fn(8, 6, |x, y| Rgb([x as u8 * 20, y as u8 * 30, 90]));
+        expected.save(&input).unwrap();
+        let mut tagged = Png::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        tagged.set_icc_profile(Some(lcms2::Profile::new_srgb().icc().unwrap().into()));
+        std::fs::write(&input, tagged.encoder().bytes()).unwrap();
+
+        let mut request = color_request(&input, &output, TargetFormat::Png);
+        request.image_color_policy = Some(ImageColorPolicy::ConvertToSrgb);
+        let outcome =
+            process_color_managed(&input, &output, &request, &CancellationToken::new()).unwrap();
+
+        assert_eq!(image::open(&output).unwrap().to_rgb8(), expected);
+        let execution = outcome.image_metadata.unwrap();
+        assert_eq!(
+            execution.requested_color_policy,
+            ImageColorPolicy::ConvertToSrgb
+        );
+        assert_eq!(
+            execution.color_handling,
+            ImageColorHandling::ConvertedToSrgb
+        );
+        assert!(execution.destination_srgb_profile_attached);
+    }
+
+    #[test]
+    fn convert_to_srgb_executes_tagged_gray_product_path() {
+        use image::{GrayImage, Luma};
+        use img_parts::{png::Png, ImageICC};
+        use lcms2::{CIExyY, Profile, ToneCurve};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("tagged-gray.png");
+        let output = directory.path().join("output.png");
+        GrayImage::from_fn(8, 1, |x, _| Luma([x as u8 * 32]))
+            .save(&input)
+            .unwrap();
+        let d50 = CIExyY {
+            x: 0.3457,
+            y: 0.3585,
+            Y: 1.0,
+        };
+        let profile = Profile::new_gray(&d50, &ToneCurve::new(2.2))
+            .unwrap()
+            .icc()
+            .unwrap();
+        let mut tagged = Png::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        tagged.set_icc_profile(Some(profile.into()));
+        std::fs::write(&input, tagged.encoder().bytes()).unwrap();
+
+        let mut request = color_request(&input, &output, TargetFormat::Png);
+        request.image_color_policy = Some(ImageColorPolicy::ConvertToSrgb);
+        process_color_managed(&input, &output, &request, &CancellationToken::new()).unwrap();
+
+        let pixels = image::open(&output).unwrap().to_rgb8();
+        assert_eq!(pixels.dimensions(), (8, 1));
+        assert!(pixels
+            .pixels()
+            .all(|pixel| pixel.0[0] == pixel.0[1] && pixel.0[1] == pixel.0[2]));
+        assert!(pixels
+            .pixels()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|pair| pair[0].0[0] < pair[1].0[0]));
+    }
+
+    #[test]
+    fn explicit_color_refuses_alpha_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("alpha.png");
+        let output = directory.path().join("output.png");
+        write_test_png(&input, 8, 6);
+        let request = color_request(&input, &output, TargetFormat::Png);
+        let error = process_color_managed(&input, &output, &request, &CancellationToken::new())
+            .unwrap_err();
+        assert!(error.user_message().contains("without alpha"));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn explicit_color_rejects_invalid_image_options_before_source_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("missing.png");
+        let output = directory.path().join("output.jpg");
+        let mut request = color_request(&input, &output, TargetFormat::Jpeg);
+        request.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 0,
+            resize: goop_core::ImageResize::Original,
+        });
+
+        let error = process_color_managed(&input, &output, &request, &CancellationToken::new())
+            .unwrap_err();
+
+        assert!(error.user_message().contains("quality must be 1–100"));
+        assert!(!output.exists());
     }
 
     fn orientation_exif(value: u16) -> Vec<u8> {

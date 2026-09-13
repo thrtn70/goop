@@ -10,7 +10,8 @@
  *   dropped.
  * * `RemovePersonal` — drop EXIF and other source ancillary metadata,
  *   retaining an exact ICC profile only on engine-proven paths.
- * * `StripAll` — drop all metadata regardless. Privacy default for
- *   shared photos; also gives the smallest output bytes.
+ * * `StripAll` — drop all source metadata. Explicit color conversion may
+ *   still attach a generated destination profile that describes the output
+ *   pixels; the legacy Preserve color path attaches nothing new.
  */
 export type MetadataPolicy = "preserve" | "remove_personal" | "strip_all";

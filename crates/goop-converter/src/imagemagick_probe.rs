@@ -1,5 +1,6 @@
 use goop_core::{GoopError, ProbeResult, SourceKind};
 use image::ImageDecoder;
+use img_parts::Bytes;
 use std::{
     fs::File,
     io::{BufReader, Cursor, Read, Seek},
@@ -87,6 +88,29 @@ pub(crate) fn image_probe_result(
         audio_codecs: vec![],
         image_has_alpha,
     }
+}
+
+pub(crate) fn probe_raster_snapshot(bytes: Bytes) -> Result<ProbeResult, GoopError> {
+    let detected = image::guess_format(bytes.get(..16).unwrap_or(bytes.as_ref()))
+        .map_err(|error| probe_error(format!("failed to identify image snapshot: {error}")))?;
+    if detected == image::ImageFormat::Jpeg {
+        return probe_jpeg_reader(
+            Cursor::new(bytes.clone()),
+            bytes.len() as u64,
+            JPEG_HEADER_BYTES,
+        );
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(bytes.clone()));
+    reader.set_format(detected);
+    let decoder = reader
+        .into_decoder()
+        .map_err(|error| probe_error(format!("failed to read image snapshot: {error}")))?;
+    Ok(image_probe_result(
+        decoder.dimensions(),
+        Some(format!("{detected:?}")),
+        None,
+        bytes.len() as u64,
+    ))
 }
 
 fn probe_error(message: impl Into<String>) -> GoopError {

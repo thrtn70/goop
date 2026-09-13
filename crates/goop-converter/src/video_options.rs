@@ -684,6 +684,7 @@ fn capabilities_inner(
         gif_options: None,
         compress_mode: None,
         metadata_policy: None,
+        image_color_policy: None,
         subtitle: None,
         image_options: None,
     };

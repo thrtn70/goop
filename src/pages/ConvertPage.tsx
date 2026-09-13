@@ -65,8 +65,9 @@ import {
 } from "@/features/convert/videoTrackOptions";
 
 import { useAppStore } from "@/store/appStore";
-import type { MetadataPolicy, Preset, TargetFormat } from "@/types";
+import type { ImageColorPolicy, MetadataPolicy, Preset, TargetFormat } from "@/types";
 import { metadataPolicyProblem } from "@/features/metadata/MetadataPolicyControl";
+import { imageColorPolicyProblem } from "@/features/metadata/ImageColorPolicyControl";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -218,6 +219,7 @@ function ConvertPage() {
         input_path: file.path, output_path: "", target: file.target,
         video_options: videoRequestOptions(file), ...(trackOptions ? { track_options: trackOptions } : {}), quality_preset: null, resolution_cap: file.resolutionCap,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
+        image_color_policy: file.imageColorPolicy,
         subtitle: file.subtitle, gif_options: file.gifOptions, image_options: cloneImageOptions(file.imageOptions),
       },
     }];
@@ -235,6 +237,7 @@ function ConvertPage() {
         audio_options: audioRequestOptions(file), track_options: trackOptions,
         video_options: null, quality_preset: null, resolution_cap: null,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
+        image_color_policy: file.imageColorPolicy,
         subtitle: null, gif_options: null, image_options: null,
       },
     }];
@@ -290,6 +293,7 @@ function ConvertPage() {
           imageOptions: imageCapability?.available ? { jpeg_quality: imageCapability.default_quality, resize: { kind: "original" as const } } : null,
           gifOptions: target === "gif" ? defaultGifOptions() : null,
           metadataPolicy: policy,
+          imageColorPolicy: f.imageColorPolicy ?? "preserve",
         };
       });
       return changed ? next : previous;
@@ -334,6 +338,7 @@ function ConvertPage() {
                 sourceDir: dirname(path),
                 gifOptions: null,
                 metadataPolicy: "preserve",
+                imageColorPolicy: "preserve",
                 subtitle: null,
                 qualityPreset: null,
                 resolutionCap: null,
@@ -367,6 +372,7 @@ function ConvertPage() {
               sourceDir: dirname(p),
               gifOptions: null,
               metadataPolicy: "preserve" as MetadataPolicy,
+              imageColorPolicy: "preserve" as ImageColorPolicy,
               subtitle: null,
               qualityPreset: null,
               resolutionCap: null,
@@ -415,6 +421,7 @@ function ConvertPage() {
                   || (current?.videoOptions == null && opts.videoOptions != null && Boolean((opts.videoTrackSettings?.audio_tracks.length ?? 0) > 1 || opts.videoTrackSettings?.subtitle_tracks.length))
                   || opts.trackOptions?.kind === "video" || opts.pendingTrackPolicy?.kind === "video" || Boolean(opts.videoTrackPolicyDraft),
                 metadataPolicy: opts.metadataPolicy,
+                imageColorPolicy: opts.imageColorPolicy,
                 subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
                 resolutionCap: opts.resolutionCap ?? null,
@@ -456,6 +463,7 @@ function ConvertPage() {
       return ({
       ...file,
       target: settings.target, metadataPolicy: settings.metadataPolicy,
+      imageColorPolicy: settings.imageColorPolicy ?? "preserve",
       qualityPreset: settings.qualityPreset ?? null,
       resolutionCap: settings.resolutionCap ?? null,
       optionsReady: true,
@@ -478,7 +486,9 @@ function ConvertPage() {
     const incompatible = next.map(withAudioInspection).flatMap(file => {
       const state = byId[file.id ?? ""] ?? PROBING;
       const capability = state.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null;
-      const metadataProblem = state.phase === "ready" && state.probe.source_kind === "image"
+      const metadataProblem = state.phase === "ready"
+        && state.probe.source_kind === "image"
+        && (file.imageColorPolicy ?? "preserve") === "preserve"
         ? metadataPolicyProblem(
             file.metadataPolicy ?? "preserve",
             state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
@@ -510,7 +520,13 @@ function ConvertPage() {
         ?? videoOptionsError({...file, videoCapability:capability})
         ?? videoTrackProblem
         ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state)
-        ?? metadataProblem;
+        ?? metadataProblem
+        ?? (state.phase === "ready" && state.probe.source_kind === "image"
+          ? imageColorPolicyProblem(
+              file.imageColorPolicy ?? "preserve",
+              state.capabilities.targets.find(c => c.target === file.target)?.image_color,
+            )
+          : null);
       return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
     });
     if (incompatible.length) {
@@ -531,6 +547,7 @@ function ConvertPage() {
       audioOptions: cloneAudioOptions(preset.audio_options),
       gifOptions: preset.gif_options ?? (preset.target === "gif" ? defaultGifOptions() : null),
       metadataPolicy: preset.metadata_policy ?? "preserve",
+      imageColorPolicy: preset.image_color_policy ?? "preserve",
       subtitle: preset.subtitle ?? null,
       qualityPreset: preset.quality_preset,
       resolutionCap: preset.resolution_cap,
@@ -541,7 +558,7 @@ function ConvertPage() {
   };
 
   const applyFirstToAll = () => {
-    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean) || metadataProblems.some(Boolean)) return;
+    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean) || metadataProblems.some(Boolean) || colorProblems.some(Boolean)) return;
     applySettings({...plannedFiles[0],audioOptions:audioRequestOptions(plannedFiles[0]),videoOptions:videoRequestOptions(plannedFiles[0])}, files[0].id);
   };
 
@@ -574,14 +591,23 @@ function ConvertPage() {
   const metadataProblems = plannedFiles.map((file) => {
     const state = byId[file.id ?? ""] ?? PROBING;
     if (state.phase !== "ready" || state.probe.source_kind !== "image") return null;
+    if ((file.imageColorPolicy ?? "preserve") !== "preserve") return null;
     return metadataPolicyProblem(
       file.metadataPolicy ?? "preserve",
       state.capabilities.targets.find(c => c.target === file.target)?.image_metadata,
       file.imageOptions ? "channel_aware" : "rgb_reencode",
     );
   });
+  const colorProblems = plannedFiles.map((file) => {
+    const state = byId[file.id ?? ""] ?? PROBING;
+    if (state.phase !== "ready" || state.probe.source_kind !== "image") return null;
+    return imageColorPolicyProblem(
+      file.imageColorPolicy ?? "preserve",
+      state.capabilities.targets.find(c => c.target === file.target)?.image_color,
+    );
+  });
   const baseProblems = files.map((f, i) =>
-    audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i] ?? metadataProblems[i],
+    audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i] ?? metadataProblems[i] ?? colorProblems[i],
   );
   const problems = plannedFiles.map((file, index) => (file.videoOptions && (file.videoTrackOptionsEnabled || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video") ? videoTrackOptionsProblem({
     options: file.trackOptions, settings: file.videoTrackSettings,
@@ -659,7 +685,7 @@ function ConvertPage() {
               </section>}
               {!isAudioTarget(selected.target) && !selected.audioOptions && (!problems[files.indexOf(selected)] || selected.videoOptions) && <SettingsPreview videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
-                compress_mode:null,metadata_policy:selected.metadataPolicy,
+                compress_mode:null,metadata_policy:selected.metadataPolicy,image_color_policy:selected.imageColorPolicy ?? "preserve",
                 subtitle:selected.subtitle,gif_options:selected.gifOptions,image_options:cloneImageOptions(selected.imageOptions)}}/>}
             </WorkspaceDraftProvider>
           ) : (

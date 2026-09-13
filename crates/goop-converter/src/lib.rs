@@ -1,6 +1,7 @@
 pub mod audio_options;
 pub mod backend;
 pub mod capabilities;
+mod color;
 pub mod compat;
 pub mod encoders;
 mod exif_geometry;

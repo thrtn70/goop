@@ -4,4 +4,4 @@
  * How the completed image output represents color. These values describe
  * verified handling, not perceptual equivalence between viewers.
  */
-export type ImageColorHandling = "exact_profile_retained" | "renderer_sdr_srgb" | "untagged" | "no_profile";
+export type ImageColorHandling = "exact_profile_retained" | "renderer_sdr_srgb" | "converted_to_srgb" | "assumed_srgb" | "untagged" | "no_profile";

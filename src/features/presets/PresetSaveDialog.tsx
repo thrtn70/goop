@@ -1,7 +1,7 @@
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
+import type { CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
@@ -22,6 +22,7 @@ interface PresetSaveDialogProps {
     resolution_cap?: ResolutionCap | null;
     compress_mode?: CompressMode | null;
     metadata_policy?: MetadataPolicy | null;
+    image_color_policy?: ImageColorPolicy | null;
     gif_options?: GifOptions | null;
     subtitle?: SubtitleOptions | null;
     image_options?: ImageConvertOptions | null;
@@ -100,6 +101,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         resolution_cap: saved.resolution_cap ?? null,
         compress_mode: saved.compress_mode ?? null,
         metadata_policy: saved.metadata_policy ?? null,
+        image_color_policy: saved.image_color_policy ?? null,
         gif_options: saved.gif_options ?? null,
         subtitle: saved.subtitle ?? null,
         image_options: cloneImageOptions(imageOptions),

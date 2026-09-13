@@ -1,7 +1,8 @@
 use goop_core::{
-    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, ImageColorHandling,
-    ImageMetadataCapabilities, ImageMetadataExecution, ImageOrientationStatus, JobResult,
-    MetadataPolicy, MetadataPolicyAvailability, TargetCapability,
+    ColorPolicyAvailability, CompressMode, CompressionExecution, ConvertRequest, ConvertResult,
+    ImageColorCapabilities, ImageColorHandling, ImageColorPolicy, ImageMetadataCapabilities,
+    ImageMetadataExecution, ImageOrientationStatus, JobResult, MetadataPolicy,
+    MetadataPolicyAvailability, TargetCapability,
 };
 use serde_json::{json, Value};
 
@@ -20,6 +21,50 @@ fn metadata_policy_wire_values_are_additive_and_strict() {
     }
     assert_eq!(MetadataPolicy::default(), MetadataPolicy::Preserve);
     assert!(serde_json::from_value::<MetadataPolicy>(json!("remove_exif")).is_err());
+}
+
+#[test]
+fn image_color_policy_wire_values_are_additive_and_strict() {
+    for (policy, wire) in [
+        (ImageColorPolicy::Preserve, "preserve"),
+        (ImageColorPolicy::ConvertToSrgb, "convert_to_srgb"),
+        (ImageColorPolicy::AssumeSrgb, "assume_srgb"),
+    ] {
+        assert_eq!(serde_json::to_value(policy).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<ImageColorPolicy>(json!(wire)).unwrap(),
+            policy
+        );
+    }
+    assert_eq!(ImageColorPolicy::default(), ImageColorPolicy::Preserve);
+    assert!(serde_json::from_value::<ImageColorPolicy>(json!("auto")).is_err());
+}
+
+#[test]
+fn image_color_capabilities_round_trip_strictly() {
+    let available = |summary: &str| ColorPolicyAvailability {
+        available: true,
+        reason: None,
+        summary: summary.into(),
+    };
+    let capability = ImageColorCapabilities {
+        preserve: available("Keep existing color behavior."),
+        convert_to_srgb: available("Convert tagged pixels to sRGB."),
+        assume_srgb: ColorPolicyAvailability {
+            available: false,
+            reason: Some("The source already has a color profile.".into()),
+            summary: "Available only for untagged RGB or grayscale images.".into(),
+        },
+    };
+    let value = serde_json::to_value(&capability).unwrap();
+    assert_eq!(value["convert_to_srgb"]["available"], json!(true));
+    assert_eq!(
+        serde_json::from_value::<ImageColorCapabilities>(value.clone()).unwrap(),
+        capability
+    );
+    let mut unknown = value;
+    unknown["invented"] = json!(true);
+    assert!(serde_json::from_value::<ImageColorCapabilities>(unknown).is_err());
 }
 
 #[test]
@@ -85,8 +130,10 @@ fn target_capability_defaults_absent_image_metadata_for_legacy_payloads() {
 fn image_and_compression_execution_round_trip_strictly() {
     let image = ImageMetadataExecution {
         requested_policy: MetadataPolicy::RemovePersonal,
+        requested_color_policy: ImageColorPolicy::Preserve,
         exif_retained: false,
         icc_retained: true,
+        destination_srgb_profile_attached: false,
         orientation_normalized: true,
         color_handling: ImageColorHandling::ExactProfileRetained,
         notices: vec!["Personal metadata removed; color profile retained.".into()],
@@ -110,6 +157,22 @@ fn image_and_compression_execution_round_trip_strictly() {
         serde_json::from_value::<ImageMetadataExecution>(image_value.clone()).unwrap(),
         image
     );
+    let mut legacy_image_value = image_value.clone();
+    legacy_image_value
+        .as_object_mut()
+        .unwrap()
+        .remove("requested_color_policy");
+    legacy_image_value
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_srgb_profile_attached");
+    let legacy_image =
+        serde_json::from_value::<ImageMetadataExecution>(legacy_image_value).unwrap();
+    assert_eq!(
+        legacy_image.requested_color_policy,
+        ImageColorPolicy::Preserve
+    );
+    assert!(!legacy_image.destination_srgb_profile_attached);
     let compression_value = serde_json::to_value(&compression).unwrap();
     assert_eq!(
         serde_json::from_value::<CompressionExecution>(compression_value.clone()).unwrap(),
@@ -138,6 +201,7 @@ fn legacy_requests_and_results_keep_absent_fields() {
         "batch_id": null
     }))
     .unwrap();
+    assert_eq!(request.image_color_policy, None);
     assert_eq!(request.metadata_policy, None);
 
     let result: ConvertResult = serde_json::from_value(json!({

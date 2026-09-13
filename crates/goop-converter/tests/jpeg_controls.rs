@@ -1,8 +1,8 @@
 mod common;
 use goop_converter::{ConversionBackend, ImageMagickBackend};
 use goop_core::{
-    CompressMode, ConvertRequest, ImageConvertOptions, ImageResize, JobId, MetadataPolicy,
-    TargetFormat,
+    CompressMode, ConvertRequest, ImageColorHandling, ImageColorPolicy, ImageConvertOptions,
+    ImageResize, JobId, MetadataPolicy, TargetFormat,
 };
 use img_parts::{jpeg::Jpeg, ImageEXIF, ImageICC};
 use std::{path::Path, sync::Arc};
@@ -193,6 +193,124 @@ fn orientation_exif() -> Vec<u8> {
     bytes.extend([0; 6]);
     bytes
 }
+
+fn wide_gamut_rgb_profile() -> Vec<u8> {
+    use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
+
+    let white = CIExyY {
+        x: 0.3127,
+        y: 0.3290,
+        Y: 1.0,
+    };
+    let primaries = CIExyYTRIPLE {
+        Red: CIExyY {
+            x: 0.680,
+            y: 0.320,
+            Y: 1.0,
+        },
+        Green: CIExyY {
+            x: 0.265,
+            y: 0.690,
+            Y: 1.0,
+        },
+        Blue: CIExyY {
+            x: 0.150,
+            y: 0.060,
+            Y: 1.0,
+        },
+    };
+    let curve = ToneCurve::new(2.2);
+    Profile::new_rgb(&white, &primaries, &[&curve, &curve, &curve])
+        .unwrap()
+        .icc()
+        .unwrap()
+}
+
+fn tag_rgb_jpeg_with_profile_and_exif(path: &Path) -> Vec<u8> {
+    let profile = wide_gamut_rgb_profile();
+    let mut jpeg = Jpeg::from_bytes(std::fs::read(path).unwrap().into()).unwrap();
+    jpeg.set_icc_profile(Some(profile.clone().into()));
+    jpeg.set_exif(Some(orientation_exif().into()));
+    jpeg.encoder()
+        .write_to(std::fs::File::create(path).unwrap())
+        .unwrap();
+    profile
+}
+
+fn assert_canonical_srgb_profile(actual: &[u8]) {
+    let mut actual = actual.to_vec();
+    let mut expected = lcms2::Profile::new_srgb().icc().unwrap();
+    actual[24..36].fill(0);
+    expected[24..36].fill(0);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn tagged_rgb_conversion_publishes_only_canonical_srgb_color_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("tagged.jpg");
+    let output = directory.path().join("converted.jpg");
+    source(&input, 32, 24);
+    let source_profile = tag_rgb_jpeg_with_profile_and_exif(&input);
+    let original = std::fs::read(&input).unwrap();
+
+    let mut req = request(&input, &output, 90, ImageResize::Original);
+    req.metadata_policy = Some(MetadataPolicy::Preserve);
+    req.image_color_policy = Some(ImageColorPolicy::ConvertToSrgb);
+    let result = convert(&req).await.unwrap();
+
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+    let (exif, icc) = goop_converter::metadata::read(&output).unwrap();
+    let icc = icc.expect("converted output must describe its sRGB pixels");
+    assert!(exif.is_none());
+    assert_canonical_srgb_profile(&icc);
+    assert_ne!(icc, source_profile);
+    let execution = result.image_metadata_execution.unwrap();
+    assert_eq!(execution.requested_policy, MetadataPolicy::Preserve);
+    assert_eq!(
+        execution.requested_color_policy,
+        ImageColorPolicy::ConvertToSrgb
+    );
+    assert_eq!(
+        execution.color_handling,
+        ImageColorHandling::ConvertedToSrgb
+    );
+    assert!(!execution.exif_retained);
+    assert!(!execution.icc_retained);
+    assert!(execution.destination_srgb_profile_attached);
+}
+
+#[tokio::test]
+async fn explicit_privacy_policies_strip_source_metadata_but_keep_destination_srgb() {
+    for policy in [MetadataPolicy::RemovePersonal, MetadataPolicy::StripAll] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("tagged.jpg");
+        let output = directory.path().join("converted.jpg");
+        source(&input, 32, 24);
+        let source_profile = tag_rgb_jpeg_with_profile_and_exif(&input);
+
+        let mut req = request(&input, &output, 90, ImageResize::Original);
+        req.metadata_policy = Some(policy);
+        req.image_color_policy = Some(ImageColorPolicy::ConvertToSrgb);
+        let result = convert(&req).await.unwrap();
+
+        let (exif, icc) = goop_converter::metadata::read(&output).unwrap();
+        let icc = icc.expect("generated destination profile must survive privacy policy");
+        assert!(exif.is_none(), "source EXIF survived {policy:?}");
+        assert_canonical_srgb_profile(&icc);
+        assert_ne!(icc, source_profile);
+        let execution = result.image_metadata_execution.unwrap();
+        assert_eq!(execution.requested_policy, policy);
+        assert!(!execution.exif_retained);
+        assert!(!execution.icc_retained);
+        assert!(execution.destination_srgb_profile_attached);
+        assert_eq!(
+            execution.color_handling,
+            ImageColorHandling::ConvertedToSrgb
+        );
+    }
+}
+
 #[tokio::test]
 async fn orientation_six_is_applied_once_before_fitting_and_preserve_normalizes_tag() {
     let d = tempfile::tempdir().unwrap();

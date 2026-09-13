@@ -17,7 +17,7 @@ Goop bundles several third-party binaries as **sidecars** — separate executabl
 
 ## Statically-linked and staged third-party libraries (v0.2.6+)
 
-Goop's main binary statically links the production libraries below. Dependency spikes may stage a native library before a production call path links it into that binary; those rows say so explicitly. All compile from source at build time and require no system package on the user's machine — goop ships no runtime codec dylibs or DLLs.
+Goop's main binary statically links the production libraries below. All compile from source at build time and require no system package on the user's machine — goop ships no runtime codec dylibs or DLLs.
 
 | Library | License | Used for | Notes |
 |---|---|---|---|
@@ -27,7 +27,7 @@ Goop's main binary statically links the production libraries below. Dependency s
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
 | libwebp | BSD-3-Clause | Lossy WebP encode | Statically linked through the exact `webp` 0.3.1 wrapper and `libwebp-sys` 0.9.6; the required copyright and redistribution notice is bundled at `licenses/libwebp-COPYING.txt`. |
-| Little CMS | MIT | Portable ICC profile transforms (preliminary dependency spike; no product path yet) | The safe `lcms2` 6.2.0 wrapper and pinned `lcms2-sys` 4.0.7 build the bundled Little CMS 2.19.1 source statically into the spike test and reference binaries. The application dependency is staged but unused until an approved product path lands. Wrapper and native notices are bundled at `licenses/lcms2-LICENSE.txt` and `licenses/littlecms-LICENSE.txt`. |
+| Little CMS | MIT | Explicit JPEG/PNG RGB8 and Gray8 conversion to tagged sRGB | The safe `lcms2` 6.2.0 wrapper and pinned `lcms2-sys` 4.0.7 build the bundled Little CMS 2.19.1 source statically into the application. Wrapper and native notices are bundled at `licenses/lcms2-LICENSE.txt` and `licenses/littlecms-LICENSE.txt`. |
 | Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
 | imageproc | MIT | Watermark glyph compositing (`draw_text_mut` on top of the `image` crate's RgbaImage). | Permissive. |
 | ab_glyph | Apache-2.0 OR MIT | Font loader for `imageproc`. Reads the bundled Roboto TTF. | Permissive. |

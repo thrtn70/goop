@@ -6,7 +6,7 @@
  * across machines.
  */
 
-import type { CompressMode, GifOptions, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
+import type { CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
@@ -14,7 +14,7 @@ import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/vide
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 8 as const;
+export const PRESET_BUNDLE_VERSION = 9 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -82,6 +82,7 @@ interface PresetEntry {
   resolution_cap: ResolutionCap | null;
   compress_mode: CompressMode | null;
   metadata_policy: MetadataPolicy | null;
+  image_color_policy: ImageColorPolicy | null;
   gif_options: GifOptions | null;
   subtitle: SubtitleOptions | null;
   image_options: ImageConvertOptions | null;
@@ -117,6 +118,7 @@ interface PresetBundleWire {
     resolution_cap: ResolutionCap | null;
     compress_mode: WireCompressMode | null;
     metadata_policy: MetadataPolicy | null;
+    image_color_policy: ImageColorPolicy | null;
     gif_options: GifOptions | null;
     subtitle: SubtitleOptions | null;
     image_options: ImageConvertOptions | null;
@@ -139,6 +141,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       resolution_cap: p.resolution_cap,
       compress_mode: compressModeForWire(p.compress_mode),
       metadata_policy: p.metadata_policy ?? null,
+      image_color_policy: p.image_color_policy ?? null,
       gif_options: p.gif_options ?? null,
       subtitle: p.subtitle ?? null,
       image_options: cloneImageOptions(p.image_options),
@@ -223,6 +226,13 @@ function validateMetadata(value: unknown, version: number): MetadataPolicy | nul
   if (value === "remove_personal" && version >= 8) return value;
   throw new PresetParseError("metadata_policy is not recognized");
 }
+function validateImageColorPolicy(value: unknown, version: number): ImageColorPolicy | null {
+  if (value == null) return null;
+  if (version >= 9 && ["preserve", "convert_to_srgb", "assume_srgb"].includes(String(value))) {
+    return value as ImageColorPolicy;
+  }
+  throw new PresetParseError("image_color_policy is not recognized");
+}
 function validateGif(value: unknown): GifOptions | null {
   if (value == null) return null;
   if (!isObject(value) || typeof value.size_preset !== "string" || !["small", "medium", "large"].includes(value.size_preset)) throw new PresetParseError("invalid gif_options");
@@ -274,6 +284,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
   let videoOptions: VideoConvertOptions | null;
   let audioOptions: AudioConvertOptions | null;
   let trackPolicy: TrackPresetPolicy | null;
+  const imageColorPolicy = validateImageColorPolicy(v.image_color_policy, version);
   try {
     if (version === 1 && v.image_options != null) {
       throw new Error("image_options is not allowed in schema 1");
@@ -308,6 +319,21 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     if (imageOptions !== null && v.compress_mode != null) {
       throw new Error("compression and image settings cannot be combined");
     }
+    if (imageColorPolicy != null && imageColorPolicy !== "preserve") {
+      if (!["jpeg", "png"].includes(String(v.target))) {
+        throw new Error("explicit image color handling requires JPEG or PNG output");
+      }
+      if (v.compress_mode != null) {
+        throw new Error("explicit image color handling is available in Convert only");
+      }
+      if ((v.quality_preset != null && v.quality_preset !== "original")
+        || (v.resolution_cap != null && v.resolution_cap !== "original")) {
+        throw new Error("explicit image color handling cannot be combined with quality or resolution presets");
+      }
+      if (v.gif_options != null || v.subtitle != null || videoOptions != null || audioOptions != null || trackPolicy != null) {
+        throw new Error("explicit image color handling cannot be combined with media controls");
+      }
+    }
   } catch (error) {
     throw new PresetParseError(`Preset "${v.name.trim()}": ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -318,6 +344,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     resolution_cap: (v.resolution_cap as ResolutionCap | null | undefined) ?? null,
     compress_mode: validateCompressMode(v.compress_mode),
     metadata_policy: validateMetadata(v.metadata_policy, version),
+    image_color_policy: imageColorPolicy,
     gif_options: validateGif(v.gif_options),
     subtitle: validateSubtitle(v.subtitle),
     image_options: imageOptions,
@@ -344,7 +371,7 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (![1, 2, 3, 4, 5, 6, 7, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
+  if (![1, 2, 3, 4, 5, 6, 7, 8, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
     throw new PresetParseError(
       `unsupported bundle version: ${String(parsed.version)} (expected 1 through ${PRESET_BUNDLE_VERSION})`,
     );
@@ -379,6 +406,7 @@ export function entriesToPresets(
       resolution_cap: entry.resolution_cap,
       compress_mode: entry.compress_mode ? { ...entry.compress_mode } : null,
       metadata_policy: entry.metadata_policy,
+      image_color_policy: entry.image_color_policy,
       gif_options: entry.gif_options ? { ...entry.gif_options } : null,
       subtitle: entry.subtitle ? { ...entry.subtitle } : null,
       image_options: cloneImageOptions(entry.image_options),
