@@ -286,6 +286,57 @@ jobs:
           cargo test -p goop-converter heic
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      - name: Lossy WebP static link
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESOLVED=$(cargo tree -p webp@0.3.1 --depth 1 --prefix none)
+          echo "$RESOLVED"
+          grep -qx 'webp v0.3.1' <<<"$RESOLVED"
+          grep -qx 'libwebp-sys v0.9.6' <<<"$RESOLVED"
+          BIN=$(CARGO_INCREMENTAL=0 cargo test -p goop-converter --release --test webp_lossy --no-run --message-format=json | python3 -c '
+          import json
+          import sys
+
+          paths = []
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              target = message.get("target", {})
+              if target.get("name") == "webp_lossy" and message.get("executable"):
+                  paths.append(message["executable"])
+          if len(paths) != 1:
+              raise SystemExit(f"expected one webp_lossy executable, found {paths!r}")
+          print(paths[0])
+          ')
+          "$BIN"
+          case "$RUNNER_OS" in
+            macOS)
+              stat -f 'lossy WebP test binary: %z bytes' "$BIN"
+              LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
+              if [ -n "$LEAKS" ]; then
+                echo "::error::lossy WebP test references non-system dylibs:"
+                echo "$LEAKS"
+                exit 1
+              fi
+              ;;
+            Windows)
+              echo "lossy WebP test binary: $(stat -c %s "$BIN") bytes"
+              DEPS=$(objdump.exe -p "$BIN")
+              echo "$DEPS"
+              if echo "$DEPS" | grep -qiE '(lib)?(webp|sharpyuv)[^ ]*\.dll'; then
+                echo "::error::lossy WebP test dynamically depends on libwebp or libsharpyuv"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unsupported runner OS: $RUNNER_OS"
+              exit 1
+              ;;
+          esac
+          echo "lossy WebP static link guard passed."
       - name: Image conversion correctness
         shell: bash
         run: |
