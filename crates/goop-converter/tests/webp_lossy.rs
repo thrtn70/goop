@@ -60,9 +60,10 @@ fn candidate_encoder_encodes_lossy_rgb_and_preserves_rgba_alpha() {
         .into_rgba8();
     assert_eq!(decoded.dimensions(), (64, 64));
     assert!(
-        rgba.chunks_exact(4)
-            .zip(decoded.as_raw().chunks_exact(4))
-            .all(|(expected, actual)| expected[3] == actual[3]),
+        rgba.iter()
+            .skip(3)
+            .step_by(4)
+            .eq(decoded.as_raw().iter().skip(3).step_by(4)),
         "lossy WebP must preserve the source alpha plane exactly"
     );
 }
