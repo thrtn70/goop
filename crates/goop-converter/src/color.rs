@@ -940,13 +940,15 @@ pub(crate) fn transform_pixels(
                 let count = source_chunk.len() / 3;
                 for (pixel, channels) in source_pixels[..count]
                     .iter_mut()
-                    .zip(source_chunk.chunks_exact(3))
+                    .zip(source_chunk.as_chunks::<3>().0.iter())
                 {
                     pixel.copy_from_slice(channels);
                 }
                 transform.transform_pixels(&source_pixels[..count], &mut output_pixels[..count]);
                 for (channels, pixel) in output_chunk
-                    .chunks_exact_mut(3)
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
                     .zip(output_pixels[..count].iter())
                 {
                     channels.copy_from_slice(pixel);
@@ -981,7 +983,9 @@ pub(crate) fn transform_pixels(
                 checkpoint(cancel)?;
                 transform.transform_pixels(source_chunk, &mut output_pixels[..source_chunk.len()]);
                 for (channels, pixel) in output_chunk
-                    .chunks_exact_mut(3)
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
                     .zip(output_pixels[..source_chunk.len()].iter())
                 {
                     channels.copy_from_slice(pixel);
