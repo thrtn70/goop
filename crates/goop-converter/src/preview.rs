@@ -208,9 +208,11 @@ impl PreviewService {
         }
         if is_image
             && matches!(request.compress_mode, Some(CompressMode::Quality(_)))
-            && request.target != TargetFormat::Jpeg
+            && !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Webp)
         {
-            return Err(invalid("Sample quality control is available for JPEG only"));
+            return Err(invalid(
+                "Sample quality control is available for JPEG and WebP only",
+            ));
         }
         if !is_image
             && matches!(
@@ -441,9 +443,14 @@ fn image_sample_bytes(
         TargetFormat::Png => sample
             .write_to(&mut encoded, ImageFormat::Png)
             .map_err(|e| invalid(e.to_string()))?,
-        TargetFormat::Webp => sample
-            .write_to(&mut encoded, ImageFormat::WebP)
-            .map_err(|e| invalid(e.to_string()))?,
+        TargetFormat::Webp => match request.compress_mode {
+            Some(CompressMode::Quality(quality)) => {
+                encoded = Cursor::new(crate::webp_lossy::encode(&sample, quality, cancel)?);
+            }
+            _ => sample
+                .write_to(&mut encoded, ImageFormat::WebP)
+                .map_err(|e| invalid(e.to_string()))?,
+        },
         _ => unreachable!(),
     }
     checkpoint(cancel, deadline)?;
@@ -763,6 +770,39 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("JPEG sources only"));
         assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn webp_quality_preview_uses_the_lossy_encoder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.png");
+        image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([x as u8 * 4, y as u8 * 4, (x ^ y) as u8 * 4])
+        })
+        .save(&input)
+        .unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+        let bytes = capture_image(&input, MAX_INPUT_BYTES, &token, deadline).unwrap();
+        let make_request = |quality| {
+            serde_json::from_value(serde_json::json!({
+                "request_id": format!("webp-{quality}"),
+                "input_path": input,
+                "source_revision": "1",
+                "target": "webp",
+                "compress_mode": { "kind": "quality", "value": quality }
+            }))
+            .unwrap()
+        };
+        let low_dir = tmp.path().join("low");
+        let high_dir = tmp.path().join("high");
+        std::fs::create_dir(&low_dir).unwrap();
+        std::fs::create_dir(&high_dir).unwrap();
+        let low = image_sample_bytes(bytes.clone(), &low_dir, &make_request(1), &token, deadline)
+            .unwrap();
+        let high =
+            image_sample_bytes(bytes, &high_dir, &make_request(100), &token, deadline).unwrap();
+        assert_ne!(low.sample_bytes, high.sample_bytes);
     }
 
     #[test]

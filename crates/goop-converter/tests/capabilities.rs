@@ -222,21 +222,67 @@ fn explicit_image_settings_reject_unsupported_sources_and_collisions() {
     assert!(validate_request(&request, &oversized).is_err());
 }
 #[test]
-fn webp_is_lossless_only() {
+fn webp_offers_lossy_quality_and_lossless_reoptimization_but_not_target_size() {
     let p = probe("webp");
     let c = capabilities_for(&p);
-    assert!(!c.compression.quality);
+    assert!(c.compression.quality);
     assert!(!c.compression.target_size);
     assert!(c.compression.lossless);
-    for m in [
-        CompressMode::Quality(75),
-        CompressMode::TargetSizeBytes(100),
-    ] {
-        assert!(validate_request(&request(TargetFormat::Webp, Some(m)), &p).is_err());
+    assert!(c
+        .compression
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("Target Size")));
+    for quality in [1, 50, 100] {
+        assert!(validate_request(
+            &request(TargetFormat::Webp, Some(CompressMode::Quality(quality))),
+            &p
+        )
+        .is_ok());
     }
+    for quality in [0, 101] {
+        assert!(validate_request(
+            &request(TargetFormat::Webp, Some(CompressMode::Quality(quality))),
+            &p
+        )
+        .is_err());
+    }
+    assert!(validate_request(
+        &request(TargetFormat::Webp, Some(CompressMode::TargetSizeBytes(100))),
+        &p
+    )
+    .is_err());
     assert!(validate_request(
         &request(TargetFormat::Webp, Some(CompressMode::LosslessReoptimize)),
         &p
+    )
+    .is_ok());
+}
+
+#[test]
+fn webp_quality_target_fails_closed_for_sources_outside_the_snapshot_matrix() {
+    let p = probe("tiff");
+    let capability = capabilities_for(&p)
+        .targets
+        .into_iter()
+        .find(|target| target.target == TargetFormat::Webp)
+        .unwrap()
+        .compression
+        .unwrap();
+    assert!(!capability.quality);
+    assert!(capability.lossless);
+    assert!(capability
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("JPEG, PNG and WebP")));
+    assert!(validate_request(
+        &request(TargetFormat::Webp, Some(CompressMode::Quality(75))),
+        &p,
+    )
+    .is_err());
+    assert!(validate_request(
+        &request(TargetFormat::Webp, Some(CompressMode::LosslessReoptimize)),
+        &p,
     )
     .is_ok());
 }

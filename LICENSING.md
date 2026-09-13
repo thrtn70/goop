@@ -1,6 +1,6 @@
 # Licensing
 
-Goop is MIT-licensed. The Rust workspace, the React frontend, and everything in `src/`, `src-tauri/`, `crates/`, and `shared/` ship under MIT.
+Goop is MIT-licensed. Goop-authored Rust, React, Tauri, and shared source ships under MIT. Bundled third-party libraries, assets, and notices retain the licenses identified below.
 
 Goop bundles several third-party binaries as **sidecars** — separate executables that goop spawns as child processes via `Command::spawn`. Sidecars carry their own licenses; their license terms cover their own binaries, not goop's source or goop's compiled binary. The licensing wall between goop and a sidecar is the `Command::spawn` boundary.
 
@@ -26,6 +26,7 @@ Goop's main binary statically links a handful of native libraries. All of them c
 | libjxl | BSD-3-Clause | JPEG-XL decode + encode (v0.2.6) | Built from vendored source via `jpegxl-rs`'s `vendored` feature → statically linked. Permissive. |
 | libhwy | Apache-2.0 | SIMD acceleration (transitive via libjxl) | Permissive. |
 | brotli | MIT | Compression (transitive via libjxl) | Permissive. |
+| libwebp | BSD-3-Clause | Lossy WebP encode | Statically linked through the exact `webp` 0.3.1 wrapper and `libwebp-sys` 0.9.6; the required copyright and redistribution notice is bundled at `licenses/libwebp-COPYING.txt`. |
 | Roboto Regular (font file) | Apache-2.0 | Watermark text rasterization (`crates/goop-converter/assets/Roboto-Regular.ttf`, bundled via `include_bytes!`) | Permissive. Embedded font, not linked code — Apache-2.0 allows redistribution as-is. |
 | imageproc | MIT | Watermark glyph compositing (`draw_text_mut` on top of the `image` crate's RgbaImage). | Permissive. |
 | ab_glyph | Apache-2.0 OR MIT | Font loader for `imageproc`. Reads the bundled Roboto TTF. | Permissive. |

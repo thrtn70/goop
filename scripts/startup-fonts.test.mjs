@@ -35,3 +35,14 @@ test('desktop bundles carry the full copyright and font license notices', () => 
     assert.equal(config.bundle.resources[`../src/assets/fonts/${family}-OFL.txt`], `licenses/fonts/${family}-OFL.txt`);
   }
 });
+test('desktop bundle carries the libwebp binary redistribution notice', () => {
+  const config = JSON.parse(readFileSync(new URL('src-tauri/tauri.conf.json', root), 'utf8'));
+  assert.equal(
+    config.bundle.resources['licenses/libwebp-COPYING.txt'],
+    'licenses/libwebp-COPYING.txt',
+  );
+  const notice = readFileSync(new URL('src-tauri/licenses/libwebp-COPYING.txt', root), 'utf8');
+  assert.match(notice, /Copyright \(c\) 2010, Google Inc\. All rights reserved\./);
+  assert.match(notice, /Redistributions? in binary form must reproduce/);
+  assert.match(notice, /THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS/);
+});

@@ -1,12 +1,22 @@
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import CompressControls from "../CompressControls";
 import type { ProbeResult } from "@/types";
 afterEach(cleanup);
-it("WebP offers only lossless reoptimization", () => {
+it("WebP offers lossy quality and explicit lossless reoptimization", () => {
  const probe = { source_kind: "image", image_format:"webp",file_size:1000,duration_ms:0 } as unknown as ProbeResult;
- render(<CompressControls capabilities={{quality:false,target_size:false,lossless:true,reason:"WebP supports lossless reoptimization only."}} probe={probe} mode={{kind:"quality",value:75}} onChange={vi.fn()} />);
+ const onChange = vi.fn();
+ const capabilities = {quality:true,target_size:false,lossless:true,reason:"Target Size is not available for WebP."};
+ const view = render(<CompressControls capabilities={capabilities} probe={probe} mode={{kind:"quality",value:63}} onChange={onChange} />);
+ expect((screen.getByRole("button",{name:"Quality"}) as HTMLButtonElement).disabled).toBe(false);
+ expect((screen.getByRole("button",{name:"Lossless"}) as HTMLButtonElement).disabled).toBe(false);
  expect((screen.getByRole("button",{name:"Target size"}) as HTMLButtonElement).disabled).toBe(true);
- expect(screen.queryByRole("slider")).toBeNull();
- expect(screen.getByRole("button",{name:"Re-optimize losslessly"})).toBeTruthy();
+ expect(screen.getByRole("slider", { name: "Compression quality" })).toBeTruthy();
+ fireEvent.change(screen.getByRole("slider", { name: "Compression quality" }), { target: { value: "42" } });
+ view.rerender(<CompressControls capabilities={capabilities} probe={probe} mode={{kind:"quality",value:42}} onChange={onChange} />);
+ fireEvent.click(screen.getByRole("button", { name: "Lossless" }));
+ expect(onChange).toHaveBeenLastCalledWith({ kind: "lossless_reoptimize" });
+ view.rerender(<CompressControls capabilities={capabilities} probe={probe} mode={{kind:"lossless_reoptimize"}} onChange={onChange} />);
+ fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+ expect(onChange).toHaveBeenLastCalledWith({ kind: "quality", value: 42 });
 });

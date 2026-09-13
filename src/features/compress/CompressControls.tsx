@@ -39,6 +39,10 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
     if (mode.kind === "target_size_bytes" && Number(mode.value) < 1024 * 1024) return "kb";
     return "mb";
   });
+  const [lastQuality, setLastQuality] = useWorkspaceDraftState<number>(
+    "CompressControls.lastQuality",
+    () => mode.kind === "quality" ? mode.value : 75,
+  );
 
   const modeKey = mode.kind === "lossless_reoptimize" ? mode.kind : `${mode.kind}:${mode.value}`;
   const [appliedMode, setAppliedMode] = useWorkspaceDraftState("CompressControls.appliedMode", modeKey);
@@ -51,10 +55,15 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
     setSizeUnit(unit);
     setSizeInput(String(bytes / (unit === "kb" ? 1024 : 1024 * 1024)));
   }, [mode, modeKey, appliedMode, setAppliedMode, setSizeUnit, setSizeInput]);
+  useEffect(() => {
+    if (mode.kind === "quality" && mode.value !== lastQuality) {
+      setLastQuality(mode.value);
+    }
+  }, [mode, lastQuality, setLastQuality]);
 
   const modeAllowed = mode.kind === "quality" ? avail.quality : mode.kind === "target_size_bytes" ? avail.targetSize : avail.lossless;
-  const currentTab: "quality" | "target_size" =
-    mode.kind === "target_size_bytes" ? "target_size" : "quality";
+  const currentTab: "quality" | "lossless" | "target_size" =
+    mode.kind === "target_size_bytes" ? "target_size" : mode.kind === "lossless_reoptimize" ? "lossless" : "quality";
 
   const commitTargetSize = (raw: string, unit: SizeUnit) => {
     const num = parseFloat(raw);
@@ -64,11 +73,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
   };
 
   const switchToQuality = () => {
-    if (avail.lossless && !avail.quality) {
-      onChange({ kind: "lossless_reoptimize" });
-    } else {
-      onChange({ kind: "quality", value: 75 });
-    }
+    onChange({ kind: "quality", value: lastQuality });
   };
 
   const switchToTargetSize = () => {
@@ -95,24 +100,41 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
       )}
 
       {/* Tab toggle */}
-      <div className="mb-3 inline-flex rounded-md bg-surface-1 p-0.5">
+      <div className="mb-3 inline-flex rounded-md bg-surface-1 p-0.5" role="group" aria-label="Compression mode">
         <button
           type="button"
-          disabled={!avail.quality && !avail.lossless}
+          disabled={!avail.quality}
+          aria-pressed={currentTab === "quality"}
           onClick={switchToQuality}
           className={clsx(
             "btn-press rounded px-3 py-1 text-xs font-medium transition duration-fast ease-out",
             currentTab === "quality"
               ? "bg-accent text-accent-fg"
               : "text-fg-secondary hover:text-fg",
-            !avail.quality && !avail.lossless && "cursor-not-allowed opacity-40",
+            !avail.quality && "cursor-not-allowed opacity-40",
           )}
         >
-          {avail.lossless && !avail.quality ? "Re-optimize" : "Quality"}
+          Quality
+        </button>
+        <button
+          type="button"
+          disabled={!avail.lossless}
+          aria-pressed={currentTab === "lossless"}
+          onClick={() => onChange({ kind: "lossless_reoptimize" })}
+          className={clsx(
+            "btn-press rounded px-3 py-1 text-xs font-medium transition duration-fast ease-out",
+            currentTab === "lossless"
+              ? "bg-accent text-accent-fg"
+              : "text-fg-secondary hover:text-fg",
+            !avail.lossless && "cursor-not-allowed opacity-40",
+          )}
+        >
+          Lossless
         </button>
         <button
           type="button"
           disabled={!avail.targetSize}
+          aria-pressed={currentTab === "target_size"}
           onClick={switchToTargetSize}
           className={clsx(
             "btn-press rounded px-3 py-1 text-xs font-medium transition duration-fast ease-out",
@@ -135,9 +157,11 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
               min={1}
               max={100}
               value={qualityValue}
-              onChange={(e) =>
-                onChange({ kind: "quality", value: parseInt(e.target.value, 10) })
-              }
+              onChange={(e) => {
+                const quality = parseInt(e.target.value, 10);
+                setLastQuality(quality);
+                onChange({ kind: "quality", value: quality });
+              }}
               className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-accent"
               aria-label="Compression quality"
             />
@@ -152,19 +176,10 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
         </div>
       )}
 
-      {currentTab === "quality" && !avail.quality && avail.lossless && (
-        <button
-          type="button"
-          onClick={() => onChange({ kind: "lossless_reoptimize" })}
-          className={clsx(
-            "btn-press rounded-md px-3 py-2 text-sm font-medium transition duration-fast ease-out",
-            mode.kind === "lossless_reoptimize"
-              ? "bg-accent text-accent-fg"
-              : "bg-surface-1 text-fg-secondary hover:bg-surface-3",
-          )}
-        >
-          Re-optimize losslessly
-        </button>
+      {currentTab === "lossless" && avail.lossless && (
+        <p className="text-xs text-fg-secondary">
+          Re-encode without changing pixel values. The file may not become smaller.
+        </p>
       )}
 
       {currentTab === "target_size" && avail.targetSize && (

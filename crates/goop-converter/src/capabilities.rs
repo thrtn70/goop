@@ -15,7 +15,8 @@ pub fn compression_for(target: TargetFormat) -> CompressionCapabilities {
     use TargetFormat::*;
     let (quality, target_size, lossless, reason) = match target {
         Jpeg => (true, true, false, None),
-        Png | Tiff | Webp => (false, false, true, Some("Only lossless reoptimization is supported. Convert to JPEG for quality or target-size compression.")),
+        Webp => (true, false, true, Some("WebP supports Quality and Lossless. Target Size is not available yet.")),
+        Png | Tiff => (false, false, true, Some("Only lossless reoptimization is supported. Convert to JPEG for quality or target-size compression.")),
         Bmp | Avif | JpegXl | Srt | Vtt | Gif | Wav | Flac | ExtractAudioKeepCodec => (false, false, false, Some("Compression controls are unavailable for this format. Choose another output format in Convert.")),
         _ => (true, true, false, None),
     };
@@ -25,6 +26,24 @@ pub fn compression_for(target: TargetFormat) -> CompressionCapabilities {
         lossless,
         reason: reason.map(str::to_owned),
     }
+}
+
+fn compression_for_image_target(
+    target: TargetFormat,
+    source_format: &str,
+) -> CompressionCapabilities {
+    if target == TargetFormat::Webp && !matches!(source_format, "jpg" | "jpeg" | "png" | "webp") {
+        return CompressionCapabilities {
+            quality: false,
+            target_size: false,
+            lossless: true,
+            reason: Some(
+                "WebP Quality is available for JPEG, PNG and WebP sources. Lossless remains available for this source."
+                    .into(),
+            ),
+        };
+    }
+    compression_for(target)
 }
 
 pub fn capabilities_for(probe: &ProbeResult) -> ConversionCapabilities {
@@ -178,7 +197,11 @@ fn capabilities_for_bound_source(
                 } else {
                     None
                 },
-                compression: Some(compression_for(target)),
+                compression: Some(if image {
+                    compression_for_image_target(target, &fmt)
+                } else {
+                    compression_for(target)
+                }),
                 image_settings: image_settings_for(probe, target),
                 target,
                 available: reason.is_none(),
@@ -528,7 +551,10 @@ pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(),
         crate::image_options::output_dimensions(source, &options.resize)?;
     }
     if let Some(mode) = req.compress_mode {
-        let c = compression_for(req.target);
+        let c = target
+            .compression
+            .clone()
+            .unwrap_or_else(|| compression_for(req.target));
         let allowed = match mode {
             CompressMode::Quality(q) => c.quality && (1..=100).contains(&q),
             CompressMode::TargetSizeBytes(n) => c.target_size && n > 0,
