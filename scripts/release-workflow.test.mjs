@@ -7,7 +7,9 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 
 const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+const auditWorkflow = readFileSync(new URL("../.github/workflows/audit.yml", import.meta.url), "utf8");
 const lines = workflow.split("\n");
+const auditLines = auditWorkflow.split("\n");
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
@@ -17,6 +19,13 @@ function job(name) {
   assert.notEqual(start, -1, `missing ${name} job`);
   const end = lines.findIndex((line, index) => index > start && /^ {2}[a-z][a-z0-9-]*:$/.test(line));
   return lines.slice(start, end === -1 ? undefined : end).join("\n");
+}
+
+function auditJob(name) {
+  const start = auditLines.findIndex((line) => line === `  ${name}:`);
+  assert.notEqual(start, -1, `missing ${name} audit job`);
+  const end = auditLines.findIndex((line, index) => index > start && /^ {2}[a-z][a-z0-9-]*:$/.test(line));
+  return auditLines.slice(start, end === -1 ? undefined : end).join("\n");
 }
 
 test("release builds run read-only and without persisted checkout credentials", () => {
@@ -51,6 +60,22 @@ test("both platform builds stage immutable workflow artifacts before publication
   assert.match(build, /overwrite: true/);
   assert.match(workflow, /group: release-\$\{\{ github\.ref \}\}/);
   assert.match(workflow, /cancel-in-progress: false/);
+});
+
+test("audit executes the pinned static Little CMS transform on both release targets", () => {
+  const smoke = auditJob("sidecar-smoke");
+  assert.match(smoke, /os: \[macos-14, windows-latest\]/);
+  const step = smoke.match(/ {6}- name: Portable color static link\n([\s\S]*?)\n {6}- name: Image conversion correctness/);
+  assert.ok(step, "missing bounded portable color static-link step");
+  assert.doesNotMatch(step[0], /^\s*if:/m);
+  assert.match(step[0], /cargo tree -p lcms2@6\.2\.0 --depth 1 --prefix none/);
+  assert.match(step[0], /grep -qx 'lcms2-sys v4\.0\.7'/);
+  assert.match(step[0], /cargo clean -p lcms2-sys/);
+  assert.match(step[0], /env -u LCMS2_LIB_DIR -u LCMS2_INCLUDE_DIR cargo test/);
+  assert.match(step[0], /--test lcms_static/);
+  assert.match(step[0], /otool -L "\$BIN"/);
+  assert.match(step[0], /objdump\.exe -p "\$BIN"/);
+  assert.match(step[0], /lcms2\[\^ \]\*\\\.dll/);
 });
 
 const version = "0.3.3";

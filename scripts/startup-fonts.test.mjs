@@ -46,3 +46,23 @@ test('desktop bundle carries the libwebp binary redistribution notice', () => {
   assert.match(notice, /Redistributions? in binary form must reproduce/);
   assert.match(notice, /THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS/);
 });
+
+test('desktop bundle carries the Little CMS wrapper and native notices', () => {
+  const config = JSON.parse(
+    readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'),
+  );
+  const notices = [
+    ['licenses/lcms2-LICENSE.txt', 'Copyright (c) Kornel Lesiński'],
+    ['licenses/littlecms-LICENSE.txt', 'Copyright (c) 2023 Marti Maria Saguer'],
+  ];
+
+  for (const [resource, copyright] of notices) {
+    assert.equal(config.bundle.resources[resource], resource);
+    const notice = readFileSync(
+      new URL(`../src-tauri/${resource}`, import.meta.url),
+      'utf8',
+    );
+    assert.match(notice, /Permission is hereby granted, free of charge/);
+    assert.ok(notice.includes(copyright));
+  }
+});
