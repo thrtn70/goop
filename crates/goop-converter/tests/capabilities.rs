@@ -430,7 +430,7 @@ fn lossless_audio_does_not_promise_ignored_quality_knobs() {
 }
 
 #[tokio::test]
-async fn inspection_returns_consistent_probe_and_capabilities() {
+async fn inspection_refines_only_source_bound_capabilities_consistently() {
     let dir = tempfile::tempdir().unwrap();
     let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_owned());
     let source = dir.path().join("source.png");
@@ -440,17 +440,51 @@ async fn inspection_returns_consistent_probe_and_capabilities() {
         .unwrap();
     assert_eq!(inspection.probe.width, Some(3));
     assert_eq!(inspection.probe.height, Some(5));
-    assert_eq!(inspection.capabilities, capabilities_for(&inspection.probe));
+    let mut inspected_without_color = inspection.capabilities.clone();
+    let mut baseline_without_color = capabilities_for(&inspection.probe);
+    for target in &mut inspected_without_color.targets {
+        target.image_color = None;
+    }
+    for target in &mut baseline_without_color.targets {
+        target.image_color = None;
+    }
+    assert_eq!(inspected_without_color, baseline_without_color);
     assert!(inspection.capabilities.compression.lossless);
-    let png = inspection
+    let png_target = inspection
         .capabilities
         .targets
         .iter()
         .find(|target| target.target == TargetFormat::Png)
+        .unwrap();
+    let png_color = png_target.image_color.as_ref().unwrap();
+    assert!(png_color.preserve.available);
+    assert!(!png_color.convert_to_srgb.available);
+    assert!(png_color
+        .convert_to_srgb
+        .reason
+        .as_deref()
         .unwrap()
-        .image_metadata
+        .contains("no embedded ICC profile"));
+    assert!(png_color.assume_srgb.available);
+    assert!(png_color.assume_srgb.reason.is_none());
+    let webp_color = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Webp)
+        .unwrap()
+        .image_color
         .as_ref()
         .unwrap();
+    assert!(!webp_color.convert_to_srgb.available);
+    assert!(webp_color
+        .convert_to_srgb
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("only for JPEG and PNG output"));
+    assert!(!webp_color.assume_srgb.available);
+    let png = png_target.image_metadata.as_ref().unwrap();
     assert_eq!(
         png.orientation,
         goop_core::ImageOrientationStatus::Uninspected

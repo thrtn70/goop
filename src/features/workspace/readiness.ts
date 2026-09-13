@@ -1,12 +1,13 @@
 import type { ProbeState } from "@/hooks/useProbe";
 import { imageOptionsProblem } from "@/features/convert/imageOptions";
 import { subtitleForTarget } from "@/features/convert/FileRow";
+import { imageColorPolicyProblem } from "@/features/metadata/ImageColorPolicyControl";
 import type { TargetFormat, CompressMode } from "@/types";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 export function conversionProblem(
   entry: Pick<
     FileEntry,
-    "target" | "optionsReady" | "qualityPreset" | "resolutionCap" | "subtitle" | "imageOptions"
+    "target" | "optionsReady" | "qualityPreset" | "resolutionCap" | "subtitle" | "imageOptions" | "imageColorPolicy"
   > & Partial<Pick<FileEntry, "gifOptions">>,
   state: ProbeState,
 ): string | null {
@@ -20,6 +21,8 @@ export function conversionProblem(
     return target?.reason ?? "Choose an available output format.";
   const imageProblem = imageOptionsProblem(entry.imageOptions, target.image_settings);
   if (imageProblem) return imageProblem;
+  const colorProblem = imageColorPolicyProblem(entry.imageColorPolicy ?? "preserve", target.image_color);
+  if (colorProblem) return colorProblem;
   if (entry.imageOptions && entry.gifOptions) return "Remove GIF settings before using image settings.";
   if (entry.imageOptions && entry.subtitle) return "Remove subtitles before using image settings.";
   if (entry.subtitle && !subtitleForTarget(entry.subtitle, entry.target))

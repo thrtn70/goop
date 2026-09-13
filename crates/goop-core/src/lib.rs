@@ -6,11 +6,11 @@ pub use audio::{
 };
 pub mod capabilities;
 pub use capabilities::{
-    CompressionCapabilities, ConversionCapabilities, ConversionInspection,
-    ImageMetadataCapabilities, ImageOrientationStatus, ImageSettingsCapabilities,
-    MetadataPolicyAvailability, TargetCapability, TrackChoiceCapability, TrackModeAvailability,
-    TrackSettingsCapabilities, VideoTrackChoiceCapability, VideoTrackPolicyCapabilities,
-    VideoTrackPolicyModeCapabilities, VideoTrackSettingsCapabilities,
+    ColorPolicyAvailability, CompressionCapabilities, ConversionCapabilities, ConversionInspection,
+    ImageColorCapabilities, ImageMetadataCapabilities, ImageOrientationStatus,
+    ImageSettingsCapabilities, MetadataPolicyAvailability, TargetCapability, TrackChoiceCapability,
+    TrackModeAvailability, TrackSettingsCapabilities, VideoTrackChoiceCapability,
+    VideoTrackPolicyCapabilities, VideoTrackPolicyModeCapabilities, VideoTrackSettingsCapabilities,
 };
 pub mod convert;
 pub mod error;
@@ -30,10 +30,10 @@ pub mod tracks;
 pub mod update;
 
 pub use convert::{
-    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, GifOptions, GifSizePreset,
-    ImageColorHandling, ImageConvertOptions, ImageMetadataExecution, ImageResize, MetadataPolicy,
-    ProbeResult, QualityPreset, ResolutionCap, SourceKind, SubtitleMode, SubtitleOptions,
-    TargetFormat,
+    validate_image_color_request_shape, CompressMode, CompressionExecution, ConvertRequest,
+    ConvertResult, GifOptions, GifSizePreset, ImageColorHandling, ImageColorPolicy,
+    ImageConvertOptions, ImageMetadataExecution, ImageResize, MetadataPolicy, ProbeResult,
+    QualityPreset, ResolutionCap, SourceKind, SubtitleMode, SubtitleOptions, TargetFormat,
 };
 pub use error::{
     both_failed, friendly_message, is_access_blocked_stderr, is_cookie_db_error,

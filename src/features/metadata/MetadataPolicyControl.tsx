@@ -11,6 +11,7 @@ export interface MetadataPolicyControlProps {
   onDraftEdit?: () => void;
   label?: string;
   preserveMode?: MetadataPreserveMode;
+  retainsDestinationColorProfile?: boolean;
 }
 
 const choices: Array<{ value: MetadataPolicy; label: string }> = [
@@ -60,6 +61,7 @@ export default function MetadataPolicyControl({
   onDraftEdit,
   label = "Metadata",
   preserveMode = "channel_aware",
+  retainsDestinationColorProfile = false,
 }: MetadataPolicyControlProps) {
   const reasonIdPrefix = useId();
   return (
@@ -110,7 +112,7 @@ export default function MetadataPolicyControl({
       <p className="text-fg-secondary" role="status">
         {availabilityFor(capabilities, value, preserveMode).summary}
       </p>
-      {value === "strip_all" && (
+      {value === "strip_all" && !retainsDestinationColorProfile && (
         <p className="text-warning" role="status">
           Removes ICC color data; output color may differ.
         </p>

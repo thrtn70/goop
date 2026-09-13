@@ -174,7 +174,8 @@ function validFiles(value: unknown, compress: boolean): boolean {
       parsePresetBundle(JSON.stringify({version:PRESET_BUNDLE_VERSION, presets:[{name:"Draft", target:file.target,
         quality_preset:file.qualityPreset, resolution_cap:file.resolutionCap,
         compress_mode:compress ? file.mode : null, gif_options:file.gifOptions,
-        metadata_policy:file.metadataPolicy, subtitle:file.subtitle, image_options:file.imageOptions}]}));
+        metadata_policy:file.metadataPolicy, image_color_policy:file.imageColorPolicy,
+        subtitle:file.subtitle, image_options:file.imageOptions}]}));
       // Drafts retain hidden Automatic quality and temporarily incompatible targets.
       // Validate explicit shape independently; submission performs strict admission.
       validateAudioOptions(file.audioOptions);
@@ -222,6 +223,7 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
     const normalized = {
       ...file,
       ...(imageTarget && file.metadataPolicy == null ? { metadataPolicy: "preserve" } : {}),
+      ...(imageTarget && file.imageColorPolicy == null ? { imageColorPolicy: "preserve" } : {}),
     };
     if (slot !== "CompressPage.files" || !object(file.mode) || file.mode.kind !== "target_size_bytes") {
       return normalized;

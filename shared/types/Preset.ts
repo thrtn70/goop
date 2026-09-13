@@ -2,6 +2,7 @@
 import type { AudioConvertOptions } from "./AudioConvertOptions";
 import type { CompressMode } from "./CompressMode";
 import type { GifOptions } from "./GifOptions";
+import type { ImageColorPolicy } from "./ImageColorPolicy";
 import type { ImageConvertOptions } from "./ImageConvertOptions";
 import type { MetadataPolicy } from "./MetadataPolicy";
 import type { QualityPreset } from "./QualityPreset";
@@ -20,4 +21,4 @@ import type { VideoConvertOptions } from "./VideoConvertOptions";
  * only the fields relevant to it. Presets without a `compress_mode` are
  * hidden from the Compress page's chip picker.
  */
-export type Preset = { audio_options?: AudioConvertOptions | null, video_options?: VideoConvertOptions | null, track_policy?: TrackPresetPolicy | null, id: string, name: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy?: MetadataPolicy | null, gif_options?: GifOptions | null, subtitle?: SubtitleOptions | null, image_options?: ImageConvertOptions | null, is_builtin: boolean, created_at: bigint, };
+export type Preset = { audio_options?: AudioConvertOptions | null, video_options?: VideoConvertOptions | null, track_policy?: TrackPresetPolicy | null, id: string, name: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, compress_mode: CompressMode | null, metadata_policy?: MetadataPolicy | null, image_color_policy?: ImageColorPolicy | null, gif_options?: GifOptions | null, subtitle?: SubtitleOptions | null, image_options?: ImageConvertOptions | null, is_builtin: boolean, created_at: bigint, };

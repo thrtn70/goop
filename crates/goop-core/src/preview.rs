@@ -1,6 +1,6 @@
 use crate::{
-    CompressMode, GifOptions, ImageConvertOptions, MetadataPolicy, QualityPreset, ResolutionCap,
-    SubtitleOptions, TargetFormat,
+    CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, MetadataPolicy, QualityPreset,
+    ResolutionCap, SubtitleOptions, TargetFormat,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -19,6 +19,9 @@ pub struct PreviewRequest {
     pub resolution_cap: Option<ResolutionCap>,
     pub compress_mode: Option<CompressMode>,
     pub metadata_policy: Option<MetadataPolicy>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_color_policy: Option<ImageColorPolicy>,
     pub subtitle: Option<SubtitleOptions>,
     pub gif_options: Option<GifOptions>,
     #[serde(default)]

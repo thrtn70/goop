@@ -2,6 +2,7 @@
 import type { AudioConvertOptions } from "./AudioConvertOptions";
 import type { CompressMode } from "./CompressMode";
 import type { GifOptions } from "./GifOptions";
+import type { ImageColorPolicy } from "./ImageColorPolicy";
 import type { ImageConvertOptions } from "./ImageConvertOptions";
 import type { MetadataPolicy } from "./MetadataPolicy";
 import type { QualityPreset } from "./QualityPreset";
@@ -18,6 +19,11 @@ export type ConvertRequest = { video_options?: VideoConvertOptions | null, input
  * `StripAll` opts in to scrubbing.
  */
 metadata_policy: MetadataPolicy | null, 
+/**
+ * Explicit color conversion is opt-in. `None` is identical to
+ * `Preserve` for older callers, presets and queued jobs.
+ */
+image_color_policy?: ImageColorPolicy | null,
 /**
  * External subtitle to soft-embed or burn in. `None` skips all
  * subtitle handling, so pre-subtitle presets and queued job

@@ -3,13 +3,19 @@ use crate::{
     backend_for_extension, BackendKind, ConversionBackend, FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
-    CompressMode, CompressionCapabilities, ConversionCapabilities, ConvertRequest, GoopError,
-    ImageMetadataCapabilities, ImageOrientationStatus, ImageResize, ImageSettingsCapabilities,
-    MetadataPolicy, MetadataPolicyAvailability, ProbeResult, SourceKind, TargetCapability,
-    TargetFormat, TrackSourceBinding,
+    ColorPolicyAvailability, CompressMode, CompressionCapabilities, ConversionCapabilities,
+    ConvertRequest, GoopError, ImageColorCapabilities, ImageColorPolicy, ImageMetadataCapabilities,
+    ImageOrientationStatus, ImageResize, ImageSettingsCapabilities, MetadataPolicy,
+    MetadataPolicyAvailability, ProbeResult, SourceKind, TargetCapability, TargetFormat,
+    TrackSourceBinding,
 };
 use goop_sidecar::BinaryResolver;
-use std::path::Path;
+use img_parts::Bytes;
+use std::{
+    fs::File,
+    io::{Cursor, Read},
+    path::Path,
+};
 
 pub fn compression_for(target: TargetFormat) -> CompressionCapabilities {
     use TargetFormat::*;
@@ -155,6 +161,7 @@ fn capabilities_for_bound_source(
                 None
             };
             TargetCapability {
+                image_color: image.then(|| base_image_color_capabilities(target)),
                 image_metadata: image.then(|| base_image_metadata_capabilities(
                     preserves_metadata,
                     source_target == Some(Jpeg) && target == Jpeg,
@@ -227,6 +234,87 @@ fn policy_availability(
         available,
         reason,
         summary: summary.into(),
+    }
+}
+
+fn color_availability(
+    available: bool,
+    summary: impl Into<String>,
+    reason: Option<String>,
+) -> ColorPolicyAvailability {
+    ColorPolicyAvailability {
+        available,
+        reason,
+        summary: summary.into(),
+    }
+}
+
+fn base_image_color_capabilities(target: TargetFormat) -> ImageColorCapabilities {
+    let target_reason = (!matches!(target, TargetFormat::Jpeg | TargetFormat::Png))
+        .then(|| "Color-managed conversion is available only for JPEG and PNG output.".into());
+    ImageColorCapabilities {
+        preserve: color_availability(
+            true,
+            "Keep the existing pixel and color-metadata behavior.",
+            None,
+        ),
+        convert_to_srgb: color_availability(
+            false,
+            "Convert a tagged 8-bit RGB or grayscale source to sRGB.",
+            target_reason.clone().or_else(|| {
+                Some("Fresh color-profile inspection is required before conversion.".into())
+            }),
+        ),
+        assume_srgb: color_availability(
+            false,
+            "Treat an untagged 8-bit RGB or grayscale source as sRGB.",
+            target_reason.or_else(|| {
+                Some(
+                    "Fresh color-profile inspection is required before making an assumption."
+                        .into(),
+                )
+            }),
+        ),
+    }
+}
+
+fn enrich_image_color_capabilities(
+    inspection: &Result<crate::color::SourceInspection, String>,
+    capabilities: &mut ConversionCapabilities,
+) {
+    for target in &mut capabilities.targets {
+        let Some(color) = target.image_color.as_mut() else {
+            continue;
+        };
+        if !matches!(target.target, TargetFormat::Jpeg | TargetFormat::Png) {
+            continue;
+        }
+        match inspection {
+            Ok(source) if source.profile.is_some() => {
+                color.convert_to_srgb = color_availability(
+                    true,
+                    "Pixels will be converted from the embedded profile to sRGB; source EXIF is omitted and a canonical sRGB profile is attached.",
+                    None,
+                );
+                color.assume_srgb.reason =
+                    Some("The source already has an embedded ICC profile.".into());
+            }
+            Ok(_) => {
+                color.assume_srgb = color_availability(
+                    true,
+                    "Untagged pixels will be explicitly treated as sRGB; source EXIF is omitted and a canonical sRGB profile is attached.",
+                    None,
+                );
+                color.convert_to_srgb.reason = Some(
+                    "The source has no embedded ICC profile. Choose Assume sRGB only if that assumption is correct."
+                        .into(),
+                );
+            }
+            Err(reason) => {
+                color.convert_to_srgb.reason = Some(reason.clone());
+                color.assume_srgb.reason = Some(reason.clone());
+            }
+        }
     }
 }
 
@@ -345,22 +433,152 @@ fn enrich_jpeg_metadata_capabilities(
 struct ImageSourceInspection {
     probe: ProbeResult,
     jpeg_metadata: Option<crate::metadata::JpegMetadataInspection>,
+    color: Result<crate::color::SourceInspection, String>,
+}
+
+enum ColorRasterSnapshot {
+    Captured(Bytes),
+    OversizedPng { header: Vec<u8>, file_size: u64 },
+}
+
+fn oversized_png_probe(header: &[u8], file_size: u64) -> Result<ProbeResult, GoopError> {
+    if header.len() < 33
+        || !header.starts_with(b"\x89PNG\r\n\x1a\n")
+        || header.get(8..12) != Some(13_u32.to_be_bytes().as_slice())
+        || header.get(12..16) != Some(b"IHDR")
+    {
+        return Err(GoopError::InvalidRequest(
+            "failed to read image snapshot: invalid PNG header".into(),
+        ));
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    if width == 0 || height == 0 {
+        return Err(GoopError::InvalidRequest(
+            "failed to read image snapshot: invalid PNG dimensions".into(),
+        ));
+    }
+    let bit_depth = header[24];
+    let color_type = header[25];
+    let legal_layout = matches!(
+        (color_type, bit_depth),
+        (0, 1 | 2 | 4 | 8 | 16) | (2, 8 | 16) | (3, 1 | 2 | 4 | 8) | (4, 8 | 16) | (6, 8 | 16)
+    );
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(&header[12..29]);
+    let declared_crc = u32::from_be_bytes(header[29..33].try_into().unwrap());
+    if !legal_layout
+        || header[26] != 0
+        || header[27] != 0
+        || header[28] > 1
+        || crc.finalize() != declared_crc
+    {
+        return Err(GoopError::InvalidRequest(
+            "failed to read image snapshot: invalid PNG header".into(),
+        ));
+    }
+    Ok(crate::imagemagick_probe::image_probe_result(
+        (width, height),
+        Some("Png".into()),
+        matches!(color_type, 4 | 6).then_some(true),
+        file_size,
+    ))
+}
+
+fn color_raster_snapshot(path: &Path) -> Result<Option<ColorRasterSnapshot>, GoopError> {
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(GoopError::InvalidRequest(
+            "Image inspection requires a file".into(),
+        ));
+    }
+    let mut signature = Vec::with_capacity(8);
+    (&mut file).take(8).read_to_end(&mut signature)?;
+    let jpeg = signature.starts_with(&[0xff, 0xd8, 0xff]);
+    let png = signature.starts_with(b"\x89PNG\r\n\x1a\n");
+    if !jpeg && !png {
+        return Ok(None);
+    }
+    if png && metadata.len() > crate::color::MAX_INPUT_BYTES {
+        let mut header = signature;
+        (&mut file).take(25).read_to_end(&mut header)?;
+        return Ok(Some(ColorRasterSnapshot::OversizedPng {
+            header,
+            file_size: metadata.len(),
+        }));
+    }
+    let (limit, message) = if jpeg {
+        (
+            crate::jpeg_controls::MAX_INPUT_BYTES,
+            "Image inspection input exceeds the 512 MiB limit",
+        )
+    } else {
+        (
+            crate::color::MAX_INPUT_BYTES,
+            "Image inspection input exceeds the 64 MiB limit",
+        )
+    };
+    crate::image_read::read_snapshot(
+        Cursor::new(signature).chain(file),
+        limit,
+        message,
+        || Ok(()),
+    )
+    .map(|bytes| Some(ColorRasterSnapshot::Captured(bytes)))
+}
+
+fn inspect_image_source_snapshot_blocking(
+    path: &Path,
+    after_snapshot: impl FnOnce(),
+) -> Result<ImageSourceInspection, GoopError> {
+    if let Some(snapshot) = color_raster_snapshot(path)? {
+        after_snapshot();
+        let (probe, jpeg_metadata, color) = match snapshot {
+            ColorRasterSnapshot::Captured(bytes) => {
+                let probe = crate::imagemagick_probe::probe_raster_snapshot(bytes.clone())?;
+                let jpeg = crate::jpeg_controls::JpegSource::from_snapshot(bytes.clone());
+                let jpeg_metadata = jpeg
+                    .as_ref()
+                    .map(|source| source.inspect_metadata(crate::metadata::JpegOutputColor::Rgb))
+                    .transpose()?;
+                let color = if bytes.len() as u64 > crate::color::MAX_INPUT_BYTES {
+                    Err("Color-managed image input exceeds the 64 MiB limit".into())
+                } else {
+                    crate::color::prepare_bytes(bytes)
+                        .and_then(|prepared| {
+                            crate::color::validate_native_profile(&prepared.inspection)?;
+                            Ok(prepared.inspection)
+                        })
+                        .map_err(|error| error.user_message())
+                };
+                (probe, jpeg_metadata, color)
+            }
+            ColorRasterSnapshot::OversizedPng { header, file_size } => (
+                oversized_png_probe(&header, file_size)?,
+                None,
+                Err("Color-managed image input exceeds the 64 MiB limit".into()),
+            ),
+        };
+        return Ok(ImageSourceInspection {
+            probe,
+            jpeg_metadata,
+            color,
+        });
+    }
+
+    after_snapshot();
+    Ok(ImageSourceInspection {
+        probe: crate::imagemagick_probe::probe_image(path)?,
+        jpeg_metadata: None,
+        color: Err("Color-managed conversion currently requires JPEG or PNG input".into()),
+    })
 }
 
 async fn inspect_image_source_snapshot(path: &Path) -> Result<ImageSourceInspection, GoopError> {
     let inspection_path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let source =
-            crate::jpeg_controls::prepare(&inspection_path, crate::jpeg_controls::MAX_INPUT_BYTES)?;
-        let probe = crate::jpeg_controls::probe_prepared(&inspection_path, source.as_ref())?;
-        let jpeg_metadata = source
-            .as_ref()
-            .map(|source| source.inspect_metadata(crate::metadata::JpegOutputColor::Rgb))
-            .transpose()?;
-        Ok(ImageSourceInspection {
-            probe,
-            jpeg_metadata,
-        })
+        inspect_image_source_snapshot_blocking(&inspection_path, || {})
     })
     .await
     .map_err(|error| GoopError::InvalidRequest(format!("Image inspection task failed: {error}")))?
@@ -370,6 +588,9 @@ fn validate_metadata_policy(
     req: &ConvertRequest,
     capabilities: &ConversionCapabilities,
 ) -> Result<(), GoopError> {
+    if req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve {
+        return Ok(());
+    }
     let policy = req.metadata_policy.unwrap_or_default();
     let metadata = capabilities
         .targets
@@ -386,6 +607,46 @@ fn validate_metadata_policy(
         MetadataPolicy::Preserve => &metadata.preserve,
         MetadataPolicy::RemovePersonal => &metadata.remove_personal,
         MetadataPolicy::StripAll => &metadata.strip_all,
+    };
+    if availability.available {
+        Ok(())
+    } else {
+        Err(GoopError::InvalidRequest(
+            availability
+                .reason
+                .clone()
+                .unwrap_or_else(|| availability.summary.clone()),
+        ))
+    }
+}
+
+fn validate_color_policy(
+    req: &ConvertRequest,
+    capabilities: &ConversionCapabilities,
+) -> Result<(), GoopError> {
+    let policy = req.image_color_policy.unwrap_or_default();
+    if policy == ImageColorPolicy::Preserve {
+        return Ok(());
+    }
+    if req.compress_mode.is_some() {
+        return Err(GoopError::InvalidRequest(
+            "Explicit color handling is currently available in Convert only".into(),
+        ));
+    }
+    let color = capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == req.target)
+        .and_then(|target| target.image_color.as_ref())
+        .ok_or_else(|| {
+            GoopError::InvalidRequest(
+                "Color policy is unavailable for this source and output.".into(),
+            )
+        })?;
+    let availability = match policy {
+        ImageColorPolicy::Preserve => &color.preserve,
+        ImageColorPolicy::ConvertToSrgb => &color.convert_to_srgb,
+        ImageColorPolicy::AssumeSrgb => &color.assume_srgb,
     };
     if availability.available {
         Ok(())
@@ -589,6 +850,20 @@ pub async fn validate_request_source(
     resolver: &BinaryResolver,
     req: &ConvertRequest,
 ) -> Result<(), GoopError> {
+    goop_core::validate_image_color_request_shape(req)?;
+    let path = goop_core::path::expand(&req.input_path);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let backend = backend_for_extension(extension);
+    if req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve
+        && backend != BackendKind::ImageMagick
+    {
+        return Err(GoopError::InvalidRequest(
+            "Explicit color handling requires a source routed to the image converter.".into(),
+        ));
+    }
     if req.video_options.is_some() {
         return Err(GoopError::InvalidRequest(
             "Explicit video admission requires an encoder inventory".into(),
@@ -599,12 +874,6 @@ pub async fn validate_request_source(
         resolve_audio_request_source(resolver, req, &encoders).await?;
         return Ok(());
     }
-    let path = goop_core::path::expand(&req.input_path);
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    let backend = backend_for_extension(extension);
     if req.image_options.is_some() && backend != BackendKind::ImageMagick {
         return Err(GoopError::InvalidRequest(
             "Image settings require a source routed to the image converter.".into(),
@@ -629,7 +898,15 @@ pub async fn validate_request_source(
                 .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
             &mut capabilities,
         );
+        enrich_image_color_capabilities(
+            &image_inspection
+                .as_ref()
+                .expect("image inspection exists")
+                .color,
+            &mut capabilities,
+        );
         validate_metadata_policy(req, &capabilities)?;
+        validate_color_policy(req, &capabilities)?;
     }
     Ok(())
 }
@@ -675,6 +952,9 @@ pub async fn inspect_source(
             .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
         &mut capabilities,
     );
+    if let Some(inspection) = image_inspection.as_ref() {
+        enrich_image_color_capabilities(&inspection.color, &mut capabilities);
+    }
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
@@ -748,7 +1028,9 @@ pub async fn validate_request_source_with_encoders(
     req: &ConvertRequest,
     encoders: &crate::DetectedEncoders,
 ) -> Result<(), GoopError> {
-    if req.video_options.is_some() {
+    if req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve {
+        validate_request_source(resolver, req).await
+    } else if req.video_options.is_some() {
         resolve_video_request_source(resolver, req, encoders).await?;
         Ok(())
     } else if req.audio_options.is_some() {
@@ -800,6 +1082,9 @@ pub async fn inspect_source_with_encoders(
             .and_then(|inspection| inspection.jpeg_metadata.as_ref()),
         &mut capabilities,
     );
+    if let Some(inspection) = image_inspection.as_ref() {
+        enrich_image_color_capabilities(&inspection.color, &mut capabilities);
+    }
     Ok(goop_core::ConversionInspection {
         probe,
         capabilities,
@@ -814,6 +1099,71 @@ mod tests {
     use crate::{parse_probe_json, DetectedEncoders};
     use goop_core::TRACK_SOURCE_BINDING_VERSION;
     use serde_json::json;
+    use std::io::{Seek, SeekFrom, Write};
+
+    #[test]
+    fn oversized_png_inspection_keeps_only_the_header_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.png");
+        image::RgbImage::new(16, 8).save(&path).unwrap();
+        let mut file = File::options().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(crate::color::MAX_INPUT_BYTES))
+            .unwrap();
+        file.write_all(&[0]).unwrap();
+        drop(file);
+
+        let snapshot = color_raster_snapshot(&path).unwrap().unwrap();
+        assert!(matches!(
+            snapshot,
+            ColorRasterSnapshot::OversizedPng { file_size, .. }
+                if file_size == crate::color::MAX_INPUT_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn oversized_png_probe_rejects_a_corrupt_ihdr() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.png");
+        image::RgbImage::new(16, 8).save(&path).unwrap();
+        let mut header = std::fs::read(path).unwrap()[..33].to_vec();
+        header[32] ^= 0xff;
+
+        assert!(
+            oversized_png_probe(&header, crate::color::MAX_INPUT_BYTES + 1)
+                .unwrap_err()
+                .user_message()
+                .contains("invalid PNG header")
+        );
+    }
+
+    #[test]
+    fn image_inspection_uses_one_snapshot_when_path_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.png");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([220, 20, 10]))
+            .save(&path)
+            .unwrap();
+
+        let inspection = inspect_image_source_snapshot_blocking(&path, || {
+            image::RgbImage::from_pixel(8, 16, image::Rgb([10, 20, 220]))
+                .save(&path)
+                .unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(
+            (inspection.probe.width, inspection.probe.height),
+            (Some(16), Some(8))
+        );
+        assert_eq!(inspection.color.unwrap().dimensions, (16, 8));
+        assert_eq!(
+            image::ImageReader::open(path)
+                .unwrap()
+                .into_dimensions()
+                .unwrap(),
+            (8, 16)
+        );
+    }
 
     #[test]
     fn bound_video_track_capabilities_keep_explicit_modes_reachable() {
@@ -936,6 +1286,29 @@ mod tests {
             error
                 .user_message()
                 .contains("Audio track selection requires MP3, M4A, AAC, WAV or FLAC output"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_image_color_rejects_media_routing_before_sidecar_work() {
+        let request: ConvertRequest = serde_json::from_value(json!({
+            "input_path": "/tmp/source.mp4",
+            "output_path": "/tmp/output.png",
+            "target": "png",
+            "image_color_policy": "assume_srgb"
+        }))
+        .unwrap();
+        let resolver = BinaryResolver::new(std::env::temp_dir().join("missing-goop-sidecars"));
+
+        let error = validate_request_source(&resolver, &request)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .user_message()
+                .contains("source routed to the image converter"),
             "{error:?}"
         );
     }

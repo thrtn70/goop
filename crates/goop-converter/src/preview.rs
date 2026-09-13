@@ -1,13 +1,13 @@
 //! Explicit, isolated sample generation. Never schedules jobs or writes source files.
 use goop_core::{
-    CompressMode, GoopError, ImageResize, JobId, MetadataPolicy, PreviewKind, PreviewRequest,
-    PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
+    CompressMode, GoopError, ImageColorPolicy, ImageResize, JobId, MetadataPolicy, PreviewKind,
+    PreviewRequest, PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
-use image::{ImageDecoder, ImageFormat};
+use image::{DynamicImage, ImageDecoder, ImageFormat};
 use img_parts::Bytes;
 use std::{
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -24,7 +24,12 @@ fn invalid(message: impl Into<String>) -> GoopError {
     GoopError::InvalidRequest(message.into())
 }
 pub fn validate_pixels(width: u32, height: u32) -> Result<(), GoopError> {
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
+    if width == 0
+        || height == 0
+        || width > 32_768
+        || height > 32_768
+        || u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS
+    {
         Err(invalid(
             "Sample preview unavailable: source exceeds the 4 million decoded-pixel limit",
         ))
@@ -247,28 +252,56 @@ impl PreviewService {
         let directory = self.root.join(JobId::new().0.to_string());
         std::fs::create_dir_all(&directory)?;
         std::fs::write(self.root.join(".goop-preview-session"), b"v1")?;
-        let mut scratch = Scratch(Some(directory.clone()));
-        let original = std::fs::metadata(&input)?;
+        let mut scratch = (!is_image).then(|| Scratch(Some(directory.clone())));
+        let original_video_metadata = if is_image {
+            None
+        } else {
+            Some(std::fs::metadata(&input)?)
+        };
         let result = if is_image {
             let req = request.clone();
             let path = input.clone();
             let dir = directory.clone();
             let token = cancel.clone();
-            tokio::task::spawn_blocking(move || {
+            let mut worker = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                image_sample(&path, &dir, &req, &token, deadline)
-            })
-            .await
-            .map_err(|e| invalid(e.to_string()))?
+                image_worker(&path, &dir, &req, &token, deadline)
+            });
+            let mut interrupt_error = None;
+            let completed = tokio::select! {
+                result = &mut worker => Some(result.map_err(|e| invalid(e.to_string()))?),
+                _ = cancel.cancelled() => {
+                    interrupt_error = Some(GoopError::Cancelled);
+                    None
+                },
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    interrupt_error = Some(invalid("Sample preview timed out"));
+                    None
+                }
+            };
+            if let Some((result, image_scratch)) = completed {
+                scratch = Some(image_scratch);
+                result
+            } else {
+                cancel.cancel();
+                // A running spawn_blocking task cannot be aborted safely. Await its
+                // bounded cooperative shutdown so it cannot retain permits/locks or
+                // race scratch cleanup after this request returns.
+                let _ = worker.await;
+                return Err(interrupt_error.expect("interrupted preview has an error"));
+            }
         } else {
             let _permit = permit;
             video_sample(resolver, &input, &directory, &request, &cancel, deadline).await
         };
         let result = result?;
         checkpoint(&cancel, deadline)?;
-        let latest = std::fs::metadata(&input)?;
-        if latest.len() != original.len() || latest.modified().ok() != original.modified().ok() {
-            return Err(invalid("Source changed while generating preview"));
+        if let Some(original) = original_video_metadata {
+            let latest = std::fs::metadata(&input)?;
+            if latest.len() != original.len() || latest.modified().ok() != original.modified().ok()
+            {
+                return Err(invalid("Source changed while generating preview"));
+            }
         }
         let mut state = self.state.lock().unwrap();
         checkpoint(&cancel, deadline)?;
@@ -278,7 +311,9 @@ impl PreviewService {
         {
             let _ = std::fs::remove_dir_all(old);
         }
-        scratch.0.take();
+        if let Some(scratch) = scratch.as_mut() {
+            scratch.0.take();
+        }
         Ok(result)
     }
 }
@@ -317,6 +352,18 @@ fn response(
         max_duration_ms: 3000,
     }
 }
+
+fn image_worker(
+    input: &Path,
+    directory: &Path,
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> (Result<PreviewResult, GoopError>, Scratch) {
+    let scratch = Scratch(Some(directory.to_path_buf()));
+    let result = image_sample(input, directory, request, cancel, deadline);
+    (result, scratch)
+}
 fn image_sample(
     input: &Path,
     dir: &Path,
@@ -325,7 +372,34 @@ fn image_sample(
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
     let bytes = capture_image(input, MAX_INPUT_BYTES, cancel, deadline)?;
-    image_sample_bytes(bytes, dir, request, cancel, deadline)
+    let result = image_sample_bytes(bytes.clone(), dir, request, cancel, deadline)?;
+    verify_snapshot_unchanged(input, &bytes, cancel, deadline)?;
+    Ok(result)
+}
+
+fn verify_snapshot_unchanged(
+    input: &Path,
+    snapshot: &[u8],
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<(), GoopError> {
+    let changed = || invalid("Source changed while generating preview");
+    let mut file = std::fs::File::open(input)?;
+    let mut offset = 0usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    while offset < snapshot.len() {
+        checkpoint(cancel, deadline)?;
+        let requested = (snapshot.len() - offset).min(buffer.len());
+        let count = file.read(&mut buffer[..requested])?;
+        if count == 0 || buffer[..count] != snapshot[offset..offset + count] {
+            return Err(changed());
+        }
+        offset += count;
+    }
+    if file.read(&mut buffer[..1])? != 0 {
+        return Err(changed());
+    }
+    Ok(())
 }
 
 fn capture_image(
@@ -361,6 +435,9 @@ fn image_sample_bytes(
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
     checkpoint(cancel, deadline)?;
+    if request.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve {
+        return color_managed_image_sample(bytes, dir, request, cancel, deadline);
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     if !matches!(
         reader.format(),
@@ -474,6 +551,133 @@ fn image_sample_bytes(
         after,
         (w, h),
         bytes,
+        None,
+    ))
+}
+
+fn color_managed_image_sample(
+    bytes: Bytes,
+    dir: &Path,
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewResult, GoopError> {
+    let policy = request.image_color_policy.unwrap_or_default();
+    if !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Png) {
+        return Err(invalid(
+            "Color-managed conversion is available only for JPEG and PNG output",
+        ));
+    }
+    if request.compress_mode.is_some() {
+        return Err(invalid(
+            "Explicit color handling is currently available in Convert only",
+        ));
+    }
+    if request.video_options.is_some()
+        || request.gif_options.is_some()
+        || request.subtitle.is_some()
+        || request
+            .quality_preset
+            .is_some_and(|value| value != goop_core::QualityPreset::Original)
+        || request
+            .resolution_cap
+            .is_some_and(|value| value != goop_core::ResolutionCap::Original)
+    {
+        return Err(invalid(
+            "Explicit image color handling cannot be combined with media, GIF, subtitle, or video quality controls",
+        ));
+    }
+    if let Some(options) = request.image_options.as_ref() {
+        crate::image_options::validate_options(options)?;
+        if request.target != TargetFormat::Jpeg {
+            return Err(invalid(
+                "Explicit JPEG quality and resize settings require JPEG output",
+            ));
+        }
+    }
+    let _working_set = crate::color::acquire_working_set(cancel)?;
+    let prepared = crate::color::prepare_bytes(bytes)?;
+    validate_pixels(
+        prepared.inspection.dimensions.0,
+        prepared.inspection.dimensions.1,
+    )?;
+    crate::color::validate_policy(&prepared.inspection, request.target, policy)?;
+    checkpoint(cancel, deadline)?;
+    let source = prepared.decode()?;
+    validate_pixels(source.width(), source.height())?;
+    let mut transformed = crate::color::transform_pixels(
+        source,
+        prepared.inspection.profile.clone(),
+        policy,
+        cancel,
+    )?;
+    if let Some(options) = request.image_options.as_ref() {
+        let dimensions = crate::image_options::output_dimensions(
+            transformed.pixels.dimensions(),
+            &options.resize,
+        )?;
+        if dimensions != transformed.pixels.dimensions() {
+            transformed.pixels = image::imageops::resize(
+                &transformed.pixels,
+                dimensions.0,
+                dimensions.1,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+    }
+    checkpoint(cancel, deadline)?;
+    let (width, height) = bounded_dimensions(
+        transformed.pixels.width(),
+        transformed.pixels.height(),
+        edge(request),
+    );
+    let before_sample = image::imageops::resize(
+        &transformed.pixels,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+    let after_pixels = image::imageops::resize(
+        &transformed.pixels,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+    let before = dir.join("before.png");
+    DynamicImage::ImageRgb8(before_sample)
+        .save_with_format(&before, ImageFormat::Png)
+        .map_err(|error| invalid(error.to_string()))?;
+    checkpoint(cancel, deadline)?;
+    let sample_transform = crate::color::TransformResult {
+        pixels: after_pixels,
+        destination_profile: transformed.destination_profile,
+        handling: transformed.handling,
+    };
+    let quality = request
+        .image_options
+        .as_ref()
+        .map_or(75, |options| options.jpeg_quality);
+    let encoded = crate::color::encode_tagged(&sample_transform, request.target, quality, cancel)?;
+    if encoded.len() as u64 > BYTES {
+        return Err(invalid("Sample artifact exceeds 16 MiB"));
+    }
+    checkpoint(cancel, deadline)?;
+    let after = dir.join("after.png");
+    image::load_from_memory(&encoded)
+        .map_err(|error| invalid(error.to_string()))?
+        .save_with_format(&after, ImageFormat::Png)
+        .map_err(|error| invalid(error.to_string()))?;
+    if std::fs::metadata(&before)?.len() + std::fs::metadata(&after)?.len() > BYTES {
+        return Err(invalid("Sample artifacts exceed 16 MiB"));
+    }
+    checkpoint(cancel, deadline)?;
+    Ok(response(
+        request,
+        PreviewKind::Image,
+        Some(before),
+        after,
+        (width, height),
+        encoded.len() as u64,
         None,
     ))
 }
@@ -708,6 +912,7 @@ mod process_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
 
     fn explicit_request(input: &Path) -> PreviewRequest {
         serde_json::from_value(serde_json::json!({
@@ -716,6 +921,31 @@ mod tests {
             "image_options":{"jpeg_quality":75,"resize":{"kind":"original"}}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn successful_image_worker_keeps_scratch_armed_until_publication() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        let output = tmp.path().join("sample");
+        std::fs::create_dir(&output).unwrap();
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let request = explicit_request(&input);
+
+        let (result, scratch) = image_worker(
+            &input,
+            &output,
+            &request,
+            &CancellationToken::new(),
+            Instant::now() + TIMEOUT,
+        );
+
+        assert!(result.is_ok());
+        assert!(output.exists());
+        drop(scratch);
+        assert!(!output.exists());
     }
 
     #[test]
@@ -770,6 +1000,107 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("JPEG sources only"));
         assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn explicit_color_preview_uses_conversion_resize_and_verified_output_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let output = tmp.path().join("sample");
+        std::fs::create_dir(&output).unwrap();
+        let request: PreviewRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"color", "input_path":input, "source_revision":"1",
+            "target":"jpeg", "metadata_policy":"strip_all",
+            "image_color_policy":"assume_srgb",
+            "image_options":{"jpeg_quality":88,"resize":{"kind":"fit_within","width":8,"height":4}}
+        }))
+        .unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+        let bytes = capture_image(&input, MAX_INPUT_BYTES, &token, deadline).unwrap();
+
+        let result = image_sample_bytes(bytes, &output, &request, &token, deadline).unwrap();
+
+        assert_eq!((result.width, result.height), (8, 4));
+        assert_eq!(
+            image::open(result.before_path.unwrap())
+                .unwrap()
+                .dimensions(),
+            (8, 4)
+        );
+        assert_eq!(image::open(result.after_path).unwrap().dimensions(), (8, 4));
+    }
+
+    #[test]
+    fn tagged_color_preview_renders_source_sample_in_display_srgb() {
+        use img_parts::{png::Png, ImageICC};
+        use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("wide-gamut.png");
+        let source = image::RgbImage::from_pixel(2, 1, image::Rgb([64, 180, 96]));
+        source.save(&input).unwrap();
+        let white = CIExyY {
+            x: 0.3127,
+            y: 0.3290,
+            Y: 1.0,
+        };
+        let primaries = CIExyYTRIPLE {
+            Red: CIExyY {
+                x: 0.680,
+                y: 0.320,
+                Y: 1.0,
+            },
+            Green: CIExyY {
+                x: 0.265,
+                y: 0.690,
+                Y: 1.0,
+            },
+            Blue: CIExyY {
+                x: 0.150,
+                y: 0.060,
+                Y: 1.0,
+            },
+        };
+        let curve = ToneCurve::new(2.2);
+        let profile = Profile::new_rgb(&white, &primaries, &[&curve, &curve, &curve])
+            .unwrap()
+            .icc()
+            .unwrap();
+        let expected = crate::color::transform_pixels(
+            DynamicImage::ImageRgb8(source.clone()),
+            Some(profile.clone()),
+            ImageColorPolicy::ConvertToSrgb,
+            &CancellationToken::new(),
+        )
+        .unwrap()
+        .pixels;
+        assert_ne!(expected, source);
+        let mut tagged = Png::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        tagged.set_icc_profile(Some(profile.into()));
+        std::fs::write(&input, tagged.encoder().bytes()).unwrap();
+
+        let output = tmp.path().join("sample");
+        std::fs::create_dir(&output).unwrap();
+        let request: PreviewRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"tagged", "input_path":input, "source_revision":"1",
+            "target":"png", "metadata_policy":"preserve",
+            "image_color_policy":"convert_to_srgb"
+        }))
+        .unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+        let bytes = capture_image(&input, MAX_INPUT_BYTES, &token, deadline).unwrap();
+
+        let result = image_sample_bytes(bytes, &output, &request, &token, deadline).unwrap();
+
+        assert_eq!(
+            image::open(result.before_path.unwrap()).unwrap().to_rgb8(),
+            expected
+        );
     }
 
     #[test]
@@ -842,5 +1173,37 @@ mod tests {
             Err(GoopError::Cancelled)
         ));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn snapshot_revalidation_rejects_same_size_same_mtime_substitution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.png");
+        std::fs::write(&input, [1_u8; 32]).unwrap();
+        let original = std::fs::metadata(&input).unwrap();
+        let snapshot = std::fs::read(&input).unwrap();
+
+        std::fs::write(&input, [2_u8; 32]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&input)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original.modified().unwrap()))
+            .unwrap();
+        let replacement = std::fs::metadata(&input).unwrap();
+        assert_eq!(replacement.len(), original.len());
+        assert_eq!(
+            replacement.modified().unwrap(),
+            original.modified().unwrap()
+        );
+
+        let error = verify_snapshot_unchanged(
+            &input,
+            &snapshot,
+            &CancellationToken::new(),
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Source changed"));
     }
 }

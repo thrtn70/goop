@@ -36,6 +36,7 @@ import { videoTrackOptionsProblem, videoTrackPolicyForPreset } from "./videoTrac
 import type {
   GifOptions,
   ImageConvertOptions,
+  ImageColorPolicy,
   MetadataPolicy,
   QualityPreset,
   ResolutionCap,
@@ -53,6 +54,7 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile
   imageOptions?: ImageConvertOptions | null;
   audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
+  imageColorPolicy?: ImageColorPolicy;
   subtitle: SubtitleOptions | null;
   /** Set by an applied preset. `null` leaves the backend's own default in
    *  place — these are only ever populated from a preset the user picked. */
@@ -200,6 +202,7 @@ export default function ConvertActionBar({
             compress_mode: null,
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
+            image_color_policy: f.imageColorPolicy ?? "preserve",
             subtitle: f.subtitle,
           };
           return api.convert.fromFile(request);
@@ -284,6 +287,7 @@ export default function ConvertActionBar({
           // pass, and now that a preset actually applies them, omitting
           // them here would save the fork with both cleared.
           metadata_policy: presetFile?.metadataPolicy ?? null,
+          image_color_policy: presetFile?.imageColorPolicy ?? "preserve",
           gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
           image_options: cloneImageOptions(presetFile?.imageOptions),
           audio_options: cloneAudioOptions(presetFile?.audioOptions),

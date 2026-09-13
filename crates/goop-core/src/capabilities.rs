@@ -185,6 +185,26 @@ pub struct MetadataPolicyAvailability {
     pub summary: String,
 }
 
+/// Whether one explicit color policy can be applied to an inspected source
+/// and target, plus the engine-owned explanation shown by clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct ColorPolicyAvailability {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct ImageColorCapabilities {
+    pub preserve: ColorPolicyAvailability,
+    pub convert_to_srgb: ColorPolicyAvailability,
+    pub assume_srgb: ColorPolicyAvailability,
+}
+
 /// Source orientation state established by bounded metadata inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
@@ -241,6 +261,9 @@ pub struct TargetCapability {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub image_metadata: Option<ImageMetadataCapabilities>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_color: Option<ImageColorCapabilities>,
     pub target: TargetFormat,
     pub available: bool,
     pub reason: Option<String>,

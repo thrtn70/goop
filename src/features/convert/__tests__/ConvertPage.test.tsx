@@ -9,13 +9,27 @@ import type { ProbeResult, Settings, Preset } from "@/types";
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewGenerate, mockPreviewCancel } = vi.hoisted(() => ({
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
   mockFromFile: vi.fn(),
   mockOpen: vi.fn(),
   mockSave: vi.fn(),
+  mockPreviewGenerate: vi.fn(async (request: { request_id: string; source_revision: string }) => ({
+    request_id: request.request_id,
+    source_revision: request.source_revision,
+    kind: "image",
+    before_path: null,
+    after_path: "/tmp/preview.png",
+    width: 16,
+    height: 8,
+    sample_bytes: 128,
+    duration_ms: null,
+    max_edge: 1280,
+    max_duration_ms: 3000,
+  })),
+  mockPreviewCancel: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/ipc/commands", () => ({
@@ -64,6 +78,32 @@ vi.mock("@/ipc/commands", () => ({
               reason: null,
               preserves_metadata: false,
               metadata_warning: null,
+              image_metadata: p.source_kind === "image" ? {
+                preserve: { available: true, reason: null, summary: "Metadata retained." },
+                rgb_reencode_preserve: { available: true, reason: null, summary: "Metadata retained." },
+                remove_personal: {
+                  available: target === "jpeg",
+                  reason: target === "jpeg" ? null : "Remove personal data is unavailable for this legacy pair.",
+                  summary: target === "jpeg" ? "Personal metadata removed." : "Unavailable",
+                },
+                strip_all: { available: true, reason: null, summary: "All metadata removed." },
+                source_has_exif: true,
+                source_has_icc: true,
+                orientation: "valid",
+              } : null,
+              image_color: p.source_kind === "image" ? {
+                preserve: { available: true, reason: null, summary: "Preserve color handling." },
+                convert_to_srgb: {
+                  available: ["jpeg", "png"].includes(target),
+                  reason: ["jpeg", "png"].includes(target) ? null : "Color conversion requires JPEG or PNG output.",
+                  summary: "Convert to tagged sRGB.",
+                },
+                assume_srgb: {
+                  available: false,
+                  reason: "The source already has a profile.",
+                  summary: "Assume untagged pixels are sRGB.",
+                },
+              } : null,
               video_settings: p.source_kind === "video" && ["mp4","mov","mkv"].includes(target) ? {
                 copy:{available:true}, encode:{available:path !== "/tmp/unsupported.mp4",reason:"Unknown field order"},
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
@@ -128,6 +168,10 @@ vi.mock("@/ipc/commands", () => ({
     },
     queue: { list: vi.fn().mockResolvedValue([]) },
     settings: { get: vi.fn().mockResolvedValue({}) },
+    preview: {
+      generate: (request: { request_id: string; source_revision: string }) => mockPreviewGenerate(request),
+      cancel: (requestId: string) => mockPreviewCancel(requestId),
+    },
   },
 }));
 
@@ -135,6 +179,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onDragDropEvent: () => Promise.resolve(() => {}),
   }),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: (path: string) => `asset://${path}`,
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -875,6 +923,43 @@ describe("ConvertPage", () => {
     expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
     expect(screen.queryByRole("button", { name: "MKV" })).toBeNull();
     expect(screen.queryByLabelText("Audio track")).toBeNull();
+  });
+
+  it("applies an explicit-color preset without legacy metadata rejection", async () => {
+    mockProbe.mockResolvedValue(imageProbe);
+    mockOpen.mockResolvedValue(["/tmp/tagged.png"]);
+    mockSave.mockResolvedValue("/tmp/converted.png");
+    useAppStore.setState({ presets: [{
+      id: "color-managed",
+      name: "Color managed",
+      target: "png",
+      quality_preset: null,
+      resolution_cap: null,
+      compress_mode: null,
+      metadata_policy: "remove_personal",
+      image_color_policy: "convert_to_srgb",
+      is_builtin: false,
+      created_at: 0n,
+    }] });
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await screen.findByText("tagged.png");
+    await userEvent.click(screen.getByRole("button", { name: "Color managed" }));
+    expect(screen.queryByText(/Settings were not applied/)).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await waitFor(() => expect(mockPreviewGenerate).toHaveBeenCalled());
+    expect(mockPreviewGenerate.mock.calls[0][0]).toMatchObject({
+      target: "png",
+      metadata_policy: "remove_personal",
+      image_color_policy: "convert_to_srgb",
+    });
+    await userEvent.click(screen.getByRole("button", { name: /convert 1 file/i }));
+    await waitFor(() => expect(mockFromFile).toHaveBeenCalled());
+    expect(mockFromFile.mock.calls[0][0]).toMatchObject({
+      target: "png",
+      metadata_policy: "remove_personal",
+      image_color_policy: "convert_to_srgb",
+    });
   });
 
   it("does not show compression presets on Convert page (moved to Compress tab in v0.1.6)", async () => {

@@ -48,7 +48,7 @@ describe("JPEG draft persistence", () => {
       [JSON.stringify(["convert", "file", "photo-1", "ImageOptionsPanel.appliedWidth"])]: { value: "2048" } };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({
       ...entries,
-      [fileKey]: { value: [{ ...file, metadataPolicy: "preserve" }] },
+      [fileKey]: { value: [{ ...file, metadataPolicy: "preserve", imageColorPolicy: "preserve" }] },
     });
   });
   it("drops malformed options instead of restoring an ineffective draft", () => {
@@ -59,7 +59,7 @@ describe("JPEG draft persistence", () => {
     const entries = { [fileKey]: { value: [{ ...file, imageOptions: undefined }] } };
     const { imageOptions: _imageOptions, ...withoutImageOptions } = file;
     expect(decodeDraftEntries(encodeDraftEntries(entries))[fileKey]).toEqual({
-      value: [{ ...withoutImageOptions, metadataPolicy: "preserve" }],
+      value: [{ ...withoutImageOptions, metadataPolicy: "preserve", imageColorPolicy: "preserve" }],
     });
   });
   it.each([true, undefined])("normalizes legacy metadata absence to Preserve when optionsReady is %s", (optionsReady) => {
@@ -81,7 +81,10 @@ describe("JPEG draft persistence", () => {
       }] },
     };
     const restored = decodeDraftEntries(encodeDraftEntries(entries));
-    expect(restored).toEqual(entries);
+    expect(restored).toEqual(Object.fromEntries(Object.entries(entries).map(([key, entry]) => [
+      key,
+      { value: (entry.value as Array<Record<string, unknown>>).map(file => ({ ...file, imageColorPolicy: "preserve" })) },
+    ])));
     const files = restored[compressKey].value as Array<{ mode: { kind: string; value: unknown } }>;
     expect(typeof files[0].mode.value).toBe("bigint");
   });

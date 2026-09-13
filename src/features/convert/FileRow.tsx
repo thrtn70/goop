@@ -12,6 +12,7 @@ import { WorkspaceDraftProvider, withWorkspaceDrafts } from "@/store/workspaceDr
 import type {
   GifOptions,
   ImageConvertOptions,
+  ImageColorPolicy,
   VideoConvertOptions,
   MetadataPolicy,
   SubtitleOptions,
@@ -35,6 +36,7 @@ import AudioTrackPanel from "./AudioTrackPanel";
 import VideoTrackPanel from "./VideoTrackPanel";
 import { cloneVideoTrackPolicyDraft, completeVideoTrackOptions, defaultVideoTrackOptions, shouldOfferVideoTrackOptions, videoTrackPolicyForPreset, type VideoTrackPolicyDraft } from "./videoTrackOptions";
 import MetadataPolicyControl from "@/features/metadata/MetadataPolicyControl";
+import ImageColorPolicyControl from "@/features/metadata/ImageColorPolicyControl";
 
 interface RowOptionsState {
   target: TargetFormat;
@@ -52,6 +54,7 @@ interface RowOptionsState {
   trackSourceUnavailableReason?: string | null;
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
+  imageColorPolicy?: ImageColorPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
   resolutionCap?: ResolutionCap | null;
@@ -73,6 +76,7 @@ export interface FileRowOptions {
   trackSourceUnavailableReason?: string | null;
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
+  imageColorPolicy?: ImageColorPolicy;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
   resolutionCap?: ResolutionCap | null;
@@ -130,7 +134,7 @@ export function ConvertSettingsPanel({
   draftIdentity?: string;
 }) {
   const p = state.probe;
-  const { target, gifOptions, metadataPolicy, subtitle } = opts;
+  const { target, gifOptions, imageColorPolicy = "preserve", metadataPolicy, subtitle } = opts;
 
   const update = (partial: Partial<RowOptionsState>) => {
     const next: RowOptionsState = {
@@ -150,6 +154,7 @@ export function ConvertSettingsPanel({
       gifOptions:
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
       metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
+      imageColorPolicy: partial.imageColorPolicy ?? imageColorPolicy,
       subtitle: partial.subtitle !== undefined ? partial.subtitle : subtitle,
       qualityPreset:
         partial.qualityPreset !== undefined
@@ -197,6 +202,16 @@ export function ConvertSettingsPanel({
     opts.resolutionCap != null &&
     opts.resolutionCap !== "original";
   const metadataCapabilities = targetCapability?.image_metadata;
+  const metadataControlCapabilities = imageColorPolicy === "preserve" || !metadataCapabilities
+    ? metadataCapabilities
+    : {
+        ...metadataCapabilities,
+        preserve: { available: true, reason: null, summary: "Source EXIF and ICC are replaced by the destination sRGB description." },
+        rgb_reencode_preserve: { available: true, reason: null, summary: "Source EXIF and ICC are replaced by the destination sRGB description." },
+        remove_personal: { available: true, reason: null, summary: "All source metadata is removed; the generated sRGB profile remains." },
+        strip_all: { available: true, reason: null, summary: "All source metadata is removed; the generated sRGB profile remains." },
+      };
+  const colorCapabilities = targetCapability?.image_color;
   const showMetadataPolicy = p.source_kind === "image";
   const subSupport = subtitleSupport(target);
   const showSubtitle =
@@ -416,10 +431,19 @@ export function ConvertSettingsPanel({
           </p>
         )}
       {showMetadataPolicy && (
+        <ImageColorPolicyControl
+          value={imageColorPolicy}
+          capabilities={colorCapabilities}
+          onChange={(next) => update({ imageColorPolicy: next })}
+          onDraftEdit={onDraftEdit}
+        />
+      )}
+      {showMetadataPolicy && (
         <MetadataPolicyControl
           value={metadataPolicy}
-          capabilities={metadataCapabilities}
+          capabilities={metadataControlCapabilities}
           preserveMode={opts.imageOptions ? "channel_aware" : "rgb_reencode"}
+          retainsDestinationColorProfile={imageColorPolicy !== "preserve"}
           onChange={(next) => update({ metadataPolicy: next })}
           onDraftEdit={onDraftEdit}
         />

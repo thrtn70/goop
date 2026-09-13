@@ -129,14 +129,22 @@ export function videoTrackExecutionText(summary: VideoTrackExecutionSummary): st
 }
 
 export function imageMetadataExecutionText(summary: ImageMetadataExecution): string {
-  const policy = summary.requested_policy === "remove_personal"
-    ? "Personal metadata removed"
-    : summary.requested_policy === "strip_all"
-      ? "All metadata removed"
-      : "Metadata preserved";
+  const explicitColor = summary.requested_color_policy != null
+    && summary.requested_color_policy !== "preserve";
+  const policy = explicitColor
+    ? "All source metadata removed"
+    : summary.requested_policy === "remove_personal"
+      ? "Personal metadata removed"
+      : summary.requested_policy === "strip_all"
+        ? summary.destination_srgb_profile_attached
+          ? "All source metadata removed"
+          : "All metadata removed"
+        : "Metadata preserved";
   const color: Record<ImageMetadataExecution["color_handling"], string> = {
     exact_profile_retained: "Exact ICC profile retained",
     renderer_sdr_srgb: "Rendered as SDR sRGB",
+    converted_to_srgb: "Converted to tagged sRGB",
+    assumed_srgb: "Assumed and tagged as sRGB",
     untagged: "No ICC profile attached",
     no_profile: "ICC profile removed",
   };

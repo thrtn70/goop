@@ -60,12 +60,14 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
         compress_mode: preset.compress_mode,
         batch_id: None,
         metadata_policy: preset.metadata_policy,
+        image_color_policy: preset.image_color_policy,
         subtitle: preset.subtitle.clone(),
         image_options: preset.image_options.clone(),
         video_options: preset.video_options.clone(),
     };
     goop_core::validate_audio_request(&request)
         .and_then(|()| goop_core::validate_video_request(&request))
+        .and_then(|()| goop_core::validate_image_color_request_shape(&request))
         .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
         .and_then(|()| match preset.track_policy.as_ref() {
             None => Ok(()),
@@ -196,6 +198,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             resolution_cap: Some(ResolutionCap::R1080p),
             compress_mode: None,
             metadata_policy: None,
+            image_color_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -213,6 +216,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             resolution_cap: Some(ResolutionCap::R720p),
             compress_mode: Some(CompressMode::TargetSizeBytes(200_000_000)),
             metadata_policy: None,
+            image_color_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -230,6 +234,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             resolution_cap: None,
             compress_mode: Some(CompressMode::Quality(75)),
             metadata_policy: None,
+            image_color_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -247,6 +252,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             resolution_cap: None,
             compress_mode: Some(CompressMode::LosslessReoptimize),
             metadata_policy: None,
+            image_color_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -288,6 +294,7 @@ mod tests {
             resolution_cap: None,
             compress_mode: None,
             metadata_policy: None,
+            image_color_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -329,6 +336,26 @@ mod tests {
         assert!(validate(&preset).is_err());
         preset.audio_options = Some(goop_core::AudioConvertOptions::Copy);
         assert!(validate(&preset).is_ok());
+    }
+
+    #[test]
+    fn explicit_color_presets_reject_intrinsically_impossible_combinations() {
+        let mut preset = sample("color", "Color managed");
+        preset.image_color_policy = Some(goop_core::ImageColorPolicy::ConvertToSrgb);
+        assert!(validate(&preset).is_err());
+
+        preset.target = TargetFormat::Png;
+        preset.quality_preset = Some(QualityPreset::Original);
+        assert!(validate(&preset).is_ok());
+
+        preset.compress_mode = Some(CompressMode::Quality(75));
+        assert!(validate(&preset).is_err());
+        preset.compress_mode = None;
+        preset.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 75,
+            resize: goop_core::ImageResize::Original,
+        });
+        assert!(validate(&preset).is_err());
     }
 
     #[test]
