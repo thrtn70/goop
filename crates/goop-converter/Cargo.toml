@@ -21,6 +21,12 @@ tracing.workspace = true
 chardetng = "0.1"
 encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff", "avif", "hdr", "ico"] }
+# COMP-01A's dependency spike evaluates this safe wrapper over its bundled,
+# statically linked libwebp build. The exact wrapper version and the CI
+# resolver assertion below prevent the ignored Cargo.lock from silently
+# changing the reviewed native source. Disabling the wrapper's defaults omits
+# only its optional `image` adapter.
+webp = { version = "=0.3.1", default-features = false }
 # JPEG-XL via jpegxl-rs's `vendored` feature: jpegxl-src builds libjxl
 # 0.11 from vendored source via cmake at build time, statically linking
 # the result into our binary. Avoids the per-platform libjxl version
