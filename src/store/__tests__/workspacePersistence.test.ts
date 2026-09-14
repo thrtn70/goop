@@ -93,6 +93,41 @@ describe("JPEG draft persistence", () => {
       value: [{ ...file, mode: { kind: "quality", value: 75 } }] } };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
   });
+
+  it("round-trips an exact custom alpha background without seeding absent policy", () => {
+    const alpha = { kind: "flatten", background: { red: 17, green: 34, blue: 51 } };
+    const entries = { [fileKey]: { value: [{ ...file, imageColorPolicy: "assume_srgb", imageAlphaPolicy: alpha }] } };
+    const restored = decodeDraftEntries(encodeDraftEntries(entries));
+    expect(restored[fileKey].value).toEqual([expect.objectContaining({ imageAlphaPolicy: alpha })]);
+    const restoredAlpha = (restored[fileKey].value as Array<{imageAlphaPolicy: typeof alpha}>)[0].imageAlphaPolicy;
+    expect(restoredAlpha).not.toBe(alpha);
+    expect(restoredAlpha.background).not.toBe(alpha.background);
+
+    const absent = decodeDraftEntries(encodeDraftEntries({ [fileKey]: { value: [file] } }));
+    expect((absent[fileKey].value as Array<Record<string, unknown>>)[0]).not.toHaveProperty("imageAlphaPolicy");
+  });
+
+  it("retains exact alpha intent while its target or color selection is temporarily incompatible", () => {
+    const alpha = { kind: "flatten", background: { red: 17, green: 34, blue: 51 } };
+    const rows = [
+      {...file,imageColorPolicy:"preserve",imageAlphaPolicy:alpha},
+      {...file,id:"photo-2",target:"png",imageColorPolicy:"assume_srgb",imageAlphaPolicy:alpha},
+    ];
+    const restored = decodeDraftEntries(encodeDraftEntries({[fileKey]:{value:rows}}));
+    expect(restored[fileKey].value).toEqual(rows.map(row => ({...row,metadataPolicy:"preserve"})));
+  });
+
+  it.each([
+    { kind: "flatten", background: { red: -1, green: 0, blue: 0 } },
+    { kind: "flatten", background: { red: 0, green: 256, blue: 0 } },
+    { kind: "flatten", background: { red: 0, green: 0, blue: 0 }, extra: true },
+    { kind: "flatten", background: { red: "0", green: 0, blue: 0 } },
+    { kind: "flatten", background: { red: null, green: 0, blue: 0 } },
+    { kind: "flatten", background: [] },
+  ])("drops malformed alpha policy drafts: %j", (imageAlphaPolicy) => {
+    const entries = { [fileKey]: { value: [{ ...file, imageAlphaPolicy }] } };
+    expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
+  });
 });
 
 

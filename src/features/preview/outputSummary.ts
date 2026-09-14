@@ -1,4 +1,5 @@
-import type { AudioExecutionSummary, CompressionExecution, ImageMetadataExecution, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary, VideoTrackExecutionSummary } from "@/types";
+import type { AudioExecutionSummary, CompressionExecution, ImageAlphaExecution, ImageMetadataExecution, Job, JobResult, TrackExecutionSummary, TrackTextFact, VideoRationalFact, VideoExecutionSummary, VideoTrackExecutionSummary } from "@/types";
+import { srgbHex } from "@/features/convert/imageAlphaPolicy";
 
 function rational(fact: VideoRationalFact | null | undefined): string | null {
   return fact?.kind === "exact" ? `${fact.numerator}/${fact.denominator}` : null;
@@ -163,6 +164,14 @@ export function compressionExecutionText(summary: CompressionExecution): string 
   return [mode, quality, target, `Final ${summary.final_bytes} bytes`].filter(Boolean).join(" · ");
 }
 
+export function imageAlphaExecutionText(summary: ImageAlphaExecution): string {
+  const background = srgbHex(summary.background);
+  if (!summary.source_had_alpha || !summary.flattened) {
+    return `Background ${background} saved · no transparency found`;
+  }
+  return `Transparency over ${background} · linear sRGB`;
+}
+
 /** Measured results only; old history entries do not imply zero source bytes. */
 export function outputSummary(result: JobResult | null | undefined, job?: Pick<Job, "kind" | "payload">): string | null {
   if (!result) return null;
@@ -181,6 +190,7 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
   if (result.track_execution) facts.push(trackExecutionText(result.track_execution));
   if (result.video_track_execution) facts.push(videoTrackExecutionText(result.video_track_execution));
   if (result.image_metadata_execution) facts.push(imageMetadataExecutionText(result.image_metadata_execution));
+  if (result.image_alpha_execution) facts.push(imageAlphaExecutionText(result.image_alpha_execution));
   if (result.compression_execution) facts.push(compressionExecutionText(result.compression_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
   else if (result.video_execution) facts.push(videoExecutionText(result.video_execution, !result.video_track_execution));

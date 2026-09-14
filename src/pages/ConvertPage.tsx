@@ -40,6 +40,7 @@ import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import { cloneImageOptions, imageDraftProblem, imageDraftSlots, type ImageDraftText } from "@/features/convert/imageOptions";
+import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { useWorkspaceDraftEntries, clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { smartDefault } from "@/features/convert/TargetPicker";
 import { conversionProblem } from "@/features/workspace/readiness";
@@ -97,6 +98,16 @@ function ConvertPage() {
   const { byId, retry } = useSourceInspections(files);
   const draftEntries = useWorkspaceDraftEntries();
   const [applicationError, setApplicationError] = useState<string | null>(null);
+  const [alphaDraftProblems, setAlphaDraftProblems] = useState<Record<string, string>>({});
+  const handleAlphaValidityChange = useCallback((id: string, problem: string | null) => {
+    setAlphaDraftProblems(previous => {
+      if ((previous[id] ?? null) === problem) return previous;
+      const next = {...previous};
+      if (problem) next[id] = problem;
+      else delete next[id];
+      return next;
+    });
+  }, []);
   const withAudioInspection = (file: FileEntry) => {
     const state = byId[file.id ?? ""];
     if (state?.phase !== "ready") return file;
@@ -220,6 +231,7 @@ function ConvertPage() {
         video_options: videoRequestOptions(file), ...(trackOptions ? { track_options: trackOptions } : {}), quality_preset: null, resolution_cap: file.resolutionCap,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
         image_color_policy: file.imageColorPolicy,
+        image_alpha_policy: cloneImageAlphaPolicy(file.imageAlphaPolicy),
         subtitle: file.subtitle, gif_options: file.gifOptions, image_options: cloneImageOptions(file.imageOptions),
       },
     }];
@@ -238,6 +250,7 @@ function ConvertPage() {
         video_options: null, quality_preset: null, resolution_cap: null,
         compress_mode: null, batch_id: null, metadata_policy: file.metadataPolicy,
         image_color_policy: file.imageColorPolicy,
+        image_alpha_policy: cloneImageAlphaPolicy(file.imageAlphaPolicy),
         subtitle: null, gif_options: null, image_options: null,
       },
     }];
@@ -294,6 +307,7 @@ function ConvertPage() {
           gifOptions: target === "gif" ? defaultGifOptions() : null,
           metadataPolicy: policy,
           imageColorPolicy: f.imageColorPolicy ?? "preserve",
+          imageAlphaPolicy: cloneImageAlphaPolicy(f.imageAlphaPolicy),
         };
       });
       return changed ? next : previous;
@@ -339,6 +353,7 @@ function ConvertPage() {
                 gifOptions: null,
                 metadataPolicy: "preserve",
                 imageColorPolicy: "preserve",
+                imageAlphaPolicy: null,
                 subtitle: null,
                 qualityPreset: null,
                 resolutionCap: null,
@@ -373,6 +388,7 @@ function ConvertPage() {
               gifOptions: null,
               metadataPolicy: "preserve" as MetadataPolicy,
               imageColorPolicy: "preserve" as ImageColorPolicy,
+              imageAlphaPolicy: null,
               subtitle: null,
               qualityPreset: null,
               resolutionCap: null,
@@ -422,6 +438,7 @@ function ConvertPage() {
                   || opts.trackOptions?.kind === "video" || opts.pendingTrackPolicy?.kind === "video" || Boolean(opts.videoTrackPolicyDraft),
                 metadataPolicy: opts.metadataPolicy,
                 imageColorPolicy: opts.imageColorPolicy,
+                imageAlphaPolicy: cloneImageAlphaPolicy(opts.imageAlphaPolicy),
                 subtitle: opts.subtitle ? { ...opts.subtitle } : null,
                 qualityPreset: opts.qualityPreset ?? null,
                 resolutionCap: opts.resolutionCap ?? null,
@@ -464,6 +481,7 @@ function ConvertPage() {
       ...file,
       target: settings.target, metadataPolicy: settings.metadataPolicy,
       imageColorPolicy: settings.imageColorPolicy ?? "preserve",
+      imageAlphaPolicy: cloneImageAlphaPolicy(settings.imageAlphaPolicy),
       qualityPreset: settings.qualityPreset ?? null,
       resolutionCap: settings.resolutionCap ?? null,
       optionsReady: true,
@@ -548,6 +566,7 @@ function ConvertPage() {
       gifOptions: preset.gif_options ?? (preset.target === "gif" ? defaultGifOptions() : null),
       metadataPolicy: preset.metadata_policy ?? "preserve",
       imageColorPolicy: preset.image_color_policy ?? "preserve",
+      imageAlphaPolicy: cloneImageAlphaPolicy(preset.image_alpha_policy),
       subtitle: preset.subtitle ?? null,
       qualityPreset: preset.quality_preset,
       resolutionCap: preset.resolution_cap,
@@ -607,7 +626,7 @@ function ConvertPage() {
     );
   });
   const baseProblems = files.map((f, i) =>
-    audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i] ?? metadataProblems[i] ?? colorProblems[i],
+    alphaDraftProblems[f.id ?? ""] ?? audioProblems[i] ?? videoProblems[i] ?? conversionProblem({...f,qualityPreset:f.videoOptions || f.audioOptions ? null : f.qualityPreset}, byId[f.id ?? ""] ?? PROBING) ?? imageProblems[i] ?? metadataProblems[i] ?? colorProblems[i],
   );
   const problems = plannedFiles.map((file, index) => (file.videoOptions && (file.videoTrackOptionsEnabled || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video") ? videoTrackOptionsProblem({
     options: file.trackOptions, settings: file.videoTrackSettings,
@@ -665,6 +684,7 @@ function ConvertPage() {
             <WorkspaceDraftProvider key={selected.id} scope={["source", selected.path]} sourcePaths={[selected.path]}>
               <ConvertSettingsPanel
                 onDraftEdit={() => selected.id && handleDraftEdit(selected.id)}
+                onAlphaValidityChange={(problem) => selected.id && handleAlphaValidityChange(selected.id, problem)}
                 path={selected.path}
                 draftIdentity={selected.id}
                 options={selectedPlanned ?? selected}
@@ -686,6 +706,7 @@ function ConvertPage() {
               {!isAudioTarget(selected.target) && !selected.audioOptions && (!problems[files.indexOf(selected)] || selected.videoOptions) && <SettingsPreview videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
                 compress_mode:null,metadata_policy:selected.metadataPolicy,image_color_policy:selected.imageColorPolicy ?? "preserve",
+                image_alpha_policy:cloneImageAlphaPolicy(selected.imageAlphaPolicy),
                 subtitle:selected.subtitle,gif_options:selected.gifOptions,image_options:cloneImageOptions(selected.imageOptions)}}/>}
             </WorkspaceDraftProvider>
           ) : (

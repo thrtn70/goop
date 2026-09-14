@@ -908,7 +908,7 @@ async fn invalid_orientation_refuses_preserve_and_privacy_modes() {
 }
 
 #[tokio::test]
-async fn explicit_admission_preserves_backend_routing_and_checks_actual_image_header() {
+async fn explicit_admission_preserves_routing_and_uses_the_actual_image_header() {
     let d = tempfile::tempdir().unwrap();
     let input = d.path().join("jpeg.png");
     source(&input, 32, 24);
@@ -927,6 +927,18 @@ async fn explicit_admission_preserves_backend_routing_and_checks_actual_image_he
     );
     req.input_path = input.to_string_lossy().into_owned();
     image::RgbImage::new(32, 24).save(&input).unwrap();
+    assert!(
+        goop_converter::capabilities::validate_request_source(&resolver, &req)
+            .await
+            .is_err()
+    );
+    req.image_color_policy = Some(goop_core::ImageColorPolicy::AssumeSrgb);
+    goop_converter::capabilities::validate_request_source(&resolver, &req)
+        .await
+        .unwrap();
+    image::RgbImage::new(32, 24)
+        .save_with_format(&input, image::ImageFormat::WebP)
+        .unwrap();
     assert!(
         goop_converter::capabilities::validate_request_source(&resolver, &req)
             .await

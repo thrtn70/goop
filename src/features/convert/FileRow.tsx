@@ -13,6 +13,7 @@ import type {
   GifOptions,
   ImageConvertOptions,
   ImageColorPolicy,
+  ImageAlphaPolicy,
   VideoConvertOptions,
   MetadataPolicy,
   SubtitleOptions,
@@ -37,6 +38,8 @@ import VideoTrackPanel from "./VideoTrackPanel";
 import { cloneVideoTrackPolicyDraft, completeVideoTrackOptions, defaultVideoTrackOptions, shouldOfferVideoTrackOptions, videoTrackPolicyForPreset, type VideoTrackPolicyDraft } from "./videoTrackOptions";
 import MetadataPolicyControl from "@/features/metadata/MetadataPolicyControl";
 import ImageColorPolicyControl from "@/features/metadata/ImageColorPolicyControl";
+import ImageAlphaPolicyControl from "./ImageAlphaPolicyControl";
+import { cloneImageAlphaPolicy } from "./imageAlphaPolicy";
 
 interface RowOptionsState {
   target: TargetFormat;
@@ -55,6 +58,7 @@ interface RowOptionsState {
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
   imageColorPolicy?: ImageColorPolicy;
+  imageAlphaPolicy?: ImageAlphaPolicy | null;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
   resolutionCap?: ResolutionCap | null;
@@ -77,6 +81,7 @@ export interface FileRowOptions {
   audioPlanError?: string | null;
   metadataPolicy: MetadataPolicy;
   imageColorPolicy?: ImageColorPolicy;
+  imageAlphaPolicy?: ImageAlphaPolicy | null;
   subtitle: SubtitleOptions | null;
   qualityPreset?: QualityPreset | null;
   resolutionCap?: ResolutionCap | null;
@@ -122,6 +127,7 @@ export function ConvertSettingsPanel({
   state,
   onOptionsChange,
   onDraftEdit,
+  onAlphaValidityChange,
   onReinspect,
   draftIdentity,
 }: {
@@ -130,6 +136,7 @@ export function ConvertSettingsPanel({
   state: Extract<import("@/hooks/useProbe").ProbeState, { phase: "ready" }>;
   onOptionsChange: (path: string, opts: FileRowOptions) => void;
   onDraftEdit?: () => void;
+  onAlphaValidityChange?: (problem: string | null) => void;
   onReinspect?: () => void;
   draftIdentity?: string;
 }) {
@@ -155,6 +162,9 @@ export function ConvertSettingsPanel({
         partial.gifOptions !== undefined ? partial.gifOptions : gifOptions,
       metadataPolicy: partial.metadataPolicy ?? metadataPolicy,
       imageColorPolicy: partial.imageColorPolicy ?? imageColorPolicy,
+      imageAlphaPolicy: partial.imageAlphaPolicy !== undefined
+        ? cloneImageAlphaPolicy(partial.imageAlphaPolicy)
+        : cloneImageAlphaPolicy(opts.imageAlphaPolicy),
       subtitle: partial.subtitle !== undefined ? partial.subtitle : subtitle,
       qualityPreset:
         partial.qualityPreset !== undefined
@@ -212,6 +222,7 @@ export function ConvertSettingsPanel({
         strip_all: { available: true, reason: null, summary: "All source metadata is removed; the generated sRGB profile remains." },
       };
   const colorCapabilities = targetCapability?.image_color;
+  const alphaCapabilities = targetCapability?.image_alpha;
   const showMetadataPolicy = p.source_kind === "image";
   const subSupport = subtitleSupport(target);
   const showSubtitle =
@@ -430,6 +441,18 @@ export function ConvertSettingsPanel({
             }
           </p>
         )}
+      {showMetadataPolicy && (
+        ((alphaCapabilities?.source_has_alpha === true && target === "jpeg") || opts.imageAlphaPolicy) && (
+          <ImageAlphaPolicyControl
+            value={opts.imageAlphaPolicy}
+            capabilities={alphaCapabilities}
+            target={target}
+            onChange={(next) => update({ imageAlphaPolicy: next })}
+            onDraftEdit={onDraftEdit}
+            onValidityChange={onAlphaValidityChange}
+          />
+        )
+      )}
       {showMetadataPolicy && (
         <ImageColorPolicyControl
           value={imageColorPolicy}

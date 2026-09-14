@@ -6,11 +6,12 @@ pub use audio::{
 };
 pub mod capabilities;
 pub use capabilities::{
-    ColorPolicyAvailability, CompressionCapabilities, ConversionCapabilities, ConversionInspection,
-    ImageColorCapabilities, ImageMetadataCapabilities, ImageOrientationStatus,
-    ImageSettingsCapabilities, MetadataPolicyAvailability, TargetCapability, TrackChoiceCapability,
-    TrackModeAvailability, TrackSettingsCapabilities, VideoTrackChoiceCapability,
-    VideoTrackPolicyCapabilities, VideoTrackPolicyModeCapabilities, VideoTrackSettingsCapabilities,
+    AlphaPolicyAvailability, ColorPolicyAvailability, CompressionCapabilities,
+    ConversionCapabilities, ConversionInspection, ImageAlphaCapabilities, ImageColorCapabilities,
+    ImageMetadataCapabilities, ImageOrientationStatus, ImageSettingsCapabilities,
+    MetadataPolicyAvailability, TargetCapability, TrackChoiceCapability, TrackModeAvailability,
+    TrackSettingsCapabilities, VideoTrackChoiceCapability, VideoTrackPolicyCapabilities,
+    VideoTrackPolicyModeCapabilities, VideoTrackSettingsCapabilities,
 };
 pub mod convert;
 pub mod error;
@@ -30,10 +31,12 @@ pub mod tracks;
 pub mod update;
 
 pub use convert::{
-    validate_image_color_request_shape, CompressMode, CompressionExecution, ConvertRequest,
-    ConvertResult, GifOptions, GifSizePreset, ImageColorHandling, ImageColorPolicy,
+    validate_image_alpha_request_shape, validate_image_color_request_shape, AlphaCompositing,
+    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, GifOptions, GifSizePreset,
+    ImageAlphaExecution, ImageAlphaPolicy, ImageColorHandling, ImageColorPolicy,
     ImageConvertOptions, ImageMetadataExecution, ImageResize, MetadataPolicy, ProbeResult,
-    QualityPreset, ResolutionCap, SourceKind, SubtitleMode, SubtitleOptions, TargetFormat,
+    QualityPreset, ResolutionCap, SourceKind, SrgbColor, SubtitleMode, SubtitleOptions,
+    TargetFormat,
 };
 pub use error::{
     both_failed, friendly_message, is_access_blocked_stderr, is_cookie_db_error,

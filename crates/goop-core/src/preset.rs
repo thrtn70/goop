@@ -1,6 +1,6 @@
 use crate::convert::{
-    CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, MetadataPolicy, QualityPreset,
-    ResolutionCap, SubtitleOptions, TargetFormat,
+    CompressMode, GifOptions, ImageAlphaPolicy, ImageColorPolicy, ImageConvertOptions,
+    MetadataPolicy, QualityPreset, ResolutionCap, SubtitleOptions, TargetFormat,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -39,6 +39,9 @@ pub struct Preset {
     pub image_color_policy: Option<ImageColorPolicy>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub image_alpha_policy: Option<ImageAlphaPolicy>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub gif_options: Option<GifOptions>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -64,6 +67,7 @@ mod tests {
         let preset: Preset = serde_json::from_str(r#"{"id":"old","name":"Old","target":"mp4","quality_preset":null,"resolution_cap":null,"compress_mode":null,"is_builtin":false,"created_at":0}"#).unwrap();
         assert_eq!(preset.metadata_policy, None);
         assert_eq!(preset.image_color_policy, None);
+        assert_eq!(preset.image_alpha_policy, None);
         assert_eq!(preset.gif_options, None);
         assert_eq!(preset.subtitle, None);
         assert_eq!(preset.image_options, None);

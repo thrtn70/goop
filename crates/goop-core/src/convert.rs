@@ -249,6 +249,45 @@ pub enum ImageColorPolicy {
     AssumeSrgb,
 }
 
+/// An opaque color expressed in the destination sRGB encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct SrgbColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+/// Explicit authorization to remove image transparency for an opaque output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum ImageAlphaPolicy {
+    Flatten { background: SrgbColor },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+/// The transfer function used to composite transparent source pixels.
+pub enum AlphaCompositing {
+    LinearSrgb,
+}
+
+/// Verified transparency outcome for a completed conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct ImageAlphaExecution {
+    pub requested_policy: ImageAlphaPolicy,
+    pub source_had_alpha: bool,
+    pub flattened: bool,
+    pub background: SrgbColor,
+    pub compositing: AlphaCompositing,
+}
+
 /// How the completed image output represents color. These values describe
 /// verified handling, not perceptual equivalence between viewers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -321,6 +360,11 @@ pub struct ImageConvertOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ConvertRequest {
+    /// Explicit color conversion is opt-in. `None` is identical to
+    /// `Preserve` for older callers, presets and queued jobs.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_color_policy: Option<ImageColorPolicy>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub video_options: Option<crate::video::VideoConvertOptions>,
@@ -337,11 +381,6 @@ pub struct ConvertRequest {
     /// `StripAll` opts in to scrubbing.
     #[serde(default)]
     pub metadata_policy: Option<MetadataPolicy>,
-    /// Explicit color conversion is opt-in. `None` is identical to
-    /// `Preserve` for older callers, presets and queued jobs.
-    #[serde(default)]
-    #[ts(optional = nullable)]
-    pub image_color_policy: Option<ImageColorPolicy>,
     /// External subtitle to soft-embed or burn in. `None` skips all
     /// subtitle handling, so pre-subtitle presets and queued job
     /// payloads keep deserializing unchanged.
@@ -356,6 +395,9 @@ pub struct ConvertRequest {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub track_options: Option<crate::tracks::TrackConvertOptions>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_alpha_policy: Option<ImageAlphaPolicy>,
 }
 
 /// Reject source-independent explicit color combinations before any source I/O
@@ -412,6 +454,49 @@ pub fn validate_image_color_request_shape(request: &ConvertRequest) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Reject invalid alpha-policy combinations without reading the source.
+pub fn validate_image_alpha_request_shape(request: &ConvertRequest) -> Result<(), GoopError> {
+    if request.image_alpha_policy.is_none() {
+        return Ok(());
+    }
+    if request.target != TargetFormat::Jpeg {
+        return Err(GoopError::InvalidRequest(
+            "JPEG transparency flattening requires JPEG output".into(),
+        ));
+    }
+    if request.compress_mode.is_some() {
+        return Err(GoopError::InvalidRequest(
+            "JPEG transparency flattening is currently available in Convert only".into(),
+        ));
+    }
+    if matches!(
+        request.image_color_policy.unwrap_or_default(),
+        ImageColorPolicy::Preserve
+    ) {
+        return Err(GoopError::InvalidRequest(
+            "JPEG transparency flattening requires Convert to sRGB or Assume sRGB".into(),
+        ));
+    }
+    if request.video_options.is_some()
+        || request.audio_options.is_some()
+        || request.track_options.is_some()
+        || request.gif_options.is_some()
+        || request.subtitle.is_some()
+        || request
+            .quality_preset
+            .is_some_and(|value| value != QualityPreset::Original)
+        || request
+            .resolution_cap
+            .is_some_and(|value| value != ResolutionCap::Original)
+    {
+        return Err(GoopError::InvalidRequest(
+            "JPEG transparency flattening cannot be combined with media, GIF, subtitle, or video quality controls."
+                .into(),
+        ));
+    }
+    validate_image_color_request_shape(request)
 }
 
 /// Media probe facts. The bounded track inventory is absent when complete
@@ -490,6 +575,9 @@ pub struct ConvertResult {
     pub compression_execution: Option<CompressionExecution>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub image_alpha_execution: Option<ImageAlphaExecution>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub source_bytes: Option<u64>,
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -522,6 +610,7 @@ mod tests {
             batch_id: None,
             metadata_policy: None,
             image_color_policy: Some(ImageColorPolicy::ConvertToSrgb),
+            image_alpha_policy: None,
             subtitle: None,
             image_options: None,
             audio_options: None,

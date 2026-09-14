@@ -25,6 +25,7 @@ import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
 import PresetSaveDialog from "@/features/presets/PresetSaveDialog";
 import { cloneImageOptions } from "./imageOptions";
+import { cloneImageAlphaPolicy } from "./imageAlphaPolicy";
 import { subtitleForTarget } from "./FileRow";
 import {
   cloneTrackOptions,
@@ -37,6 +38,7 @@ import type {
   GifOptions,
   ImageConvertOptions,
   ImageColorPolicy,
+  ImageAlphaPolicy,
   MetadataPolicy,
   QualityPreset,
   ResolutionCap,
@@ -55,6 +57,7 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile
   audioOptions?: AudioConvertOptions | null;
   metadataPolicy: MetadataPolicy;
   imageColorPolicy?: ImageColorPolicy;
+  imageAlphaPolicy?: ImageAlphaPolicy | null;
   subtitle: SubtitleOptions | null;
   /** Set by an applied preset. `null` leaves the backend's own default in
    *  place — these are only ever populated from a preset the user picked. */
@@ -167,6 +170,7 @@ export default function ConvertActionBar({
         trackOptions: activeTrackRequestOptions(file),
         videoOptions: videoRequestOptions(file),
         imageOptions: cloneImageOptions(file.imageOptions),
+        imageAlphaPolicy: cloneImageAlphaPolicy(file.imageAlphaPolicy),
         gifOptions: file.gifOptions ? { ...file.gifOptions } : null,
         subtitle: file.subtitle ? { ...file.subtitle } : null,
       }));
@@ -203,6 +207,7 @@ export default function ConvertActionBar({
             batch_id: batchId,
             metadata_policy: f.metadataPolicy,
             image_color_policy: f.imageColorPolicy ?? "preserve",
+            image_alpha_policy: cloneImageAlphaPolicy(f.imageAlphaPolicy),
             subtitle: f.subtitle,
           };
           return api.convert.fromFile(request);
@@ -288,6 +293,7 @@ export default function ConvertActionBar({
           // them here would save the fork with both cleared.
           metadata_policy: presetFile?.metadataPolicy ?? null,
           image_color_policy: presetFile?.imageColorPolicy ?? "preserve",
+          image_alpha_policy: cloneImageAlphaPolicy(presetFile?.imageAlphaPolicy),
           gif_options: presetFile?.gifOptions ? { ...presetFile.gifOptions } : null,
           image_options: cloneImageOptions(presetFile?.imageOptions),
           audio_options: cloneAudioOptions(presetFile?.audioOptions),

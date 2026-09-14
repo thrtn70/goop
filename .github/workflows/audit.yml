@@ -404,6 +404,17 @@ jobs:
         shell: bash
         run: |
           CARGO_INCREMENTAL=0 cargo test -p goop-core --test image_options_contract
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test image_alpha_contract -- --list | tee image-alpha-contract-tests.txt
+          test "$(grep -c ': test$' image-alpha-contract-tests.txt)" -eq 5
+          for test_name in \
+            alpha_policy_and_receipt_round_trip_exact_rgb_bytes \
+            alpha_policy_rejects_unknown_nested_fields \
+            alpha_shape_is_jpeg_convert_only_and_requires_explicit_color_handling \
+            generated_alpha_policy_binding_matches_the_serde_wire_shape \
+            legacy_request_defaults_alpha_policy_to_none; do
+            grep -qx "$test_name: test" image-alpha-contract-tests.txt
+          done
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test image_alpha_contract
           CARGO_INCREMENTAL=0 cargo test -p goop-config --lib presets::tests
           CARGO_INCREMENTAL=0 cargo test -p goop-queue --lib store::tests
       # The capability check earlier proves the ffmpeg features exist; this

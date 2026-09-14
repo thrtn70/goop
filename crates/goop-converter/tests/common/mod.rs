@@ -385,6 +385,7 @@ pub fn request(
         batch_id: None,
         metadata_policy: None,
         image_color_policy: None,
+        image_alpha_policy: None,
         subtitle: sub,
         image_options: None,
     }

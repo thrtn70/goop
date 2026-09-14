@@ -1,6 +1,7 @@
 import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import type { TrackConvertOptions, TrackPresetPolicy, VideoConvertOptions } from "@/types";
+import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, type ComponentType, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { create } from "zustand";
 import { cloneTrackOptions, loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistence";
@@ -88,6 +89,7 @@ function ownMediaDraft<T>(slot: string, value: T): T {
       ...(file.trackOptions === undefined ? {} : {trackOptions:cloneTrackOptions(file.trackOptions as TrackConvertOptions | null)}),
       ...(file.pendingTrackPolicy === undefined ? {} : {pendingTrackPolicy:file.pendingTrackPolicy ? structuredClone(file.pendingTrackPolicy as TrackPresetPolicy) : null}),
       ...(file.videoTrackPolicyDraft === undefined ? {} : {videoTrackPolicyDraft:cloneVideoTrackPolicyDraft(file.videoTrackPolicyDraft as VideoTrackPolicyDraft | null)}),
+      ...(file.imageAlphaPolicy === undefined ? {} : {imageAlphaPolicy:cloneImageAlphaPolicy(file.imageAlphaPolicy)}),
     })) as T;
   }
   return value;

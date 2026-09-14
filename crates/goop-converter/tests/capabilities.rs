@@ -186,6 +186,9 @@ fn explicit_image_settings_reject_unsupported_sources_and_collisions() {
     request.resolution_cap = None;
     assert!(validate_request(&request, &probe("jpeg")).is_err());
     assert!(validate_request(&request, &opaque_probe("png")).is_err());
+    request.image_color_policy = Some(goop_core::ImageColorPolicy::AssumeSrgb);
+    assert!(validate_request(&request, &opaque_probe("png")).is_ok());
+    request.image_color_policy = None;
 
     request.target = TargetFormat::Png;
     assert!(validate_request(&request, &opaque_probe("jpeg")).is_err());
@@ -442,11 +445,40 @@ async fn inspection_refines_only_source_bound_capabilities_consistently() {
     assert_eq!(inspection.probe.height, Some(5));
     let mut inspected_without_color = inspection.capabilities.clone();
     let mut baseline_without_color = capabilities_for(&inspection.probe);
-    for target in &mut inspected_without_color.targets {
+    let jpeg_settings = inspection
+        .capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_settings
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        jpeg_settings.required_color_policy,
+        Some(goop_core::ImageColorPolicy::AssumeSrgb)
+    );
+    assert!(jpeg_settings.preview_original_available);
+    assert!(!jpeg_settings.preview_fit_within);
+    for (target, baseline) in inspected_without_color
+        .targets
+        .iter_mut()
+        .zip(&baseline_without_color.targets)
+    {
         target.image_color = None;
+        target.image_alpha = None;
+        if let (Some(settings), Some(baseline)) = (
+            target.image_settings.as_mut(),
+            baseline.image_settings.as_ref(),
+        ) {
+            settings.required_color_policy = baseline.required_color_policy;
+            settings.preview_original_available = baseline.preview_original_available;
+            settings.preview_unavailable_reason = baseline.preview_unavailable_reason.clone();
+        }
     }
     for target in &mut baseline_without_color.targets {
         target.image_color = None;
+        target.image_alpha = None;
     }
     assert_eq!(inspected_without_color, baseline_without_color);
     assert!(inspection.capabilities.compression.lossless);
@@ -501,15 +533,21 @@ async fn jpeg_inspection_reports_source_bound_metadata_policy_capabilities() {
     let inspection = goop_converter::capabilities::inspect_source(&resolver, &source)
         .await
         .unwrap();
-    let jpeg = inspection
+    let jpeg_target = inspection
         .capabilities
         .targets
         .iter()
         .find(|target| target.target == TargetFormat::Jpeg)
-        .unwrap()
-        .image_metadata
-        .as_ref()
         .unwrap();
+    assert_eq!(
+        jpeg_target
+            .image_settings
+            .as_ref()
+            .unwrap()
+            .required_color_policy,
+        None
+    );
+    let jpeg = jpeg_target.image_metadata.as_ref().unwrap();
     assert!(jpeg.preserve.available);
     assert!(jpeg.rgb_reencode_preserve.available);
     assert!(jpeg.remove_personal.available);
@@ -801,4 +839,49 @@ fn output_compression_capabilities_do_not_inherit_source_format() {
         .unwrap();
     assert_eq!(jpeg["compression"]["quality"], true);
     assert_eq!(jpeg["compression"]["lossless"], false);
+}
+
+#[test]
+fn transparent_sources_do_not_advertise_jpeg_compression_without_a_background() {
+    for format in ["png", "webp"] {
+        let mut transparent = probe(format);
+        transparent.image_has_alpha = Some(true);
+        let capability = capabilities_for(&transparent)
+            .targets
+            .into_iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap()
+            .compression
+            .unwrap();
+
+        assert!(!capability.quality, "transparent {format} quality");
+        assert!(!capability.target_size, "transparent {format} target size");
+        assert!(!capability.lossless, "transparent {format} lossless");
+        assert!(capability
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("background") && reason.contains("Convert")));
+
+        for mode in [
+            CompressMode::Quality(75),
+            CompressMode::TargetSizeBytes(100_000),
+            CompressMode::LosslessReoptimize,
+        ] {
+            assert!(
+                validate_request(&request(TargetFormat::Jpeg, Some(mode)), &transparent,).is_err()
+            );
+        }
+
+        let opaque = capabilities_for(&opaque_probe(format))
+            .targets
+            .into_iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap()
+            .compression
+            .unwrap();
+        assert!(opaque.quality, "opaque {format} quality");
+        assert!(opaque.target_size, "opaque {format} target size");
+        assert!(!opaque.lossless, "opaque {format} lossless");
+        assert!(opaque.reason.is_none(), "opaque {format} reason");
+    }
 }

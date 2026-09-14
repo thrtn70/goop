@@ -430,6 +430,7 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         }
         let published = staged.publish(&destination, target_bytes, false, &cancel)?;
         Ok(ConvertResult {
+            image_alpha_execution: None,
             compression_execution: None,
             image_metadata_execution: None,
             audio_execution,
@@ -932,6 +933,7 @@ mod tests {
             batch_id: None,
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             subtitle,
             image_options: None,
         }

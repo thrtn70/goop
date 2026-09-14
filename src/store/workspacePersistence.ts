@@ -1,5 +1,6 @@
 import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoOptions";
 import { validateAudioOptions } from "@/features/convert/audioOptions";
+import { validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { parsePresetBundle, PRESET_BUNDLE_VERSION } from "@/features/presets/io";
 import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 
@@ -175,9 +176,11 @@ function validFiles(value: unknown, compress: boolean): boolean {
         quality_preset:file.qualityPreset, resolution_cap:file.resolutionCap,
         compress_mode:compress ? file.mode : null, gif_options:file.gifOptions,
         metadata_policy:file.metadataPolicy, image_color_policy:file.imageColorPolicy,
+        image_alpha_policy:null,
         subtitle:file.subtitle, image_options:file.imageOptions}]}));
       // Drafts retain hidden Automatic quality and temporarily incompatible targets.
       // Validate explicit shape independently; submission performs strict admission.
+      validateImageAlphaPolicy(file.imageAlphaPolicy);
       validateAudioOptions(file.audioOptions);
       validateVideoOptions(file.videoOptions);
       validateTrackOptions(file.trackOptions);

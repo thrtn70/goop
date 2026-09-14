@@ -122,6 +122,9 @@ pub struct JobResult {
     pub image_metadata_execution: Option<crate::convert::ImageMetadataExecution>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub image_alpha_execution: Option<crate::convert::ImageAlphaExecution>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub compression_execution: Option<crate::convert::CompressionExecution>,
 }
 

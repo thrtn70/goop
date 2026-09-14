@@ -1,11 +1,12 @@
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
 import { useEffect, useRef, useState } from "react";
-import type { CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
+import type { CompressMode, GifOptions, ImageAlphaPolicy, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 import { useAppStore } from "@/store/appStore";
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 import { formatError } from "@/ipc/error";
 import { cloneTrackPresetPolicy } from "@/features/convert/videoTrackOptions";
+import { cloneImageAlphaPolicy, validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 
 interface PresetSaveDialogProps {
   open: boolean;
@@ -23,6 +24,7 @@ interface PresetSaveDialogProps {
     compress_mode?: CompressMode | null;
     metadata_policy?: MetadataPolicy | null;
     image_color_policy?: ImageColorPolicy | null;
+    image_alpha_policy?: ImageAlphaPolicy | null;
     gif_options?: GifOptions | null;
     subtitle?: SubtitleOptions | null;
     image_options?: ImageConvertOptions | null;
@@ -61,6 +63,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         gif_options: snapshot.gif_options ? { ...snapshot.gif_options } : null,
         subtitle: snapshot.subtitle ? { ...snapshot.subtitle } : null,
         image_options: cloneImageOptions(snapshot.image_options),
+        image_alpha_policy: cloneImageAlphaPolicy(snapshot.image_alpha_policy),
       };
     }
   }, [open, snapshot, validationError]);
@@ -92,6 +95,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
       const videoOptions = validateVideoRequest(saved);
       const audioOptions = validateAudioRequest(saved);
       const imageOptions = validateImageOptions(saved.image_options);
+      const imageAlphaPolicy = validateImageAlphaPolicy(saved.image_alpha_policy);
       if (imageOptions && saved.compress_mode) throw new Error("Compression and image settings cannot be combined");
       const preset = {
         id: newId(),
@@ -102,6 +106,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
         compress_mode: saved.compress_mode ?? null,
         metadata_policy: saved.metadata_policy ?? null,
         image_color_policy: saved.image_color_policy ?? null,
+        image_alpha_policy: cloneImageAlphaPolicy(imageAlphaPolicy),
         gif_options: saved.gif_options ?? null,
         subtitle: saved.subtitle ?? null,
         image_options: cloneImageOptions(imageOptions),

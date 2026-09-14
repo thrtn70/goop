@@ -3,9 +3,9 @@ use crate::imagemagick_probe::probe_image;
 use crate::metadata;
 use crate::naming::{allocate_output_path, stem_of};
 use goop_core::{
-    CompressMode, CompressionExecution, ConvertRequest, ConvertResult, EventSink, GoopError,
-    ImageColorHandling, ImageColorPolicy, ImageMetadataExecution, JobId, MetadataPolicy,
-    ProbeResult, ProgressEvent, TargetFormat,
+    AlphaCompositing, CompressMode, CompressionExecution, ConvertRequest, ConvertResult, EventSink,
+    GoopError, ImageAlphaExecution, ImageAlphaPolicy, ImageColorHandling, ImageColorPolicy,
+    ImageMetadataExecution, JobId, MetadataPolicy, ProbeResult, ProgressEvent, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
@@ -78,8 +78,9 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             _ => None,
         };
         let explicit_request = (req.image_options.is_some()
-            || req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve)
-            .then(|| req.clone());
+            || req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve
+            || req.image_alpha_policy.is_some())
+        .then(|| req.clone());
         let outcome_slot = Arc::new(std::sync::Mutex::new(None));
         let worker_outcome = Arc::clone(&outcome_slot);
         let worker_cancel = cancel.clone();
@@ -104,6 +105,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
                         )?;
                     }
                     ImageProcessingOutcome {
+                        image_alpha: None,
                         image_metadata: source
                             .as_ref()
                             .map(|source| jpeg_metadata_execution(source, metadata_policy, true))
@@ -143,6 +145,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         });
 
         Ok(ConvertResult {
+            image_alpha_execution: outcome.image_alpha,
             compression_execution: outcome.compression,
             image_metadata_execution: outcome.image_metadata,
             video_track_execution: None,
@@ -172,6 +175,7 @@ fn process_color_managed(
         ));
     }
     goop_core::validate_image_color_request_shape(request)?;
+    goop_core::validate_image_alpha_request_shape(request)?;
     if let Some(options) = request.image_options.as_ref() {
         crate::image_options::validate_options(options)?;
     }
@@ -182,12 +186,28 @@ fn process_color_managed(
         prepared.inspection.orientation != image::metadata::Orientation::NoTransforms;
     let source_had_exif = prepared.inspection.has_exif;
     let pixels = prepared.decode()?;
-    let mut transformed = crate::color::transform_pixels(
-        pixels,
-        prepared.inspection.profile.clone(),
-        policy,
-        cancel,
-    )?;
+    let source_had_alpha = prepared.inspection.layout.has_alpha();
+    if source_had_alpha && request.image_alpha_policy.is_none() {
+        return Err(GoopError::InvalidRequest(
+            "JPEG removes transparency; choose an explicit background before converting.".into(),
+        ));
+    }
+    if source_had_alpha && request.target != TargetFormat::Jpeg {
+        return Err(GoopError::InvalidRequest(
+            "Transparency flattening is currently available only for JPEG output.".into(),
+        ));
+    }
+    let mut transformed = if request.image_alpha_policy.is_some() {
+        crate::color::transform_and_flatten_pixels(
+            pixels,
+            prepared.inspection.profile.clone(),
+            policy,
+            request.image_alpha_policy,
+            cancel,
+        )?
+    } else {
+        crate::color::transform_pixels(pixels, prepared.inspection.profile.clone(), policy, cancel)?
+    };
     if let Some(options) = request.image_options.as_ref() {
         let dimensions = crate::image_options::output_dimensions(
             transformed.pixels.dimensions(),
@@ -246,6 +266,18 @@ fn process_color_managed(
         );
     }
     Ok(ImageProcessingOutcome {
+        image_alpha: request.image_alpha_policy.map(|requested_policy| {
+            let background = match requested_policy {
+                ImageAlphaPolicy::Flatten { background } => background,
+            };
+            ImageAlphaExecution {
+                requested_policy,
+                source_had_alpha,
+                flattened: source_had_alpha,
+                background,
+                compositing: AlphaCompositing::LinearSrgb,
+            }
+        }),
         image_metadata: Some(ImageMetadataExecution {
             requested_policy: request.metadata_policy.unwrap_or_default(),
             requested_color_policy: policy,
@@ -264,6 +296,7 @@ fn process_color_managed(
 struct ImageProcessingOutcome {
     image_metadata: Option<ImageMetadataExecution>,
     compression: Option<CompressionExecution>,
+    image_alpha: Option<ImageAlphaExecution>,
 }
 
 fn jpeg_metadata_execution(
@@ -517,6 +550,7 @@ fn process_image_with_metadata(
         ],
     });
     Ok(ImageProcessingOutcome {
+        image_alpha: None,
         image_metadata,
         compression: None,
     })
@@ -587,6 +621,7 @@ fn process_snapshot_jpeg(
     verify_and_write_snapshot_jpeg(&plan, output, &bytes, cancel)?;
     source.verify_unchanged(input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
     Ok(ImageProcessingOutcome {
+        image_alpha: None,
         image_metadata: Some(jpeg_metadata_execution(source, policy, false)?),
         compression,
     })
@@ -639,7 +674,17 @@ fn metadata_policy_name(policy: MetadataPolicy) -> &'static str {
 /// outputs run through `jpegxl-rs::encoder_builder` (the `image` crate
 /// has no JXL codec). Everything else uses `image::save_with_format`.
 fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<(), GoopError> {
-    let img = decode_any(input)?;
+    let img = if target == TargetFormat::Jpeg {
+        decode_for_jpeg_output(input)?
+    } else {
+        decode_any(input)?
+    };
+
+    if target == TargetFormat::Jpeg && img.color().has_alpha() {
+        return Err(GoopError::InvalidRequest(
+            "JPEG removes transparency; choose an explicit background before converting.".into(),
+        ));
+    }
 
     if matches!(target, TargetFormat::JpegXl) {
         return encode_jxl(&img, output);
@@ -708,6 +753,20 @@ pub(crate) fn decode_heic_explicit(input: &Path) -> Result<image::DynamicImage, 
     decode_heic_with_limits(input, true)
 }
 
+fn decode_for_jpeg_output(input: &Path) -> Result<image::DynamicImage, GoopError> {
+    let is_heic = input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
+        });
+    if is_heic {
+        decode_heic_explicit(input)
+    } else {
+        decode_any(input)
+    }
+}
+
 fn decode_heic_with_limits(input: &Path, explicit: bool) -> Result<image::DynamicImage, GoopError> {
     use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
 
@@ -731,8 +790,9 @@ fn decode_heic_with_limits(input: &Path, explicit: bool) -> Result<image::Dynami
     if explicit {
         crate::jpeg_controls::check_raster(width, height, 3)?;
         if handle.has_alpha_channel() {
-            return Err(image_error(
-                "JPEG settings are unavailable for HEIC transparency",
+            return Err(GoopError::InvalidRequest(
+                "JPEG removes transparency; choose an explicit background before converting."
+                    .into(),
             ));
         }
         if crate::heif_header::primary_item_format(input, handle.item_id())? != "HEIC" {
@@ -1096,13 +1156,21 @@ fn compress_jpeg_with_cancel(
     mode: CompressMode,
     cancel: &CancellationToken,
 ) -> Result<(), GoopError> {
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
     if matches!(mode, CompressMode::LosslessReoptimize) {
         return Err(image_error("JPEG lossless reoptimization is unavailable; choose Quality or Target Size for lossy recompression"));
     }
     // Route through decode_any so HEIC + JXL inputs reach the dedicated
     // decoders. image::open would fail on those formats with a generic
     // "unsupported format" error.
-    let img = decode_any(input)?;
+    let img = decode_for_jpeg_output(input)?;
+    if img.color().has_alpha() {
+        return Err(GoopError::InvalidRequest(
+            "JPEG removes transparency; choose an explicit background before compressing.".into(),
+        ));
+    }
 
     let checkpoint = || {
         if cancel.is_cancelled() {
@@ -1227,6 +1295,333 @@ mod tests {
         .unwrap()
     }
 
+    struct SilentSink;
+    impl EventSink for SilentSink {
+        fn emit_progress(&self, _: ProgressEvent) {}
+        fn emit_queue(&self, _: goop_core::QueueEvent) {}
+        fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+    }
+
+    #[tokio::test]
+    async fn transparent_png_requires_background_and_never_publishes_legacy_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("transparent.png");
+        let output = dir.path().join("output.jpg");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 255, 0]))
+            .save(&input)
+            .unwrap();
+        let request: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": "jpeg"
+        }))
+        .unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+
+        let error = backend
+            .convert(JobId::new(), &request, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.user_message().contains("background"));
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_heic_jpeg_paths_refuse_alpha_before_decode_and_keep_opaque_compatibility() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let resolver = BinaryResolver::new(fixtures.clone());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+        let directory = tempfile::tempdir().unwrap();
+
+        for (index, compress_mode) in [None, Some(CompressMode::Quality(75))]
+            .into_iter()
+            .enumerate()
+        {
+            let output = directory.path().join(format!("alpha-{index}.jpg"));
+            let request: ConvertRequest = serde_json::from_value(serde_json::json!({
+                "input_path": fixtures.join("alpha.heic"),
+                "output_path": output,
+                "target": "jpeg",
+                "compress_mode": compress_mode
+            }))
+            .unwrap();
+
+            let error = backend
+                .convert(JobId::new(), &request, CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(error.user_message().contains("background"), "{error:?}");
+            assert!(!output.exists());
+        }
+
+        let opaque_output = directory.path().join("opaque.jpg");
+        let opaque: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": fixtures.join("sample.heic"),
+            "output_path": opaque_output,
+            "target": "jpeg"
+        }))
+        .unwrap();
+        backend
+            .convert(JobId::new(), &opaque, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(opaque_output.exists());
+    }
+
+    #[tokio::test]
+    async fn explicit_flatten_precedes_resize_and_reports_verified_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("transparent.png");
+        let output = dir.path().join("output.jpg");
+        let pixels =
+            image::RgbaImage::from_raw(3, 1, vec![0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 255])
+                .unwrap();
+        pixels.save(&input).unwrap();
+        let mut request = color_request(&input, &output, TargetFormat::Jpeg);
+        request.image_alpha_policy = Some(ImageAlphaPolicy::Flatten {
+            background: goop_core::SrgbColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+        });
+        request.image_options = Some(goop_core::ImageConvertOptions {
+            jpeg_quality: 100,
+            resize: goop_core::ImageResize::FitWithin {
+                width: 1,
+                height: 1,
+            },
+        });
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+
+        let result = backend
+            .convert(JobId::new(), &request, CancellationToken::new())
+            .await
+            .unwrap();
+        let receipt = result.image_alpha_execution.unwrap();
+        assert!(receipt.source_had_alpha);
+        assert!(receipt.flattened);
+        assert_eq!(receipt.compositing, AlphaCompositing::LinearSrgb);
+        let output_pixel = image::open(&output).unwrap().to_rgb8().get_pixel(0, 0).0;
+        assert!(
+            output_pixel.iter().all(|channel| *channel <= 2),
+            "flatten-before-resize must stay black, got {output_pixel:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_background_is_inert_for_opaque_source_except_for_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("opaque.png");
+        let legacy_output = dir.path().join("legacy.jpg");
+        let explicit_output = dir.path().join("explicit.jpg");
+        image::RgbImage::from_fn(16, 8, |x, y| {
+            image::Rgb([x as u8 * 11, y as u8 * 23, (x + y) as u8 * 7])
+        })
+        .save(&input)
+        .unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+
+        let legacy = backend
+            .convert(
+                JobId::new(),
+                &color_request(&input, &legacy_output, TargetFormat::Jpeg),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut explicit = color_request(&input, &explicit_output, TargetFormat::Jpeg);
+        let background = goop_core::SrgbColor {
+            red: 239,
+            green: 41,
+            blue: 83,
+        };
+        explicit.image_alpha_policy = Some(ImageAlphaPolicy::Flatten { background });
+        let explicit = backend
+            .convert(JobId::new(), &explicit, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let legacy_pixels = image::open(&legacy_output).unwrap().to_rgb8();
+        let explicit_pixels = image::open(&explicit_output).unwrap().to_rgb8();
+        assert_eq!(legacy_pixels.dimensions(), (16, 8));
+        assert_eq!(explicit_pixels.dimensions(), (16, 8));
+        assert_eq!(legacy_pixels, explicit_pixels);
+
+        let legacy_inspection =
+            crate::color::inspect_bytes(std::fs::read(&legacy_output).unwrap().into()).unwrap();
+        let explicit_inspection =
+            crate::color::inspect_bytes(std::fs::read(&explicit_output).unwrap().into()).unwrap();
+        assert_eq!(legacy_inspection.layout, explicit_inspection.layout);
+        assert_eq!(legacy_inspection.dimensions, explicit_inspection.dimensions);
+        assert!(!legacy_inspection.has_exif);
+        assert!(!explicit_inspection.has_exif);
+
+        let verify_srgb_profile = |profile: Option<Vec<u8>>| {
+            use lcms2::{Intent, PixelFormat, Profile, Transform};
+
+            let profile = profile.expect("managed JPEG must carry a destination profile");
+            assert_eq!(crate::color::validate_profile(&profile).unwrap(), b"RGB ");
+            let source = Profile::new_icc(&profile).expect("destination profile must parse");
+            let destination = Profile::new_srgb();
+            let transform = Transform::new(
+                &source,
+                PixelFormat::RGB_8,
+                &destination,
+                PixelFormat::RGB_8,
+                Intent::Perceptual,
+            )
+            .expect("destination profile must describe transformable sRGB");
+            let samples = [[0_u8, 0, 0], [32, 96, 192], [255, 255, 255]];
+            let mut transformed = [[0_u8; 3]; 3];
+            transform.transform_pixels(&samples, &mut transformed);
+            assert_eq!(transformed, samples);
+        };
+        verify_srgb_profile(legacy_inspection.profile);
+        verify_srgb_profile(explicit_inspection.profile);
+
+        assert_eq!(legacy.image_alpha_execution, None);
+        assert_eq!(
+            legacy.image_metadata_execution,
+            explicit.image_metadata_execution
+        );
+        let metadata = explicit.image_metadata_execution.unwrap();
+        assert_eq!(
+            metadata.requested_color_policy,
+            ImageColorPolicy::AssumeSrgb
+        );
+        assert_eq!(metadata.color_handling, ImageColorHandling::AssumedSrgb);
+        assert!(metadata.destination_srgb_profile_attached);
+        let receipt = explicit.image_alpha_execution.unwrap();
+        assert!(!receipt.source_had_alpha);
+        assert!(!receipt.flattened);
+        assert_eq!(receipt.background, background);
+    }
+
+    #[tokio::test]
+    async fn opaque_png_image_settings_require_explicit_color_and_execute_when_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("opaque.png");
+        let output = dir.path().join("output.jpg");
+        image::RgbImage::from_pixel(8, 4, image::Rgb([30, 90, 180]))
+            .save(&input)
+            .unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let options = goop_core::ImageConvertOptions {
+            jpeg_quality: 90,
+            resize: goop_core::ImageResize::FitWithin {
+                width: 4,
+                height: 4,
+            },
+        };
+        let mut missing_policy: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": "jpeg",
+            "image_options": options
+        }))
+        .unwrap();
+
+        let inspection = crate::capabilities::inspect_source(&resolver, &input)
+            .await
+            .unwrap();
+        let settings = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap()
+            .image_settings
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            settings.required_color_policy,
+            Some(ImageColorPolicy::AssumeSrgb)
+        );
+        assert!(settings.preview_original_available);
+        assert!(!settings.preview_fit_within);
+        assert!(settings
+            .preview_unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Fit within")));
+
+        let error = crate::capabilities::validate_request_source(&resolver, &missing_policy)
+            .await
+            .unwrap_err();
+        assert!(error.user_message().contains("explicit color"), "{error:?}");
+
+        missing_policy.image_color_policy = Some(ImageColorPolicy::AssumeSrgb);
+        crate::capabilities::validate_request_source(&resolver, &missing_policy)
+            .await
+            .unwrap();
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+        let result = backend
+            .convert(JobId::new(), &missing_policy, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            image::image_dimensions(&result.output_path).unwrap(),
+            (4, 2)
+        );
+        assert!(result.image_metadata_execution.is_some());
+        assert_eq!(result.image_alpha_execution, None);
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_alpha_conversion_preserves_destination_and_leaves_no_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("transparent.png");
+        let output = dir.path().join("output.jpg");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 90, 128]))
+            .save(&input)
+            .unwrap();
+        std::fs::write(&output, b"existing destination").unwrap();
+        let mut request = color_request(&input, &output, TargetFormat::Jpeg);
+        request.image_alpha_policy = Some(ImageAlphaPolicy::Flatten {
+            background: goop_core::SrgbColor {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
+        });
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(SilentSink));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = backend
+            .convert(JobId::new(), &request, cancel)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GoopError::Cancelled));
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing destination");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn transparent_webp_quality_and_target_size_refuse_before_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("transparent.webp");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 0]))
+            .save(&input)
+            .unwrap();
+        for mode in [
+            CompressMode::Quality(80),
+            CompressMode::TargetSizeBytes(4096),
+        ] {
+            let output = dir.path().join(format!("{:?}.jpg", mode));
+            let error = compress_jpeg_with_cancel(&input, &output, mode, &CancellationToken::new())
+                .unwrap_err();
+            assert!(error.user_message().contains("background"));
+            assert!(!output.exists());
+        }
+    }
+
     #[test]
     fn assume_srgb_writes_verified_rgb_with_destination_profile() {
         use image::{Rgb, RgbImage};
@@ -1328,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_color_refuses_alpha_before_publication() {
+    fn explicit_color_refuses_unresolved_alpha_before_publication() {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("alpha.png");
         let output = directory.path().join("output.png");
@@ -1336,7 +1731,7 @@ mod tests {
         let request = color_request(&input, &output, TargetFormat::Png);
         let error = process_color_managed(&input, &output, &request, &CancellationToken::new())
             .unwrap_err();
-        assert!(error.user_message().contains("without alpha"));
+        assert!(error.user_message().contains("background"));
         assert!(!output.exists());
     }
 
@@ -2470,7 +2865,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input.png");
         let output = dir.path().join("output.jpg");
-        write_test_png(&input, 64, 64);
+        image::RgbImage::from_pixel(64, 64, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
         let prepared = decode_any(&input).unwrap().into_rgb8();
         let target = encode_jpeg(&prepared, 75).unwrap().len() as u64;
         let expected = (1..=100)

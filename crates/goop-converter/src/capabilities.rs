@@ -3,11 +3,11 @@ use crate::{
     backend_for_extension, BackendKind, ConversionBackend, FfmpegBackend, ImageMagickBackend,
 };
 use goop_core::{
-    ColorPolicyAvailability, CompressMode, CompressionCapabilities, ConversionCapabilities,
-    ConvertRequest, GoopError, ImageColorCapabilities, ImageColorPolicy, ImageMetadataCapabilities,
-    ImageOrientationStatus, ImageResize, ImageSettingsCapabilities, MetadataPolicy,
-    MetadataPolicyAvailability, ProbeResult, SourceKind, TargetCapability, TargetFormat,
-    TrackSourceBinding,
+    AlphaPolicyAvailability, ColorPolicyAvailability, CompressMode, CompressionCapabilities,
+    ConversionCapabilities, ConvertRequest, GoopError, ImageAlphaCapabilities,
+    ImageColorCapabilities, ImageColorPolicy, ImageMetadataCapabilities, ImageOrientationStatus,
+    ImageResize, ImageSettingsCapabilities, MetadataPolicy, MetadataPolicyAvailability,
+    ProbeResult, SourceKind, SrgbColor, TargetCapability, TargetFormat, TrackSourceBinding,
 };
 use goop_sidecar::BinaryResolver;
 use img_parts::Bytes;
@@ -37,7 +37,19 @@ pub fn compression_for(target: TargetFormat) -> CompressionCapabilities {
 fn compression_for_image_target(
     target: TargetFormat,
     source_format: &str,
+    source_has_alpha: Option<bool>,
 ) -> CompressionCapabilities {
+    if target == TargetFormat::Jpeg && source_has_alpha == Some(true) {
+        return CompressionCapabilities {
+            quality: false,
+            target_size: false,
+            lossless: false,
+            reason: Some(
+                "JPEG compression cannot remove transparency. Use Convert and choose an explicit background."
+                    .into(),
+            ),
+        };
+    }
     if target == TargetFormat::Webp && !matches!(source_format, "jpg" | "jpeg" | "png" | "webp") {
         return CompressionCapabilities {
             quality: false,
@@ -162,6 +174,8 @@ fn capabilities_for_bound_source(
             };
             TargetCapability {
                 image_color: image.then(|| base_image_color_capabilities(target)),
+                image_alpha: (image && target == Jpeg)
+                    .then(|| base_image_alpha_capabilities(target)),
                 image_metadata: image.then(|| base_image_metadata_capabilities(
                     preserves_metadata,
                     source_target == Some(Jpeg) && target == Jpeg,
@@ -205,7 +219,7 @@ fn capabilities_for_bound_source(
                     None
                 },
                 compression: Some(if image {
-                    compression_for_image_target(target, &fmt)
+                    compression_for_image_target(target, &fmt, probe.image_has_alpha)
                 } else {
                     compression_for(target)
                 }),
@@ -278,15 +292,155 @@ fn base_image_color_capabilities(target: TargetFormat) -> ImageColorCapabilities
     }
 }
 
-fn enrich_image_color_capabilities(
+fn base_image_alpha_capabilities(target: TargetFormat) -> ImageAlphaCapabilities {
+    let reason = if target == TargetFormat::Jpeg {
+        "Fresh transparency and color-profile inspection is required before flattening."
+    } else {
+        "Transparency flattening is currently available only for JPEG output."
+    };
+    ImageAlphaCapabilities {
+        source_has_alpha: None,
+        flatten: AlphaPolicyAvailability {
+            available: false,
+            reason: Some(reason.into()),
+            summary: "Composite transparency over an explicit sRGB background in linear sRGB."
+                .into(),
+        },
+        required_color_policy: None,
+        suggested_background: SrgbColor {
+            red: 255,
+            green: 255,
+            blue: 255,
+        },
+    }
+}
+
+fn enrich_image_alpha_capabilities(
     inspection: &Result<crate::color::SourceInspection, String>,
+    probed_alpha: Option<bool>,
     capabilities: &mut ConversionCapabilities,
 ) {
     for target in &mut capabilities.targets {
+        let Some(alpha) = target.image_alpha.as_mut() else {
+            continue;
+        };
+        if target.target != TargetFormat::Jpeg {
+            continue;
+        }
+        alpha.source_has_alpha = probed_alpha;
+        match inspection {
+            Ok(source) => {
+                alpha.source_has_alpha = Some(source.layout.has_alpha());
+                alpha.required_color_policy = Some(if source.profile.is_some() {
+                    ImageColorPolicy::ConvertToSrgb
+                } else {
+                    ImageColorPolicy::AssumeSrgb
+                });
+                alpha.flatten = AlphaPolicyAvailability {
+                    available: true,
+                    reason: None,
+                    summary: if source.layout.has_alpha() {
+                        "Transparency will be composited over the selected background in linear sRGB."
+                            .into()
+                    } else {
+                        "This source is opaque; the saved background remains available for transparent inputs."
+                            .into()
+                    },
+                };
+            }
+            Err(reason) => {
+                alpha.flatten.reason = Some(reason.clone());
+            }
+        }
+    }
+}
+
+fn enrich_image_color_capabilities(
+    inspection: &Result<crate::color::SourceInspection, String>,
+    probe: &ProbeResult,
+    capabilities: &mut ConversionCapabilities,
+) {
+    let png_source = probe
+        .image_format
+        .as_deref()
+        .is_some_and(|format| format.eq_ignore_ascii_case("png"));
+    let image_settings_required_color_policy = if png_source {
+        inspection.as_ref().ok().map(|source| {
+            if source.profile.is_some() {
+                ImageColorPolicy::ConvertToSrgb
+            } else {
+                ImageColorPolicy::AssumeSrgb
+            }
+        })
+    } else {
+        None
+    };
+    for target in &mut capabilities.targets {
+        if target.target == TargetFormat::Jpeg {
+            if let Some(settings) = target.image_settings.as_mut() {
+                if png_source {
+                    match inspection {
+                        Ok(_) => {
+                            settings.required_color_policy = image_settings_required_color_policy;
+                            if settings.available {
+                                let original_reason = if probe.file_size
+                                    > crate::preview::MAX_INPUT_BYTES
+                                {
+                                    Some(
+                                        "Image preview source exceeds the 64 MiB input limit."
+                                            .into(),
+                                    )
+                                } else if probe.width.zip(probe.height).is_none_or(
+                                    |(width, height)| {
+                                        width == 0
+                                            || height == 0
+                                            || u64::from(width) * u64::from(height)
+                                                > crate::preview::MAX_SOURCE_PIXELS
+                                    },
+                                ) {
+                                    Some(
+                                        "Image preview source exceeds the 4 million decoded-pixel limit."
+                                            .into(),
+                                    )
+                                } else {
+                                    None
+                                };
+                                settings.preview_original_available = original_reason.is_none();
+                                settings.preview_unavailable_reason =
+                                    original_reason.or_else(|| {
+                                        Some(
+                                            "Fit within image samples are not available yet."
+                                                .into(),
+                                        )
+                                    });
+                            }
+                        }
+                        Err(reason) => {
+                            settings.available = false;
+                            settings.reason = Some(reason.clone());
+                            settings.required_color_policy = None;
+                            settings.preview_original_available = false;
+                            settings.preview_fit_within = false;
+                            settings.preview_unavailable_reason = Some(reason.clone());
+                        }
+                    }
+                }
+            }
+        }
         let Some(color) = target.image_color.as_mut() else {
             continue;
         };
         if !matches!(target.target, TargetFormat::Jpeg | TargetFormat::Png) {
+            continue;
+        }
+        if target.target == TargetFormat::Png
+            && inspection
+                .as_ref()
+                .is_ok_and(|source| source.layout.has_alpha())
+        {
+            let reason = "Explicit color handling is not available for alpha-bearing PNG output.";
+            color.convert_to_srgb.reason = Some(reason.into());
+            color.assume_srgb.reason = Some(reason.into());
             continue;
         }
         match inspection {
@@ -660,6 +814,56 @@ fn validate_color_policy(
     }
 }
 
+fn validate_alpha_policy(
+    req: &ConvertRequest,
+    capabilities: &ConversionCapabilities,
+) -> Result<(), GoopError> {
+    let target = capabilities
+        .targets
+        .iter()
+        .find(|target| target.target == req.target)
+        .and_then(|target| target.image_alpha.as_ref());
+    let source_has_alpha = target.and_then(|alpha| alpha.source_has_alpha);
+    if req.image_alpha_policy.is_none() {
+        return if source_has_alpha == Some(true) {
+            Err(GoopError::InvalidRequest(
+                "JPEG removes transparency; choose an explicit background before converting."
+                    .into(),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let alpha = target.ok_or_else(|| {
+        GoopError::InvalidRequest(
+            "Transparency flattening is unavailable for this source and output.".into(),
+        )
+    })?;
+    if !alpha.flatten.available {
+        return Err(GoopError::InvalidRequest(
+            alpha
+                .flatten
+                .reason
+                .clone()
+                .unwrap_or_else(|| alpha.flatten.summary.clone()),
+        ));
+    }
+    if alpha.required_color_policy != req.image_color_policy {
+        return Err(GoopError::InvalidRequest(match alpha.required_color_policy {
+            Some(ImageColorPolicy::ConvertToSrgb) => {
+                "This source has an embedded profile; choose Convert to sRGB before flattening."
+                    .into()
+            }
+            Some(ImageColorPolicy::AssumeSrgb) => {
+                "This source has no ICC profile; explicitly choose Assume sRGB before flattening."
+                    .into()
+            }
+            _ => "The selected color policy cannot flatten this source.".into(),
+        }));
+    }
+    Ok(())
+}
+
 fn image_settings_for(
     probe: &ProbeResult,
     target: TargetFormat,
@@ -674,6 +878,7 @@ fn image_settings_for(
         .unwrap_or("")
         .to_ascii_lowercase();
     let jpeg = matches!(format.as_str(), "jpg" | "jpeg");
+    let png = format == "png";
     let heic = format == "heic";
     let raw = format == "raw" || crate::raw::is_raw_extension(&format);
     let dimensions = probe.width.zip(probe.height);
@@ -683,12 +888,12 @@ fn image_settings_for(
         })
         .map(|error| error.user_message());
 
-    let reason = if probe.source_kind != SourceKind::Image || !(jpeg || heic || raw) {
-        Some("Explicit JPEG settings are available for JPEG, HEIC and RAW sources.".into())
+    let reason = if probe.source_kind != SourceKind::Image || !(jpeg || png || heic || raw) {
+        Some("Explicit JPEG settings are available for JPEG, PNG, HEIC and RAW sources.".into())
     } else if raw && !cfg!(target_os = "macos") {
         Some("RAW rendering requires macOS.".into())
-    } else if probe.image_has_alpha == Some(true) {
-        Some("JPEG settings are unavailable for images with transparency.".into())
+    } else if !png && probe.image_has_alpha == Some(true) {
+        Some("JPEG settings are unavailable for unsupported transparent sources.".into())
     } else if probe.image_has_alpha.is_none() {
         Some("JPEG settings require a source whose opacity can be verified.".into())
     } else if dimensions.is_none() {
@@ -720,6 +925,7 @@ fn image_settings_for(
     Some(ImageSettingsCapabilities {
         available,
         reason,
+        required_color_policy: None,
         quality_min: 1,
         quality_max: 100,
         default_quality: 75,
@@ -742,6 +948,7 @@ fn refused(reason: impl Into<String>) -> GoopError {
 
 /// The probe must be obtained from the engine's source read, never from client input.
 pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(), GoopError> {
+    goop_core::validate_image_alpha_request_shape(req)?;
     goop_core::validate_video_request(req)?;
     goop_core::validate_audio_request(req)?;
     goop_core::validate_track_request(req)?;
@@ -784,6 +991,24 @@ pub fn validate_request(req: &ConvertRequest, probe: &ProbeResult) -> Result<(),
                 "Image settings cannot be combined with GIF or subtitle controls.".into(),
             ));
         }
+        if probe
+            .image_format
+            .as_deref()
+            .is_some_and(|format| format.eq_ignore_ascii_case("png"))
+            && req.image_color_policy.unwrap_or_default() == ImageColorPolicy::Preserve
+        {
+            return Err(GoopError::InvalidRequest(
+                "PNG JPEG settings require explicit color handling.".into(),
+            ));
+        }
+    }
+    if req.target == TargetFormat::Jpeg
+        && probe.image_has_alpha == Some(true)
+        && req.image_alpha_policy.is_none()
+    {
+        return Err(GoopError::InvalidRequest(
+            "JPEG removes transparency; choose an explicit background before converting.".into(),
+        ));
     }
     let caps = capabilities_for(probe);
     let target = caps
@@ -851,6 +1076,7 @@ pub async fn validate_request_source(
     req: &ConvertRequest,
 ) -> Result<(), GoopError> {
     goop_core::validate_image_color_request_shape(req)?;
+    goop_core::validate_image_alpha_request_shape(req)?;
     let path = goop_core::path::expand(&req.input_path);
     let extension = path
         .extension()
@@ -903,10 +1129,20 @@ pub async fn validate_request_source(
                 .as_ref()
                 .expect("image inspection exists")
                 .color,
+            &probe,
+            &mut capabilities,
+        );
+        enrich_image_alpha_capabilities(
+            &image_inspection
+                .as_ref()
+                .expect("image inspection exists")
+                .color,
+            probe.image_has_alpha,
             &mut capabilities,
         );
         validate_metadata_policy(req, &capabilities)?;
         validate_color_policy(req, &capabilities)?;
+        validate_alpha_policy(req, &capabilities)?;
     }
     Ok(())
 }
@@ -953,7 +1189,12 @@ pub async fn inspect_source(
         &mut capabilities,
     );
     if let Some(inspection) = image_inspection.as_ref() {
-        enrich_image_color_capabilities(&inspection.color, &mut capabilities);
+        enrich_image_color_capabilities(&inspection.color, &inspection.probe, &mut capabilities);
+        enrich_image_alpha_capabilities(
+            &inspection.color,
+            inspection.probe.image_has_alpha,
+            &mut capabilities,
+        );
     }
     Ok(goop_core::ConversionInspection {
         probe,
@@ -1083,7 +1324,12 @@ pub async fn inspect_source_with_encoders(
         &mut capabilities,
     );
     if let Some(inspection) = image_inspection.as_ref() {
-        enrich_image_color_capabilities(&inspection.color, &mut capabilities);
+        enrich_image_color_capabilities(&inspection.color, &inspection.probe, &mut capabilities);
+        enrich_image_alpha_capabilities(
+            &inspection.color,
+            inspection.probe.image_has_alpha,
+            &mut capabilities,
+        );
     }
     Ok(goop_core::ConversionInspection {
         probe,
@@ -1311,5 +1557,176 @@ mod tests {
                 .contains("source routed to the image converter"),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn rgba_png_inspection_exposes_source_bound_alpha_contract_and_requires_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([20, 40, 80, 128]))
+            .save(&input)
+            .unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_owned());
+
+        let inspection = inspect_source(&resolver, &input).await.unwrap();
+        assert_eq!(inspection.probe.image_has_alpha, Some(true));
+        let jpeg = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap();
+        let alpha = jpeg.image_alpha.as_ref().unwrap();
+        assert_eq!(alpha.source_has_alpha, Some(true));
+        assert!(alpha.flatten.available);
+        assert_eq!(
+            alpha.required_color_policy,
+            Some(ImageColorPolicy::AssumeSrgb)
+        );
+        assert_eq!(
+            alpha.suggested_background,
+            SrgbColor {
+                red: 255,
+                green: 255,
+                blue: 255
+            }
+        );
+
+        let output = directory.path().join("output.jpg");
+        let missing: ConvertRequest = serde_json::from_value(json!({
+            "input_path": input,
+            "output_path": output,
+            "target": "jpeg"
+        }))
+        .unwrap();
+        assert!(validate_request_source(&resolver, &missing)
+            .await
+            .unwrap_err()
+            .user_message()
+            .contains("background"));
+
+        let explicit: ConvertRequest = serde_json::from_value(json!({
+            "input_path": input,
+            "output_path": output,
+            "target": "jpeg",
+            "image_color_policy": "assume_srgb",
+            "image_alpha_policy": {
+                "kind": "flatten",
+                "background": {"red": 255, "green": 255, "blue": 255}
+            }
+        }))
+        .unwrap();
+        validate_request_source(&resolver, &explicit).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rgba_png_does_not_widen_color_management_for_png_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([20, 40, 80, 128]))
+            .save(&input)
+            .unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_owned());
+
+        let inspection = inspect_source(&resolver, &input).await.unwrap();
+        let png = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Png)
+            .unwrap();
+        let color = png.image_color.as_ref().unwrap();
+        assert!(!color.convert_to_srgb.available);
+        assert!(!color.assume_srgb.available);
+
+        let explicit: ConvertRequest = serde_json::from_value(json!({
+            "input_path": input,
+            "output_path": directory.path().join("output.png"),
+            "target": "png",
+            "image_color_policy": "assume_srgb"
+        }))
+        .unwrap();
+        let error = validate_request_source(&resolver, &explicit)
+            .await
+            .unwrap_err();
+        assert!(error.user_message().contains("not available"), "{error:?}");
+
+        let jpeg = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap();
+        assert!(jpeg.image_color.as_ref().unwrap().assume_srgb.available);
+    }
+
+    #[tokio::test]
+    async fn unsupported_png_layout_keeps_jpeg_settings_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("sixteen-bit.png");
+        image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_pixel(2, 2, image::Luma([32_768]))
+            .save(&input)
+            .unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_owned());
+
+        let inspection = inspect_source(&resolver, &input).await.unwrap();
+        let settings = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap()
+            .image_settings
+            .as_ref()
+            .unwrap();
+        assert!(!settings.available);
+        assert_eq!(settings.required_color_policy, None);
+        assert!(settings
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("8-bit")));
+        assert!(!settings.preview_original_available);
+
+        let request: ConvertRequest = serde_json::from_value(json!({
+            "input_path": input,
+            "output_path": directory.path().join("output.jpg"),
+            "target": "jpeg",
+            "image_color_policy": "assume_srgb",
+            "image_options": {
+                "jpeg_quality": 75,
+                "resize": {"kind": "original"}
+            }
+        }))
+        .unwrap();
+        let error = validate_request_source(&resolver, &request)
+            .await
+            .unwrap_err();
+        assert!(error.user_message().contains("8-bit"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn transparent_webp_reports_alpha_but_keeps_flattening_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.webp");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([20, 40, 80, 128]))
+            .save(&input)
+            .unwrap();
+        let resolver = BinaryResolver::new(directory.path().to_owned());
+
+        let inspection = inspect_source(&resolver, &input).await.unwrap();
+        assert_eq!(inspection.probe.image_has_alpha, Some(true));
+        let alpha = inspection
+            .capabilities
+            .targets
+            .iter()
+            .find(|target| target.target == TargetFormat::Jpeg)
+            .unwrap()
+            .image_alpha
+            .as_ref()
+            .unwrap();
+        assert_eq!(alpha.source_has_alpha, Some(true));
+        assert!(!alpha.flatten.available);
+        assert!(alpha.flatten.reason.is_some());
+        assert_eq!(alpha.required_color_policy, None);
     }
 }

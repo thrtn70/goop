@@ -100,6 +100,70 @@ describe("preset I/O — parse", () => {
     expect(() => parsePresetBundle(JSON.stringify(legacy))).toThrow(/image_color_policy/);
   });
 
+  it("round-trips an exact JPEG alpha background only in schema 10", () => {
+    const alphaPolicy = {
+      kind: "flatten" as const,
+      background: { red: 17, green: 34, blue: 51 },
+    };
+    const serialized = serializePresets([
+      makePreset({
+        name: "Transparent JPEG",
+        target: "jpeg",
+        quality_preset: null,
+        resolution_cap: null,
+        image_color_policy: "assume_srgb",
+        image_alpha_policy: alphaPolicy,
+      }),
+    ]);
+
+    expect(PRESET_BUNDLE_VERSION).toBe(10);
+    expect(parsePresetBundle(serialized)[0].image_alpha_policy).toEqual(alphaPolicy);
+
+    const downgraded = JSON.parse(serialized) as { version: number };
+    downgraded.version = 9;
+    expect(() => parsePresetBundle(JSON.stringify(downgraded))).toThrow(/image_alpha_policy/);
+  });
+
+  it("imports schemas 1 through 9 without synthesizing an alpha background", () => {
+    for (let version = 1; version <= 9; version += 1) {
+      const parsed = parsePresetBundle(JSON.stringify({
+        version,
+        presets: [{
+          name: `Legacy ${version}`,
+          target: "jpeg",
+          quality_preset: null,
+          resolution_cap: null,
+          compress_mode: null,
+        }],
+      }));
+      expect(parsed[0].image_alpha_policy).toBeNull();
+    }
+  });
+
+  it.each([
+    { kind: "flatten", background: { red: -1, green: 0, blue: 0 } },
+    { kind: "flatten", background: { red: 0, green: 256, blue: 0 } },
+    { kind: "flatten", background: { red: 0.5, green: 0, blue: 0 } },
+    { kind: "flatten", background: { red: 0, green: 0, blue: 0 }, extra: true },
+    { kind: "flatten", background: { red: 0, green: 0 } },
+    { kind: "flatten", background: { red: "0", green: 0, blue: 0 } },
+    { kind: "flatten", background: { red: null, green: 0, blue: 0 } },
+    { kind: "flatten", background: [] },
+  ])("rejects malformed schema 10 alpha policy: %j", (image_alpha_policy) => {
+    expect(() => parsePresetBundle(JSON.stringify({
+      version: 10,
+      presets: [{
+        name: "Malformed alpha",
+        target: "jpeg",
+        quality_preset: null,
+        resolution_cap: null,
+        compress_mode: null,
+        image_color_policy: "assume_srgb",
+        image_alpha_policy,
+      }],
+    }))).toThrow(/image_alpha_policy/);
+  });
+
   it("rejects explicit image color handling for non-image targets and compression", () => {
     const wrongTarget = serializePresets([
       makePreset({ image_color_policy: "convert_to_srgb" }),
@@ -145,7 +209,7 @@ describe("preset I/O — parse", () => {
       quality_preset: null,
       resolution_cap: null,
       compress_mode: null,
-      metadata_policy: null, image_color_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null, track_policy: null,
+      metadata_policy: null, image_color_policy: null, image_alpha_policy: null, gif_options: null, subtitle: null, image_options: null, video_options: null, audio_options: null, track_policy: null,
     }]);
   });
 
@@ -483,7 +547,7 @@ describe("schema 6 portable track policy", () => {
     });
     const raw = serializePresets([preset]);
     const wire = JSON.parse(raw);
-    expect(wire.version).toBe(9);
+    expect(wire.version).toBe(PRESET_BUNDLE_VERSION);
     expect(wire.presets[0].track_policy).toEqual(choosePerFile);
     expect(raw).not.toContain("canonical_path");
     expect(raw).not.toContain("stream_index");
@@ -536,7 +600,7 @@ describe("schema 7 portable video track policy", () => {
   it("roundtrips independent families without source identity", () => {
     const preset = makePreset({ target: "mkv", quality_preset: null, resolution_cap: null, video_options: { kind: "copy" }, track_policy: policy });
     const raw = serializePresets([preset]);
-    expect(JSON.parse(raw).version).toBe(9);
+    expect(JSON.parse(raw).version).toBe(PRESET_BUNDLE_VERSION);
     expect(entriesToPresets(parsePresetBundle(raw), [])[0].track_policy).toEqual(policy);
     expect(raw).not.toMatch(/canonical_path|stream_indices|inventory/);
   });

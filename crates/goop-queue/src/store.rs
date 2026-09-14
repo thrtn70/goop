@@ -1175,6 +1175,44 @@ mod tests {
     }
 
     #[test]
+    fn explicit_alpha_background_survives_reopen_and_retry() {
+        let (store, tmp) = temp_store();
+        let submitted: goop_core::ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": "transparent.png",
+            "output_path": "converted.jpg",
+            "target": "jpeg",
+            "metadata_policy": "strip_all",
+            "image_color_policy": "assume_srgb",
+            "image_alpha_policy": {
+                "kind": "flatten",
+                "background": { "red": 17, "green": 34, "blue": 51 }
+            }
+        }))
+        .unwrap();
+        let job = Job::new(JobKind::Convert, serde_json::to_value(&submitted).unwrap());
+        store.insert(&job).unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let store = QueueStore::open(&path).unwrap();
+        let restored = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        let restored_request: goop_core::ConvertRequest =
+            serde_json::from_value(restored.payload).unwrap();
+        assert_eq!(restored_request, submitted);
+
+        assert_eq!(store.claim_queued(job.id, 1000).unwrap(), 1);
+        drop(store);
+        let store = QueueStore::open(&path).unwrap();
+        store.reconcile().unwrap();
+        assert_eq!(store.retry_errored(job.id).unwrap(), 1);
+        let retry = store.next_queued(&JobKind::Convert, 0).unwrap().unwrap();
+        assert_eq!(retry.payload, job.payload);
+        let retried_request: goop_core::ConvertRequest =
+            serde_json::from_value(retry.payload).unwrap();
+        assert_eq!(retried_request, submitted);
+    }
+
+    #[test]
     fn convert_legacy_image_options_stay_absent_or_null_after_reopen_and_retry() {
         for explicit_null in [false, true] {
             let (store, tmp) = temp_store();
@@ -2183,6 +2221,7 @@ mod tests {
             video_track_execution: None,
             image_metadata_execution: None,
             compression_execution: None,
+            image_alpha_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,
@@ -2200,6 +2239,47 @@ mod tests {
             file_count: 1,
         });
         j
+    }
+
+    #[test]
+    fn alpha_execution_receipt_survives_history_reopen() {
+        let (store, tmp) = temp_store();
+        let mut job = done_job(
+            JobKind::Convert,
+            serde_json::json!({
+                "input_path": "transparent.png",
+                "target": "jpeg",
+                "image_alpha_policy": {
+                    "kind": "flatten",
+                    "background": { "red": 17, "green": 34, "blue": 51 }
+                }
+            }),
+            Some(123),
+        );
+        job.result.as_mut().unwrap().image_alpha_execution = Some(goop_core::ImageAlphaExecution {
+            requested_policy: goop_core::ImageAlphaPolicy::Flatten {
+                background: goop_core::SrgbColor {
+                    red: 17,
+                    green: 34,
+                    blue: 51,
+                },
+            },
+            source_had_alpha: true,
+            flattened: true,
+            background: goop_core::SrgbColor {
+                red: 17,
+                green: 34,
+                blue: 51,
+            },
+            compositing: goop_core::AlphaCompositing::LinearSrgb,
+        });
+        store.insert(&job).unwrap();
+        let path = tmp.path().join("q.db");
+        drop(store);
+
+        let reopened = QueueStore::open(&path).unwrap();
+        let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(restored.result, job.result);
     }
 
     #[test]
