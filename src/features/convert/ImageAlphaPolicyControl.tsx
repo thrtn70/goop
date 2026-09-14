@@ -87,18 +87,25 @@ export default function ImageAlphaPolicyControl({
         {[
           { label: "White", color: { red: 255, green: 255, blue: 255 } },
           { label: "Black", color: { red: 0, green: 0, blue: 0 } },
-        ].map(({ label, color }) => (
-          <button
-            key={label}
-            type="button"
-            disabled={!available}
-            aria-pressed={value ? srgbHex(value.background) === srgbHex(color) : false}
-            onClick={() => commit(color)}
-            className="btn-press rounded-md bg-surface-2 px-2 py-1 text-fg-secondary transition duration-fast ease-out enabled:hover:bg-surface-3 enabled:hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {label}
-          </button>
-        ))}
+        ].map(({ label, color }) => {
+          const selected = value ? srgbHex(value.background) === srgbHex(color) : false;
+          return (
+            <button
+              key={label}
+              type="button"
+              disabled={!available}
+              aria-pressed={selected}
+              onClick={() => commit(color)}
+              className={`btn-press rounded-md px-2 py-1 transition duration-fast ease-out disabled:cursor-not-allowed disabled:opacity-50 ${
+                selected
+                  ? "bg-accent text-accent-fg"
+                  : "bg-surface-2 text-fg-secondary enabled:hover:bg-surface-3 enabled:hover:text-fg"
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
         <input
           type="color"
           aria-label="Choose custom background color"

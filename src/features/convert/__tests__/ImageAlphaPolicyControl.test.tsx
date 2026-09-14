@@ -36,6 +36,20 @@ it("commits White, Black and a valid custom sRGB color deliberately", () => {
   expect(change).toHaveBeenLastCalledWith({kind:"flatten",background:{red:17,green:34,blue:51}});
 });
 
+it("visually distinguishes the committed quick background", () => {
+  render(<ImageAlphaPolicyControl
+    value={{ kind: "flatten", background: { red: 255, green: 255, blue: 255 } }}
+    capabilities={available}
+    onChange={vi.fn()}
+  />);
+  const white = screen.getByRole("button", { name: "White" });
+  const black = screen.getByRole("button", { name: "Black" });
+  expect(white.getAttribute("aria-pressed")).toBe("true");
+  expect(white.className).toContain("bg-accent");
+  expect(white.className).toContain("text-accent-fg");
+  expect(black.className).toContain("bg-surface-2");
+});
+
 it("keeps invalid custom text editable without committing it", () => {
   const change = vi.fn();
   render(<ImageAlphaPolicyControl value={null} capabilities={available} onChange={change} />);

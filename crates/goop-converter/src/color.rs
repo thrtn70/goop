@@ -1,5 +1,8 @@
 use goop_core::{GoopError, ImageAlphaPolicy, ImageColorHandling, ImageColorPolicy, SrgbColor};
-use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, RgbImage};
+use image::{
+    ColorType, DynamicImage, GenericImageView, GrayImage, ImageDecoder, ImageFormat, RgbImage,
+    RgbaImage,
+};
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
 use img_parts::{Bytes, ImageEXIF, ImageICC};
@@ -268,11 +271,11 @@ impl Write for BoundedWriter {
     }
 }
 
-fn allocate_rgb(width: u32, height: u32) -> Result<RgbImage, GoopError> {
+fn allocate_raster_bytes(width: u32, height: u32, channels: u64) -> Result<Vec<u8>, GoopError> {
     let length = usize::try_from(
         u64::from(width)
             .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|pixels| pixels.checked_mul(channels))
             .ok_or_else(|| invalid("Color-managed destination raster size overflow"))?,
     )
     .map_err(|_| invalid("Color-managed destination raster is too large"))?;
@@ -281,8 +284,25 @@ fn allocate_rgb(width: u32, height: u32) -> Result<RgbImage, GoopError> {
         .try_reserve_exact(length)
         .map_err(|_| invalid("Insufficient memory for color-managed destination raster"))?;
     bytes.resize(length, 0);
+    Ok(bytes)
+}
+
+fn allocate_rgb(width: u32, height: u32) -> Result<RgbImage, GoopError> {
+    let bytes = allocate_raster_bytes(width, height, 3)?;
     RgbImage::from_raw(width, height, bytes)
         .ok_or_else(|| invalid("Color-managed destination raster shape is invalid"))
+}
+
+fn allocate_gray(width: u32, height: u32) -> Result<GrayImage, GoopError> {
+    let bytes = allocate_raster_bytes(width, height, 1)?;
+    GrayImage::from_raw(width, height, bytes)
+        .ok_or_else(|| invalid("Color-managed grayscale raster shape is invalid"))
+}
+
+fn allocate_rgba(width: u32, height: u32) -> Result<RgbaImage, GoopError> {
+    let bytes = allocate_raster_bytes(width, height, 4)?;
+    RgbaImage::from_raw(width, height, bytes)
+        .ok_or_else(|| invalid("Color-managed RGBA raster shape is invalid"))
 }
 
 #[derive(Debug)]
@@ -891,6 +911,78 @@ pub(crate) fn transform_pixels(
     cancel: &CancellationToken,
 ) -> Result<TransformResult, GoopError> {
     transform_and_flatten_pixels(source, source_profile, policy, None, cancel)
+}
+
+/// Convert alpha-bearing foreground samples to display sRGB while retaining
+/// straight alpha for the transparent side of a preview comparison.
+pub(crate) fn transform_alpha_preview_pixels(
+    source: &DynamicImage,
+    source_profile: Option<Vec<u8>>,
+    policy: ImageColorPolicy,
+    cancel: &CancellationToken,
+) -> Result<RgbaImage, GoopError> {
+    checkpoint(cancel)?;
+    let (width, height) = source.dimensions();
+    let mut alpha = allocate_gray(width, height)?;
+    let foreground = match source {
+        DynamicImage::ImageRgba8(image) => {
+            let mut foreground = allocate_rgb(width, height)?;
+            for (index, ((source, rgb), alpha)) in image
+                .pixels()
+                .zip(foreground.pixels_mut())
+                .zip(alpha.pixels_mut())
+                .enumerate()
+            {
+                if index % TRANSFORM_CHUNK_PIXELS == 0 {
+                    checkpoint(cancel)?;
+                }
+                rgb.0.copy_from_slice(&source.0[..3]);
+                alpha.0[0] = source.0[3];
+            }
+            DynamicImage::ImageRgb8(foreground)
+        }
+        DynamicImage::ImageLumaA8(image) => {
+            let mut foreground = allocate_gray(width, height)?;
+            for (index, ((source, gray), alpha)) in image
+                .pixels()
+                .zip(foreground.pixels_mut())
+                .zip(alpha.pixels_mut())
+                .enumerate()
+            {
+                if index % TRANSFORM_CHUNK_PIXELS == 0 {
+                    checkpoint(cancel)?;
+                }
+                gray.0[0] = source.0[0];
+                alpha.0[0] = source.0[1];
+            }
+            DynamicImage::ImageLuma8(foreground)
+        }
+        _ => {
+            return Err(invalid(
+                "Transparent preview requires admitted RGBA8 or grayscale-alpha pixels",
+            ));
+        }
+    };
+    let transformed = transform_pixels(foreground, source_profile, policy, cancel)?.pixels;
+    let mut output = allocate_rgba(width, height)?;
+    for (index, ((foreground, alpha), output)) in transformed
+        .pixels()
+        .zip(alpha.pixels())
+        .zip(output.pixels_mut())
+        .enumerate()
+    {
+        if index % TRANSFORM_CHUNK_PIXELS == 0 {
+            checkpoint(cancel)?;
+        }
+        output.0 = [
+            foreground.0[0],
+            foreground.0[1],
+            foreground.0[2],
+            alpha.0[0],
+        ];
+    }
+    checkpoint(cancel)?;
+    Ok(output)
 }
 
 fn calculate_srgb_to_linear(byte: u8) -> f64 {
@@ -1668,6 +1760,47 @@ mod tests {
                 oracle_channel(180, background.red, 127),
                 oracle_channel(180, background.green, 127),
                 oracle_channel(180, background.blue, 127),
+            ]
+        );
+
+        let profile = gray_profile();
+        let source_profile = Profile::new_icc(&profile).unwrap();
+        let destination_profile = Profile::new_srgb();
+        let independent_transform = Transform::new(
+            &source_profile,
+            PixelFormat::GRAY_8,
+            &destination_profile,
+            PixelFormat::RGB_8,
+            Intent::Perceptual,
+        )
+        .unwrap();
+        let mut transformed_foreground = [[0_u8; 3]; 1];
+        independent_transform.transform_pixels(&[180_u8], &mut transformed_foreground);
+        let tagged_gray_source =
+            DynamicImage::ImageLumaA8(GrayAlphaImage::from_raw(1, 1, vec![180, 127]).unwrap());
+        let preview = transform_alpha_preview_pixels(
+            &tagged_gray_source,
+            Some(profile.clone()),
+            ImageColorPolicy::ConvertToSrgb,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(&preview.get_pixel(0, 0).0[..3], &transformed_foreground[0]);
+        assert_eq!(preview.get_pixel(0, 0).0[3], 127);
+        let tagged_gray = transform_and_flatten_pixels(
+            tagged_gray_source,
+            Some(profile),
+            ImageColorPolicy::ConvertToSrgb,
+            Some(ImageAlphaPolicy::Flatten { background }),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            tagged_gray.pixels.get_pixel(0, 0).0,
+            [
+                oracle_channel(transformed_foreground[0][0], background.red, 127),
+                oracle_channel(transformed_foreground[0][1], background.green, 127),
+                oracle_channel(transformed_foreground[0][2], background.blue, 127),
             ]
         );
 
