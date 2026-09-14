@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import SettingsPreview from "../SettingsPreview";
+import type { ImageSettingsCapabilities } from "@/types";
 const mocks=vi.hoisted(()=>({generate:vi.fn(),cancel:vi.fn().mockResolvedValue(undefined)}));
 vi.mock("@/ipc/commands",()=>({api:{preview:mocks}}));
 vi.mock("@tauri-apps/api/core",()=>({convertFileSrc:(path:string)=>"asset://"+path}));
@@ -24,6 +25,13 @@ it("shows backend limitations and permits another request", async()=>{
   fireEvent.click(screen.getByRole("button",{name:"Preview sample"}));
   expect(await screen.findByRole("alert")).toHaveProperty("textContent",expect.stringContaining("unavailable"));
 });
+it("shows source transparency against a checkerboard", async()=>{
+  mocks.generate.mockImplementationOnce(async sent => ({...sent,kind:"image",before_path:"/before.png",after_path:"/after.png",width:2,height:2,sample_bytes:100,duration_ms:null}));
+  render(<SettingsPreview request={{...request,image_alpha_policy:{kind:"flatten",background:{red:255,green:255,blue:255}}}}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Preview sample"}));
+  const source = await screen.findByAltText("Source sample");
+  expect(source.parentElement?.className).toContain("transparency-checkerboard");
+});
 it("retains a successful same-settings sample when replacement fails", async()=>{
   mocks.generate.mockImplementationOnce(async(sent)=>({...sent,kind:"image",before_path:"/before.png",after_path:"/after.png",width:2,height:2,sample_bytes:100,duration_ms:null}));
   render(<SettingsPreview request={request}/>);
@@ -37,8 +45,8 @@ it("retains a successful same-settings sample when replacement fails", async()=>
   expect(mocks.cancel).not.toHaveBeenCalledWith(original);
 });
 
-const imageSettings = { available:true, reason:null, quality_min:1, quality_max:100, default_quality:75, max_dimension:32768, max_output_pixels:100000000, fit_within:true, upscale:false, preview_original_available:true, preview_fit_within:false, preview_unavailable_reason:"Fit within image samples are not available yet." };
-const explicit = {...request,input_path:"/photo.jpg",image_options:{jpeg_quality:30,resize:{kind:"original" as const}}};
+const imageSettings = { required_color_policy:"convert_to_srgb", available:true, reason:null, quality_min:1, quality_max:100, default_quality:75, max_dimension:32768, max_output_pixels:100000000, fit_within:true, upscale:false, preview_original_available:true, preview_fit_within:false, preview_unavailable_reason:"Fit within image samples are not available yet." } satisfies ImageSettingsCapabilities;
+const explicit = {...request,input_path:"/photo.png",image_color_policy:"convert_to_srgb" as const,image_options:{jpeg_quality:30,resize:{kind:"original" as const}}};
 const sample = (sent: {request_id:string;source_revision:string}, path = "/after.png") => ({...sent,kind:"image",before_path:"/before.png",after_path:path,width:2,height:2,sample_bytes:100,duration_ms:null});
 it.each(["fit", "RAW", "HEIC", "oversized"])("disables %s previews with the engine descriptor reason", (source) => {
   const reason = source === "fit" ? imageSettings.preview_unavailable_reason : `${source} preview is unavailable`;
@@ -71,6 +79,25 @@ it("cancels pending quality revisions, refuses late results, and sends the lates
   expect(sent.source_revision).not.toBe(old.source_revision);
   await act(async()=>resolve(sample(old,"/stale.png")));
   expect(screen.getByAltText("Output sample").getAttribute("src")).toBe("asset:///latest.png");
+});
+it("makes the alpha background part of preview identity and refuses a late prior background", async () => {
+  let resolve!: (value:unknown)=>void;
+  mocks.generate.mockImplementationOnce(()=>new Promise(r=>{resolve=r;}));
+  const first = {...explicit,image_alpha_policy:{kind:"flatten" as const,background:{red:255,green:255,blue:255}}};
+  const view = render(<SettingsPreview request={first} imageSettings={imageSettings}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Preview sample"}));
+  const old = mocks.generate.mock.calls[0][0];
+  const latest = {...first,image_alpha_policy:{kind:"flatten" as const,background:{red:17,green:34,blue:51}}};
+  view.rerender(<SettingsPreview request={latest} imageSettings={imageSettings}/>);
+  expect(mocks.cancel).toHaveBeenCalledWith(old.request_id);
+  mocks.generate.mockImplementationOnce(async sent => sample(sent,"/custom.png"));
+  fireEvent.click(screen.getByRole("button",{name:"Preview sample"}));
+  await screen.findByAltText("Output sample");
+  const sent = mocks.generate.mock.calls[1][0];
+  expect(sent.image_alpha_policy).toEqual(latest.image_alpha_policy);
+  expect(sent.source_revision).not.toBe(old.source_revision);
+  await act(async()=>resolve(sample(old,"/white.png")));
+  expect(screen.getByAltText("Output sample").getAttribute("src")).toBe("asset:///custom.png");
 });
 it("releases a displayed sample immediately when dimensions become unavailable", async () => {
   mocks.generate.mockImplementationOnce(async sent => sample(sent));

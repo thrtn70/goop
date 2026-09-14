@@ -2,6 +2,7 @@
 import type { AudioConvertOptions } from "./AudioConvertOptions";
 import type { CompressMode } from "./CompressMode";
 import type { GifOptions } from "./GifOptions";
+import type { ImageAlphaPolicy } from "./ImageAlphaPolicy";
 import type { ImageColorPolicy } from "./ImageColorPolicy";
 import type { ImageConvertOptions } from "./ImageConvertOptions";
 import type { MetadataPolicy } from "./MetadataPolicy";
@@ -12,21 +13,21 @@ import type { TargetFormat } from "./TargetFormat";
 import type { TrackConvertOptions } from "./TrackConvertOptions";
 import type { VideoConvertOptions } from "./VideoConvertOptions";
 
-export type ConvertRequest = { video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
+export type ConvertRequest = {
+/**
+ * Explicit color conversion is opt-in. `None` is identical to
+ * `Preserve` for older callers, presets and queued jobs.
+ */
+image_color_policy?: ImageColorPolicy | null, video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null,
 /**
  * EXIF + ICC handling. `None` is treated as `Preserve` so older
  * callers / presets don't need to migrate; an explicit
  * `StripAll` opts in to scrubbing.
  */
-metadata_policy: MetadataPolicy | null, 
-/**
- * Explicit color conversion is opt-in. `None` is identical to
- * `Preserve` for older callers, presets and queued jobs.
- */
-image_color_policy?: ImageColorPolicy | null,
+metadata_policy: MetadataPolicy | null,
 /**
  * External subtitle to soft-embed or burn in. `None` skips all
  * subtitle handling, so pre-subtitle presets and queued job
  * payloads keep deserializing unchanged.
  */
-subtitle: SubtitleOptions | null, image_options?: ImageConvertOptions | null, audio_options?: AudioConvertOptions | null, track_options?: TrackConvertOptions | null, };
+subtitle: SubtitleOptions | null, image_options?: ImageConvertOptions | null, audio_options?: AudioConvertOptions | null, track_options?: TrackConvertOptions | null, image_alpha_policy?: ImageAlphaPolicy | null, };

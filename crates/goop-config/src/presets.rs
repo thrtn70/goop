@@ -61,6 +61,7 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
         batch_id: None,
         metadata_policy: preset.metadata_policy,
         image_color_policy: preset.image_color_policy,
+        image_alpha_policy: preset.image_alpha_policy,
         subtitle: preset.subtitle.clone(),
         image_options: preset.image_options.clone(),
         video_options: preset.video_options.clone(),
@@ -68,6 +69,7 @@ pub fn validate(preset: &Preset) -> Result<(), GoopError> {
     goop_core::validate_audio_request(&request)
         .and_then(|()| goop_core::validate_video_request(&request))
         .and_then(|()| goop_core::validate_image_color_request_shape(&request))
+        .and_then(|()| goop_core::validate_image_alpha_request_shape(&request))
         .map_err(|error| GoopError::Config(format!("Preset \"{}\": {error}", preset.name)))
         .and_then(|()| match preset.track_policy.as_ref() {
             None => Ok(()),
@@ -199,6 +201,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             compress_mode: None,
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -217,6 +220,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             compress_mode: Some(CompressMode::TargetSizeBytes(200_000_000)),
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -235,6 +239,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             compress_mode: Some(CompressMode::Quality(75)),
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -253,6 +258,7 @@ pub fn builtin_defaults() -> Vec<Preset> {
             compress_mode: Some(CompressMode::LosslessReoptimize),
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -295,6 +301,7 @@ mod tests {
             compress_mode: None,
             metadata_policy: None,
             image_color_policy: None,
+            image_alpha_policy: None,
             gif_options: None,
             subtitle: None,
             image_options: None,
@@ -355,6 +362,36 @@ mod tests {
             jpeg_quality: 75,
             resize: goop_core::ImageResize::Original,
         });
+        assert!(validate(&preset).is_err());
+    }
+
+    #[test]
+    fn explicit_alpha_background_roundtrips_and_validates_as_convert_only_jpeg() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let mut preset = sample("alpha", "Transparency over custom");
+        preset.target = TargetFormat::Jpeg;
+        preset.quality_preset = None;
+        preset.image_color_policy = Some(goop_core::ImageColorPolicy::AssumeSrgb);
+        preset.image_alpha_policy = Some(goop_core::ImageAlphaPolicy::Flatten {
+            background: goop_core::SrgbColor {
+                red: 17,
+                green: 34,
+                blue: 51,
+            },
+        });
+
+        validate(&preset).unwrap();
+        save(&path, std::slice::from_ref(&preset)).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![preset.clone()]);
+
+        preset.target = TargetFormat::Png;
+        assert!(validate(&preset).is_err());
+        preset.target = TargetFormat::Jpeg;
+        preset.image_color_policy = Some(goop_core::ImageColorPolicy::Preserve);
+        assert!(validate(&preset).is_err());
+        preset.image_color_policy = Some(goop_core::ImageColorPolicy::AssumeSrgb);
+        preset.compress_mode = Some(CompressMode::Quality(75));
         assert!(validate(&preset).is_err());
     }
 

@@ -4,22 +4,26 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
 import CompressPage from "@/pages/CompressPage";
-import type { Preset } from "@/types";
+import type { ImageAlphaCapabilities, ImageSettingsCapabilities, Preset } from "@/types";
 
-const mocks = vi.hoisted(() => ({ inspect: vi.fn(), enqueue: vi.fn(), open: vi.fn(), save: vi.fn(), preset: null as Preset | null, preview: vi.fn(), presetSave: vi.fn() }));
+const mocks = vi.hoisted(() => ({ inspect: vi.fn(), enqueue: vi.fn(), open: vi.fn(), save: vi.fn(), preset: null as Preset | null, preview: vi.fn(), previewCancel: vi.fn(), presetSave: vi.fn() }));
 vi.mock("@/ipc/commands", () => ({ api: {
   convert: { inspect: mocks.inspect, fromFile: mocks.enqueue },
-  preview: { generate: mocks.preview, cancel: vi.fn().mockResolvedValue(null) },
+  preview: { generate: mocks.preview, cancel: mocks.previewCancel },
   preset: { save: mocks.presetSave, list: vi.fn().mockResolvedValue([]) },
 } }));
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => "asset://" + path }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open, save: mocks.save }));
 vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/features/presets/PresetChips", () => ({ default: ({ onApply }: { onApply: (p: Preset) => void }) => mocks.preset && <button onClick={() => onApply(mocks.preset!)}>Apply test preset</button> }));
-export const imageCapability = { available: true, reason: null, quality_min: 1, quality_max: 100, default_quality: 75, max_dimension: 32768, max_output_pixels: 100000000, fit_within: true, upscale: false, preview_original_available: true, preview_fit_within: false, preview_unavailable_reason: "Resized samples are unavailable" };
-const inspect = (video = false, sourceFormat = "jpeg") => ({
-  probe: { source_kind: video ? "video" : "image", image_format: video ? null : sourceFormat, image_has_alpha: false, video_codec: video ? "h264" : null, audio_codec: video ? "aac" : null, has_video: video, has_audio: video, duration_ms: 0, file_size: 100, width: 6048, height: 8064, audio_codecs: [], subtitle_codecs: [] },
-  capabilities: { targets: (video ? ["mp4"] : ["jpeg", "png"]).map(target => ({ target, available: true, reason: null, metadata_warning: null, image_settings: target === "jpeg" ? imageCapability : null,
+export const imageCapability = { required_color_policy: null, available: true, reason: null, quality_min: 1, quality_max: 100, default_quality: 75, max_dimension: 32768, max_output_pixels: 100000000, fit_within: true, upscale: false, preview_original_available: true, preview_fit_within: false, preview_unavailable_reason: "Resized samples are unavailable" } satisfies ImageSettingsCapabilities;
+const inspect = (video = false, sourceFormat = "jpeg", tagged = true, sourceHasAlpha = sourceFormat === "png" || sourceFormat === "webp") => {
+  return ({
+  probe: { source_kind: video ? "video" : "image", image_format: video ? null : sourceFormat, image_has_alpha: sourceHasAlpha, video_codec: video ? "h264" : null, audio_codec: video ? "aac" : null, has_video: video, has_audio: video, duration_ms: 0, file_size: 100, width: 6048, height: 8064, audio_codecs: [], subtitle_codecs: [] },
+  capabilities: { targets: (video ? ["mp4"] : ["jpeg", "png"]).map(target => ({ target, available: true, reason: null, metadata_warning: null, image_settings: target === "jpeg" ? {
+    ...imageCapability,
+    required_color_policy: sourceFormat === "png" ? (tagged ? "convert_to_srgb" : "assume_srgb") : null,
+  } : null,
     image_metadata: video ? null : {
       preserve: { available: true, reason: null, summary: "Metadata retained." },
       rgb_reencode_preserve: { available: true, reason: null, summary: "Metadata retained." },
@@ -31,17 +35,25 @@ const inspect = (video = false, sourceFormat = "jpeg") => ({
     },
     image_color: video ? null : {
       preserve: { available: true, reason: null, summary: "Keep existing color behavior." },
-      convert_to_srgb: { available: true, reason: null, summary: "Convert to tagged sRGB." },
-      assume_srgb: { available: false, reason: "The source already has a profile.", summary: "Assume untagged pixels are sRGB." },
+      convert_to_srgb: tagged ? { available: true, reason: null, summary: "Convert to tagged sRGB." } : { available: false, reason: "No embedded profile.", summary: "Unavailable." },
+      assume_srgb: tagged ? { available: false, reason: "The source already has a profile.", summary: "Assume untagged pixels are sRGB." } : { available: true, reason: null, summary: "Assume untagged pixels are sRGB." },
     },
+    image_alpha: !video && target === "jpeg" ? ({
+      source_has_alpha: sourceHasAlpha,
+      flatten: sourceFormat === "webp"
+        ? { available: false, reason: "Transparent WebP is not supported yet.", summary: "Unavailable." }
+        : { available: true, reason: null, summary: "Flatten transparency in linear sRGB." },
+      required_color_policy: tagged ? "convert_to_srgb" : "assume_srgb",
+      suggested_background: { red: 255, green: 255, blue: 255 },
+    } satisfies ImageAlphaCapabilities) : null,
   })), compression: { quality: true, target_size: false, lossless: false, reason: null } },
-});
+})};
 const fit = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 2048, height: 2048 } };
 const preset = (image_options: Preset["image_options"] = fit) => ({ name: "Photo", target: "jpeg", image_options, quality_preset: null, resolution_cap: null, compress_mode: null, gif_options: null, subtitle: null, metadata_policy: "preserve" }) as Preset;
 beforeEach(() => {
   vi.clearAllMocks(); mocks.preset = null;
-  mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(path.endsWith("mp4"))));
-  mocks.open.mockResolvedValue(["/a.jpg"]); mocks.save.mockResolvedValue("/out.jpg"); mocks.enqueue.mockResolvedValue("job");
+  mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(path.endsWith("mp4"), path.endsWith(".png") ? "png" : path.endsWith(".webp") ? "webp" : "jpeg", !path.includes("untagged"), !path.includes("opaque") && (path.endsWith(".png") || path.endsWith(".webp")))));
+  mocks.open.mockResolvedValue(["/a.jpg"]); mocks.save.mockResolvedValue("/out.jpg"); mocks.enqueue.mockResolvedValue("job"); mocks.previewCancel.mockResolvedValue(null);
 });
 afterEach(cleanup);
 const page = () => <MemoryRouter><ConvertPage /></MemoryRouter>;
@@ -303,6 +315,156 @@ it("forwards a directly selected sRGB conversion to preview and conversion reque
     target: "jpeg",
     image_color_policy: "convert_to_srgb",
   });
+});
+it("uses the managed PNG image-settings color requirement and permits Original preview", async () => {
+  mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
+  render(page()); await add(["/opaque.png"]);
+  fireEvent.change(screen.getByRole("textbox", {name:"JPEG quality"}), {target:{value:"90"}});
+  expect(disabled("Convert 1 file")).toBe(true);
+  expect(screen.getByText(/Convert.*sRGB.*image settings/i)).toBeTruthy();
+
+  const color = within(screen.getByRole("group", {name:"Color handling"}));
+  await userEvent.setup().click(color.getByRole("button", {name:"Convert to sRGB"}));
+  expect(disabled("Convert 1 file")).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  await screen.findByAltText("Output sample");
+  expect(mocks.preview.mock.calls[0][0]).toMatchObject({
+    target:"jpeg",
+    image_color_policy:"convert_to_srgb",
+    image_options:{jpeg_quality:90,resize:{kind:"original"}},
+  });
+});
+it("requires a deliberate background and forwards it to preview and conversion", async () => {
+  mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
+  render(page()); await add(["/a.png"]);
+  expect(disabled("Convert 1 file")).toBe(true);
+  expect(disabled("Save as preset")).toBe(true);
+  expect(screen.queryByRole("button", {name:"Preview sample"})).toBeNull();
+  expect(screen.getByText(/Suggested: #FFFFFF/)).toBeTruthy();
+  expect(screen.getByRole("button", {name:"White"}).getAttribute("aria-pressed")).toBe("false");
+  fireEvent.click(screen.getByRole("button", {name:"PNG"}));
+  expect(screen.queryByRole("button", {name:"White"})).toBeNull();
+  fireEvent.click(screen.getByRole("button", {name:"JPEG"}));
+  expect(screen.getByRole("button", {name:"White"}).getAttribute("aria-pressed")).toBe("false");
+
+  fireEvent.click(screen.getByRole("button", {name:"White"}));
+  const color = within(screen.getByRole("group", { name: "Color handling" }));
+  await userEvent.setup().click(color.getByRole("button", { name: "Convert to sRGB" }));
+  expect(disabled("Convert 1 file")).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  await screen.findByAltText("Output sample");
+  expect(mocks.preview.mock.calls[0][0].image_alpha_policy).toEqual({kind:"flatten",background:{red:255,green:255,blue:255}});
+  fireEvent.click(screen.getByRole("button", {name:"Convert 1 file"}));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0].image_alpha_policy).toEqual({kind:"flatten",background:{red:255,green:255,blue:255}});
+});
+
+it("applies independent preset backgrounds across a homogeneous transparent batch", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  fireEvent.click(screen.getByRole("button", {name:"Black"}));
+  fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+  expect(mocks.enqueue.mock.calls[0][0].image_alpha_policy.background).toEqual({red:0,green:0,blue:0});
+  expect(mocks.enqueue.mock.calls[1][0].image_alpha_policy.background).toEqual({red:255,green:255,blue:255});
+  expect(mocks.preset.image_alpha_policy.background).toEqual({red:255,green:255,blue:255});
+});
+
+it("applies one alpha preset to a homogeneous opaque and transparent batch", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/transparent.png", "/opaque.jpg"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+  expect(mocks.enqueue.mock.calls.map(call => call[0].image_alpha_policy)).toEqual([
+    {kind:"flatten",background:{red:255,green:255,blue:255}},
+    {kind:"flatten",background:{red:255,green:255,blue:255}},
+  ]);
+});
+
+it("refuses an unsupported alpha row atomically by source name", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.webp"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  expect(screen.getByRole("alert").textContent).toContain("b.webp");
+  expect(screen.getByRole("alert").textContent).toContain("Transparent WebP is not supported yet.");
+  expect(mocks.enqueue).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"Select a.png"}));
+  expect(screen.getByRole("button", {name:"JPEG"}).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", {name:"White"}).getAttribute("aria-pressed")).toBe("false");
+});
+
+it("copies independent alpha backgrounds through Apply first to all", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  const custom = screen.getByRole("textbox", {name:"Custom background"});
+  fireEvent.change(custom, {target:{value:"#112233"}});
+  fireEvent.keyDown(custom, {key:"Enter"});
+  fireEvent.click(screen.getByRole("button", {name:"Apply first to all"}));
+  fireEvent.click(screen.getByRole("button", {name:"Black"}));
+  fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
+  await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+  expect(mocks.enqueue.mock.calls[0][0].image_alpha_policy.background).toEqual({red:0,green:0,blue:0});
+  expect(mocks.enqueue.mock.calls[1][0].image_alpha_policy.background).toEqual({red:17,green:34,blue:51});
+  expect(mocks.preset.image_alpha_policy.background).toEqual({red:255,green:255,blue:255});
+});
+
+it("blocks every effective action while custom background text differs from the saved policy", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  fireEvent.click(screen.getByRole("button", {name:"White"}));
+  mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/white.png",width:160,height:100,sample_bytes:100}));
+  expect(disabled("Convert 2 files")).toBe(false);
+  expect(disabled("Save as preset")).toBe(false);
+  expect(disabled("Apply first to all")).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  await screen.findByAltText("Output sample");
+  const displayedRequest = mocks.preview.mock.calls[0][0];
+
+  const custom = screen.getByRole("textbox", {name:"Custom background"});
+  fireEvent.change(custom, {target:{value:"#12zz34"}});
+  expect((custom as HTMLInputElement).value).toBe("#12zz34");
+  expect(disabled("Convert 2 files")).toBe(true);
+  expect(disabled("Save as preset")).toBe(true);
+  expect(disabled("Apply first to all")).toBe(true);
+  expect(screen.queryByRole("button", {name:"Preview sample"})).toBeNull();
+  expect(screen.queryByAltText("Output sample")).toBeNull();
+  expect(mocks.previewCancel).toHaveBeenCalledWith(displayedRequest.request_id);
+  fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
+  expect(mocks.enqueue).not.toHaveBeenCalled();
+
+  fireEvent.change(custom, {target:{value:"#112233"}});
+  fireEvent.keyDown(custom, {key:"Enter"});
+  expect(disabled("Convert 2 files")).toBe(false);
+  expect(disabled("Save as preset")).toBe(false);
+  expect(disabled("Apply first to all")).toBe(false);
+  expect(screen.getByRole("button", {name:"Preview sample"})).toBeTruthy();
+});
+
+it("refuses an alpha preset atomically across different required color-policy groups", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/tagged.png", "/untagged.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  expect(screen.getByRole("alert").textContent).toContain("untagged.png");
+  fireEvent.click(screen.getByRole("button", {name:"Select untagged.png"}));
+  expect(screen.getByRole("button", {name:"PNG"}).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", {name:"White"})).toBeNull();
 });
 it("retains explicit color intent when a target makes it unavailable and blocks until cleared", async () => {
   const inspected = inspect();

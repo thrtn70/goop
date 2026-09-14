@@ -2,6 +2,7 @@ import { cloneVideoOptions } from "@/features/convert/videoOptions";
 import { useAppStore } from "@/store/appStore";
 import type { Preset } from "@/types";
 import { cloneTrackPresetPolicy } from "@/features/convert/videoTrackOptions";
+import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 
 interface PresetChipsProps {
   kind: "convert" | "compress";
@@ -33,6 +34,9 @@ export default function PresetChips({ kind, onApply }: PresetChipsProps) {
               ...(p.video_options === undefined ? {} : {video_options: cloneVideoOptions(p.video_options)}),
               ...(p.track_policy === undefined ? {} : {
                 track_policy: cloneTrackPresetPolicy(p.track_policy),
+              }),
+              ...(p.image_alpha_policy === undefined ? {} : {
+                image_alpha_policy: cloneImageAlphaPolicy(p.image_alpha_policy),
               }),
             })}
             title={p.name}

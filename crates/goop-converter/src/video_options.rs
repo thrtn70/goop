@@ -685,6 +685,7 @@ fn capabilities_inner(
         compress_mode: None,
         metadata_policy: None,
         image_color_policy: None,
+        image_alpha_policy: None,
         subtitle: None,
         image_options: None,
     };

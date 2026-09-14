@@ -65,6 +65,7 @@ pub async fn run(
     });
     let output = publish_worker(worker, destination, cancel).await?;
     Ok(JobResult {
+        image_alpha_execution: None,
         video_track_execution: None,
         image_metadata_execution: None,
         compression_execution: None,

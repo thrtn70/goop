@@ -1,4 +1,4 @@
-use goop_core::{GoopError, ImageColorHandling, ImageColorPolicy};
+use goop_core::{GoopError, ImageAlphaPolicy, ImageColorHandling, ImageColorPolicy, SrgbColor};
 use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, RgbImage};
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
@@ -19,6 +19,7 @@ pub(crate) const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const TRANSFORM_CHUNK_PIXELS: usize = 4_096;
 static COLOR_WORKING_SET: Mutex<()> = Mutex::new(());
 
+#[derive(Debug)]
 pub(crate) struct TransformResult {
     pub pixels: RgbImage,
     pub destination_profile: Vec<u8>,
@@ -29,6 +30,21 @@ pub(crate) struct TransformResult {
 pub(crate) enum SourceLayout {
     Rgb8,
     Gray8,
+    Rgba8,
+    GrayAlpha8,
+}
+
+impl SourceLayout {
+    pub(crate) fn has_alpha(self) -> bool {
+        matches!(self, Self::Rgba8 | Self::GrayAlpha8)
+    }
+
+    fn profile_space(self) -> &'static [u8; 4] {
+        match self {
+            Self::Rgb8 | Self::Rgba8 => b"RGB ",
+            Self::Gray8 | Self::GrayAlpha8 => b"GRAY",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -471,19 +487,21 @@ fn inspect_png(bytes: &[u8]) -> Result<EncodedFacts, GoopError> {
                 }
                 let width = read_u32(data, 0, "PNG width")?;
                 let height = read_u32(data, 4, "PNG height")?;
-                if data[8] != 8 || !matches!(data[9], 0 | 2) {
+                if data[8] != 8 || !matches!(data[9], 0 | 2 | 4 | 6) {
                     return Err(invalid(
-                        "Color-managed PNG input must be 8-bit RGB or grayscale without alpha",
+                        "Color-managed PNG input must use direct 8-bit RGB, RGBA, grayscale, or grayscale-alpha pixels",
                     ));
                 }
                 if data[10..13] != [0, 0, 0] || width == 0 || height == 0 {
                     return Err(invalid("PNG header methods or dimensions are invalid"));
                 }
                 header = Some((
-                    if data[9] == 0 {
-                        SourceLayout::Gray8
-                    } else {
-                        SourceLayout::Rgb8
+                    match data[9] {
+                        0 => SourceLayout::Gray8,
+                        2 => SourceLayout::Rgb8,
+                        4 => SourceLayout::GrayAlpha8,
+                        6 => SourceLayout::Rgba8,
+                        _ => unreachable!("validated PNG color type"),
                     },
                     (width, height),
                 ));
@@ -584,10 +602,7 @@ pub(crate) fn inspect_bytes(bytes: Bytes) -> Result<SourceInspection, GoopError>
     validate_color_dimensions(encoded.dimensions)?;
     if let Some(profile) = encoded.profile.as_deref() {
         let space = validate_profile(profile)?;
-        let expected = match encoded.layout {
-            SourceLayout::Rgb8 => b"RGB ",
-            SourceLayout::Gray8 => b"GRAY",
-        };
+        let expected = encoded.layout.profile_space();
         if space != expected {
             return Err(invalid(
                 "The embedded ICC profile does not match the encoded pixel layout",
@@ -609,11 +624,8 @@ pub(crate) fn inspect_bytes(bytes: Bytes) -> Result<SourceInspection, GoopError>
     let decoded_layout = match decoder.color_type() {
         ColorType::Rgb8 => SourceLayout::Rgb8,
         ColorType::L8 => SourceLayout::Gray8,
-        ColorType::Rgba8 | ColorType::La8 => {
-            return Err(invalid(
-                "Color-managed conversion with transparency is not available yet",
-            ));
-        }
+        ColorType::Rgba8 => SourceLayout::Rgba8,
+        ColorType::La8 => SourceLayout::GrayAlpha8,
         _ => {
             return Err(invalid(
                 "Color-managed conversion currently supports only 8-bit RGB or grayscale pixels",
@@ -648,7 +660,7 @@ pub(crate) fn validate_native_profile(inspection: &SourceInspection) -> Result<(
             .map_err(|error| invalid(format!("ICC profile could not be parsed: {error}")))?;
         let destination = Profile::new_srgb_context(&context);
         match (inspection.layout, profile_space) {
-            (SourceLayout::Rgb8, b"RGB ") => {
+            (SourceLayout::Rgb8 | SourceLayout::Rgba8, b"RGB ") => {
                 let _: Transform<[u8; 3], [u8; 3], ThreadContext> = Transform::new_context(
                     &context,
                     &source,
@@ -659,7 +671,7 @@ pub(crate) fn validate_native_profile(inspection: &SourceInspection) -> Result<(
                 )
                 .map_err(|error| invalid(format!("ICC transform could not be created: {error}")))?;
             }
-            (SourceLayout::Gray8, b"GRAY") => {
+            (SourceLayout::Gray8 | SourceLayout::GrayAlpha8, b"GRAY") => {
                 let _: Transform<u8, [u8; 3], ThreadContext> = Transform::new_context(
                     &context,
                     &source,
@@ -878,6 +890,104 @@ pub(crate) fn transform_pixels(
     policy: ImageColorPolicy,
     cancel: &CancellationToken,
 ) -> Result<TransformResult, GoopError> {
+    transform_and_flatten_pixels(source, source_profile, policy, None, cancel)
+}
+
+fn calculate_srgb_to_linear(byte: u8) -> f64 {
+    let value = f64::from(byte) / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+static SRGB_TO_LINEAR: std::sync::LazyLock<[f64; 256]> =
+    std::sync::LazyLock::new(|| std::array::from_fn(|index| calculate_srgb_to_linear(index as u8)));
+
+fn srgb_to_linear(byte: u8) -> f64 {
+    SRGB_TO_LINEAR[usize::from(byte)]
+}
+
+fn linear_to_srgb_byte(value: f64) -> u8 {
+    let encoded = if value <= 0.003_130_8 {
+        12.92 * value
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+#[derive(Clone, Copy)]
+struct LinearBackground {
+    encoded: [u8; 3],
+    linear: [f64; 3],
+}
+
+impl From<SrgbColor> for LinearBackground {
+    fn from(background: SrgbColor) -> Self {
+        let encoded = [background.red, background.green, background.blue];
+        Self {
+            encoded,
+            linear: encoded.map(srgb_to_linear),
+        }
+    }
+}
+
+fn composite_channel(foreground: u8, background: u8, linear_background: f64, alpha: u8) -> u8 {
+    match alpha {
+        0 => background,
+        255 => foreground,
+        _ => {
+            let amount = f64::from(alpha) / 255.0;
+            linear_to_srgb_byte(
+                amount * srgb_to_linear(foreground) + (1.0 - amount) * linear_background,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+fn composite_rgb(foreground: [u8; 3], background: SrgbColor, alpha: u8) -> [u8; 3] {
+    composite_rgb_precomputed(foreground, background.into(), alpha)
+}
+
+fn composite_rgb_precomputed(
+    foreground: [u8; 3],
+    background: LinearBackground,
+    alpha: u8,
+) -> [u8; 3] {
+    [
+        composite_channel(
+            foreground[0],
+            background.encoded[0],
+            background.linear[0],
+            alpha,
+        ),
+        composite_channel(
+            foreground[1],
+            background.encoded[1],
+            background.linear[1],
+            alpha,
+        ),
+        composite_channel(
+            foreground[2],
+            background.encoded[2],
+            background.linear[2],
+            alpha,
+        ),
+    ]
+}
+
+/// Transform foreground samples into destination sRGB and, when needed,
+/// composite straight alpha over the explicitly selected sRGB background.
+pub(crate) fn transform_and_flatten_pixels(
+    source: DynamicImage,
+    source_profile: Option<Vec<u8>>,
+    policy: ImageColorPolicy,
+    alpha_policy: Option<ImageAlphaPolicy>,
+    cancel: &CancellationToken,
+) -> Result<TransformResult, GoopError> {
     checkpoint(cancel)?;
     if policy == ImageColorPolicy::Preserve {
         return Err(invalid(
@@ -892,6 +1002,11 @@ pub(crate) fn transform_pixels(
         .map_err(|error| invalid(format!("Could not serialize the sRGB profile: {error}")))?;
     validate_profile(&destination_profile)?;
 
+    let background = alpha_policy
+        .map(|policy| match policy {
+            ImageAlphaPolicy::Flatten { background } => background,
+        })
+        .map(LinearBackground::from);
     let pixels = match (source, policy, source_profile) {
         (DynamicImage::ImageRgb8(image), ImageColorPolicy::AssumeSrgb, None) => image,
         (DynamicImage::ImageLuma8(image), ImageColorPolicy::AssumeSrgb, None) => {
@@ -993,6 +1108,158 @@ pub(crate) fn transform_pixels(
             }
             output
         }
+        (DynamicImage::ImageRgba8(image), ImageColorPolicy::AssumeSrgb, None) => {
+            let background = background.ok_or_else(|| {
+                invalid(
+                    "JPEG removes transparency; choose an explicit background before converting",
+                )
+            })?;
+            let mut output = allocate_rgb(width, height)?;
+            for (index, (source_pixel, output_pixel)) in
+                image.pixels().zip(output.pixels_mut()).enumerate()
+            {
+                if index % TRANSFORM_CHUNK_PIXELS == 0 {
+                    checkpoint(cancel)?;
+                }
+                output_pixel.0 = composite_rgb_precomputed(
+                    [source_pixel.0[0], source_pixel.0[1], source_pixel.0[2]],
+                    background,
+                    source_pixel.0[3],
+                );
+            }
+            output
+        }
+        (DynamicImage::ImageLumaA8(image), ImageColorPolicy::AssumeSrgb, None) => {
+            let background = background.ok_or_else(|| {
+                invalid(
+                    "JPEG removes transparency; choose an explicit background before converting",
+                )
+            })?;
+            let mut output = allocate_rgb(width, height)?;
+            for (index, (source_pixel, output_pixel)) in
+                image.pixels().zip(output.pixels_mut()).enumerate()
+            {
+                if index % TRANSFORM_CHUNK_PIXELS == 0 {
+                    checkpoint(cancel)?;
+                }
+                output_pixel.0 = composite_rgb_precomputed(
+                    [source_pixel.0[0]; 3],
+                    background,
+                    source_pixel.0[1],
+                );
+            }
+            output
+        }
+        (DynamicImage::ImageRgba8(image), ImageColorPolicy::ConvertToSrgb, Some(profile)) => {
+            if validate_profile(&profile)? != b"RGB " {
+                return Err(invalid(
+                    "The ICC profile color space does not match the RGBA source pixels",
+                ));
+            }
+            let background = background.ok_or_else(|| {
+                invalid(
+                    "JPEG removes transparency; choose an explicit background before converting",
+                )
+            })?;
+            let source_profile = Profile::new_icc_context(&context, &profile)
+                .map_err(|error| invalid(format!("ICC profile could not be parsed: {error}")))?;
+            let transform = Transform::new_context(
+                &context,
+                &source_profile,
+                PixelFormat::RGB_8,
+                &destination,
+                PixelFormat::RGB_8,
+                Intent::Perceptual,
+            )
+            .map_err(|error| invalid(format!("ICC transform could not be created: {error}")))?;
+            let mut output = allocate_rgb(width, height)?;
+            let mut source_pixels = [[0_u8; 3]; TRANSFORM_CHUNK_PIXELS];
+            let mut transformed_pixels = [[0_u8; 3]; TRANSFORM_CHUNK_PIXELS];
+            for (source_chunk, output_chunk) in image
+                .as_raw()
+                .chunks(TRANSFORM_CHUNK_PIXELS * 4)
+                .zip(output.as_mut().chunks_mut(TRANSFORM_CHUNK_PIXELS * 3))
+            {
+                checkpoint(cancel)?;
+                let pixels = source_chunk.as_chunks::<4>().0;
+                for (rgb, rgba) in source_pixels.iter_mut().zip(pixels) {
+                    rgb.copy_from_slice(&rgba[..3]);
+                }
+                transform.transform_pixels(
+                    &source_pixels[..pixels.len()],
+                    &mut transformed_pixels[..pixels.len()],
+                );
+                for ((destination, foreground), rgba) in output_chunk
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(&transformed_pixels[..pixels.len()])
+                    .zip(pixels)
+                {
+                    destination.copy_from_slice(&composite_rgb_precomputed(
+                        *foreground,
+                        background,
+                        rgba[3],
+                    ));
+                }
+            }
+            output
+        }
+        (DynamicImage::ImageLumaA8(image), ImageColorPolicy::ConvertToSrgb, Some(profile)) => {
+            if validate_profile(&profile)? != b"GRAY" {
+                return Err(invalid(
+                    "The ICC profile color space does not match the grayscale-alpha source pixels",
+                ));
+            }
+            let background = background.ok_or_else(|| {
+                invalid(
+                    "JPEG removes transparency; choose an explicit background before converting",
+                )
+            })?;
+            let source_profile = Profile::new_icc_context(&context, &profile)
+                .map_err(|error| invalid(format!("ICC profile could not be parsed: {error}")))?;
+            let transform = Transform::new_context(
+                &context,
+                &source_profile,
+                PixelFormat::GRAY_8,
+                &destination,
+                PixelFormat::RGB_8,
+                Intent::Perceptual,
+            )
+            .map_err(|error| invalid(format!("ICC transform could not be created: {error}")))?;
+            let mut output = allocate_rgb(width, height)?;
+            let mut source_pixels = [0_u8; TRANSFORM_CHUNK_PIXELS];
+            let mut transformed_pixels = [[0_u8; 3]; TRANSFORM_CHUNK_PIXELS];
+            for (source_chunk, output_chunk) in image
+                .as_raw()
+                .chunks(TRANSFORM_CHUNK_PIXELS * 2)
+                .zip(output.as_mut().chunks_mut(TRANSFORM_CHUNK_PIXELS * 3))
+            {
+                checkpoint(cancel)?;
+                let pixels = source_chunk.as_chunks::<2>().0;
+                for (gray, gray_alpha) in source_pixels.iter_mut().zip(pixels) {
+                    *gray = gray_alpha[0];
+                }
+                transform.transform_pixels(
+                    &source_pixels[..pixels.len()],
+                    &mut transformed_pixels[..pixels.len()],
+                );
+                for ((destination, foreground), gray_alpha) in output_chunk
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(&transformed_pixels[..pixels.len()])
+                    .zip(pixels)
+                {
+                    destination.copy_from_slice(&composite_rgb_precomputed(
+                        *foreground,
+                        background,
+                        gray_alpha[1],
+                    ));
+                }
+            }
+            output
+        }
         (_, ImageColorPolicy::ConvertToSrgb, None) => {
             return Err(invalid(
                 "Convert to sRGB requires a valid embedded RGB or grayscale ICC profile",
@@ -1000,7 +1267,7 @@ pub(crate) fn transform_pixels(
         }
         _ => {
             return Err(invalid(
-                "Color-managed conversion currently supports only 8-bit RGB or grayscale pixels without alpha",
+                "Color-managed conversion currently supports only admitted 8-bit RGB or grayscale pixels",
             ));
         }
     };
@@ -1019,9 +1286,9 @@ pub(crate) fn transform_pixels(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use goop_core::ImageColorPolicy;
-    use image::{DynamicImage, GrayImage, RgbImage};
-    use lcms2::{CIExyY, Profile, ToneCurve};
+    use goop_core::{ImageAlphaPolicy, ImageColorPolicy, SrgbColor};
+    use image::{DynamicImage, GrayAlphaImage, GrayImage, RgbImage, RgbaImage};
+    use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
     use tokio_util::sync::CancellationToken;
 
     fn gray_profile() -> Vec<u8> {
@@ -1031,6 +1298,36 @@ mod tests {
             Y: 1.0,
         };
         Profile::new_gray(&d50, &ToneCurve::new(2.2))
+            .unwrap()
+            .icc()
+            .unwrap()
+    }
+
+    fn wide_rgb_profile() -> Vec<u8> {
+        let white = CIExyY {
+            x: 0.3127,
+            y: 0.3290,
+            Y: 1.0,
+        };
+        let primaries = CIExyYTRIPLE {
+            Red: CIExyY {
+                x: 0.64,
+                y: 0.33,
+                Y: 1.0,
+            },
+            Green: CIExyY {
+                x: 0.21,
+                y: 0.71,
+                Y: 1.0,
+            },
+            Blue: CIExyY {
+                x: 0.15,
+                y: 0.06,
+                Y: 1.0,
+            },
+        };
+        let curve = ToneCurve::new(1.8);
+        Profile::new_rgb(&white, &primaries, &[&curve, &curve, &curve])
             .unwrap()
             .icc()
             .unwrap()
@@ -1249,13 +1546,265 @@ mod tests {
         assert!(validate_profile(&cmyk).is_err());
     }
 
+    fn oracle_channel(foreground: u8, background: u8, alpha: u8) -> u8 {
+        if alpha == 0 {
+            return background;
+        }
+        if alpha == 255 {
+            return foreground;
+        }
+        let linear = |byte: u8| {
+            let value = f64::from(byte) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let encoded = |value: f64| {
+            if value <= 0.003_130_8 {
+                12.92 * value
+            } else {
+                1.055 * value.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let amount = f64::from(alpha) / 255.0;
+        (encoded(amount * linear(foreground) + (1.0 - amount) * linear(background)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+
     #[test]
-    fn strict_container_admission_rejects_alpha_apng_and_non_eight_bit_jpeg() {
-        let rgba = encode_image(&DynamicImage::new_rgba8(1, 1), ImageFormat::Png);
-        assert!(inspect_bytes(rgba.into())
-            .unwrap_err()
-            .user_message()
-            .contains("without alpha"));
+    fn rgba_and_gray_alpha_are_admitted_only_for_explicit_flattening() {
+        for source in [
+            DynamicImage::ImageRgba8(RgbaImage::from_raw(1, 1, vec![1, 2, 3, 4]).unwrap()),
+            DynamicImage::ImageLumaA8(GrayAlphaImage::from_raw(1, 1, vec![120, 128]).unwrap()),
+        ] {
+            let bytes = encode_image(&source, ImageFormat::Png);
+            let inspection = inspect_bytes(bytes.into()).unwrap();
+            assert!(inspection.layout.has_alpha());
+        }
+    }
+
+    #[test]
+    fn linear_srgb_flatten_matches_independent_oracle_and_preserves_endpoints() {
+        let foreground = [17, 103, 241];
+        for background in [
+            SrgbColor {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
+            SrgbColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+            SrgbColor {
+                red: 239,
+                green: 41,
+                blue: 83,
+            },
+        ] {
+            for alpha in [0, 1, 127, 128, 254, 255] {
+                let source = DynamicImage::ImageRgba8(
+                    RgbaImage::from_raw(
+                        1,
+                        1,
+                        vec![foreground[0], foreground[1], foreground[2], alpha],
+                    )
+                    .unwrap(),
+                );
+                let result = transform_and_flatten_pixels(
+                    source,
+                    None,
+                    ImageColorPolicy::AssumeSrgb,
+                    Some(ImageAlphaPolicy::Flatten { background }),
+                    &CancellationToken::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    result.pixels.get_pixel(0, 0).0,
+                    [
+                        oracle_channel(foreground[0], background.red, alpha),
+                        oracle_channel(foreground[1], background.green, alpha),
+                        oracle_channel(foreground[2], background.blue, alpha),
+                    ]
+                );
+            }
+        }
+
+        let midpoint = composite_rgb(
+            [255, 255, 255],
+            SrgbColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+            128,
+        );
+        assert_eq!(midpoint, [188, 188, 188]);
+        assert_ne!(midpoint, [128, 128, 128]);
+    }
+
+    #[test]
+    fn gray_alpha_and_tagged_rgba_transform_then_composite() {
+        let background = SrgbColor {
+            red: 10,
+            green: 40,
+            blue: 200,
+        };
+        let gray = transform_and_flatten_pixels(
+            DynamicImage::ImageLumaA8(GrayAlphaImage::from_raw(1, 1, vec![180, 127]).unwrap()),
+            None,
+            ImageColorPolicy::AssumeSrgb,
+            Some(ImageAlphaPolicy::Flatten { background }),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            gray.pixels.get_pixel(0, 0).0,
+            [
+                oracle_channel(180, background.red, 127),
+                oracle_channel(180, background.green, 127),
+                oracle_channel(180, background.blue, 127),
+            ]
+        );
+
+        let profile = wide_rgb_profile();
+        let source_pixel = [31_u8, 149, 227];
+        let source_profile = Profile::new_icc(&profile).unwrap();
+        let destination_profile = Profile::new_srgb();
+        let independent_transform = Transform::new(
+            &source_profile,
+            PixelFormat::RGB_8,
+            &destination_profile,
+            PixelFormat::RGB_8,
+            Intent::Perceptual,
+        )
+        .unwrap();
+        let mut transformed_foreground = [[0_u8; 3]; 1];
+        independent_transform.transform_pixels(&[source_pixel], &mut transformed_foreground);
+        assert_ne!(transformed_foreground[0], source_pixel);
+
+        let tagged = transform_and_flatten_pixels(
+            DynamicImage::ImageRgba8(RgbaImage::from_raw(1, 1, vec![31, 149, 227, 128]).unwrap()),
+            Some(profile),
+            ImageColorPolicy::ConvertToSrgb,
+            Some(ImageAlphaPolicy::Flatten { background }),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            tagged.pixels.get_pixel(0, 0).0,
+            [
+                oracle_channel(transformed_foreground[0][0], background.red, 128),
+                oracle_channel(transformed_foreground[0][1], background.green, 128),
+                oracle_channel(transformed_foreground[0][2], background.blue, 128),
+            ]
+        );
+    }
+
+    #[test]
+    fn premultiplied_looking_samples_are_still_treated_as_straight_alpha() {
+        let background = SrgbColor {
+            red: 240,
+            green: 120,
+            blue: 60,
+        };
+        let source = [32_u8, 16, 8, 128];
+        let result = transform_and_flatten_pixels(
+            DynamicImage::ImageRgba8(RgbaImage::from_raw(1, 1, source.to_vec()).unwrap()),
+            None,
+            ImageColorPolicy::AssumeSrgb,
+            Some(ImageAlphaPolicy::Flatten { background }),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.pixels.get_pixel(0, 0).0,
+            [
+                oracle_channel(source[0], background.red, source[3]),
+                oracle_channel(source[1], background.green, source[3]),
+                oracle_channel(source[2], background.blue, source[3]),
+            ]
+        );
+    }
+
+    #[test]
+    fn fully_transparent_hidden_rgb_cannot_contaminate_background() {
+        let background = SrgbColor {
+            red: 12,
+            green: 34,
+            blue: 56,
+        };
+        for hidden in [[255, 0, 255], [0, 255, 0]] {
+            let source = DynamicImage::ImageRgba8(
+                RgbaImage::from_raw(1, 1, vec![hidden[0], hidden[1], hidden[2], 0]).unwrap(),
+            );
+            let result = transform_and_flatten_pixels(
+                source,
+                None,
+                ImageColorPolicy::AssumeSrgb,
+                Some(ImageAlphaPolicy::Flatten { background }),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(result.pixels.get_pixel(0, 0).0, [12, 34, 56]);
+        }
+    }
+
+    #[test]
+    fn alpha_source_requires_explicit_policy_before_rgb_preparation() {
+        let source = DynamicImage::ImageRgba8(RgbaImage::new(1, 1));
+        let error = transform_and_flatten_pixels(
+            source,
+            None,
+            ImageColorPolicy::AssumeSrgb,
+            None,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(error.user_message().contains("background"));
+    }
+
+    #[test]
+    fn alpha_snapshot_revalidation_rejects_a_replaced_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.png");
+        RgbaImage::from_pixel(4, 4, image::Rgba([20, 40, 80, 128]))
+            .save(&input)
+            .unwrap();
+        let prepared = prepare_path(&input, &CancellationToken::new()).unwrap();
+        RgbaImage::from_pixel(4, 4, image::Rgba([200, 10, 30, 128]))
+            .save(&input)
+            .unwrap();
+
+        let error = prepared.verify_unchanged(&input).unwrap_err();
+
+        assert!(error.user_message().contains("source changed"));
+    }
+
+    #[test]
+    fn strict_container_admission_rejects_unsupported_png_layouts_and_non_eight_bit_jpeg() {
+        let direct_png = encode_image(&DynamicImage::new_rgb8(1, 1), ImageFormat::Png);
+        for (offset, value) in [(24, 16), (25, 3), (28, 1)] {
+            let mut unsupported = direct_png.clone();
+            unsupported[offset] = value;
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(&unsupported[12..29]);
+            unsupported[29..33].copy_from_slice(&crc.finalize().to_be_bytes());
+            assert!(inspect_bytes(unsupported.into()).is_err());
+        }
+        for chunk in [
+            png_chunk(b"tRNS", &[0, 0, 0, 0, 0, 0]),
+            png_chunk(b"sRGB", &[0]),
+        ] {
+            let mut unsupported = direct_png.clone();
+            unsupported.splice(33..33, chunk);
+            assert!(inspect_bytes(unsupported.into()).is_err());
+        }
 
         let mut apng = encode_image(&DynamicImage::new_rgb8(1, 1), ImageFormat::Png);
         let animation_control = png_chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]);

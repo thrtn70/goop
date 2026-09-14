@@ -6,15 +6,16 @@
  * across machines.
  */
 
-import type { CompressMode, GifOptions, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
+import type { CompressMode, GifOptions, ImageAlphaPolicy, ImageColorPolicy, ImageConvertOptions, VideoConvertOptions, MetadataPolicy, SubtitleOptions, Preset, QualityPreset, ResolutionCap, TargetFormat, TrackPresetPolicy } from "@/types";
 
 import { cloneImageOptions, validateImageOptions } from "@/features/convert/imageOptions";
 
 import { cloneVideoOptions, validateVideoRequest } from "@/features/convert/videoOptions";
 import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } from "@/features/convert/audioOptions";
+import { cloneImageAlphaPolicy, validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 9 as const;
+export const PRESET_BUNDLE_VERSION = 10 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -83,6 +84,7 @@ interface PresetEntry {
   compress_mode: CompressMode | null;
   metadata_policy: MetadataPolicy | null;
   image_color_policy: ImageColorPolicy | null;
+  image_alpha_policy: ImageAlphaPolicy | null;
   gif_options: GifOptions | null;
   subtitle: SubtitleOptions | null;
   image_options: ImageConvertOptions | null;
@@ -119,6 +121,7 @@ interface PresetBundleWire {
     compress_mode: WireCompressMode | null;
     metadata_policy: MetadataPolicy | null;
     image_color_policy: ImageColorPolicy | null;
+    image_alpha_policy: ImageAlphaPolicy | null;
     gif_options: GifOptions | null;
     subtitle: SubtitleOptions | null;
     image_options: ImageConvertOptions | null;
@@ -142,6 +145,7 @@ export function serializePresets(presets: readonly Preset[]): string {
       compress_mode: compressModeForWire(p.compress_mode),
       metadata_policy: p.metadata_policy ?? null,
       image_color_policy: p.image_color_policy ?? null,
+      image_alpha_policy: cloneImageAlphaPolicy(p.image_alpha_policy),
       gif_options: p.gif_options ?? null,
       subtitle: p.subtitle ?? null,
       image_options: cloneImageOptions(p.image_options),
@@ -285,7 +289,12 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
   let audioOptions: AudioConvertOptions | null;
   let trackPolicy: TrackPresetPolicy | null;
   const imageColorPolicy = validateImageColorPolicy(v.image_color_policy, version);
+  let imageAlphaPolicy: ImageAlphaPolicy | null;
   try {
+    if (version < 10 && v.image_alpha_policy != null) {
+      throw new Error("image_alpha_policy requires schema 10");
+    }
+    imageAlphaPolicy = validateImageAlphaPolicy(v.image_alpha_policy);
     if (version === 1 && v.image_options != null) {
       throw new Error("image_options is not allowed in schema 1");
     }
@@ -334,6 +343,19 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
         throw new Error("explicit image color handling cannot be combined with media controls");
       }
     }
+    if (imageAlphaPolicy) {
+      if (v.target !== "jpeg") throw new Error("image_alpha_policy requires JPEG output");
+      if (!imageColorPolicy || imageColorPolicy === "preserve") {
+        throw new Error("image_alpha_policy requires explicit sRGB color handling");
+      }
+      if (v.compress_mode != null || v.gif_options != null || v.subtitle != null || videoOptions != null || audioOptions != null || trackPolicy != null) {
+        throw new Error("image_alpha_policy is available in Convert only");
+      }
+      if ((v.quality_preset != null && v.quality_preset !== "original")
+        || (v.resolution_cap != null && v.resolution_cap !== "original")) {
+        throw new Error("image_alpha_policy cannot be combined with quality or resolution presets");
+      }
+    }
   } catch (error) {
     throw new PresetParseError(`Preset "${v.name.trim()}": ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -345,6 +367,7 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
     compress_mode: validateCompressMode(v.compress_mode),
     metadata_policy: validateMetadata(v.metadata_policy, version),
     image_color_policy: imageColorPolicy,
+    image_alpha_policy: imageAlphaPolicy,
     gif_options: validateGif(v.gif_options),
     subtitle: validateSubtitle(v.subtitle),
     image_options: imageOptions,
@@ -371,7 +394,7 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (![1, 2, 3, 4, 5, 6, 7, 8, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
     throw new PresetParseError(
       `unsupported bundle version: ${String(parsed.version)} (expected 1 through ${PRESET_BUNDLE_VERSION})`,
     );
@@ -407,6 +430,7 @@ export function entriesToPresets(
       compress_mode: entry.compress_mode ? { ...entry.compress_mode } : null,
       metadata_policy: entry.metadata_policy,
       image_color_policy: entry.image_color_policy,
+      image_alpha_policy: cloneImageAlphaPolicy(entry.image_alpha_policy),
       gif_options: entry.gif_options ? { ...entry.gif_options } : null,
       subtitle: entry.subtitle ? { ...entry.subtitle } : null,
       image_options: cloneImageOptions(entry.image_options),

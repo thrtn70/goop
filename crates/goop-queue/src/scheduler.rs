@@ -692,6 +692,7 @@ mod tests {
             video_track_execution: None,
             image_metadata_execution: None,
             compression_execution: None,
+            image_alpha_execution: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,
@@ -962,7 +963,7 @@ mod tests {
             Box::pin(async move {
                 tokio::select! {
                     _ = signals.cancel.cancelled() => Err(GoopError::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ track_execution: None, audio_execution: None, video_execution: None, video_track_execution: None, image_metadata_execution: None, compression_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ track_execution: None, audio_execution: None, video_execution: None, video_track_execution: None, image_metadata_execution: None, compression_execution: None, image_alpha_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
                 }
             })
         });

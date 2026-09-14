@@ -84,6 +84,29 @@ it("snapshots nested JPEG settings before the destination dialog even if the cal
   expect(mocks.enqueue.mock.calls[0][0].image_options).toEqual({ jpeg_quality: 90, resize: { kind: "fit_within", width: 2048, height: 2048 } });
 });
 
+it("snapshots a nested JPEG alpha background before the destination dialog", async () => {
+  const alpha = { kind: "flatten" as const, background: { red: 17, green: 34, blue: 51 } };
+  let resolve!: (path: string) => void;
+  mocks.save.mockReset().mockImplementation(() => new Promise(r => { resolve = r; }));
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const done = vi.fn();
+  render(<ConvertActionBar files={[{
+    ...file,
+    path: "/a.png",
+    target: "jpeg",
+    imageColorPolicy: "assume_srgb",
+    imageAlphaPolicy: alpha,
+  }]} disabled={false} onEnqueued={done} />);
+  fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
+  alpha.background.red = 200;
+  await act(async () => resolve("/out.jpg"));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0].image_alpha_policy).toEqual({
+    kind: "flatten",
+    background: { red: 17, green: 34, blue: 51 },
+  });
+});
+
 it("snapshots nested audio settings before the destination dialog", async () => {
   const options: Extract<AudioConvertOptions, { kind: "encode" }> = {
     kind: "encode" as const,

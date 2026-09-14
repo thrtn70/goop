@@ -344,6 +344,20 @@ describe("JPEG preset save snapshot", () => {
     options.resize.height = 1;
     expect(vi.mocked(api.preset.save).mock.calls[0][0].image_options?.resize).toEqual({ kind: "fit_within", width: 2048, height: 2048 });
   });
+
+  it("captures an owned alpha background when opened before later edits", async () => {
+    const { default: PresetSaveDialog } = await import("@/features/presets/PresetSaveDialog");
+    const alpha = { kind: "flatten" as const, background: { red: 17, green: 34, blue: 51 } };
+    const snapshot = { target: "jpeg" as const, image_color_policy: "assume_srgb" as const, image_alpha_policy: alpha };
+    const { rerender } = render(<PresetSaveDialog open onClose={() => {}} snapshot={snapshot} />);
+    alpha.background.red = 200;
+    rerender(<PresetSaveDialog open onClose={() => {}} snapshot={snapshot} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Preset name" }), "Alpha");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(api.preset.save).toHaveBeenCalledWith(expect.objectContaining({
+      image_alpha_policy: { kind: "flatten", background: { red: 17, green: 34, blue: 51 } },
+    }));
+  });
 });
 
 describe("video preset snapshots", () => {

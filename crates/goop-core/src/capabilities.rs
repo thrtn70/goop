@@ -160,6 +160,10 @@ pub struct CompressionCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 pub struct ImageSettingsCapabilities {
+    /// Exact managed-color choice required when these settings use a source-bound path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub required_color_policy: Option<crate::ImageColorPolicy>,
     pub available: bool,
     pub reason: Option<String>,
     pub quality_min: u8,
@@ -203,6 +207,31 @@ pub struct ImageColorCapabilities {
     pub preserve: ColorPolicyAvailability,
     pub convert_to_srgb: ColorPolicyAvailability,
     pub assume_srgb: ColorPolicyAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+/// Whether an explicit alpha policy can execute for a source-bound target.
+pub struct AlphaPolicyAvailability {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+/// Source-bound transparency facts and explicit policies for an image target.
+pub struct ImageAlphaCapabilities {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_has_alpha: Option<bool>,
+    pub flatten: AlphaPolicyAvailability,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub required_color_policy: Option<crate::ImageColorPolicy>,
+    pub suggested_background: crate::SrgbColor,
 }
 
 /// Source orientation state established by bounded metadata inspection.
@@ -264,6 +293,9 @@ pub struct TargetCapability {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub image_color: Option<ImageColorCapabilities>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub image_alpha: Option<ImageAlphaCapabilities>,
     pub target: TargetFormat,
     pub available: bool,
     pub reason: Option<String>,

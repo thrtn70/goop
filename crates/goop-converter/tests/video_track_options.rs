@@ -87,6 +87,7 @@ fn request(
         batch_id: None,
         metadata_policy: None,
         image_color_policy: None,
+        image_alpha_policy: None,
         subtitle: None,
         image_options: None,
         audio_options: None,

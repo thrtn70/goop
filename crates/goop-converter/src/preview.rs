@@ -464,6 +464,11 @@ fn image_sample_bytes(
     if decoder.total_bytes() > MAX_SOURCE_PIXELS * 16 {
         return Err(invalid("Decoded image exceeds preview memory limit"));
     }
+    if request.target == TargetFormat::Jpeg && decoder.color_type().has_alpha() {
+        return Err(invalid(
+            "JPEG removes transparency; choose an explicit background before previewing.",
+        ));
+    }
     let orientation = if request.image_options.is_some() {
         let orientation = decoder
             .exif_metadata()
@@ -563,6 +568,16 @@ fn color_managed_image_sample(
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
     let policy = request.image_color_policy.unwrap_or_default();
+    if request.image_alpha_policy.is_some() && request.target != TargetFormat::Jpeg {
+        return Err(invalid(
+            "Transparency flattening is currently available only for JPEG output",
+        ));
+    }
+    if request.image_alpha_policy.is_some() && policy == ImageColorPolicy::Preserve {
+        return Err(invalid(
+            "JPEG transparency flattening requires Convert to sRGB or Assume sRGB",
+        ));
+    }
     if !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Png) {
         return Err(invalid(
             "Color-managed conversion is available only for JPEG and PNG output",
@@ -605,12 +620,27 @@ fn color_managed_image_sample(
     checkpoint(cancel, deadline)?;
     let source = prepared.decode()?;
     validate_pixels(source.width(), source.height())?;
-    let mut transformed = crate::color::transform_pixels(
-        source,
-        prepared.inspection.profile.clone(),
-        policy,
-        cancel,
-    )?;
+    let source_had_alpha = prepared.inspection.layout.has_alpha();
+    if source_had_alpha && request.image_alpha_policy.is_none() {
+        return Err(invalid(
+            "JPEG removes transparency; choose an explicit background before previewing.",
+        ));
+    }
+    let alpha_before = source_had_alpha.then(|| {
+        let (width, height) = bounded_dimensions(source.width(), source.height(), edge(request));
+        source.resize_exact(width, height, image::imageops::FilterType::Triangle)
+    });
+    let mut transformed = if request.image_alpha_policy.is_some() {
+        crate::color::transform_and_flatten_pixels(
+            source,
+            prepared.inspection.profile.clone(),
+            policy,
+            request.image_alpha_policy,
+            cancel,
+        )?
+    } else {
+        crate::color::transform_pixels(source, prepared.inspection.profile.clone(), policy, cancel)?
+    };
     if let Some(options) = request.image_options.as_ref() {
         let dimensions = crate::image_options::output_dimensions(
             transformed.pixels.dimensions(),
@@ -631,12 +661,14 @@ fn color_managed_image_sample(
         transformed.pixels.height(),
         edge(request),
     );
-    let before_sample = image::imageops::resize(
-        &transformed.pixels,
-        width,
-        height,
-        image::imageops::FilterType::Triangle,
-    );
+    let before_sample = alpha_before.unwrap_or_else(|| {
+        DynamicImage::ImageRgb8(image::imageops::resize(
+            &transformed.pixels,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        ))
+    });
     let after_pixels = image::imageops::resize(
         &transformed.pixels,
         width,
@@ -644,7 +676,7 @@ fn color_managed_image_sample(
         image::imageops::FilterType::Triangle,
     );
     let before = dir.join("before.png");
-    DynamicImage::ImageRgb8(before_sample)
+    before_sample
         .save_with_format(&before, ImageFormat::Png)
         .map_err(|error| invalid(error.to_string()))?;
     checkpoint(cancel, deadline)?;
@@ -921,6 +953,53 @@ mod tests {
             "image_options":{"jpeg_quality":75,"resize":{"kind":"original"}}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn jpeg_preview_refuses_implicit_alpha_and_explicit_preview_keeps_source_transparency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 255, 0]))
+            .save(&input)
+            .unwrap();
+        let bytes: Bytes = std::fs::read(&input).unwrap().into();
+        let mut request: PreviewRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "alpha",
+            "input_path": input,
+            "source_revision": "1",
+            "target": "jpeg"
+        }))
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + TIMEOUT;
+
+        let error =
+            image_sample_bytes(bytes.clone(), tmp.path(), &request, &cancel, deadline).unwrap_err();
+        assert!(error.user_message().contains("background"));
+
+        request.image_color_policy = Some(ImageColorPolicy::AssumeSrgb);
+        request.image_alpha_policy = Some(goop_core::ImageAlphaPolicy::Flatten {
+            background: goop_core::SrgbColor {
+                red: 12,
+                green: 34,
+                blue: 56,
+            },
+        });
+        let result = image_sample_bytes(
+            bytes,
+            tmp.path(),
+            &request,
+            &cancel,
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+        let before = image::open(result.before_path.unwrap()).unwrap();
+        assert_eq!(before.to_rgba8().get_pixel(0, 0).0[3], 0);
+        let after = image::open(result.after_path).unwrap().to_rgb8();
+        let pixel = after.get_pixel(0, 0).0;
+        assert!((i16::from(pixel[0]) - 12).abs() <= 3);
+        assert!((i16::from(pixel[1]) - 34).abs() <= 3);
+        assert!((i16::from(pixel[2]) - 56).abs() <= 3);
     }
 
     #[test]

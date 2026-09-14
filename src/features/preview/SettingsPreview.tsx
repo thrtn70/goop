@@ -71,7 +71,7 @@ export default function SettingsPreview({ request, imageSettings, videoSettings 
     {error && <p role="alert" className="mt-2 text-xs text-warning">{error}</p>}
     {result && supported && result.source_revision === revision && <div className="mt-3 space-y-3">
       <p className="text-xs text-fg-muted">{result.kind === "video" ? "Muted H.264 viewing sample. Stream-copy jobs are re-encoded for this preview." : "Sample images omit metadata."}</p>
-      {result.before_path && <figure><img src={convertFileSrc(result.before_path)} alt="Source sample" className="max-h-52 w-full rounded-md object-contain"/><figcaption className="mt-1 text-xs text-fg-muted">Source sample</figcaption></figure>}
+      {result.before_path && <figure className="transparency-checkerboard rounded-md"><img src={convertFileSrc(result.before_path)} alt="Source sample" className="max-h-52 w-full rounded-md object-contain"/><figcaption className="mt-1 bg-surface-1 text-xs text-fg-muted">Source sample</figcaption></figure>}
       {result.kind === "image" ? <figure><img src={convertFileSrc(result.after_path)} alt="Output sample" className="max-h-52 w-full rounded-md object-contain"/><figcaption className="mt-1 text-xs text-fg-muted">Output sample</figcaption></figure> : <video src={convertFileSrc(result.after_path)} aria-label="Output video sample" controls muted preload="metadata" className="w-full rounded-md"/>}
       <p className="text-xs text-fg-muted">{result.width} × {result.height} · Sample only{result.duration_ms != null ? ` · ${(result.duration_ms / 1000).toFixed(1)} seconds` : ""}</p>
     </div>}

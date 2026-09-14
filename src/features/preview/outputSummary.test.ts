@@ -265,3 +265,30 @@ it("does not claim source metadata was preserved during explicit color conversio
   expect(summary).toContain("All source metadata removed");
   expect(summary).not.toContain("Metadata preserved");
 });
+
+it("distinguishes requested alpha policy from actual flattening", () => {
+  const flattened = outputSummary(result({
+    image_alpha_execution: {
+      requested_policy: {kind:"flatten",background:{red:17,green:34,blue:51}},
+      source_had_alpha: true,
+      flattened: true,
+      background: {red:17,green:34,blue:51},
+      compositing: "linear_srgb",
+    },
+  }));
+  expect(flattened).toContain("Transparency over #112233");
+  expect(flattened).toContain("linear sRGB");
+
+  const opaque = outputSummary(result({
+    image_alpha_execution: {
+      requested_policy: {kind:"flatten",background:{red:255,green:255,blue:255}},
+      source_had_alpha: false,
+      flattened: false,
+      background: {red:255,green:255,blue:255},
+      compositing: "linear_srgb",
+    },
+  }));
+  expect(opaque).toContain("Background #FFFFFF saved");
+  expect(opaque).toContain("no transparency found");
+  expect(opaque).not.toContain("Transparency over");
+});

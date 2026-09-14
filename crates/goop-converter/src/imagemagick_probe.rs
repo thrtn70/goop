@@ -108,7 +108,7 @@ pub(crate) fn probe_raster_snapshot(bytes: Bytes) -> Result<ProbeResult, GoopErr
     Ok(image_probe_result(
         decoder.dimensions(),
         Some(format!("{detected:?}")),
-        None,
+        Some(decoder.color_type().has_alpha()),
         bytes.len() as u64,
     ))
 }
@@ -150,7 +150,7 @@ fn raster_probe(path: &Path) -> Result<ProbeResult, GoopError> {
     Ok(image_probe_result(
         decoder.dimensions(),
         detected.map(|f| format!("{f:?}")),
-        None,
+        Some(decoder.color_type().has_alpha()),
         metadata.len(),
     ))
 }
@@ -331,8 +331,23 @@ mod tests {
         assert!(!result.has_audio);
         assert_eq!(result.duration_ms, 0);
         assert!(result.file_size > 0);
+        assert_eq!(result.image_has_alpha, Some(true));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn probes_gray_alpha_png_layout_as_alpha_bearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gray-alpha.png");
+        image::GrayAlphaImage::from_pixel(3, 5, image::LumaA([120, 200]))
+            .save(&path)
+            .unwrap();
+
+        let result = probe_image(&path).unwrap();
+
+        assert_eq!((result.width, result.height), (Some(3), Some(5)));
+        assert_eq!(result.image_has_alpha, Some(true));
     }
 
     #[test]
