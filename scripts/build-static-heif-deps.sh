@@ -25,7 +25,8 @@
 # already populated, which also makes a CI cache restore a no-op).
 #
 # Windows is NOT handled here: libheif-sys resolves libheif via vcpkg on
-# MSVC. Install "libheif[core]:x64-windows-static" — [core] suppresses
+# MSVC. scripts/install-windows-heif-deps.sh checks out the reviewed vcpkg
+# tree before installing "libheif[core]:x64-windows-static". [core] suppresses
 # the port's DEFAULT 'hevc' feature, which is the x265 GPL *encoder*
 # (libde265 is an unconditional core dependency, so HEIC decode always
 # works). Set VCPKGRS_TRIPLET=x64-windows-static. The pure static

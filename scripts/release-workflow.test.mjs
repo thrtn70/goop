@@ -13,6 +13,10 @@ const auditLines = auditWorkflow.split("\n");
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
+const windowsHeifInstaller = readFileSync(
+  new URL("./install-windows-heif-deps.sh", import.meta.url),
+  "utf8",
+);
 
 function job(name) {
   const start = lines.findIndex((line) => line === `  ${name}:`);
@@ -76,6 +80,17 @@ test("audit executes the pinned static Little CMS transform on both release targ
   assert.match(step[0], /otool -L "\$BIN"/);
   assert.match(step[0], /objdump\.exe -p "\$BIN"/);
   assert.match(step[0], /lcms2\[\^ \]\*\\\.dll/);
+});
+
+test("Windows audit and release use one immutable libheif 1.23 vcpkg tree", () => {
+  const installer = "./scripts/install-windows-heif-deps.sh";
+  assert.equal(auditWorkflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
+  assert.equal(workflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
+  assert.match(windowsHeifInstaller, /VCPKG_COMMIT="[0-9a-f]{40}"/);
+  assert.match(windowsHeifInstaller, /checkout --detach "\$VCPKG_COMMIT"/);
+  assert.match(windowsHeifInstaller, /libheif\[core\]:x64-windows-static/);
+  assert.match(auditWorkflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
+  assert.match(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
 });
 
 const version = "0.3.3";

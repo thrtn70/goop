@@ -50,7 +50,9 @@ jobs:
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p goop-converter --all-targets --features heic-thumbnail-preview -- -D warnings
       - name: test
         run: cargo test --workspace --all-features
       # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
@@ -239,9 +241,13 @@ jobs:
         if: matrix.os == 'macos-14'
         run: |
           set -euo pipefail
-          cargo test -p goop-converter heic
-          BIN=$(cargo test -p goop-converter --no-run --message-format=json 2>/dev/null \
-            | jq -r 'select(.executable != null) | .executable' | head -1)
+          cargo test -p goop-converter --features heic-thumbnail-preview heic
+          BIN=$(cargo test -p goop-converter --features heic-thumbnail-preview --lib --no-run --message-format=json 2>/dev/null \
+            | jq -er 'select(
+                .executable != null
+                and .target.name == "goop_converter"
+                and .target.kind == ["lib"]
+              ) | .executable')
           # Strong form: nothing outside /usr/lib + /System may appear —
           # guards against any codec dylib leaking back into the link.
           LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
@@ -255,15 +261,12 @@ jobs:
         if: matrix.os == 'windows-latest'
         with:
           path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-archives-${{ runner.os }}-libheif-core-static
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('scripts/install-windows-heif-deps.sh') }}
       - name: Static HEIC stack (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # [core] suppresses the port's default 'hevc' feature (x265
-          # GPL encoder); libde265 is a core dependency so decode works.
-          # x64-windows-static matches the repo's crt-static RUSTFLAGS.
-          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+          ./scripts/install-windows-heif-deps.sh
           echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
           echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
       # Compile-check the Windows-only Rust paths on a real Windows
@@ -283,7 +286,7 @@ jobs:
         shell: bash
         run: |
           cargo check -p goop-queue --all-features
-          cargo test -p goop-converter heic
+          cargo test -p goop-converter --features heic-thumbnail-preview heic
           mkdir -p dist
           cargo check -p goop-tauri --all-features
       - name: Lossy WebP static link
