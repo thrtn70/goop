@@ -44,8 +44,8 @@ pub struct ImageFormatSupport {
 pub struct ImageDecoderStatus {
     /// libheif + libde265 versions (v0.2.8: statically linked,
     /// decode-only). macOS/Linux pin exact versions via
-    /// scripts/build-static-heif-deps.sh; Windows builds from vcpkg's
-    /// current libheif port, so the string hedges there.
+    /// scripts/build-static-heif-deps.sh; Windows pins the vcpkg tree via
+    /// scripts/install-windows-heif-deps.sh.
     pub libheif_version: String,
     /// jpegxl-rs / libjxl versions (libjxl 0.11 built from vendored
     /// source via jpegxl-rs's `vendored` feature — statically linked
@@ -62,11 +62,10 @@ pub async fn image_decoders() -> Result<ImageDecoderStatus, IpcError> {
     // Pinned per Cargo.toml + scripts/build-static-heif-deps.sh.
     // libjxl is vendored at 0.11 via jpegxl-rs's `vendored` feature;
     // libheif + libde265 are statically linked (decode-only, v0.2.8).
-    // Windows resolves libheif via vcpkg's port, which tracks its own
-    // version — hedge the displayed string there.
+    // Windows resolves libheif from the reviewed immutable vcpkg tree.
     Ok(ImageDecoderStatus {
         libheif_version: if cfg!(windows) {
-            "libheif (vcpkg, static, decode-only)".into()
+            "libheif 1.23.4 (vcpkg, static, decode-only)".into()
         } else {
             "libheif 1.23.0 + libde265 1.1.1 (static, decode-only)".into()
         },

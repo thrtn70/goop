@@ -639,6 +639,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             performance::performance_status,
             performance::performance_ready,
+            commands::preview::begin_preview_session,
+            commands::preview::release_preview_session,
             commands::preview::generate_preview,
             commands::preview::cancel_preview,
             commands::convert::convert_probe,

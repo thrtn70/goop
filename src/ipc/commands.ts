@@ -163,6 +163,7 @@ export type IpcLanguagePack = Omit<LanguagePack, "size_bytes"> & {
 
 export const api = {
   preview: {
+    begin: (): Promise<string> => invoke<string>("begin_preview_session"),
     generate: (request: PreviewRequest) => invoke<PreviewResult>("generate_preview", {request: {
       ...request,
       video_options: cloneVideoOptions(request.video_options),
@@ -170,6 +171,7 @@ export const api = {
       compress_mode: request.compress_mode?.kind === "target_size_bytes" ? {kind:"target_size_bytes",value:Number(request.compress_mode.value)} : request.compress_mode,
     }}),
     cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
+    release: (previewSessionId: string) => invoke<void>("release_preview_session", {previewSessionId}),
   },
   convert: {
     videoPlan: (req: ConvertRequest) => invoke<VideoExecutionSummary>("convert_video_plan", { req: { ...req, video_options: cloneVideoOptions(req.video_options), ...(req.track_options === undefined ? {} : {track_options: cloneTrackOptions(req.track_options)}), gif_options: gifToIpc(req.gif_options) } }),
