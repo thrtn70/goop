@@ -4,6 +4,21 @@ use goop_core::{IpcError, PreviewRequest, PreviewResult};
 use tauri::State;
 
 #[tauri::command]
+pub fn begin_preview_session(previews: State<'_, PreviewService>) -> Result<String, IpcError> {
+    previews.begin_session().map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn release_preview_session(
+    previews: State<'_, PreviewService>,
+    preview_session_id: String,
+) -> Result<(), IpcError> {
+    previews
+        .release_session(&preview_session_id)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn generate_preview(
     state: State<'_, AppState>,
     previews: State<'_, PreviewService>,

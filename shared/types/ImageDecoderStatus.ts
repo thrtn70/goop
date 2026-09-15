@@ -11,8 +11,8 @@ export type ImageDecoderStatus = {
 /**
  * libheif + libde265 versions (v0.2.8: statically linked,
  * decode-only). macOS/Linux pin exact versions via
- * scripts/build-static-heif-deps.sh; Windows builds from vcpkg's
- * current libheif port, so the string hedges there.
+ * scripts/build-static-heif-deps.sh; Windows pins the vcpkg tree via
+ * scripts/install-windows-heif-deps.sh.
  */
 libheif_version: string, 
 /**

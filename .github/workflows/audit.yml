@@ -50,7 +50,9 @@ jobs:
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p goop-converter --all-targets --features heic-thumbnail-preview -- -D warnings
       - name: test
         run: cargo test --workspace --all-features
       # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
@@ -239,9 +241,13 @@ jobs:
         if: matrix.os == 'macos-14'
         run: |
           set -euo pipefail
-          cargo test -p goop-converter heic
-          BIN=$(cargo test -p goop-converter --no-run --message-format=json 2>/dev/null \
-            | jq -r 'select(.executable != null) | .executable' | head -1)
+          cargo test -p goop-converter --features heic-thumbnail-preview heic
+          BIN=$(cargo test -p goop-converter --features heic-thumbnail-preview --lib --no-run --message-format=json 2>/dev/null \
+            | jq -er 'select(
+                .executable != null
+                and .target.name == "goop_converter"
+                and .target.kind == ["lib"]
+              ) | .executable')
           # Strong form: nothing outside /usr/lib + /System may appear —
           # guards against any codec dylib leaking back into the link.
           LEAKS=$(otool -L "$BIN" | tail -n +2 | grep -v "/usr/lib/\|/System/" || true)
@@ -255,15 +261,12 @@ jobs:
         if: matrix.os == 'windows-latest'
         with:
           path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-archives-${{ runner.os }}-libheif-core-static
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('scripts/install-windows-heif-deps.sh') }}
       - name: Static HEIC stack (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # [core] suppresses the port's default 'hevc' feature (x265
-          # GPL encoder); libde265 is a core dependency so decode works.
-          # x64-windows-static matches the repo's crt-static RUSTFLAGS.
-          /c/vcpkg/vcpkg.exe install "libheif[core]:x64-windows-static"
+          ./scripts/install-windows-heif-deps.sh
           echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
           echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
       # Compile-check the Windows-only Rust paths on a real Windows
@@ -282,10 +285,99 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
+          set -euo pipefail
           cargo check -p goop-queue --all-features
-          cargo test -p goop-converter heic
+          cargo test -p goop-converter --features heic-thumbnail-preview heic
+          BIN=$(CARGO_INCREMENTAL=0 cargo test -p goop-converter --release --features heic-thumbnail-preview --lib --no-run --message-format=json | python3 -c '
+          import json
+          import sys
+
+          paths = []
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              target = message.get("target", {})
+              if (
+                  target.get("name") == "goop_converter"
+                  and target.get("kind") == ["lib"]
+                  and message.get("executable")
+              ):
+                  paths.append(message["executable"])
+          paths = list(dict.fromkeys(paths))
+          if len(paths) != 1:
+              raise SystemExit(f"expected one goop_converter test executable, found {paths!r}")
+          print(paths[0])
+          ')
+          printf 'HEIC_PREVIEW_TEST_BINARY=%s\n' "$BIN" >> "$GITHUB_ENV"
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      - name: HEIC preview fresh-process memory (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binary = $env:HEIC_PREVIEW_TEST_BINARY
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw "HEIC preview test executable is missing: $binary"
+          }
+
+          $cases = [ordered]@{
+            baseline = "heic_preview_sampler::tests::memory_probe_baseline_without_decode"
+            primary12mp = "heic_preview_sampler::tests::memory_probe_12mp_primary_with_512x384_thumbnail"
+            primary48mp = "heic_preview_sampler::tests::memory_probe_48mp_primary_with_512x384_thumbnail"
+            exact4mp = "heic_preview_sampler::tests::memory_probe_exact_4mp_thumbnail"
+          }
+          $results = @{}
+
+          foreach ($case in $cases.GetEnumerator()) {
+            $measurements = [System.Collections.Generic.List[long]]::new()
+            for ($iteration = 0; $iteration -lt 6; $iteration++) {
+              $arguments = @("--quiet", "--exact", $case.Value, "--ignored")
+              $process = Start-Process -FilePath $binary -ArgumentList $arguments -NoNewWindow -PassThru
+              $peak = [long]0
+              while (-not $process.HasExited) {
+                try {
+                  $process.Refresh()
+                  $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+                } catch {
+                  # The process may exit between the status check and refresh.
+                }
+                Start-Sleep -Milliseconds 5
+              }
+              $process.WaitForExit()
+              try {
+                $process.Refresh()
+                $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+              } catch {
+                # Retain the last sampled peak after process exit.
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "HEIC preview memory probe $($case.Key) failed with exit code $($process.ExitCode)"
+              }
+              if ($peak -le 0) {
+                throw "HEIC preview memory probe $($case.Key) did not report peak working set"
+              }
+              if ($iteration -gt 0) {
+                $measurements.Add($peak)
+              }
+            }
+
+            $ordered = @($measurements | Sort-Object)
+            $median = [long]$ordered[2]
+            $maximum = [long](($ordered | Measure-Object -Maximum).Maximum)
+            $results[$case.Key] = $median
+            $line = "HEIC_PREVIEW_MEMORY case=$($case.Key) samples=$([string]::Join(',', $measurements)) median=$median maximum=$maximum"
+            $line | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+          $primaryDelta = [Math]::Abs([long]$results.primary12mp - [long]$results.primary48mp)
+          "HEIC_PREVIEW_MEMORY equal_thumbnail_median_delta=$primaryDelta limit=$(16MB)" |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($primaryDelta -gt 16MB) {
+            throw "Equal-thumbnail 12 MP and 48 MP median peak working sets differ by more than 16 MiB"
+          }
       - name: Lossy WebP static link
         shell: bash
         run: |

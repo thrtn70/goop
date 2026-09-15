@@ -31,6 +31,7 @@ export function parseIpcError(err: unknown): IpcError | null {
     // request (e.g. which format can't carry a subtitle track), so it is
     // worth keeping rather than collapsing into "unknown".
     case "invalid_request":
+    case "preview_unavailable":
       return { code, message: message ?? code };
     case "cancelled":
       return { code };

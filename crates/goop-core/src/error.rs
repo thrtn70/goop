@@ -24,6 +24,10 @@ pub enum GoopError {
     /// to interpret, and no retry will help.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// The request is valid, but this source cannot produce the bounded preview
+    /// the client requested. Conversion may remain available.
+    #[error("preview unavailable: {0}")]
+    PreviewUnavailable(String),
     #[error("cancelled")]
     Cancelled,
     /// Control-flow sibling of `Cancelled`: the job's pause signal fired
@@ -74,7 +78,7 @@ impl GoopError {
             // about a request it can't satisfy, not a tool's output. The
             // `invalid request:` in `Display` is for logs and `{e}` formatting;
             // in a queue row it just prefixes a complete sentence with jargon.
-            Self::InvalidRequest(msg) => msg.clone(),
+            Self::InvalidRequest(msg) | Self::PreviewUnavailable(msg) => msg.clone(),
             other => other.to_string(),
         }
     }
@@ -106,6 +110,7 @@ impl GoopError {
             | Self::Queue(_)
             | Self::Config(_)
             | Self::InvalidRequest(_)
+            | Self::PreviewUnavailable(_)
             | Self::Cancelled
             | Self::Paused
             | Self::WaitingExternal { .. }
@@ -125,6 +130,7 @@ pub enum IpcError {
     Queue(String),
     Config(String),
     InvalidRequest(String),
+    PreviewUnavailable(String),
     Cancelled,
     Unknown(String),
 }
@@ -144,6 +150,7 @@ impl From<GoopError> for IpcError {
             GoopError::Queue(x) => Self::Queue(x),
             GoopError::Config(x) => Self::Config(x),
             GoopError::InvalidRequest(x) => Self::InvalidRequest(x),
+            GoopError::PreviewUnavailable(x) => Self::PreviewUnavailable(x),
             GoopError::Cancelled => Self::Cancelled,
             // Defensive: Paused is scheduler control flow and should be
             // consumed before any IPC boundary. If it ever leaks, surface
@@ -688,6 +695,20 @@ mod tests {
         let ie = IpcError::Cancelled;
         let s = serde_json::to_string(&ie).unwrap();
         assert_eq!(s, r#"{"code":"cancelled"}"#);
+    }
+
+    #[test]
+    fn preview_unavailable_keeps_a_typed_ipc_code() {
+        let ipc: IpcError =
+            GoopError::PreviewUnavailable("This source has no bounded embedded thumbnail.".into())
+                .into();
+        assert_eq!(
+            serde_json::to_value(ipc).unwrap(),
+            serde_json::json!({
+                "code": "preview_unavailable",
+                "message": "This source has no bounded embedded thumbnail."
+            })
+        );
     }
 
     #[test]

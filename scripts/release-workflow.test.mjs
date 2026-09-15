@@ -13,6 +13,10 @@ const auditLines = auditWorkflow.split("\n");
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
+const windowsHeifInstaller = readFileSync(
+  new URL("./install-windows-heif-deps.sh", import.meta.url),
+  "utf8",
+);
 
 function job(name) {
   const start = lines.findIndex((line) => line === `  ${name}:`);
@@ -76,6 +80,51 @@ test("audit executes the pinned static Little CMS transform on both release targ
   assert.match(step[0], /otool -L "\$BIN"/);
   assert.match(step[0], /objdump\.exe -p "\$BIN"/);
   assert.match(step[0], /lcms2\[\^ \]\*\\\.dll/);
+});
+
+test("Windows audit and release use one immutable libheif 1.23 vcpkg tree", () => {
+  const installer = "./scripts/install-windows-heif-deps.sh";
+  assert.equal(auditWorkflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
+  assert.equal(workflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
+  assert.match(windowsHeifInstaller, /VCPKG_COMMIT="[0-9a-f]{40}"/);
+  assert.match(windowsHeifInstaller, /checkout --detach "\$VCPKG_COMMIT"/);
+  assert.match(windowsHeifInstaller, /libheif\[core\]:x64-windows-static/);
+  assert.match(auditWorkflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
+  assert.match(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
+});
+
+test("Windows audit records fresh-process HEIC preview memory evidence", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const handoff = smoke.match(
+    / {6}- name: Cargo check \(Windows-only paths\)\n([\s\S]*?)\n {6}- name: HEIC preview fresh-process memory \(Windows\)/,
+  );
+  assert.ok(handoff, "missing Windows HEIC preview executable handoff");
+  assert.match(
+    handoff[0],
+    /CARGO_INCREMENTAL=0 cargo test -p goop-converter --release --features heic-thumbnail-preview --lib --no-run --message-format=json/,
+  );
+  assert.match(handoff[0], /printf 'HEIC_PREVIEW_TEST_BINARY=%s\\n' "\$BIN" >> "\$GITHUB_ENV"/);
+
+  const step = smoke.match(
+    / {6}- name: HEIC preview fresh-process memory \(Windows\)\n([\s\S]*?)\n {6}- name: Lossy WebP static link/,
+  );
+  assert.ok(step, "missing Windows HEIC preview memory evidence step");
+  assert.match(step[0], /if: matrix\.os == 'windows-latest'/);
+  assert.match(step[0], /shell: pwsh/);
+  assert.match(step[0], /memory_probe_baseline_without_decode/);
+  assert.match(step[0], /memory_probe_12mp_primary_with_512x384_thumbnail/);
+  assert.match(step[0], /memory_probe_48mp_primary_with_512x384_thumbnail/);
+  assert.match(step[0], /memory_probe_exact_4mp_thumbnail/);
+  assert.match(step[0], /\$binary = \$env:HEIC_PREVIEW_TEST_BINARY/);
+  assert.match(step[0], /for \(\$iteration = 0; \$iteration -lt 6; \$iteration\+\+\)/);
+  assert.match(step[0], /@\("--quiet", "--exact", \$case\.Value, "--ignored"\)/);
+  assert.match(step[0], /if \(\$process\.ExitCode -ne 0\)/);
+  assert.match(step[0], /PeakWorkingSet64/);
+  assert.match(step[0], /if \(\$peak -le 0\)/);
+  assert.match(step[0], /if \(\$iteration -gt 0\)/);
+  assert.match(step[0], /\$median = \[long\]\$ordered\[2\]/);
+  assert.match(step[0], /HEIC_PREVIEW_MEMORY/);
+  assert.match(step[0], /if \(\$primaryDelta -gt 16MB\)/);
 });
 
 const version = "0.3.3";

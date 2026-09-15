@@ -6,6 +6,8 @@ pub mod compat;
 pub mod encoders;
 mod exif_geometry;
 pub mod ffmpeg;
+#[cfg(feature = "heic-thumbnail-preview")]
+mod heic_preview_sampler;
 mod heif_header;
 pub mod image_app_icon;
 pub mod image_crop;

@@ -160,7 +160,18 @@ fn heic_and_raw_image_settings_fail_closed_when_support_is_uncertain() {
         assert_eq!(settings.available, alpha == Some(false));
         assert_eq!(settings.reason.is_some(), alpha != Some(false));
         assert!(!settings.preview_original_available);
-        assert!(settings.preview_unavailable_reason.is_some());
+        if alpha == Some(false) {
+            assert_eq!(
+                settings.preview_unavailable_reason.as_deref(),
+                Some(if cfg!(feature = "heic-thumbnail-preview") {
+                    "Fresh bounded HEIC thumbnail inspection is required."
+                } else {
+                    "Bounded HEIC preview is not enabled in this build."
+                })
+            );
+        } else {
+            assert_eq!(settings.preview_unavailable_reason, settings.reason);
+        }
     }
 
     let settings = capabilities_for(&opaque_probe("RAW"))
@@ -172,6 +183,63 @@ fn heic_and_raw_image_settings_fail_closed_when_support_is_uncertain() {
         .unwrap();
     assert_eq!(settings.available, cfg!(target_os = "macos"));
     assert_eq!(settings.reason.is_some(), !cfg!(target_os = "macos"));
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[tokio::test]
+async fn source_bound_heic_capabilities_admit_only_a_bounded_associated_thumbnail() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = goop_sidecar::BinaryResolver::new(dir.path().join("sidecars"));
+    let admitted = dir.path().join("admitted.heic");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/heic-with-thumbnail.heic"
+        ),
+        &admitted,
+    )
+    .unwrap();
+    let missing = dir.path().join("missing.heic");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+        &missing,
+    )
+    .unwrap();
+
+    let admitted = goop_converter::capabilities::inspect_source(&resolver, &admitted)
+        .await
+        .unwrap();
+    let admitted = admitted
+        .capabilities
+        .targets
+        .iter()
+        .find(|capability| capability.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_settings
+        .as_ref()
+        .unwrap();
+    assert!(admitted.preview_original_available);
+    assert!(admitted.preview_fit_within);
+    assert_eq!(admitted.preview_unavailable_reason, None);
+
+    let missing = goop_converter::capabilities::inspect_source(&resolver, &missing)
+        .await
+        .unwrap();
+    let missing = missing
+        .capabilities
+        .targets
+        .iter()
+        .find(|capability| capability.target == TargetFormat::Jpeg)
+        .unwrap()
+        .image_settings
+        .as_ref()
+        .unwrap();
+    assert!(!missing.preview_original_available);
+    assert!(!missing.preview_fit_within);
+    assert!(missing
+        .preview_unavailable_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("no bounded embedded thumbnail")));
 }
 
 #[test]

@@ -32,6 +32,16 @@ describe("formatError", () => {
     });
   });
 
+  it("preserves preview unavailable as a machine-readable code", () => {
+    expect(parseIpcError({
+      code: "preview_unavailable",
+      message: "This source has no bounded embedded thumbnail.",
+    })).toEqual({
+      code: "preview_unavailable",
+      message: "This source has no bounded embedded thumbnail.",
+    });
+  });
+
   it("falls back to JSON for unknown object shapes", () => {
     expect(formatError({ foo: "bar" })).toBe('{"foo":"bar"}');
   });

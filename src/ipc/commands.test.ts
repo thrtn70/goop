@@ -393,6 +393,54 @@ it.each([null, {jpeg_quality:30,resize:{kind:"original" as const}}, {jpeg_qualit
   expect(JSON.parse(JSON.stringify(invokeMock.mock.calls[0][1])).request.image_options).toEqual(image_options);
 });
 
+it("uses distinct request cancellation and backend-issued session commands", async () => {
+  invokeMock.mockClear();
+  invokeMock.mockResolvedValueOnce("123e4567-e89b-42d3-a456-426614174000");
+  await expect(api.preview.begin()).resolves.toBe("123e4567-e89b-42d3-a456-426614174000");
+  expect(invokeMock).toHaveBeenLastCalledWith("begin_preview_session");
+
+  await api.preview.cancel("request-one");
+  expect(invokeMock).toHaveBeenLastCalledWith("cancel_preview", {requestId:"request-one"});
+
+  await api.preview.release("123e4567-e89b-42d3-a456-426614174000");
+  expect(invokeMock).toHaveBeenLastCalledWith("release_preview_session", {
+    previewSessionId:"123e4567-e89b-42d3-a456-426614174000",
+  });
+});
+
+it("propagates a backend preview-session cleanup failure", async () => {
+  invokeMock.mockClear();
+  const error = {code:"unknown",message:"io: simulated sharing violation"};
+  invokeMock.mockRejectedValueOnce(error);
+
+  await expect(api.preview.begin()).rejects.toEqual(error);
+  expect(invokeMock).toHaveBeenCalledWith("begin_preview_session");
+});
+
+it("preserves preview session and pinned quality through IPC", async () => {
+  invokeMock.mockClear();
+  const request = {
+    request_id:"preview",
+    source_revision:"jpeg-options",
+    preview_session_id:"123e4567-e89b-42d3-a456-426614174000",
+    pinned_jpeg_quality:90,
+    input_path:"/photo.heic",
+    target:"jpeg" as const,
+    quality_preset:null,
+    resolution_cap:null,
+    compress_mode:null,
+    metadata_policy:null,
+    subtitle:null,
+    gif_options:null,
+    image_options:{jpeg_quality:72,resize:{kind:"original" as const}},
+  };
+  await api.preview.generate(request);
+  expect(invokeMock.mock.calls[0][1].request).toMatchObject({
+    preview_session_id:request.preview_session_id,
+    pinned_jpeg_quality:90,
+  });
+});
+
 it("requests a read-only video plan with an independently owned complete video snapshot", async () => {
   invokeMock.mockClear();
   const video_options = {kind:"encode" as const,codec:"hevc" as const,rate_control:{kind:"average_bitrate" as const,kbps:6500},speed:"slow" as const,processor:"software" as const};
