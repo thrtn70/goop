@@ -1,8 +1,9 @@
 # HEIC preview evidence fixtures
 
 These deterministic HEIC files exercise the bounded associated-thumbnail sampler with
-large primary metadata, the exact four-million-pixel thumbnail boundary, and a real
-Display P3 ICC profile. They were generated on macOS arm64 with ImageMagick 7.1.2-19
+large primary metadata, the exact four-million-pixel thumbnail boundary, and a
+project-generated Display P3 ICC profile. They were generated on macOS arm64 with
+Little CMS through `lcms2` 6.2.0, ImageMagick 7.1.2-19,
 and libheif/heif-enc 1.21.2.
 
 ## Equal-size 12 MP and 48 MP pair
@@ -41,29 +42,40 @@ packed RGB buffer, below the separate 16 MiB decoded-buffer limit.
 
 ```sh
 magick -size 192x144 gradient:'#234f3d-#d9b56d' \
-  -profile '/System/Library/ColorSync/Profiles/sRGB Profile.icc' \
-  -profile '/System/Library/ColorSync/Profiles/Display P3.icc' display-p3.png
+  -profile generated-display-p3.icc display-p3.png
 heif-enc --hevc -q 80 -t 64 --no-alpha --no-thumb-alpha \
   --enable-two-colr-boxes -o display-p3.heic display-p3.png
 ```
 
-heif-enc associates the raw Display P3 ICC property with the primary and its NCLX
-property with the thumbnail. In the exact generated file, byte `0x472` is changed from
-property index `0x03` (NCLX) to `0x02` (the existing raw ICC property), producing a
-standards-valid 64 x 48 associated thumbnail with the real 536-byte profile. The test
-requires libheif to return the profile and verifies its ICC `acsp` signature.
+The 584-byte ICC profile is generated from the public Display P3 chromaticities
+(D65 white; red 0.680/0.320, green 0.265/0.690, blue 0.150/0.060) and the standard
+sRGB parametric transfer curve. Little CMS serializes it without third-party profile
+bytes; the header timestamp is normalized to 2026-09-14 00:00:00 for deterministic
+fixture identity.
 
-Profile inputs:
+heif-enc associates the raw ICC property with the primary and the NCLX property with
+the thumbnail. The fixture post-processing adds the existing raw ICC property to the
+thumbnail's `ipma` association list, increments the enclosing box sizes, and shifts
+the two `iloc` media offsets by one byte. `heif-info -d` therefore reports both property
+index 2 (`prof`) and property index 3 (`nclx`) on the standards-valid 64 x 48 associated
+thumbnail. The regression test independently decodes with libheif's NCLX passthrough
+option and requires the sampler to return those unconverted pixels for one later ICC
+normalization. The NCLX property declares Display P3 primaries (12), the sRGB transfer
+curve (13), ITU-R BT.601 matrix coefficients (6), and full range. With the pinned
+libheif 1.23 ABI, the raw ICC profile takes precedence even when an NCLX output profile
+is requested; the regression records that behavior and the explicit passthrough setting
+keeps the intended single-normalization contract stable if the library behavior changes.
 
-- macOS sRGB Profile.icc SHA-256: `2b3aa1645779a9e634744faf9b01e9102b0c9b88fd6deced7934df86b949af7e`
-- macOS Display P3.icc SHA-256: `0ff6958f98684c61f6bbdce1368ddeaf3873baf84545baba482e920d92a914c0`
+Generated profile SHA-256:
+
+- `generated-display-p3.icc`: `656b9373a5a1af04c68300c3edabf9c9d1f83973d0348244ff0c9372edc5040e`
 
 Fixture SHA-256 values:
 
 - `heic-memory-primary-12mp-padded.heic`: `03c60b9cf6a91f79b90807c411b21f34ac4b44c8242b21e7247481b02171c1ef`
 - `heic-memory-primary-48mp.heic`: `b2a1c163884edbe688353bc1d604828ac8b3e063f8aa7b3f0cdd87b4126e612e`
 - `heic-memory-thumbnail-4mp.heic`: `ec1e5f418a2355f50c0978cc5b3e62c249a29317f53504e7c8c74e16d635178b`
-- `heic-display-p3-thumbnail.heic`: `20b4ae2a409883aded652c1d589ee7bb64b7e8a7269671a5305aa40b64cd222f`
+- `heic-display-p3-thumbnail.heic`: `1e1cdd45830afdc2d64898bc8f6e4b7b94df571fedacf7bb7854a2a1fbb05bc1`
 
 These fixtures demonstrate the sampler boundary only. They do not establish a
 whole-application memory ceiling, camera color fidelity, Windows runtime behavior, or

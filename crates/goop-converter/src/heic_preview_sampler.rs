@@ -518,12 +518,11 @@ impl HeifPreviewAdapter for LibheifPreviewAdapter<'_, '_> {
             Ok(profile.data)
         });
         let raw_icc_profile = raw_icc_profile.transpose()?;
-        if raw_icc_profile.is_none() && thumbnail.color_profile_nclx().is_some() {
-            let output_profile = ColorProfileNCLX::new().ok_or_else(|| {
-                SamplerError::Adapter("allocate sRGB output color profile".into())
-            })?;
-            options.set_output_image_nclx_profile(Some(output_profile));
-        }
+        configure_decode_color_profile(
+            &mut options,
+            raw_icc_profile.is_some(),
+            thumbnail.color_profile_nclx().is_some(),
+        )?;
         let image = self
             .lib
             .decode(&thumbnail, ColorSpace::Rgb(RgbChroma::Rgb), Some(options))
@@ -568,6 +567,21 @@ impl HeifPreviewAdapter for LibheifPreviewAdapter<'_, '_> {
             raw_icc_profile,
         })
     }
+}
+
+fn configure_decode_color_profile(
+    options: &mut DecodingOptions,
+    has_raw_icc_profile: bool,
+    has_nclx_profile: bool,
+) -> Result<(), SamplerError> {
+    if has_raw_icc_profile {
+        options.set_output_image_nclx_profile_passthrough(true);
+    } else if has_nclx_profile {
+        let output_profile = ColorProfileNCLX::new()
+            .ok_or_else(|| SamplerError::Adapter("allocate sRGB output color profile".into()))?;
+        options.set_output_image_nclx_profile(Some(output_profile));
+    }
+    Ok(())
 }
 
 fn supports_security_limits_abi(version: [u8; 3]) -> bool {
@@ -963,6 +977,16 @@ mod tests {
     }
 
     #[test]
+    fn raw_icc_decode_preserves_input_nclx_until_the_icc_transform() {
+        let mut options = DecodingOptions::new().unwrap();
+
+        configure_decode_color_profile(&mut options, true, true).unwrap();
+
+        assert!(options.output_image_nclx_profile_passthrough());
+        assert!(options.output_image_nclx_profile().is_none());
+    }
+
+    #[test]
     fn selects_largest_area_then_largest_edge_then_lowest_id() {
         let candidates = [
             AdmittedThumbnail::new(9, 400, 300),
@@ -1347,25 +1371,94 @@ mod tests {
     }
 
     #[test]
-    fn real_display_p3_icc_thumbnail_reaches_the_normalization_boundary() {
+    fn dual_profile_display_p3_thumbnail_preserves_pixels_for_single_normalization() {
+        use libheif_rs::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
         use sha2::{Digest, Sha256};
 
-        let frame = sample_heic_thumbnail(
-            include_bytes!("../tests/fixtures/heic-display-p3-thumbnail.heic"),
-            &|| Ok(()),
+        let fixture = include_bytes!("../tests/fixtures/heic-display-p3-thumbnail.heic");
+        let checkpoint = || Ok(());
+        let adapter = LibheifPreviewAdapter::new(fixture, &checkpoint).unwrap();
+        let primary = adapter.primary_handle().unwrap();
+        let mut thumbnail_ids = vec![0; primary.number_of_thumbnails()];
+        let thumbnail_count = primary.thumbnail_ids(&mut thumbnail_ids);
+        assert_eq!(thumbnail_count, 1);
+        let thumbnail = primary.thumbnail(thumbnail_ids[0]).unwrap();
+        assert!(thumbnail.color_profile_raw().is_some());
+        let nclx_profile = thumbnail.color_profile_nclx().unwrap();
+        assert_eq!(
+            nclx_profile.color_primaries(),
+            ColorPrimaries::SMPTE_EG_432_1
+        );
+        assert_eq!(
+            nclx_profile.transfer_characteristics(),
+            TransferCharacteristics::IEC_61966_2_1
+        );
+        assert_eq!(
+            nclx_profile.matrix_coefficients(),
+            MatrixCoefficients::ITU_R_BT_601_6
+        );
+        assert_eq!(nclx_profile.full_range_flag(), 1);
+
+        let mut requested_srgb_options = DecodingOptions::new().unwrap();
+        requested_srgb_options.set_ignore_transformations(false);
+        let requested_srgb_profile = ColorProfileNCLX::new().unwrap();
+        requested_srgb_options.set_output_image_nclx_profile(Some(requested_srgb_profile));
+        let requested_srgb_image = adapter
+            .lib
+            .decode(
+                &thumbnail,
+                ColorSpace::Rgb(RgbChroma::Rgb),
+                Some(requested_srgb_options),
+            )
+            .unwrap();
+        let requested_srgb_plane = requested_srgb_image.planes().interleaved.unwrap();
+        let requested_srgb = pack_rgb_rows_with_checkpoint(
+            requested_srgb_plane.data,
+            requested_srgb_plane.width,
+            requested_srgb_plane.height,
+            requested_srgb_plane.stride,
+            &checkpoint,
         )
         .unwrap();
 
+        let mut reference_options = DecodingOptions::new().unwrap();
+        reference_options.set_ignore_transformations(false);
+        reference_options.set_output_image_nclx_profile_passthrough(true);
+        let reference_image = adapter
+            .lib
+            .decode(
+                &thumbnail,
+                ColorSpace::Rgb(RgbChroma::Rgb),
+                Some(reference_options),
+            )
+            .unwrap();
+        let reference_plane = reference_image.planes().interleaved.unwrap();
+        let reference_rgb = pack_rgb_rows_with_checkpoint(
+            reference_plane.data,
+            reference_plane.width,
+            reference_plane.height,
+            reference_plane.stride,
+            &checkpoint,
+        )
+        .unwrap();
+
+        let frame = sample_heic_thumbnail(fixture, &|| Ok(())).unwrap();
+
         assert_eq!(frame.primary_dimensions, dimensions(192, 144));
         assert_eq!(frame.admitted_dimensions, dimensions(64, 48));
+        assert_eq!(frame.rgb.as_ref(), reference_rgb.as_slice());
+        // libheif 1.23 gives the raw ICC profile precedence even when an NCLX output
+        // profile is requested. Keep this assertion bound to the pinned ABI so a future
+        // library behavior change forces the single-normalization contract to be reviewed.
+        assert_eq!(frame.rgb.as_ref(), requested_srgb.as_slice());
         let profile = frame
             .raw_icc_profile
             .expect("Display P3 fixture must carry a raw ICC profile");
-        assert_eq!(profile.len(), 536);
+        assert_eq!(profile.len(), 584);
         assert_eq!(profile.get(36..40), Some(b"acsp".as_slice()));
         assert_eq!(
             format!("{:x}", Sha256::digest(profile.as_ref())),
-            "0ff6958f98684c61f6bbdce1368ddeaf3873baf84545baba482e920d92a914c0"
+            "656b9373a5a1af04c68300c3edabf9c9d1f83973d0348244ff0c9372edc5040e"
         );
     }
 
