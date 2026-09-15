@@ -93,6 +93,40 @@ test("Windows audit and release use one immutable libheif 1.23 vcpkg tree", () =
   assert.match(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
 });
 
+test("Windows audit records fresh-process HEIC preview memory evidence", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const handoff = smoke.match(
+    / {6}- name: Cargo check \(Windows-only paths\)\n([\s\S]*?)\n {6}- name: HEIC preview fresh-process memory \(Windows\)/,
+  );
+  assert.ok(handoff, "missing Windows HEIC preview executable handoff");
+  assert.match(
+    handoff[0],
+    /CARGO_INCREMENTAL=0 cargo test -p goop-converter --release --features heic-thumbnail-preview --lib --no-run --message-format=json/,
+  );
+  assert.match(handoff[0], /printf 'HEIC_PREVIEW_TEST_BINARY=%s\\n' "\$BIN" >> "\$GITHUB_ENV"/);
+
+  const step = smoke.match(
+    / {6}- name: HEIC preview fresh-process memory \(Windows\)\n([\s\S]*?)\n {6}- name: Lossy WebP static link/,
+  );
+  assert.ok(step, "missing Windows HEIC preview memory evidence step");
+  assert.match(step[0], /if: matrix\.os == 'windows-latest'/);
+  assert.match(step[0], /shell: pwsh/);
+  assert.match(step[0], /memory_probe_baseline_without_decode/);
+  assert.match(step[0], /memory_probe_12mp_primary_with_512x384_thumbnail/);
+  assert.match(step[0], /memory_probe_48mp_primary_with_512x384_thumbnail/);
+  assert.match(step[0], /memory_probe_exact_4mp_thumbnail/);
+  assert.match(step[0], /\$binary = \$env:HEIC_PREVIEW_TEST_BINARY/);
+  assert.match(step[0], /for \(\$iteration = 0; \$iteration -lt 6; \$iteration\+\+\)/);
+  assert.match(step[0], /@\("--quiet", "--exact", \$case\.Value, "--ignored"\)/);
+  assert.match(step[0], /if \(\$process\.ExitCode -ne 0\)/);
+  assert.match(step[0], /PeakWorkingSet64/);
+  assert.match(step[0], /if \(\$peak -le 0\)/);
+  assert.match(step[0], /if \(\$iteration -gt 0\)/);
+  assert.match(step[0], /\$median = \[long\]\$ordered\[2\]/);
+  assert.match(step[0], /HEIC_PREVIEW_MEMORY/);
+  assert.match(step[0], /if \(\$primaryDelta -gt 16MB\)/);
+});
+
 const version = "0.3.3";
 const installers = [
   `Goop_${version}_aarch64.dmg`,

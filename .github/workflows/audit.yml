@@ -285,10 +285,99 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
+          set -euo pipefail
           cargo check -p goop-queue --all-features
           cargo test -p goop-converter --features heic-thumbnail-preview heic
+          BIN=$(CARGO_INCREMENTAL=0 cargo test -p goop-converter --release --features heic-thumbnail-preview --lib --no-run --message-format=json | python3 -c '
+          import json
+          import sys
+
+          paths = []
+          for line in sys.stdin:
+              try:
+                  message = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              target = message.get("target", {})
+              if (
+                  target.get("name") == "goop_converter"
+                  and target.get("kind") == ["lib"]
+                  and message.get("executable")
+              ):
+                  paths.append(message["executable"])
+          paths = list(dict.fromkeys(paths))
+          if len(paths) != 1:
+              raise SystemExit(f"expected one goop_converter test executable, found {paths!r}")
+          print(paths[0])
+          ')
+          printf 'HEIC_PREVIEW_TEST_BINARY=%s\n' "$BIN" >> "$GITHUB_ENV"
           mkdir -p dist
           cargo check -p goop-tauri --all-features
+      - name: HEIC preview fresh-process memory (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binary = $env:HEIC_PREVIEW_TEST_BINARY
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw "HEIC preview test executable is missing: $binary"
+          }
+
+          $cases = [ordered]@{
+            baseline = "heic_preview_sampler::tests::memory_probe_baseline_without_decode"
+            primary12mp = "heic_preview_sampler::tests::memory_probe_12mp_primary_with_512x384_thumbnail"
+            primary48mp = "heic_preview_sampler::tests::memory_probe_48mp_primary_with_512x384_thumbnail"
+            exact4mp = "heic_preview_sampler::tests::memory_probe_exact_4mp_thumbnail"
+          }
+          $results = @{}
+
+          foreach ($case in $cases.GetEnumerator()) {
+            $measurements = [System.Collections.Generic.List[long]]::new()
+            for ($iteration = 0; $iteration -lt 6; $iteration++) {
+              $arguments = @("--quiet", "--exact", $case.Value, "--ignored")
+              $process = Start-Process -FilePath $binary -ArgumentList $arguments -NoNewWindow -PassThru
+              $peak = [long]0
+              while (-not $process.HasExited) {
+                try {
+                  $process.Refresh()
+                  $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+                } catch {
+                  # The process may exit between the status check and refresh.
+                }
+                Start-Sleep -Milliseconds 5
+              }
+              $process.WaitForExit()
+              try {
+                $process.Refresh()
+                $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+              } catch {
+                # Retain the last sampled peak after process exit.
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "HEIC preview memory probe $($case.Key) failed with exit code $($process.ExitCode)"
+              }
+              if ($peak -le 0) {
+                throw "HEIC preview memory probe $($case.Key) did not report peak working set"
+              }
+              if ($iteration -gt 0) {
+                $measurements.Add($peak)
+              }
+            }
+
+            $ordered = @($measurements | Sort-Object)
+            $median = [long]$ordered[2]
+            $maximum = [long](($ordered | Measure-Object -Maximum).Maximum)
+            $results[$case.Key] = $median
+            $line = "HEIC_PREVIEW_MEMORY case=$($case.Key) samples=$([string]::Join(',', $measurements)) median=$median maximum=$maximum"
+            $line | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+          $primaryDelta = [Math]::Abs([long]$results.primary12mp - [long]$results.primary48mp)
+          "HEIC_PREVIEW_MEMORY equal_thumbnail_median_delta=$primaryDelta limit=$(16MB)" |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($primaryDelta -gt 16MB) {
+            throw "Equal-thumbnail 12 MP and 48 MP median peak working sets differ by more than 16 MiB"
+          }
       - name: Lossy WebP static link
         shell: bash
         run: |
