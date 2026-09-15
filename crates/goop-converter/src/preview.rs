@@ -1,7 +1,8 @@
 //! Explicit, isolated sample generation. Never schedules jobs or writes source files.
 use goop_core::{
-    CompressMode, GoopError, ImageColorPolicy, ImageResize, JobId, MetadataPolicy, PreviewKind,
-    PreviewRequest, PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
+    is_canonical_preview_session_id, new_preview_session_id, CompressMode, GoopError,
+    ImageColorPolicy, ImageResize, JobId, MetadataPolicy, PreviewKind, PreviewRequest,
+    PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use image::{DynamicImage, ImageDecoder, ImageFormat};
@@ -15,6 +16,27 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "heic-thumbnail-preview")]
+use {
+    crate::heic_preview_sampler::{sample_heic_thumbnail, Dimensions, SampleFrame, SamplerError},
+    goop_core::{ImagePreviewDetails, ImageSampleKind},
+    sha2::{Digest, Sha256},
+};
+
+#[cfg(feature = "heic-thumbnail-preview")]
+type HeicSampler =
+    dyn Fn(&[u8], &CancellationToken, Instant) -> Result<SampleFrame, SamplerError> + Send + Sync;
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn default_heic_sampler() -> Arc<HeicSampler> {
+    Arc::new(|bytes, cancel, deadline| {
+        sample_heic_thumbnail(bytes, &|| {
+            checkpoint(cancel, deadline).map_err(|error| SamplerError::Interrupted {
+                reason: error.user_message(),
+            })
+        })
+    })
+}
 const EDGE: u32 = 1280;
 pub(crate) const MAX_SOURCE_PIXELS: u64 = 4_000_000;
 pub(crate) const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -57,14 +79,181 @@ fn checkpoint(cancel: &CancellationToken, deadline: Instant) -> Result<(), GoopE
         Ok(())
     }
 }
+struct ActiveRequest {
+    request_id: String,
+    epoch: u64,
+    cancel: CancellationToken,
+}
+
+struct PublishedArtifacts {
+    request_id: String,
+    path: PathBuf,
+}
+
+struct PendingSessionCleanup {
+    session_id: Option<String>,
+    artifacts: Vec<PublishedArtifacts>,
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[derive(Clone)]
+struct HeicCacheEntry {
+    session_id: String,
+    source_digest: [u8; 32],
+    frame: Arc<SampleFrame>,
+}
+
+#[cfg(not(feature = "heic-thumbnail-preview"))]
+type HeicCacheEntry = ();
+
+struct ImageWorkerContext {
+    cached_heic: Option<HeicCacheEntry>,
+    #[cfg(feature = "heic-thumbnail-preview")]
+    heic_sampler: Arc<HeicSampler>,
+}
+
 #[derive(Default)]
 struct State {
-    active: Option<(String, CancellationToken)>,
-    completed: Option<(String, PathBuf)>,
+    epoch: u64,
+    session_id: Option<String>,
+    active: Option<ActiveRequest>,
+    completed: Option<PublishedArtifacts>,
+    retired: Option<PublishedArtifacts>,
+    pending_cleanup: Option<PendingSessionCleanup>,
 }
+
+fn invalidate_generation(state: &mut State) -> Vec<PublishedArtifacts> {
+    state.epoch = state
+        .epoch
+        .checked_add(1)
+        .expect("preview session epoch exhausted");
+    if let Some(active) = state.active.take() {
+        active.cancel.cancel();
+    }
+    state
+        .completed
+        .take()
+        .into_iter()
+        .chain(state.retired.take())
+        .collect()
+}
+
+fn remove_artifacts(
+    artifacts: Vec<PublishedArtifacts>,
+    remove: &mut impl FnMut(&Path) -> std::io::Result<()>,
+) -> (Vec<PublishedArtifacts>, Option<std::io::Error>) {
+    let mut retained = Vec::with_capacity(artifacts.len());
+    let mut first_error = None;
+    for artifact in artifacts {
+        match remove(&artifact.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                retained.push(artifact);
+            }
+        }
+    }
+    (retained, first_error)
+}
+
+fn retry_pending_cleanup(
+    state: &mut State,
+    session_id: Option<&str>,
+    remove: &mut impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), GoopError> {
+    let should_retry = state
+        .pending_cleanup
+        .as_ref()
+        .is_some_and(|pending| session_id.is_none() || pending.session_id.as_deref() == session_id);
+    if !should_retry {
+        return Ok(());
+    }
+    let mut pending = state
+        .pending_cleanup
+        .take()
+        .expect("checked pending cleanup exists");
+    let (retained, first_error) = remove_artifacts(pending.artifacts, remove);
+    if !retained.is_empty() {
+        pending.artifacts = retained;
+        state.pending_cleanup = Some(pending);
+    }
+    first_error.map_or(Ok(()), |error| Err(GoopError::Io(error)))
+}
+
+fn remove_slot(
+    slot: &mut Option<PublishedArtifacts>,
+    remove: &mut impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), GoopError> {
+    let Some(artifact) = slot.take() else {
+        return Ok(());
+    };
+    match remove(&artifact.path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            *slot = Some(artifact);
+            Err(GoopError::Io(error))
+        }
+    }
+}
+
+fn epoch_context_is_current(
+    state: &State,
+    requested_session: Option<&str>,
+    requested_epoch: u64,
+) -> bool {
+    let session_matches = match requested_session {
+        Some(session_id) => state.session_id.as_deref() == Some(session_id),
+        None => state.session_id.is_none(),
+    };
+    session_matches && state.epoch == requested_epoch
+}
+
+fn publication_is_current(
+    state: &State,
+    request_id: &str,
+    requested_session: Option<&str>,
+    requested_epoch: u64,
+) -> bool {
+    let active_matches = state
+        .active
+        .as_ref()
+        .is_some_and(|active| active.request_id == request_id && active.epoch == requested_epoch);
+    active_matches && epoch_context_is_current(state, requested_session, requested_epoch)
+}
+
+fn register_request(
+    state: &mut State,
+    request_id: String,
+    requested_session: Option<&str>,
+    requested_epoch: u64,
+    cancel: CancellationToken,
+) -> Result<(), GoopError> {
+    if !epoch_context_is_current(state, requested_session, requested_epoch) {
+        return Err(GoopError::PreviewUnavailable(
+            "Preview session is no longer active.".into(),
+        ));
+    }
+    if let Some(old) = state.active.replace(ActiveRequest {
+        request_id,
+        epoch: requested_epoch,
+        cancel,
+    }) {
+        old.cancel.cancel();
+    }
+    Ok(())
+}
+
 pub struct PreviewService {
     root: PathBuf,
     state: Mutex<State>,
+    #[cfg(feature = "heic-thumbnail-preview")]
+    heic_cache: Mutex<Option<HeicCacheEntry>>,
+    #[cfg(feature = "heic-thumbnail-preview")]
+    heic_sampler: Arc<HeicSampler>,
     gate: Arc<Semaphore>,
 }
 struct Scratch(Option<PathBuf>);
@@ -105,22 +294,126 @@ impl PreviewService {
         Self {
             root: root.join(format!("session-{}", JobId::new().0)),
             state: Mutex::new(State::default()),
+            #[cfg(feature = "heic-thumbnail-preview")]
+            heic_cache: Mutex::new(None),
+            #[cfg(feature = "heic-thumbnail-preview")]
+            heic_sampler: default_heic_sampler(),
+            gate: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    #[cfg(all(test, feature = "heic-thumbnail-preview"))]
+    fn new_with_heic_sampler(root: PathBuf, heic_sampler: Arc<HeicSampler>) -> Self {
+        Self {
+            root: root.join(format!("session-{}", JobId::new().0)),
+            state: Mutex::new(State::default()),
+            heic_cache: Mutex::new(None),
+            heic_sampler,
             gate: Arc::new(Semaphore::new(1)),
         }
     }
     pub fn cancel(&self, id: &str) {
+        self.cancel_with(id, |path| std::fs::remove_dir_all(path));
+    }
+
+    fn cancel_with(&self, id: &str, mut remove: impl FnMut(&Path) -> std::io::Result<()>) {
         let mut state = self.state.lock().unwrap();
-        if let Some((active, token)) = &state.active {
-            if active == id {
-                token.cancel();
+        if let Some(active) = &state.active {
+            if active.request_id == id {
+                active.cancel.cancel();
             }
         }
-        if state.completed.as_ref().is_some_and(|(done, _)| done == id) {
-            if let Some((_, path)) = state.completed.take() {
-                let _ = std::fs::remove_dir_all(path);
-            }
+        if state
+            .completed
+            .as_ref()
+            .is_some_and(|artifact| artifact.request_id == id)
+        {
+            // Request cancellation is intentionally best-effort. Session release
+            // uses the retryable cleanup path below and never loses failed paths.
+            let _ = remove_slot(&mut state.completed, &mut remove);
+        }
+        if state
+            .retired
+            .as_ref()
+            .is_some_and(|artifact| artifact.request_id == id)
+        {
+            let _ = remove_slot(&mut state.retired, &mut remove);
         }
     }
+
+    pub fn begin_session(&self) -> Result<String, GoopError> {
+        self.begin_session_with(new_preview_session_id, |path| std::fs::remove_dir_all(path))
+    }
+
+    fn begin_session_with(
+        &self,
+        mut next_id: impl FnMut() -> String,
+        mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<String, GoopError> {
+        let mut state = self.state.lock().unwrap();
+        retry_pending_cleanup(&mut state, None, &mut remove)?;
+        let session_id = loop {
+            let candidate = next_id();
+            debug_assert!(is_canonical_preview_session_id(&candidate));
+            if state.session_id.as_deref() != Some(candidate.as_str()) {
+                break candidate;
+            }
+        };
+        let replaced_session = state.session_id.take();
+        let artifacts = invalidate_generation(&mut state);
+        #[cfg(feature = "heic-thumbnail-preview")]
+        {
+            *self.heic_cache.lock().unwrap() = None;
+        }
+        if !artifacts.is_empty() {
+            state.pending_cleanup = Some(PendingSessionCleanup {
+                session_id: replaced_session,
+                artifacts,
+            });
+            retry_pending_cleanup(&mut state, None, &mut remove)?;
+        }
+        state.session_id = Some(session_id.clone());
+        Ok(session_id)
+    }
+
+    pub fn release_session(&self, session_id: &str) -> Result<(), GoopError> {
+        self.release_session_with(session_id, |path| std::fs::remove_dir_all(path))
+    }
+
+    fn release_session_with(
+        &self,
+        session_id: &str,
+        mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), GoopError> {
+        if !is_canonical_preview_session_id(session_id) {
+            return Err(invalid("Invalid preview session identity"));
+        }
+        let mut state = self.state.lock().unwrap();
+        if state
+            .pending_cleanup
+            .as_ref()
+            .is_some_and(|pending| pending.session_id.as_deref() == Some(session_id))
+        {
+            return retry_pending_cleanup(&mut state, Some(session_id), &mut remove);
+        }
+        if state.session_id.as_deref() == Some(session_id) {
+            state.session_id = None;
+            let artifacts = invalidate_generation(&mut state);
+            #[cfg(feature = "heic-thumbnail-preview")]
+            {
+                *self.heic_cache.lock().unwrap() = None;
+            }
+            if !artifacts.is_empty() {
+                state.pending_cleanup = Some(PendingSessionCleanup {
+                    session_id: Some(session_id.to_owned()),
+                    artifacts,
+                });
+                return retry_pending_cleanup(&mut state, Some(session_id), &mut remove);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn generate(
         &self,
         resolver: &BinaryResolver,
@@ -132,6 +425,23 @@ impl PreviewService {
         if request.request_id.is_empty() || request.request_id.len() > 200 {
             return Err(invalid("Invalid preview request identity"));
         }
+        let requested_session = request.preview_session_id.as_deref();
+        if requested_session.is_some_and(|id| !is_canonical_preview_session_id(id)) {
+            return Err(invalid("Invalid preview session identity"));
+        }
+        let requested_epoch = {
+            let state = self.state.lock().unwrap();
+            let session_matches = match requested_session {
+                Some(session_id) => state.session_id.as_deref() == Some(session_id),
+                None => state.session_id.is_none(),
+            };
+            if !session_matches {
+                return Err(GoopError::PreviewUnavailable(
+                    "Preview session is no longer active.".into(),
+                ));
+            }
+            state.epoch
+        };
         if let Some(options) = &request.image_options {
             crate::image_options::validate_options(options)?;
             if request.compress_mode.is_some() {
@@ -141,9 +451,6 @@ impl PreviewService {
             }
             if request.target != TargetFormat::Jpeg {
                 return Err(invalid("Explicit image samples require a JPEG target"));
-            }
-            if !matches!(options.resize, ImageResize::Original) {
-                return Err(invalid("Fit within image samples are not available yet"));
             }
         }
         if matches!(
@@ -168,7 +475,42 @@ impl PreviewService {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp");
+        let is_heic = matches!(ext.as_str(), "heic" | "heif");
+        if is_heic {
+            #[cfg(not(feature = "heic-thumbnail-preview"))]
+            return Err(GoopError::PreviewUnavailable(
+                "Bounded HEIC preview is not enabled in this build.".into(),
+            ));
+            #[cfg(feature = "heic-thumbnail-preview")]
+            {
+                if requested_session.is_none() {
+                    return Err(GoopError::PreviewUnavailable(
+                        "Bounded HEIC preview requires a live preview session.".into(),
+                    ));
+                }
+                if request.image_options.is_none() || request.target != TargetFormat::Jpeg {
+                    return Err(invalid(
+                        "Bounded HEIC preview requires explicit JPEG conversion settings",
+                    ));
+                }
+                if request
+                    .pinned_jpeg_quality
+                    .is_some_and(|quality| !(1..=100).contains(&quality))
+                {
+                    return Err(invalid("Pinned JPEG quality must be between 1 and 100"));
+                }
+            }
+        }
+        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+            || cfg!(feature = "heic-thumbnail-preview") && is_heic;
+        if !is_heic
+            && request
+                .image_options
+                .as_ref()
+                .is_some_and(|options| !matches!(options.resize, ImageResize::Original))
+        {
+            return Err(invalid("Fit within image samples are not available yet"));
+        }
         if !is_image && crate::backend_for_extension(&ext) == crate::BackendKind::ImageMagick {
             return Err(invalid("Sample preview unavailable for this image source; bounded decoding is not supported"));
         }
@@ -233,15 +575,29 @@ impl PreviewService {
             ));
         }
         let cancel = CancellationToken::new();
-        {
+        let cached_heic = {
             let mut state = self.state.lock().unwrap();
-            if let Some((_, old)) = state
-                .active
-                .replace((request.request_id.clone(), cancel.clone()))
+            register_request(
+                &mut state,
+                request.request_id.clone(),
+                requested_session,
+                requested_epoch,
+                cancel.clone(),
+            )?;
+            #[cfg(feature = "heic-thumbnail-preview")]
             {
-                old.cancel();
+                if is_heic {
+                    self.heic_cache.lock().unwrap().clone()
+                } else {
+                    *self.heic_cache.lock().unwrap() = None;
+                    None
+                }
             }
-        }
+            #[cfg(not(feature = "heic-thumbnail-preview"))]
+            {
+                None::<HeicCacheEntry>
+            }
+        };
         let deadline = Instant::now() + TIMEOUT;
         let permit = tokio::select! {
             permit=self.gate.clone().acquire_owned()=>permit.map_err(|_|invalid("Preview service closed"))?,
@@ -249,10 +605,12 @@ impl PreviewService {
             _=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>return Err(invalid("Sample preview timed out")),
         };
         checkpoint(&cancel, deadline)?;
-        let directory = self.root.join(JobId::new().0.to_string());
-        std::fs::create_dir_all(&directory)?;
+        let artifact_id = JobId::new().0.to_string();
+        let directory = self.root.join(&artifact_id);
+        let staging_directory = self.root.join(format!(".staging-{artifact_id}"));
+        std::fs::create_dir_all(&staging_directory)?;
+        let mut scratch = Some(Scratch(Some(staging_directory.clone())));
         std::fs::write(self.root.join(".goop-preview-session"), b"v1")?;
-        let mut scratch = (!is_image).then(|| Scratch(Some(directory.clone())));
         let original_video_metadata = if is_image {
             None
         } else {
@@ -261,11 +619,25 @@ impl PreviewService {
         let result = if is_image {
             let req = request.clone();
             let path = input.clone();
-            let dir = directory.clone();
+            let dir = staging_directory.clone();
             let token = cancel.clone();
+            let image_scratch = scratch.take().expect("preview scratch is armed");
+            let worker_context = ImageWorkerContext {
+                cached_heic,
+                #[cfg(feature = "heic-thumbnail-preview")]
+                heic_sampler: Arc::clone(&self.heic_sampler),
+            };
             let mut worker = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                image_worker(&path, &dir, &req, &token, deadline)
+                image_worker(
+                    &path,
+                    &dir,
+                    &req,
+                    &token,
+                    deadline,
+                    worker_context,
+                    image_scratch,
+                )
             });
             let mut interrupt_error = None;
             let completed = tokio::select! {
@@ -292,9 +664,23 @@ impl PreviewService {
             }
         } else {
             let _permit = permit;
-            video_sample(resolver, &input, &directory, &request, &cancel, deadline).await
+            video_sample(
+                resolver,
+                &input,
+                &staging_directory,
+                &request,
+                &cancel,
+                deadline,
+            )
+            .await
+            .map(|result| ImageWorkerOutput {
+                result,
+                #[cfg(feature = "heic-thumbnail-preview")]
+                heic_cache: None,
+            })
         };
-        let result = result?;
+        let worker_output = result?;
+        let mut result = worker_output.result;
         checkpoint(&cancel, deadline)?;
         if let Some(original) = original_video_metadata {
             let latest = std::fs::metadata(&input)?;
@@ -305,12 +691,38 @@ impl PreviewService {
         }
         let mut state = self.state.lock().unwrap();
         checkpoint(&cancel, deadline)?;
-        if let Some((_, old)) = state
-            .completed
-            .replace((request.request_id.clone(), directory))
-        {
-            let _ = std::fs::remove_dir_all(old);
+        if !publication_is_current(
+            &state,
+            &request.request_id,
+            requested_session,
+            requested_epoch,
+        ) {
+            return Err(GoopError::Cancelled);
         }
+        let published = PublishedArtifacts {
+            request_id: request.request_id.clone(),
+            path: directory.clone(),
+        };
+        let mut remove = |path: &Path| std::fs::remove_dir_all(path);
+        if requested_session.is_some() {
+            remove_slot(&mut state.retired, &mut remove)?;
+        } else {
+            remove_slot(&mut state.retired, &mut remove)?;
+            remove_slot(&mut state.completed, &mut remove)?;
+        }
+        relocate_result_paths(&mut result, &staging_directory, &directory)?;
+        std::fs::rename(&staging_directory, &directory)?;
+        #[cfg(feature = "heic-thumbnail-preview")]
+        if let Some(cache) = worker_output.heic_cache {
+            *self.heic_cache.lock().unwrap() = Some(cache);
+        }
+        if requested_session.is_some() {
+            state.retired = state.completed.take();
+            state.completed = Some(published);
+        } else {
+            state.completed = Some(published);
+        }
+        state.active = None;
         if let Some(scratch) = scratch.as_mut() {
             scratch.0.take();
         }
@@ -350,7 +762,36 @@ fn response(
         duration_ms: duration,
         max_edge: EDGE,
         max_duration_ms: 3000,
+        image_details: None,
     }
+}
+
+fn relocate_result_paths(
+    result: &mut PreviewResult,
+    staging_directory: &Path,
+    published_directory: &Path,
+) -> Result<(), GoopError> {
+    let relocate = |path: &str| {
+        let relative = Path::new(path)
+            .strip_prefix(staging_directory)
+            .map_err(|_| invalid("Preview artifact escaped its staging directory"))?;
+        Ok::<_, GoopError>(
+            published_directory
+                .join(relative)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    if let Some(before) = result.before_path.as_mut() {
+        *before = relocate(before)?;
+    }
+    result.after_path = relocate(&result.after_path)?;
+    if let Some(details) = result.image_details.as_mut() {
+        if let Some(pinned) = details.pinned_path.as_mut() {
+            *pinned = relocate(pinned)?;
+        }
+    }
+    Ok(())
 }
 
 fn image_worker(
@@ -359,22 +800,57 @@ fn image_worker(
     request: &PreviewRequest,
     cancel: &CancellationToken,
     deadline: Instant,
-) -> (Result<PreviewResult, GoopError>, Scratch) {
-    let scratch = Scratch(Some(directory.to_path_buf()));
-    let result = image_sample(input, directory, request, cancel, deadline);
+    worker_context: ImageWorkerContext,
+    scratch: Scratch,
+) -> (Result<ImageWorkerOutput, GoopError>, Scratch) {
+    let result = image_sample(input, directory, request, cancel, deadline, worker_context);
     (result, scratch)
 }
+
+struct ImageWorkerOutput {
+    result: PreviewResult,
+    #[cfg(feature = "heic-thumbnail-preview")]
+    heic_cache: Option<HeicCacheEntry>,
+}
+
 fn image_sample(
     input: &Path,
     dir: &Path,
     request: &PreviewRequest,
     cancel: &CancellationToken,
     deadline: Instant,
-) -> Result<PreviewResult, GoopError> {
+    worker_context: ImageWorkerContext,
+) -> Result<ImageWorkerOutput, GoopError> {
     let bytes = capture_image(input, MAX_INPUT_BYTES, cancel, deadline)?;
+    #[cfg(feature = "heic-thumbnail-preview")]
+    if input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
+        })
+    {
+        let (result, heic_cache) = heic_image_sample_bytes(
+            bytes.clone(),
+            dir,
+            request,
+            cancel,
+            deadline,
+            worker_context.cached_heic,
+            worker_context.heic_sampler.as_ref(),
+        )?;
+        verify_snapshot_unchanged(input, &bytes, cancel, deadline, true)?;
+        return Ok(ImageWorkerOutput { result, heic_cache });
+    }
+    #[cfg(not(feature = "heic-thumbnail-preview"))]
+    let _ = worker_context.cached_heic;
     let result = image_sample_bytes(bytes.clone(), dir, request, cancel, deadline)?;
-    verify_snapshot_unchanged(input, &bytes, cancel, deadline)?;
-    Ok(result)
+    verify_snapshot_unchanged(input, &bytes, cancel, deadline, false)?;
+    Ok(ImageWorkerOutput {
+        result,
+        #[cfg(feature = "heic-thumbnail-preview")]
+        heic_cache: None,
+    })
 }
 
 fn verify_snapshot_unchanged(
@@ -382,8 +858,15 @@ fn verify_snapshot_unchanged(
     snapshot: &[u8],
     cancel: &CancellationToken,
     deadline: Instant,
+    preview_unavailable: bool,
 ) -> Result<(), GoopError> {
-    let changed = || invalid("Source changed while generating preview");
+    let changed = || {
+        if preview_unavailable {
+            GoopError::PreviewUnavailable("Source changed while generating preview.".into())
+        } else {
+            invalid("Source changed while generating preview")
+        }
+    };
     let mut file = std::fs::File::open(input)?;
     let mut offset = 0usize;
     let mut buffer = [0_u8; 64 * 1024];
@@ -425,6 +908,262 @@ fn capture_image(
     )?;
     checkpoint(cancel, deadline)?;
     Ok(bytes)
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn map_heic_sample_dimensions(
+    primary: Dimensions,
+    sample: Dimensions,
+    planned: (u32, u32),
+) -> Result<(u32, u32), GoopError> {
+    let scale = |sample_axis: u32, planned_axis: u32, primary_axis: u32| {
+        (u64::from(sample_axis) * u64::from(planned_axis) + u64::from(primary_axis) / 2)
+            / u64::from(primary_axis)
+    };
+    let width = u32::try_from(scale(sample.width, planned.0, primary.width))
+        .map_err(|_| invalid("HEIC sample width overflowed"))?
+        .clamp(1, sample.width);
+    let height = u32::try_from(scale(sample.height, planned.1, primary.height))
+        .map_err(|_| invalid("HEIC sample height overflowed"))?
+        .clamp(1, sample.height);
+    Ok(bounded_dimensions(width, height, EDGE))
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn map_sampler_error(
+    error: SamplerError,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> GoopError {
+    if cancel.is_cancelled() {
+        GoopError::Cancelled
+    } else if Instant::now() >= deadline {
+        invalid("Sample preview timed out")
+    } else {
+        GoopError::PreviewUnavailable(format!("HEIC preview unavailable: {error}."))
+    }
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn normalize_heic_frame(
+    mut frame: SampleFrame,
+    cancel: &CancellationToken,
+) -> Result<SampleFrame, GoopError> {
+    let Some(profile) = frame.raw_icc_profile.take() else {
+        return Ok(frame);
+    };
+    let pixels = image::RgbImage::from_raw(
+        frame.admitted_dimensions.width,
+        frame.admitted_dimensions.height,
+        frame.rgb.as_ref().to_vec(),
+    )
+    .ok_or_else(|| {
+        GoopError::PreviewUnavailable(
+            "HEIC preview unavailable: decoded sample dimensions did not match its buffer.".into(),
+        )
+    })?;
+    let _working_set = crate::color::acquire_working_set(cancel)?;
+    let transformed = crate::color::transform_pixels(
+        DynamicImage::ImageRgb8(pixels),
+        Some(profile.as_ref().to_vec()),
+        ImageColorPolicy::ConvertToSrgb,
+        cancel,
+    )
+    .map_err(|error| match error {
+        GoopError::Cancelled => GoopError::Cancelled,
+        error => GoopError::PreviewUnavailable(format!(
+            "HEIC preview unavailable: color normalization failed: {}.",
+            error.user_message()
+        )),
+    })?;
+    frame.rgb = transformed.pixels.into_raw().into();
+    Ok(frame)
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn encode_heic_png(pixels: &image::RgbImage) -> Result<Vec<u8>, GoopError> {
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(pixels.clone())
+        .write_to(&mut encoded, ImageFormat::Png)
+        .map_err(|error| invalid(format!("Could not encode HEIC preview PNG: {error}")))?;
+    Ok(encoded.into_inner())
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn encode_heic_jpeg_round_trip(
+    pixels: &image::RgbImage,
+    quality: u8,
+    cancel: &CancellationToken,
+) -> Result<(Vec<u8>, Vec<u8>), GoopError> {
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+        .encode_image(pixels)
+        .map_err(|error| invalid(format!("Could not encode HEIC preview JPEG: {error}")))?;
+    if cancel.is_cancelled() {
+        return Err(GoopError::Cancelled);
+    }
+    let decoded = image::load_from_memory_with_format(&jpeg, ImageFormat::Jpeg)
+        .map_err(|error| invalid(format!("Could not decode HEIC preview JPEG: {error}")))?
+        .to_rgb8();
+    if decoded.dimensions() != pixels.dimensions() {
+        return Err(GoopError::PreviewUnavailable(
+            "HEIC preview unavailable: JPEG round-trip dimensions changed.".into(),
+        ));
+    }
+    Ok((jpeg, encode_heic_png(&decoded)?))
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn heic_image_sample_bytes(
+    bytes: Bytes,
+    dir: &Path,
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+    cached: Option<HeicCacheEntry>,
+    sampler: &HeicSampler,
+) -> Result<(PreviewResult, Option<HeicCacheEntry>), GoopError> {
+    checkpoint(cancel, deadline)?;
+    let session_id = request.preview_session_id.as_ref().ok_or_else(|| {
+        GoopError::PreviewUnavailable(
+            "Bounded HEIC preview requires a live preview session.".into(),
+        )
+    })?;
+    let options = request.image_options.as_ref().ok_or_else(|| {
+        invalid("Bounded HEIC preview requires explicit JPEG conversion settings")
+    })?;
+    if bytes.len() < 12 || bytes.get(4..8) != Some(b"ftyp") {
+        return Err(GoopError::PreviewUnavailable(
+            "HEIC preview unavailable: captured input has no HEIF file-type box.".into(),
+        ));
+    }
+    let source_digest: [u8; 32] = Sha256::digest(bytes.as_ref()).into();
+    let (frame, cache_update) = if let Some(entry) = cached
+        .filter(|entry| entry.session_id == *session_id && entry.source_digest == source_digest)
+    {
+        (Arc::clone(&entry.frame), Some(entry))
+    } else {
+        let frame = sampler(bytes.as_ref(), cancel, deadline)
+            .map_err(|error| map_sampler_error(error, cancel, deadline))?;
+        let frame = Arc::new(normalize_heic_frame(frame, cancel)?);
+        let cache = HeicCacheEntry {
+            session_id: session_id.clone(),
+            source_digest,
+            frame: Arc::clone(&frame),
+        };
+        (frame, Some(cache))
+    };
+    checkpoint(cancel, deadline)?;
+
+    let primary = (
+        frame.primary_dimensions.width,
+        frame.primary_dimensions.height,
+    );
+    let planned = crate::image_options::output_dimensions(primary, &options.resize)?;
+    let comparison =
+        map_heic_sample_dimensions(frame.primary_dimensions, frame.admitted_dimensions, planned)?;
+    let source = image::RgbImage::from_raw(
+        frame.admitted_dimensions.width,
+        frame.admitted_dimensions.height,
+        frame.rgb.as_ref().to_vec(),
+    )
+    .ok_or_else(|| {
+        GoopError::PreviewUnavailable(
+            "HEIC preview unavailable: decoded sample dimensions did not match its buffer.".into(),
+        )
+    })?;
+    let sample = if source.dimensions() == comparison {
+        source
+    } else {
+        image::imageops::resize(
+            &source,
+            comparison.0,
+            comparison.1,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    checkpoint(cancel, deadline)?;
+
+    let source_bytes = encode_heic_png(&sample)?;
+    let (current_jpeg, current_bytes) =
+        encode_heic_jpeg_round_trip(&sample, options.jpeg_quality, cancel)?;
+    let pinned_round_trip = request
+        .pinned_jpeg_quality
+        .map(|quality| encode_heic_jpeg_round_trip(&sample, quality, cancel))
+        .transpose()?;
+    let mut aggregate = source_bytes
+        .len()
+        .checked_add(current_jpeg.len())
+        .and_then(|total| total.checked_add(current_bytes.len()))
+        .ok_or_else(|| invalid("Sample artifact size overflowed"))?;
+    if let Some((jpeg, png)) = pinned_round_trip.as_ref() {
+        aggregate = aggregate
+            .checked_add(jpeg.len())
+            .and_then(|total| total.checked_add(png.len()))
+            .ok_or_else(|| invalid("Sample artifact size overflowed"))?;
+    }
+    if aggregate as u64 > BYTES {
+        return Err(GoopError::PreviewUnavailable(
+            "HEIC preview unavailable: sample artifacts exceed 16 MiB.".into(),
+        ));
+    }
+
+    let source_path = dir.join("before.png");
+    let current_jpeg_path = dir.join("after.tmp.jpg");
+    let current_path = dir.join("after.png");
+    std::fs::write(&source_path, &source_bytes)?;
+    std::fs::write(&current_jpeg_path, &current_jpeg)?;
+    std::fs::write(&current_path, &current_bytes)?;
+    std::fs::remove_file(&current_jpeg_path)?;
+    let pinned_path = if let Some((jpeg, png)) = pinned_round_trip {
+        let jpeg_path = dir.join("pinned.tmp.jpg");
+        let path = dir.join("pinned.png");
+        std::fs::write(&jpeg_path, jpeg)?;
+        std::fs::write(&path, png)?;
+        std::fs::remove_file(jpeg_path)?;
+        Some(path)
+    } else {
+        None
+    };
+    for encoded in [&source_bytes, &current_bytes] {
+        let decoded = image::load_from_memory(encoded).map_err(|error| {
+            GoopError::PreviewUnavailable(format!(
+                "HEIC preview unavailable: generated artifact could not be verified: {error}."
+            ))
+        })?;
+        if decoded.width() != comparison.0 || decoded.height() != comparison.1 {
+            return Err(GoopError::PreviewUnavailable(
+                "HEIC preview unavailable: generated artifact dimensions changed.".into(),
+            ));
+        }
+    }
+    checkpoint(cancel, deadline)?;
+
+    let mut result = response(
+        request,
+        PreviewKind::Image,
+        Some(source_path),
+        current_path,
+        comparison,
+        current_jpeg.len() as u64,
+        None,
+    );
+    result.image_details = Some(ImagePreviewDetails {
+        sample_kind: ImageSampleKind::EmbeddedHeicThumbnail,
+        admitted_sample_width: frame.admitted_dimensions.width,
+        admitted_sample_height: frame.admitted_dimensions.height,
+        comparison_frame_width: comparison.0,
+        comparison_frame_height: comparison.1,
+        planned_output_width: planned.0,
+        planned_output_height: planned.1,
+        current_jpeg_quality: options.jpeg_quality,
+        pinned_jpeg_quality: request.pinned_jpeg_quality,
+        pinned_path: pinned_path.map(|path| path.to_string_lossy().into_owned()),
+    });
+    Ok((result, cache_update))
 }
 
 fn image_sample_bytes(
@@ -960,6 +1699,422 @@ mod process_tests {
 mod tests {
     use super::*;
     use image::GenericImageView;
+    use std::io;
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    struct BlockingHeicSampler {
+        entered: tokio::sync::Notify,
+        resumed: std::sync::Mutex<bool>,
+        resume: std::sync::Condvar,
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    impl BlockingHeicSampler {
+        fn sample(&self) -> Result<SampleFrame, SamplerError> {
+            self.entered.notify_one();
+            let mut resumed = self.resumed.lock().unwrap();
+            while !*resumed {
+                resumed = self.resume.wait(resumed).unwrap();
+            }
+            Ok(SampleFrame {
+                rgb: vec![96; 32 * 24 * 3].into(),
+                raw_icc_profile: None,
+                primary_dimensions: Dimensions {
+                    width: 4_000,
+                    height: 3_000,
+                },
+                admitted_dimensions: Dimensions {
+                    width: 32,
+                    height: 24,
+                },
+                provenance: crate::heic_preview_sampler::SampleProvenance::EmbeddedHeicThumbnail {
+                    item_id: 1,
+                },
+            })
+        }
+
+        fn unblock(&self) {
+            *self.resumed.lock().unwrap() = true;
+            self.resume.notify_all();
+        }
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    struct UnblockSamplerOnDrop(Arc<BlockingHeicSampler>);
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    impl Drop for UnblockSamplerOnDrop {
+        fn drop(&mut self) {
+            self.0.unblock();
+        }
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    fn service_with_blocking_heic_sampler(
+        root: PathBuf,
+    ) -> (Arc<PreviewService>, Arc<BlockingHeicSampler>) {
+        let blocker = Arc::new(BlockingHeicSampler {
+            entered: tokio::sync::Notify::new(),
+            resumed: std::sync::Mutex::new(false),
+            resume: std::sync::Condvar::new(),
+        });
+        let sampler: Arc<HeicSampler> = {
+            let blocker = Arc::clone(&blocker);
+            Arc::new(move |_bytes, _cancel, _deadline| blocker.sample())
+        };
+        (
+            Arc::new(PreviewService::new_with_heic_sampler(root, sampler)),
+            blocker,
+        )
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    fn assert_no_published_preview_directories(service: &PreviewService) {
+        if !service.root.exists() {
+            return;
+        }
+        assert!(std::fs::read_dir(&service.root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_type()
+            .unwrap()
+            .is_dir()));
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    fn heic_cache_entry(session_id: &str) -> HeicCacheEntry {
+        HeicCacheEntry {
+            session_id: session_id.into(),
+            source_digest: [7; 32],
+            frame: Arc::new(SampleFrame {
+                rgb: vec![1, 2, 3].into(),
+                raw_icc_profile: None,
+                primary_dimensions: Dimensions {
+                    width: 1,
+                    height: 1,
+                },
+                admitted_dimensions: Dimensions {
+                    width: 1,
+                    height: 1,
+                },
+                provenance: crate::heic_preview_sampler::SampleProvenance::EmbeddedHeicThumbnail {
+                    item_id: 1,
+                },
+            }),
+        }
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn release_during_heic_decode_cannot_publish_cache_or_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let (service, blocker) = service_with_blocking_heic_sampler(tmp.path().join("previews"));
+        let session = service.begin_session().unwrap();
+        let mut request = explicit_request(&input);
+        request.preview_session_id = Some(session.clone());
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move { worker_service.generate(&resolver, request).await });
+        let _unblock_on_drop = UnblockSamplerOnDrop(Arc::clone(&blocker));
+
+        tokio::time::timeout(Duration::from_secs(2), blocker.entered.notified())
+            .await
+            .expect("test sampler did not reach decode");
+        let release = service.release_session(&session);
+        let repeated_release = service.release_session(&session);
+        blocker.unblock();
+        release.unwrap();
+        repeated_release.unwrap();
+
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(service.heic_cache.lock().unwrap().is_none());
+        assert_no_published_preview_directories(&service);
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn new_session_during_heic_decode_cannot_publish_into_the_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let (service, blocker) = service_with_blocking_heic_sampler(tmp.path().join("previews"));
+        let old_session = service.begin_session().unwrap();
+        let mut request = explicit_request(&input);
+        request.preview_session_id = Some(old_session.clone());
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move { worker_service.generate(&resolver, request).await });
+        let _unblock_on_drop = UnblockSamplerOnDrop(Arc::clone(&blocker));
+
+        tokio::time::timeout(Duration::from_secs(2), blocker.entered.notified())
+            .await
+            .expect("test sampler did not reach decode");
+        let replacement = service.begin_session();
+        blocker.unblock();
+        let replacement = replacement.unwrap();
+
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        service.release_session(&old_session).unwrap();
+        assert_eq!(
+            service.state.lock().unwrap().session_id.as_deref(),
+            Some(replacement.as_str())
+        );
+        assert!(service.heic_cache.lock().unwrap().is_none());
+        assert_no_published_preview_directories(&service);
+    }
+
+    #[test]
+    fn legacy_request_captured_before_session_cannot_register_after_session_begins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let captured_epoch = service.state.lock().unwrap().epoch;
+
+        let session = service.begin_session().unwrap();
+        let mut state = service.state.lock().unwrap();
+        let error = register_request(
+            &mut state,
+            "stale-legacy".into(),
+            None,
+            captured_epoch,
+            CancellationToken::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GoopError::PreviewUnavailable(_)));
+        assert_eq!(state.session_id.as_deref(), Some(session.as_str()));
+        assert!(state.active.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_request_blocked_before_work_cannot_cross_a_new_session_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let service = Arc::new(PreviewService::new(tmp.path().join("previews")));
+        let held_permit = service.gate.clone().acquire_owned().await.unwrap();
+        let resolver = BinaryResolver::new(tmp.path().into());
+        let worker_service = service.clone();
+        let worker = tokio::spawn(async move {
+            worker_service
+                .generate(&resolver, explicit_request(&input))
+                .await
+        });
+
+        for _ in 0..100 {
+            if service.state.lock().unwrap().active.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.state.lock().unwrap().active.is_some());
+
+        let session = service.begin_session().unwrap();
+        let new_artifact = tmp.path().join("new-session-artifact");
+        std::fs::create_dir(&new_artifact).unwrap();
+        service.state.lock().unwrap().completed = Some(PublishedArtifacts {
+            request_id: "new-session".into(),
+            path: new_artifact.clone(),
+        });
+        drop(held_permit);
+
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        let state = service.state.lock().unwrap();
+        assert_eq!(state.session_id.as_deref(), Some(session.as_str()));
+        assert_eq!(
+            state
+                .completed
+                .as_ref()
+                .map(|artifact| artifact.request_id.as_str()),
+            Some("new-session")
+        );
+        assert!(new_artifact.exists());
+    }
+
+    #[test]
+    fn failed_release_cleanup_is_retained_retried_and_never_releases_a_newer_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let released = service.begin_session().unwrap();
+        let artifact = tmp.path().join("locked-artifact");
+        std::fs::create_dir(&artifact).unwrap();
+        service.state.lock().unwrap().completed = Some(PublishedArtifacts {
+            request_id: "old".into(),
+            path: artifact.clone(),
+        });
+        #[cfg(feature = "heic-thumbnail-preview")]
+        {
+            *service.heic_cache.lock().unwrap() = Some(heic_cache_entry(&released));
+        }
+
+        let error = service
+            .release_session_with(&released, |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated Windows sharing violation",
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(error, GoopError::Io(_)));
+        assert!(artifact.exists());
+        assert!(service.state.lock().unwrap().session_id.is_none());
+        #[cfg(feature = "heic-thumbnail-preview")]
+        assert!(service.heic_cache.lock().unwrap().is_none());
+
+        let retry_error = service
+            .release_session_with(&released, |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated repeated sharing violation",
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(retry_error, GoopError::Io(_)));
+        assert!(artifact.exists());
+
+        let begin_error = service
+            .begin_session_with(
+                || "123e4567-e89b-42d3-a456-426614174000".into(),
+                |_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "simulated begin retry sharing violation",
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(begin_error, GoopError::Io(_)));
+        assert!(service.state.lock().unwrap().session_id.is_none());
+        assert!(artifact.exists());
+
+        let newer = service
+            .begin_session_with(
+                || "123e4567-e89b-42d3-a456-426614174000".into(),
+                |path| std::fs::remove_dir_all(path),
+            )
+            .unwrap();
+        assert!(!artifact.exists());
+
+        service
+            .release_session_with(&released, |_| {
+                panic!("a completed old cleanup must not touch the newer session")
+            })
+            .unwrap();
+        assert_eq!(
+            service.state.lock().unwrap().session_id.as_deref(),
+            Some(newer.as_str())
+        );
+    }
+
+    #[test]
+    fn failed_cancel_cleanup_stays_retryable_by_session_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let session = service.begin_session().unwrap();
+        let artifact = tmp.path().join("locked-cancel-artifact");
+        std::fs::create_dir(&artifact).unwrap();
+        service.state.lock().unwrap().completed = Some(PublishedArtifacts {
+            request_id: "cancelled".into(),
+            path: artifact.clone(),
+        });
+
+        service.cancel_with("cancelled", |_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "simulated Windows sharing violation",
+            ))
+        });
+
+        assert!(service.state.lock().unwrap().completed.is_some());
+        service.release_session(&session).unwrap();
+        assert!(!artifact.exists());
+        assert!(service.state.lock().unwrap().pending_cleanup.is_none());
+    }
+
+    #[test]
+    fn publication_barrier_rejects_a_released_session_epoch() {
+        let cancel = CancellationToken::new();
+        let mut state = State {
+            epoch: 7,
+            session_id: Some("123e4567-e89b-42d3-a456-426614174000".into()),
+            active: Some(ActiveRequest {
+                request_id: "latest".into(),
+                epoch: 7,
+                cancel,
+            }),
+            ..State::default()
+        };
+
+        assert!(publication_is_current(
+            &state,
+            "latest",
+            Some("123e4567-e89b-42d3-a456-426614174000"),
+            7,
+        ));
+
+        state.epoch += 1;
+        state.session_id = None;
+
+        assert!(!publication_is_current(
+            &state,
+            "latest",
+            Some("123e4567-e89b-42d3-a456-426614174000"),
+            7,
+        ));
+    }
+
+    #[test]
+    fn a_colliding_session_token_is_retried_before_old_state_is_invalidated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let existing = service.begin_session().unwrap();
+        let artifact = tmp.path().join("published");
+        std::fs::create_dir(&artifact).unwrap();
+        service.state.lock().unwrap().completed = Some(PublishedArtifacts {
+            request_id: "old".into(),
+            path: artifact.clone(),
+        });
+        let replacement = "123e4567-e89b-42d3-a456-426614174000".to_string();
+        let mut calls = 0;
+
+        let issued = service
+            .begin_session_with(
+                || {
+                    calls += 1;
+                    if calls == 1 {
+                        existing.clone()
+                    } else {
+                        assert!(
+                            artifact.exists(),
+                            "collision must not invalidate the live session"
+                        );
+                        replacement.clone()
+                    }
+                },
+                |path| std::fs::remove_dir_all(path),
+            )
+            .unwrap();
+
+        assert_eq!(calls, 2);
+        assert_eq!(issued, replacement);
+        assert!(!artifact.exists());
+    }
 
     fn explicit_request(input: &Path) -> PreviewRequest {
         serde_json::from_value(serde_json::json!({
@@ -1128,12 +2283,281 @@ mod tests {
             &request,
             &CancellationToken::new(),
             Instant::now() + TIMEOUT,
+            ImageWorkerContext {
+                cached_heic: None,
+                #[cfg(feature = "heic-thumbnail-preview")]
+                heic_sampler: default_heic_sampler(),
+            },
+            Scratch(Some(output.clone())),
         );
 
         assert!(result.is_ok());
         assert!(output.exists());
         drop(scratch);
         assert!(!output.exists());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[test]
+    fn captured_heic_snapshot_reaches_the_bounded_sampler_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let bytes = capture_image(
+            &input,
+            MAX_INPUT_BYTES,
+            &CancellationToken::new(),
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+
+        let frame = sample_heic_thumbnail(bytes.as_ref(), &|| Ok(())).unwrap();
+
+        assert_eq!(
+            (
+                frame.admitted_dimensions.width,
+                frame.admitted_dimensions.height
+            ),
+            (32, 24)
+        );
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn captured_heic_snapshot_decodes_on_the_preview_blocking_worker() {
+        let bytes = include_bytes!("../tests/fixtures/heic-with-thumbnail.heic").to_vec();
+
+        let frame = tokio::task::spawn_blocking(move || sample_heic_thumbnail(&bytes, &|| Ok(())))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            (
+                frame.admitted_dimensions.width,
+                frame.admitted_dimensions.height
+            ),
+            (32, 24)
+        );
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[test]
+    fn matching_session_and_source_digest_reuse_the_one_entry_heic_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let bytes: Bytes = include_bytes!("../tests/fixtures/heic-with-thumbnail.heic")
+            .to_vec()
+            .into();
+        let request: PreviewRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "cache-first",
+            "input_path": "unused.heic",
+            "source_revision": "1",
+            "target": "jpeg",
+            "metadata_policy": "preserve",
+            "preview_session_id": "123e4567-e89b-42d3-a456-426614174000",
+            "image_options": {
+                "jpeg_quality": 75,
+                "resize": { "kind": "original" }
+            }
+        }))
+        .unwrap();
+        let cancel = CancellationToken::new();
+
+        let (_, cache) = heic_image_sample_bytes(
+            bytes.clone(),
+            &first,
+            &request,
+            &cancel,
+            Instant::now() + TIMEOUT,
+            None,
+            default_heic_sampler().as_ref(),
+        )
+        .unwrap();
+        let cache = cache.expect("first decode must publish a cache candidate");
+        assert!(cache.frame.raw_icc_profile.is_none());
+        let cached_frame = Arc::clone(&cache.frame);
+
+        let (_, cache_update) = heic_image_sample_bytes(
+            bytes,
+            &second,
+            &PreviewRequest {
+                request_id: "cache-second".into(),
+                ..request
+            },
+            &cancel,
+            Instant::now() + TIMEOUT,
+            Some(cache),
+            default_heic_sampler().as_ref(),
+        )
+        .unwrap();
+
+        let cache_update = cache_update.expect("a matching cache hit retains the owned entry");
+        assert!(Arc::ptr_eq(&cache_update.frame, &cached_frame));
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn cancelled_waiting_refresh_does_not_discard_the_live_heic_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let service = Arc::new(PreviewService::new(tmp.path().join("previews")));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let session = service.begin_session().unwrap();
+        let mut request = explicit_request(&input);
+        request.preview_session_id = Some(session);
+        service.generate(&resolver, request.clone()).await.unwrap();
+        let cached_frame = Arc::clone(&service.heic_cache.lock().unwrap().as_ref().unwrap().frame);
+
+        let held_permit = service.gate.clone().acquire_owned().await.unwrap();
+        request.request_id = "waiting-refresh".into();
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move { worker_service.generate(&resolver, request).await });
+        for _ in 0..100 {
+            if service
+                .state
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .is_some_and(|active| active.request_id == "waiting-refresh")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        service.cancel("waiting-refresh");
+        drop(held_permit);
+
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(Arc::ptr_eq(
+            &service.heic_cache.lock().unwrap().as_ref().unwrap().frame,
+            &cached_frame
+        ));
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn changed_heic_source_cannot_reuse_the_previous_cache_when_resampling_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let session = service.begin_session().unwrap();
+        let mut request = explicit_request(&input);
+        request.preview_session_id = Some(session);
+
+        service.generate(&resolver, request.clone()).await.unwrap();
+        let old_digest = service
+            .heic_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .source_digest;
+
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+            &input,
+        )
+        .unwrap();
+        request.request_id = "changed-source".into();
+        assert!(matches!(
+            service.generate(&resolver, request).await,
+            Err(GoopError::PreviewUnavailable(_))
+        ));
+        assert_eq!(
+            service
+                .heic_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .source_digest,
+            old_digest
+        );
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[test]
+    fn heic_raw_icc_sample_is_normalized_once_before_cache_ownership() {
+        let profile = wide_rgb_profile();
+        let source = image::RgbImage::from_pixel(2, 1, image::Rgb([64, 180, 96]));
+        let expected = crate::color::transform_pixels(
+            DynamicImage::ImageRgb8(source.clone()),
+            Some(profile.clone()),
+            ImageColorPolicy::ConvertToSrgb,
+            &CancellationToken::new(),
+        )
+        .unwrap()
+        .pixels;
+        assert_ne!(expected, source);
+        let frame = SampleFrame {
+            rgb: source.into_raw().into(),
+            raw_icc_profile: Some(profile.into()),
+            primary_dimensions: Dimensions {
+                width: 20,
+                height: 10,
+            },
+            admitted_dimensions: Dimensions {
+                width: 2,
+                height: 1,
+            },
+            provenance: crate::heic_preview_sampler::SampleProvenance::EmbeddedHeicThumbnail {
+                item_id: 1,
+            },
+        };
+
+        let normalized = normalize_heic_frame(frame, &CancellationToken::new()).unwrap();
+
+        assert_eq!(normalized.rgb.as_ref(), expected.as_raw());
+        assert!(normalized.raw_icc_profile.is_none());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[test]
+    fn real_heic_display_p3_thumbnail_completes_normalization() {
+        let frame = sample_heic_thumbnail(
+            include_bytes!("../tests/fixtures/heic-display-p3-thumbnail.heic"),
+            &|| Ok(()),
+        )
+        .unwrap();
+        let source_rgb = Arc::clone(&frame.rgb);
+
+        let normalized = normalize_heic_frame(frame, &CancellationToken::new()).unwrap();
+
+        assert_eq!(normalized.primary_dimensions.width, 192);
+        assert_eq!(normalized.primary_dimensions.height, 144);
+        assert_eq!(normalized.admitted_dimensions.width, 64);
+        assert_eq!(normalized.admitted_dimensions.height, 48);
+        assert!(normalized.raw_icc_profile.is_none());
+        assert_ne!(normalized.rgb.as_ref(), source_rgb.as_ref());
     }
 
     #[test]
@@ -1458,6 +2882,7 @@ mod tests {
             &snapshot,
             &CancellationToken::new(),
             Instant::now() + TIMEOUT,
+            false,
         )
         .unwrap_err();
         assert!(error.to_string().contains("Source changed"));

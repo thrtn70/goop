@@ -1,4 +1,6 @@
 use goop_converter::preview::{bounded_dimensions, validate_pixels};
+#[cfg(feature = "heic-thumbnail-preview")]
+use std::path::Path;
 #[test]
 fn preview_limits_reject_invalid_or_oversized_sources() {
     assert!(validate_pixels(0, 100).is_err());
@@ -11,6 +13,83 @@ use goop_core::{PreviewRequest, TargetFormat};
 use goop_sidecar::BinaryResolver;
 fn request(path: &std::path::Path, id: &str) -> PreviewRequest {
     serde_json::from_value(serde_json::json!({"request_id":id,"input_path":path,"source_revision":"1","target":"jpeg","quality_preset":null,"resolution_cap":null,"compress_mode":null,"metadata_policy":null,"subtitle":null,"gif_options":null})).unwrap()
+}
+
+#[test]
+fn preview_sessions_are_backend_issued_canonical_uuid_v4_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let session = service.begin_session().unwrap();
+    assert_eq!(session.len(), 36);
+    assert_eq!(&session[14..15], "4");
+    assert!(matches!(&session[19..20], "8" | "9" | "a" | "b"));
+    assert!(session
+        .chars()
+        .enumerate()
+        .all(|(index, c)| matches!(index, 8 | 13 | 18 | 23) && c == '-'
+            || !matches!(index, 8 | 13 | 18 | 23)
+                && c.is_ascii_hexdigit()
+                && !c.is_ascii_uppercase()));
+}
+
+#[tokio::test]
+async fn session_release_is_exact_idempotent_and_keeps_one_retired_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.png");
+    image::RgbImage::from_pixel(32, 16, image::Rgb([100, 80, 40]))
+        .save(&input)
+        .unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    let session = service.begin_session().unwrap();
+    let mut paths = Vec::new();
+
+    for id in ["one", "two", "three"] {
+        let mut req = request(&input, id);
+        req.preview_session_id = Some(session.clone());
+        let result = service.generate(&resolver, req).await.unwrap();
+        paths.push(result.after_path);
+    }
+
+    assert!(!std::path::Path::new(&paths[0]).exists());
+    assert!(std::path::Path::new(&paths[1]).exists());
+    assert!(std::path::Path::new(&paths[2]).exists());
+
+    let other = "123e4567-e89b-42d3-a456-426614174000";
+    service.release_session(other).unwrap();
+    assert!(std::path::Path::new(&paths[2]).exists());
+
+    service.release_session(&session).unwrap();
+    service.release_session(&session).unwrap();
+    assert!(!std::path::Path::new(&paths[1]).exists());
+    assert!(!std::path::Path::new(&paths[2]).exists());
+}
+
+#[tokio::test]
+async fn invalid_or_released_session_cannot_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.png");
+    image::RgbImage::from_pixel(32, 16, image::Rgb([100, 80, 40]))
+        .save(&input)
+        .unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+
+    let mut malformed = request(&input, "malformed");
+    malformed.preview_session_id = Some("NOT-A-UUID".into());
+    assert!(matches!(
+        service.generate(&resolver, malformed).await,
+        Err(goop_core::GoopError::InvalidRequest(_))
+    ));
+
+    let session = service.begin_session().unwrap();
+    service.release_session(&session).unwrap();
+    let mut released = request(&input, "released");
+    released.preview_session_id = Some(session);
+    assert!(matches!(
+        service.generate(&resolver, released).await,
+        Err(goop_core::GoopError::PreviewUnavailable(_))
+    ));
 }
 #[tokio::test]
 async fn image_sample_is_bounded_and_source_is_unchanged() {
@@ -449,6 +528,190 @@ async fn explicit_raw_heic_and_oversized_sources_stay_unavailable() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("64 MiB"), "{error}");
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[tokio::test]
+async fn heic_thumbnail_preview_publishes_source_current_and_pinned_artifacts() {
+    use goop_core::{ImageResize, ImageSampleKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.heic");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/heic-with-thumbnail.heic"
+        ),
+        &input,
+    )
+    .unwrap();
+    let original = std::fs::read(&input).unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    let session = service.begin_session().unwrap();
+    let mut req = explicit_request(&input, "heic-preview", 84);
+    req.preview_session_id = Some(session.clone());
+    req.pinned_jpeg_quality = Some(32);
+    req.image_options.as_mut().unwrap().resize = ImageResize::Original;
+
+    let result = service.generate(&resolver, req).await.unwrap();
+    let details = result.image_details.as_ref().unwrap();
+
+    assert_eq!(details.sample_kind, ImageSampleKind::EmbeddedHeicThumbnail);
+    assert_eq!(
+        (
+            details.admitted_sample_width,
+            details.admitted_sample_height
+        ),
+        (32, 24)
+    );
+    assert_eq!(
+        (
+            details.comparison_frame_width,
+            details.comparison_frame_height
+        ),
+        (32, 24)
+    );
+    assert_eq!(
+        (details.planned_output_width, details.planned_output_height),
+        (96, 72)
+    );
+    assert_eq!(details.current_jpeg_quality, 84);
+    assert_eq!(details.pinned_jpeg_quality, Some(32));
+    let published_directory = Path::new(&result.after_path).parent().unwrap();
+    assert_eq!(
+        Path::new(result.before_path.as_ref().unwrap()).parent(),
+        Some(published_directory)
+    );
+    assert_eq!(
+        Path::new(details.pinned_path.as_ref().unwrap()).parent(),
+        Some(published_directory)
+    );
+    assert!(!published_directory
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with(".staging-"));
+    assert!(std::fs::read_dir(published_directory.parent().unwrap())
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging-")));
+    let source = result.before_path.as_ref().unwrap();
+    let pinned = details.pinned_path.as_ref().unwrap();
+    assert_eq!(
+        std::path::Path::new(source).file_name().unwrap(),
+        "before.png"
+    );
+    assert_eq!(
+        std::path::Path::new(&result.after_path)
+            .file_name()
+            .unwrap(),
+        "after.png"
+    );
+    assert_eq!(
+        std::path::Path::new(pinned).file_name().unwrap(),
+        "pinned.png"
+    );
+    for path in [source, &result.after_path, pinned] {
+        let image = image::open(path).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 24));
+    }
+    assert_ne!(
+        std::fs::read(&result.after_path).unwrap(),
+        std::fs::read(pinned).unwrap()
+    );
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+
+    service.release_session(&session).unwrap();
+    for path in [source, &result.after_path, pinned] {
+        assert!(!std::path::Path::new(path).exists());
+    }
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[tokio::test]
+async fn heic_fit_preview_maps_the_primary_plan_onto_the_embedded_sample() {
+    use goop_core::ImageResize;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.heif");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/heic-with-thumbnail.heic"
+        ),
+        &input,
+    )
+    .unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    let resolver = BinaryResolver::new(dir.path().into());
+    let session = service.begin_session().unwrap();
+    let mut req = explicit_request(&input, "heic-fit", 75);
+    req.preview_session_id = Some(session);
+    req.image_options.as_mut().unwrap().resize = ImageResize::FitWithin {
+        width: 48,
+        height: 48,
+    };
+
+    let result = service.generate(&resolver, req).await.unwrap();
+    let details = result.image_details.unwrap();
+
+    assert_eq!((result.width, result.height), (16, 12));
+    assert_eq!(
+        (
+            details.comparison_frame_width,
+            details.comparison_frame_height
+        ),
+        (16, 12)
+    );
+    assert_eq!(
+        (details.planned_output_width, details.planned_output_height),
+        (48, 36)
+    );
+    let source = image::open(result.before_path.unwrap()).unwrap();
+    assert_eq!((source.width(), source.height()), (16, 12));
+    let current = image::open(result.after_path).unwrap();
+    assert_eq!((current.width(), current.height()), (16, 12));
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[tokio::test]
+async fn heic_preview_requires_a_live_session_and_admitted_thumbnail() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolver = BinaryResolver::new(dir.path().into());
+    let admitted = dir.path().join("admitted.heic");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/heic-with-thumbnail.heic"
+        ),
+        &admitted,
+    )
+    .unwrap();
+    let service = PreviewService::new(dir.path().join("previews"));
+    assert!(matches!(
+        service
+            .generate(&resolver, explicit_request(&admitted, "no-session", 75))
+            .await,
+        Err(goop_core::GoopError::PreviewUnavailable(_))
+    ));
+
+    let missing = dir.path().join("missing.heic");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+        &missing,
+    )
+    .unwrap();
+    let session = service.begin_session().unwrap();
+    let mut req = explicit_request(&missing, "missing-thumbnail", 75);
+    req.preview_session_id = Some(session);
+    assert!(matches!(
+        service.generate(&resolver, req).await,
+        Err(goop_core::GoopError::PreviewUnavailable(_))
+    ));
 }
 #[tokio::test]
 async fn explicit_malformed_orientation_fails_preserve_but_strip_can_sample() {

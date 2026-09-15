@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+heic-thumbnail-preview = ["libheif-rs/v1_23", "dep:sha2"]
+
 [dependencies]
 goop-core = { path = "../goop-core" }
 goop-sidecar = { path = "../goop-sidecar" }
@@ -50,7 +54,8 @@ jpegxl-rs = { version = "0.11", features = ["vendored"] }
 #     which non-deterministically dynamic-links x265 (GPL!), aom, dav1d
 #     etc. on Homebrew machines. Our script pins the exact stack.
 #   * On Windows MSVC the crate resolves libheif via vcpkg —
-#     "libheif[core]:x64-windows-static" with VCPKGRS_TRIPLET set
+#     scripts/install-windows-heif-deps.sh pins the vcpkg tree before
+#     installing "libheif[core]:x64-windows-static" with VCPKGRS_TRIPLET set;
 #     gives the same minimal static stack ([core] suppresses the
 #     default 'hevc' feature = GPL x265 encoder; libde265 is a core
 #     dependency of the port; the pure static triplet matches the
@@ -58,7 +63,7 @@ jpegxl-rs = { version = "0.11", features = ["vendored"] }
 # Decode-only: libde265 is the only codec in the link. No x265 (encode-
 # only → no GPL-2.0 component), no aom (AVIF is native via `image`).
 # See LICENSING.md for the static-LGPL rationale.
-libheif-rs = { version = "2.4", default-features = false, features = ["v1_17", "image"] }
+libheif-rs = { version = "=3.0.0", default-features = false, features = ["v1_17", "image"] }
 # Phase 6 text watermark: imageproc owns the high-level draw_text_mut
 # helper that composites a rasterized glyph buffer onto a DynamicImage
 # via the `image` crate's pixel types. ab_glyph is its font loader.
@@ -81,6 +86,7 @@ img-parts = "0.3"
 # because Cargo.lock is intentionally ignored in this repository.
 flate2 = "=1.1.10"
 crc32fast = "=1.5.2"
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # Scratch dirs for the `#[ignore]`d real-ffmpeg tests.

@@ -1,4 +1,6 @@
 //! Engine-owned availability shared by the picker, queue admission and execution.
+#[cfg(feature = "heic-thumbnail-preview")]
+use crate::heic_preview_sampler::inspect_heic_thumbnail;
 use crate::{
     backend_for_extension, BackendKind, ConversionBackend, FfmpegBackend, ImageMagickBackend,
 };
@@ -472,6 +474,38 @@ fn enrich_image_color_capabilities(
     }
 }
 
+fn enrich_heic_preview_capabilities(
+    inspection: &ImageSourceInspection,
+    capabilities: &mut ConversionCapabilities,
+) {
+    let Some(preview) = inspection.heic_preview.as_ref() else {
+        return;
+    };
+    let Some(settings) = capabilities
+        .targets
+        .iter_mut()
+        .find(|target| target.target == TargetFormat::Jpeg)
+        .and_then(|target| target.image_settings.as_mut())
+    else {
+        return;
+    };
+    if !settings.available {
+        return;
+    }
+    match preview {
+        Ok(()) => {
+            settings.preview_original_available = true;
+            settings.preview_fit_within = true;
+            settings.preview_unavailable_reason = None;
+        }
+        Err(reason) => {
+            settings.preview_original_available = false;
+            settings.preview_fit_within = false;
+            settings.preview_unavailable_reason = Some(reason.clone());
+        }
+    }
+}
+
 fn base_image_metadata_capabilities(
     preserves_metadata: bool,
     jpeg_pair: bool,
@@ -588,6 +622,7 @@ struct ImageSourceInspection {
     probe: ProbeResult,
     jpeg_metadata: Option<crate::metadata::JpegMetadataInspection>,
     color: Result<crate::color::SourceInspection, String>,
+    heic_preview: Option<Result<(), String>>,
 }
 
 enum ColorRasterSnapshot {
@@ -682,6 +717,22 @@ fn color_raster_snapshot(path: &Path) -> Result<Option<ColorRasterSnapshot>, Goo
     .map(|bytes| Some(ColorRasterSnapshot::Captured(bytes)))
 }
 
+#[cfg(feature = "heic-thumbnail-preview")]
+fn path_matches_snapshot(path: &Path, snapshot: &[u8]) -> Result<bool, GoopError> {
+    let mut file = File::open(path)?;
+    let mut offset = 0usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    while offset < snapshot.len() {
+        let requested = (snapshot.len() - offset).min(buffer.len());
+        let count = file.read(&mut buffer[..requested])?;
+        if count == 0 || buffer[..count] != snapshot[offset..offset + count] {
+            return Ok(false);
+        }
+        offset += count;
+    }
+    Ok(file.read(&mut buffer[..1])? == 0)
+}
+
 fn inspect_image_source_snapshot_blocking(
     path: &Path,
     after_snapshot: impl FnOnce(),
@@ -718,14 +769,69 @@ fn inspect_image_source_snapshot_blocking(
             probe,
             jpeg_metadata,
             color,
+            heic_preview: None,
         });
     }
 
+    let is_heic = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
+        });
+    #[cfg(not(feature = "heic-thumbnail-preview"))]
+    let heic_preview =
+        is_heic.then(|| Err("Bounded HEIC preview is not enabled in this build.".into()));
+    #[cfg(feature = "heic-thumbnail-preview")]
+    let (heic_preview, heic_snapshot) = if is_heic {
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(GoopError::InvalidRequest(
+                "Image inspection requires a file".into(),
+            ));
+        }
+        if metadata.len() > crate::preview::MAX_INPUT_BYTES {
+            (
+                Some(Err(
+                    "Image preview source exceeds the 64 MiB input limit.".into()
+                )),
+                None,
+            )
+        } else {
+            let bytes = crate::image_read::read_snapshot(
+                file,
+                crate::preview::MAX_INPUT_BYTES,
+                "Image preview source exceeds the 64 MiB input limit",
+                || Ok(()),
+            )?;
+            let preview =
+                inspect_heic_thumbnail(bytes.as_ref(), &|| Ok(())).map_err(|error| match error {
+                    crate::heic_preview_sampler::SamplerError::NoAdmittedThumbnail => {
+                        "This source has no bounded embedded thumbnail.".into()
+                    }
+                    error => format!("HEIC preview unavailable: {error}."),
+                });
+            (Some(preview), Some(bytes))
+        }
+    } else {
+        (None, None)
+    };
     after_snapshot();
+    let probe = crate::imagemagick_probe::probe_image(path)?;
+    #[cfg(feature = "heic-thumbnail-preview")]
+    if let Some(snapshot) = heic_snapshot {
+        if !path_matches_snapshot(path, &snapshot)? {
+            return Err(GoopError::InvalidRequest(
+                "Source changed while inspecting HEIC preview capability".into(),
+            ));
+        }
+    }
     Ok(ImageSourceInspection {
-        probe: crate::imagemagick_probe::probe_image(path)?,
+        probe,
         jpeg_metadata: None,
         color: Err("Color-managed conversion currently requires JPEG or PNG input".into()),
+        heic_preview,
     })
 }
 
@@ -879,7 +985,7 @@ fn image_settings_for(
         .to_ascii_lowercase();
     let jpeg = matches!(format.as_str(), "jpg" | "jpeg");
     let png = format == "png";
-    let heic = format == "heic";
+    let heic = matches!(format.as_str(), "heic" | "heif");
     let raw = format == "raw" || crate::raw::is_raw_extension(&format);
     let dimensions = probe.width.zip(probe.height);
     let dimension_error = dimensions
@@ -905,6 +1011,12 @@ fn image_settings_for(
 
     let preview_original_reason = if !available {
         reason.clone()
+    } else if heic {
+        Some(if cfg!(feature = "heic-thumbnail-preview") {
+            "Fresh bounded HEIC thumbnail inspection is required.".into()
+        } else {
+            "Bounded HEIC preview is not enabled in this build.".into()
+        })
     } else if !jpeg {
         Some("Original image samples are available for JPEG sources only.".into())
     } else if probe.file_size > crate::preview::MAX_INPUT_BYTES {
@@ -1195,6 +1307,7 @@ pub async fn inspect_source(
             inspection.probe.image_has_alpha,
             &mut capabilities,
         );
+        enrich_heic_preview_capabilities(inspection, &mut capabilities);
     }
     Ok(goop_core::ConversionInspection {
         probe,
@@ -1330,6 +1443,7 @@ pub async fn inspect_source_with_encoders(
             inspection.probe.image_has_alpha,
             &mut capabilities,
         );
+        enrich_heic_preview_capabilities(inspection, &mut capabilities);
     }
     Ok(goop_core::ConversionInspection {
         probe,
@@ -1408,6 +1522,36 @@ mod tests {
                 .into_dimensions()
                 .unwrap(),
             (8, 16)
+        );
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[test]
+    fn heic_preview_capability_rejects_a_replaced_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &path,
+        )
+        .unwrap();
+
+        let error = inspect_image_source_snapshot_blocking(&path, || {
+            std::fs::copy(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+                &path,
+            )
+            .unwrap();
+        })
+        .err()
+        .expect("a replaced HEIC source must be rejected");
+
+        assert_eq!(
+            error.user_message(),
+            "Source changed while inspecting HEIC preview capability"
         );
     }
 
