@@ -83,7 +83,7 @@ it("keeps empty width through selection and remount, blocking Convert, apply, sa
   const view = render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
   await userEvent.setup().clear(screen.getByRole("textbox", { name: "Image width" }));
   expect(disabled("Convert 2 files")).toBe(true); expect(disabled("Apply first to all")).toBe(true); expect(disabled("Save as preset")).toBe(true);
-  expect(screen.queryByRole("button", { name: "Preview sample" })).toBeNull();
+  expect(disabled("Preview sample")).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
   expect(disabled("Convert 2 files")).toBe(true);
   view.unmount(); render(page());
@@ -321,7 +321,8 @@ it("uses the managed PNG image-settings color requirement and permits Original p
   render(page()); await add(["/opaque.png"]);
   fireEvent.change(screen.getByRole("textbox", {name:"JPEG quality"}), {target:{value:"90"}});
   expect(disabled("Convert 1 file")).toBe(true);
-  expect(screen.getByText(/Convert.*sRGB.*image settings/i)).toBeTruthy();
+  expect(screen.getAllByText(/Convert.*sRGB.*image settings/i)).toHaveLength(2);
+  expect(disabled("Preview sample")).toBe(true);
 
   const color = within(screen.getByRole("group", {name:"Color handling"}));
   await userEvent.setup().click(color.getByRole("button", {name:"Convert to sRGB"}));
@@ -339,7 +340,7 @@ it("requires a deliberate background and forwards it to preview and conversion",
   render(page()); await add(["/a.png"]);
   expect(disabled("Convert 1 file")).toBe(true);
   expect(disabled("Save as preset")).toBe(true);
-  expect(screen.queryByRole("button", {name:"Preview sample"})).toBeNull();
+  expect(disabled("Preview sample")).toBe(true);
   expect(screen.getByText(/Suggested: #FFFFFF/)).toBeTruthy();
   expect(screen.getByRole("button", {name:"White"}).getAttribute("aria-pressed")).toBe("false");
   fireEvent.click(screen.getByRole("button", {name:"PNG"}));
@@ -441,7 +442,7 @@ it("blocks every effective action while custom background text differs from the 
   expect(disabled("Convert 2 files")).toBe(true);
   expect(disabled("Save as preset")).toBe(true);
   expect(disabled("Apply first to all")).toBe(true);
-  expect(screen.queryByRole("button", {name:"Preview sample"})).toBeNull();
+  expect(disabled("Preview sample")).toBe(true);
   expect(screen.queryByAltText("Output sample")).toBeNull();
   expect(mocks.previewCancel).toHaveBeenCalledWith(displayedRequest.request_id);
   fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
@@ -498,7 +499,7 @@ it("retires an in-flight preview on a raw invalid edit and ignores its late resp
   fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
   const request = mocks.preview.mock.calls[0][0];
   fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "" } });
-  expect(screen.queryByRole("button", { name: "Preview sample" })).toBeNull();
+  expect(disabled("Preview sample")).toBe(true);
   fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "90" } });
   await act(async () => resolve({...request,kind:"image",before_path:"/before.png",after_path:"/stale.png",width:160,height:100,sample_bytes:100}));
   expect(screen.queryByAltText("Output sample")).toBeNull();

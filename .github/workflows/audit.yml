@@ -52,9 +52,11 @@ jobs:
       - name: clippy
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy -p goop-converter --all-targets --features heic-thumbnail-preview -- -D warnings
+          cargo clippy -p goop-converter --all-targets --no-default-features -- -D warnings
       - name: test
-        run: cargo test --workspace --all-features
+        run: |
+          cargo test -p goop-converter --no-default-features
+          cargo test --workspace --all-features
       # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
       # sit on different major.minor versions. They drift on their own here:
       # Cargo.lock is gitignored by design, so the crate re-resolves to the
@@ -101,6 +103,7 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: node --test scripts/startup-fonts.test.mjs
+      - run: node --test scripts/desktop-preview.test.mjs
       - run: npm run build
 
   legal:

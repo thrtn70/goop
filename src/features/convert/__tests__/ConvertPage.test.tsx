@@ -5,18 +5,19 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
 import { useAppStore } from "@/store/appStore";
-import type { ProbeResult, Settings, Preset } from "@/types";
+import type { PreviewRequest, PreviewResult, ProbeResult, Settings, Preset } from "@/types";
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewGenerate, mockPreviewCancel } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease } = vi.hoisted(() => ({
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
   mockFromFile: vi.fn(),
   mockOpen: vi.fn(),
   mockSave: vi.fn(),
-  mockPreviewGenerate: vi.fn(async (request: { request_id: string; source_revision: string }) => ({
+  mockPreviewBegin: vi.fn().mockResolvedValue("11111111-1111-4111-8111-111111111111"),
+  mockPreviewGenerate: vi.fn(async (request: PreviewRequest): Promise<PreviewResult> => ({
     request_id: request.request_id,
     source_revision: request.source_revision,
     kind: "image",
@@ -30,6 +31,7 @@ const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPla
     max_duration_ms: 3000,
   })),
   mockPreviewCancel: vi.fn().mockResolvedValue(undefined),
+  mockPreviewRelease: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/ipc/commands", () => ({
@@ -104,6 +106,21 @@ vi.mock("@/ipc/commands", () => ({
                   summary: "Assume untagged pixels are sRGB.",
                 },
               } : null,
+              image_settings: p.source_kind === "image" && target === "jpeg" ? {
+                available: true,
+                reason: null,
+                required_color_policy: null,
+                quality_min: 1,
+                quality_max: 100,
+                default_quality: 75,
+                max_dimension: 32768,
+                max_output_pixels: 100000000,
+                fit_within: true,
+                upscale: false,
+                preview_original_available: true,
+                preview_fit_within: true,
+                preview_unavailable_reason: null,
+              } : null,
               video_settings: p.source_kind === "video" && ["mp4","mov","mkv"].includes(target) ? {
                 copy:{available:true}, encode:{available:path !== "/tmp/unsupported.mp4",reason:"Unknown field order"},
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
@@ -169,8 +186,10 @@ vi.mock("@/ipc/commands", () => ({
     queue: { list: vi.fn().mockResolvedValue([]) },
     settings: { get: vi.fn().mockResolvedValue({}) },
     preview: {
-      generate: (request: { request_id: string; source_revision: string }) => mockPreviewGenerate(request),
+      begin: () => mockPreviewBegin(),
+      generate: (request: PreviewRequest) => mockPreviewGenerate(request),
       cancel: (requestId: string) => mockPreviewCancel(requestId),
+      release: (sessionId: string) => mockPreviewRelease(sessionId),
     },
   },
 }));
@@ -307,6 +326,14 @@ const imageProbe: ProbeResult = {
   has_subtitles: false,
   subtitle_codecs: [],
   audio_codecs: [],
+};
+
+const heicProbe: ProbeResult = {
+  ...imageProbe,
+  width: 96,
+  height: 72,
+  file_size: BigInt(865),
+  image_format: "HEIC",
 };
 
 const srtProbe: ProbeResult = {
@@ -923,6 +950,55 @@ describe("ConvertPage", () => {
     expect(screen.queryByRole("button", { name: "MP4" })).toBeNull();
     expect(screen.queryByRole("button", { name: "MKV" })).toBeNull();
     expect(screen.queryByLabelText("Audio track")).toBeNull();
+  });
+
+  it("retains a pinned HEIC quality when the parent applies a valid quality edit", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/photo.heic"]);
+    mockProbe.mockResolvedValue(heicProbe);
+    mockPreviewGenerate.mockImplementation(async request => {
+      if (!request.image_options) throw new Error("HEIC preview test requires image options");
+      const quality = request.image_options.jpeg_quality;
+      return {
+        ...request,
+        kind: "image",
+        before_path: "/tmp/source.png",
+        after_path: `/tmp/current-${quality}.png`,
+        width: 32,
+        height: 24,
+        sample_bytes: 128,
+        duration_ms: null,
+        max_edge: 1280,
+        max_duration_ms: 3000,
+        image_details: {
+          sample_kind: "embedded_heic_thumbnail",
+          admitted_sample_width: 32,
+          admitted_sample_height: 24,
+          comparison_frame_width: 32,
+          comparison_frame_height: 24,
+          planned_output_width: 96,
+          planned_output_height: 72,
+          current_jpeg_quality: quality,
+          pinned_jpeg_quality: request.pinned_jpeg_quality ?? null,
+          pinned_path: request.pinned_jpeg_quality == null ? null : "/tmp/pinned.png",
+        },
+      };
+    });
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await screen.findByText("photo.heic");
+    await userEvent.click(screen.getByRole("button", { name: "JPEG" }));
+    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Pin current quality 75" }));
+    await screen.findByRole("button", { name: "Pinned quality 75" });
+
+    fireEvent.change(screen.getByLabelText("JPEG quality"), { target: { value: "40" } });
+    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await screen.findByRole("button", { name: "Pinned quality 75" });
+
+    expect(mockPreviewGenerate.mock.calls.at(-1)?.[0].pinned_jpeg_quality).toBe(75);
+    expect(mockPreviewBegin).toHaveBeenCalledTimes(1);
   });
 
   it("applies an explicit-color preset without legacy metadata rejection", async () => {
