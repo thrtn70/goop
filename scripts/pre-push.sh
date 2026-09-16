@@ -36,15 +36,16 @@ run_step() {
 
 run_step "cargo fmt --check" cargo fmt --all --check
 run_step "cargo clippy"      cargo clippy --workspace --all-targets -- -D warnings
-run_step "cargo clippy (HEIC preview)" cargo clippy -p goop-converter --all-targets --features heic-thumbnail-preview -- -D warnings
+run_step "cargo clippy (converter feature off)" cargo clippy -p goop-converter --all-targets --no-default-features -- -D warnings
 run_step "cargo test"        cargo test --workspace --quiet
-run_step "cargo test (HEIC preview)" cargo test -p goop-converter --features heic-thumbnail-preview --quiet
+run_step "cargo test (converter feature off)" cargo test -p goop-converter --no-default-features --quiet
 run_step "tsc typecheck"     npm run --silent typecheck
 # Covers src/ AND site/ — the landing page is otherwise deployed by
 # pages.yml without a single check running against it.
 run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
 run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs
+run_step "desktop preview"   node --test scripts/desktop-preview.test.mjs
 run_step "release workflow"  node --test scripts/release-workflow.test.mjs
 run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
 

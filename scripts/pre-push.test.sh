@@ -64,6 +64,21 @@ if ! grep -Fqx "node --test scripts/startup-fonts.test.mjs" "$stub_log"; then
   cat "$stub_log"
   exit 1
 fi
+if ! grep -Fqx "node --test scripts/desktop-preview.test.mjs" "$stub_log"; then
+  echo "FAIL: pre-push.sh did not enforce desktop preview activation"
+  cat "$stub_log"
+  exit 1
+fi
+if ! grep -Fqx "cargo clippy -p goop-converter --all-targets --no-default-features -- -D warnings" "$stub_log"; then
+  echo "FAIL: pre-push.sh did not lint the feature-off converter"
+  cat "$stub_log"
+  exit 1
+fi
+if ! grep -Fqx "cargo test -p goop-converter --no-default-features --quiet" "$stub_log"; then
+  echo "FAIL: pre-push.sh did not test the feature-off converter"
+  cat "$stub_log"
+  exit 1
+fi
 if ! grep -Fqx "uname -s" "$stub_log"; then
   echo "FAIL: pre-push.sh did not detect the host platform"
   cat "$stub_log"
