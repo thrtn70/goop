@@ -76,6 +76,7 @@ export * from './PdfOperation';
 export * from './PdfProbeResult';
 export * from './PdfQuality';
 export * from './Preset';
+export * from './PreviewEligibility';
 export * from './PreviewKind';
 export * from './PreviewRequest';
 export * from './PreviewResult';

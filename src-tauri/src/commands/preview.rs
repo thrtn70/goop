@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use goop_converter::preview::PreviewService;
-use goop_core::{IpcError, PreviewRequest, PreviewResult};
+use goop_core::{IpcError, PreviewEligibility, PreviewRequest, PreviewResult};
 use tauri::State;
 
 #[tauri::command]
@@ -26,6 +26,18 @@ pub async fn generate_preview(
 ) -> Result<PreviewResult, IpcError> {
     previews
         .generate(&state.resolver, request)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn preview_eligibility(
+    state: State<'_, AppState>,
+    previews: State<'_, PreviewService>,
+    request: PreviewRequest,
+) -> Result<PreviewEligibility, IpcError> {
+    previews
+        .eligibility(&state.resolver, request)
         .await
         .map_err(Into::into)
 }

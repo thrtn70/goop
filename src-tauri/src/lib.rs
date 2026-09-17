@@ -642,6 +642,7 @@ pub fn run() {
             commands::preview::begin_preview_session,
             commands::preview::release_preview_session,
             commands::preview::generate_preview,
+            commands::preview::preview_eligibility,
             commands::preview::cancel_preview,
             commands::convert::convert_probe,
             commands::convert::convert_capabilities,

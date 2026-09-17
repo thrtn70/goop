@@ -703,7 +703,7 @@ function ConvertPage() {
                 {audioPlan?.busy && <p>Checking audio processing…</p>}
                 {audioPlan?.summary && <p>{selected.target.toUpperCase()} · {audioExecutionText(audioPlan.summary)}</p>}
               </section>}
-              {!isAudioTarget(selected.target) && !selected.audioOptions && <SettingsPreview blockedReason={selected.videoOptions ? null : problems[files.indexOf(selected)]} videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
+              {!isAudioTarget(selected.target) && !selected.audioOptions && <SettingsPreview blockedReason={problems[files.indexOf(selected)]} videoSettings={selectedVideo?.videoCapability} imageSettings={selectedState.capabilities.targets.find(capability => capability.target === selected.target)?.image_settings} request={{input_path:selected.path,target:selected.target,
                 quality_preset:selected.videoOptions ? null : selected.qualityPreset,video_options:cloneVideoOptions(selected.videoOptions),resolution_cap:selected.resolutionCap,
                 compress_mode:null,metadata_policy:selected.metadataPolicy,image_color_policy:selected.imageColorPolicy ?? "preserve",
                 image_alpha_policy:cloneImageAlphaPolicy(selected.imageAlphaPolicy),

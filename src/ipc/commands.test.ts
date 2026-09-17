@@ -393,6 +393,26 @@ it.each([null, {jpeg_quality:30,resize:{kind:"original" as const}}, {jpeg_qualit
   expect(JSON.parse(JSON.stringify(invokeMock.mock.calls[0][1])).request.image_options).toEqual(image_options);
 });
 
+it("normalizes the full preview request for eligibility exactly as generation does", async () => {
+  invokeMock.mockClear();
+  invokeMock.mockResolvedValueOnce({available:false,reason:"Target size previews cannot predict output size."});
+  const request = {
+    request_id:"eligibility-one",source_revision:"target-size",input_path:"/source.mp4",target:"gif" as const,
+    quality_preset:null,resolution_cap:null,compress_mode:{kind:"target_size_bytes" as const,value:5_000_000n},metadata_policy:null,
+    subtitle:null,gif_options:{size_preset:"medium" as const,trim_start_ms:1000n,trim_end_ms:2500n},image_options:null,
+  };
+
+  await expect(api.preview.eligibility(request)).resolves.toEqual({available:false,reason:"Target size previews cannot predict output size."});
+
+  expect(invokeMock).toHaveBeenCalledWith("preview_eligibility", {request:{
+    ...request,
+    video_options:null,
+    compress_mode:{kind:"target_size_bytes",value:5_000_000},
+    gif_options:{size_preset:"medium",trim_start_ms:1000,trim_end_ms:2500},
+  }});
+  expect(()=>JSON.stringify(invokeMock.mock.calls[0][1])).not.toThrow();
+});
+
 it("uses distinct request cancellation and backend-issued session commands", async () => {
   invokeMock.mockClear();
   invokeMock.mockResolvedValueOnce("123e4567-e89b-42d3-a456-426614174000");

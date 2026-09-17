@@ -48,6 +48,19 @@ pub struct PreviewRequest {
     #[ts(optional = nullable)]
     pub pinned_jpeg_quality: Option<u8>,
 }
+
+/// Engine-owned admission result for the current bounded preview request.
+///
+/// `available` means the request passed deterministic preflight. Generation
+/// still revalidates the source and can fail during bounded decode or encode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct PreviewEligibility {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
 #[serde(rename_all = "snake_case")]

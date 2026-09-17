@@ -30,6 +30,7 @@ import type {
   PdfQuality,
   Preset,
   ProbeResult,
+  PreviewEligibility,
   PreviewRequest,
   PreviewResult,
   ResizeMode,
@@ -44,6 +45,17 @@ import type {
   UrlProbe,
   WatermarkSpec,
 } from "@/types";
+
+function previewToIpc(request: PreviewRequest) {
+  return {
+    ...request,
+    video_options: cloneVideoOptions(request.video_options),
+    gif_options: gifToIpc(request.gif_options),
+    compress_mode: request.compress_mode?.kind === "target_size_bytes"
+      ? {kind:"target_size_bytes" as const,value:Number(request.compress_mode.value)}
+      : request.compress_mode,
+  };
+}
 
 function cloneTrackOptions(options: TrackConvertOptions | null | undefined): TrackConvertOptions | null {
   if (!options) return null;
@@ -164,12 +176,8 @@ export type IpcLanguagePack = Omit<LanguagePack, "size_bytes"> & {
 export const api = {
   preview: {
     begin: (): Promise<string> => invoke<string>("begin_preview_session"),
-    generate: (request: PreviewRequest) => invoke<PreviewResult>("generate_preview", {request: {
-      ...request,
-      video_options: cloneVideoOptions(request.video_options),
-      gif_options: gifToIpc(request.gif_options),
-      compress_mode: request.compress_mode?.kind === "target_size_bytes" ? {kind:"target_size_bytes",value:Number(request.compress_mode.value)} : request.compress_mode,
-    }}),
+    eligibility: (request: PreviewRequest) => invoke<PreviewEligibility>("preview_eligibility", {request: previewToIpc(request)}),
+    generate: (request: PreviewRequest) => invoke<PreviewResult>("generate_preview", {request: previewToIpc(request)}),
     cancel: (requestId: string) => invoke<void>("cancel_preview", {requestId}),
     release: (previewSessionId: string) => invoke<void>("release_preview_session", {previewSessionId}),
   },

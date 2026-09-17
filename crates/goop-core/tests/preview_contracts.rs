@@ -1,6 +1,6 @@
 use goop_core::{
     is_canonical_preview_session_id, new_preview_session_id, ImagePreviewDetails, ImageSampleKind,
-    PreviewRequest, PreviewResult,
+    PreviewEligibility, PreviewRequest, PreviewResult,
 };
 
 #[test]
@@ -91,4 +91,26 @@ fn absent_nested_preview_options_are_omitted() {
     let object = serde_json::to_value(details).unwrap();
     assert!(object.get("pinned_jpeg_quality").is_none());
     assert!(object.get("pinned_path").is_none());
+}
+
+#[test]
+fn preview_eligibility_has_stable_wire_names() {
+    let available = PreviewEligibility {
+        available: true,
+        reason: None,
+    };
+    let value = serde_json::to_value(&available).unwrap();
+    assert_eq!(value["available"], true);
+    assert!(value["reason"].is_null());
+
+    let unavailable: PreviewEligibility = serde_json::from_value(serde_json::json!({
+        "available": false,
+        "reason": "Sample preview unavailable for target-size compression"
+    }))
+    .unwrap();
+    assert!(!unavailable.available);
+    assert_eq!(
+        unavailable.reason.as_deref(),
+        Some("Sample preview unavailable for target-size compression")
+    );
 }
