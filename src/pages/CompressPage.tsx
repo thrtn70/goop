@@ -377,7 +377,7 @@ function CompressPage() {
                 metadataPolicy={selected.metadataPolicy ?? "preserve"}
                 onMetadataChange={(metadataPolicy) => selected.id && handleOptionsChange(selected.id, { mode: selected.mode, metadataPolicy })}
               />
-              <SettingsPreview request={{input_path:selected.path,target:selected.target,
+              <SettingsPreview blockedReason={problems[files.indexOf(selected)]} request={{input_path:selected.path,target:selected.target,
                 quality_preset:null,resolution_cap:null,compress_mode:selected.mode,
                 metadata_policy:selected.metadataPolicy ?? "preserve",subtitle:null,gif_options:null}}/>
             </WorkspaceDraftProvider>

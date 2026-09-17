@@ -21,6 +21,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/ipc/commands", () => ({
   api: {
     convert: { inspect: mocks.inspect, fromFile: mocks.enqueue },
+    preview: {
+      eligibility: vi.fn().mockResolvedValue({available:true,reason:null}),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    },
     queue: { list: vi.fn().mockResolvedValue([]) },
     pdf: { probe: vi.fn().mockResolvedValue({ pages: 3 }) },
   },

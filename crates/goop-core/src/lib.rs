@@ -75,7 +75,7 @@ pub use update::UpdateInfo;
 pub mod preview;
 pub use preview::{
     is_canonical_preview_session_id, new_preview_session_id, ImagePreviewDetails, ImageSampleKind,
-    PreviewKind, PreviewRequest, PreviewResult,
+    PreviewEligibility, PreviewKind, PreviewRequest, PreviewResult,
 };
 
 pub mod video;

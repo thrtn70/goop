@@ -806,11 +806,13 @@ async fn invalid_captures_leave_no_artifacts_and_do_not_block_next_sample() {
         if oversized {
             assert!(error.to_string().contains("64 MiB"));
         }
-        for session in std::fs::read_dir(&root).unwrap() {
-            assert_eq!(
-                std::fs::read_dir(session.unwrap().path()).unwrap().count(),
-                1
-            );
+        if root.exists() {
+            for session in std::fs::read_dir(&root).unwrap() {
+                assert_eq!(
+                    std::fs::read_dir(session.unwrap().path()).unwrap().count(),
+                    1
+                );
+            }
         }
         image::RgbImage::new(32, 16).save(&input).unwrap();
         let (old, latest) = tokio::join!(

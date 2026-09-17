@@ -1,8 +1,8 @@
 //! Explicit, isolated sample generation. Never schedules jobs or writes source files.
 use goop_core::{
     is_canonical_preview_session_id, new_preview_session_id, CompressMode, GoopError,
-    ImageColorPolicy, ImageResize, JobId, MetadataPolicy, PreviewKind, PreviewRequest,
-    PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
+    ImageColorPolicy, ImageResize, JobId, MetadataPolicy, PreviewEligibility, PreviewKind,
+    PreviewRequest, PreviewResult, QualityPreset, ResolutionCap, TargetFormat,
 };
 use goop_sidecar::BinaryResolver;
 use image::{DynamicImage, ImageDecoder, ImageFormat};
@@ -14,11 +14,17 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::{Notify, Semaphore},
+};
 use tokio_util::sync::CancellationToken;
 #[cfg(feature = "heic-thumbnail-preview")]
 use {
-    crate::heic_preview_sampler::{sample_heic_thumbnail, Dimensions, SampleFrame, SamplerError},
+    crate::heic_preview_sampler::{
+        inspect_heic_thumbnail, sample_heic_thumbnail, Dimensions, SampleFrame, SamplerError,
+    },
     goop_core::{ImagePreviewDetails, ImageSampleKind},
     sha2::{Digest, Sha256},
 };
@@ -28,9 +34,24 @@ type HeicSampler =
     dyn Fn(&[u8], &CancellationToken, Instant) -> Result<SampleFrame, SamplerError> + Send + Sync;
 
 #[cfg(feature = "heic-thumbnail-preview")]
+type HeicAdmissionInspector =
+    dyn Fn(&[u8], &CancellationToken, Instant) -> Result<(), SamplerError> + Send + Sync;
+
+#[cfg(feature = "heic-thumbnail-preview")]
 fn default_heic_sampler() -> Arc<HeicSampler> {
     Arc::new(|bytes, cancel, deadline| {
         sample_heic_thumbnail(bytes, &|| {
+            checkpoint(cancel, deadline).map_err(|error| SamplerError::Interrupted {
+                reason: error.user_message(),
+            })
+        })
+    })
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn default_heic_admission_inspector() -> Arc<HeicAdmissionInspector> {
+    Arc::new(|bytes, cancel, deadline| {
+        inspect_heic_thumbnail(bytes, &|| {
             checkpoint(cancel, deadline).map_err(|error| SamplerError::Interrupted {
                 reason: error.user_message(),
             })
@@ -79,10 +100,449 @@ fn checkpoint(cancel: &CancellationToken, deadline: Instant) -> Result<(), GoopE
         Ok(())
     }
 }
+
+fn validate_request_identity(request: &PreviewRequest) -> Result<(), GoopError> {
+    if request.request_id.is_empty() || request.request_id.len() > 200 {
+        Err(invalid("Invalid preview request identity"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_request_admission(request: &PreviewRequest) -> Result<(), GoopError> {
+    if request.video_options.is_some() {
+        return Err(invalid(crate::video_options::PREVIEW_REASON));
+    }
+    if let Some(options) = &request.image_options {
+        crate::image_options::validate_options(options)?;
+        if request.compress_mode.is_some() {
+            return Err(invalid(
+                "Image settings cannot be combined with compression",
+            ));
+        }
+        if request.target != TargetFormat::Jpeg {
+            return Err(invalid("Explicit image samples require a JPEG target"));
+        }
+    }
+    if matches!(
+        request.compress_mode,
+        Some(CompressMode::TargetSizeBytes(_))
+    ) {
+        return Err(invalid(
+            "Sample preview unavailable for target-size compression",
+        ));
+    }
+    if request.subtitle.is_some() || request.gif_options.is_some() {
+        return Err(invalid(
+            "Sample preview unavailable for subtitles or GIF settings",
+        ));
+    }
+    if matches!(request.compress_mode,Some(CompressMode::Quality(q)) if q==0 || q>100) {
+        return Err(invalid("Quality must be between 1 and 100"));
+    }
+    Ok(())
+}
+
+enum PreviewInputPath {
+    File(PathBuf),
+    Missing,
+    NotFile,
+}
+
+fn inspect_preview_input_path(
+    input_path: &str,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewInputPath, GoopError> {
+    checkpoint(cancel, deadline)?;
+    let expanded = goop_core::path::expand(input_path);
+    let input = match std::fs::canonicalize(expanded) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreviewInputPath::Missing)
+        }
+        Err(error) => return Err(GoopError::Io(error)),
+    };
+    let metadata = match std::fs::metadata(&input) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreviewInputPath::Missing)
+        }
+        Err(error) => return Err(GoopError::Io(error)),
+    };
+    checkpoint(cancel, deadline)?;
+    if metadata.is_file() {
+        Ok(PreviewInputPath::File(input))
+    } else {
+        Ok(PreviewInputPath::NotFile)
+    }
+}
+
+async fn preview_input_path(
+    input_path: &str,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewInputPath, GoopError> {
+    let input_path = input_path.to_owned();
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || inspect_preview_input_path(&input_path, &cancel, deadline))
+        .await
+        .map_err(|error| {
+            GoopError::InvalidRequest(format!("Preview path inspection task failed: {error}"))
+        })?
+}
+
+fn preview_source_family(
+    request: &PreviewRequest,
+    extension: &str,
+) -> Result<PreviewSourceFamily, GoopError> {
+    let is_heic = matches!(extension, "heic" | "heif");
+    if is_heic {
+        #[cfg(not(feature = "heic-thumbnail-preview"))]
+        return Err(GoopError::PreviewUnavailable(
+            "Bounded HEIC preview is not enabled in this build.".into(),
+        ));
+        #[cfg(feature = "heic-thumbnail-preview")]
+        if request.image_options.is_none() || request.target != TargetFormat::Jpeg {
+            return Err(invalid(
+                "Bounded HEIC preview requires explicit JPEG conversion settings",
+            ));
+        }
+    }
+
+    let family = if matches!(extension, "png" | "jpg" | "jpeg" | "webp") {
+        PreviewSourceFamily::Raster
+    } else if is_heic {
+        PreviewSourceFamily::Heic
+    } else if crate::backend_for_extension(extension) == crate::BackendKind::ImageMagick {
+        return Err(invalid(
+            "Sample preview unavailable for this image source; bounded decoding is not supported",
+        ));
+    } else {
+        PreviewSourceFamily::Video
+    };
+
+    if matches!(family, PreviewSourceFamily::Raster)
+        && request
+            .image_options
+            .as_ref()
+            .is_some_and(|options| !matches!(options.resize, ImageResize::Original))
+    {
+        return Err(invalid("Fit within image samples are not available yet"));
+    }
+    if matches!(
+        family,
+        PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+    ) && !matches!(
+        request.target,
+        TargetFormat::Jpeg | TargetFormat::Png | TargetFormat::Webp
+    ) {
+        return Err(invalid("Sample preview unavailable for this image target"));
+    }
+    if matches!(
+        family,
+        PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+    ) && request
+        .resolution_cap
+        .is_some_and(|cap| cap != ResolutionCap::Original)
+    {
+        return Err(invalid("Image conversion does not support resolution caps"));
+    }
+    if matches!(
+        family,
+        PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+    ) && request.target == TargetFormat::Jpeg
+        && matches!(
+            request.compress_mode,
+            Some(CompressMode::LosslessReoptimize)
+        )
+    {
+        return Err(invalid("Lossless JPEG sample preview is unavailable"));
+    }
+    if matches!(family, PreviewSourceFamily::Video) && request.target != TargetFormat::Mp4 {
+        return Err(invalid("Video sample preview is available for MP4 only"));
+    }
+    if matches!(
+        family,
+        PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+    ) && request
+        .quality_preset
+        .is_some_and(|quality| quality != QualityPreset::Original)
+    {
+        return Err(invalid(
+            "Image sample does not support video quality presets",
+        ));
+    }
+    if matches!(
+        family,
+        PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+    ) && matches!(request.compress_mode, Some(CompressMode::Quality(_)))
+        && !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Webp)
+    {
+        return Err(invalid(
+            "Sample quality control is available for JPEG and WebP only",
+        ));
+    }
+    if matches!(family, PreviewSourceFamily::Video)
+        && matches!(
+            request.compress_mode,
+            Some(CompressMode::LosslessReoptimize)
+        )
+    {
+        return Err(invalid("Lossless video sample preview is unavailable"));
+    }
+    if request.image_options.is_some() && matches!(family, PreviewSourceFamily::Video) {
+        return Err(invalid(
+            "Explicit image samples are available for JPEG sources only",
+        ));
+    }
+    Ok(family)
+}
+
+fn validate_source_facts(
+    request: &PreviewRequest,
+    facts: &PreviewSourceFacts,
+) -> Result<(), GoopError> {
+    match facts {
+        PreviewSourceFacts::Raster {
+            format,
+            width,
+            height,
+            decoded_bytes,
+            has_alpha,
+        } => {
+            if !matches!(
+                format,
+                ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP
+            ) {
+                return Err(invalid(
+                    "Sample preview unavailable for this image encoding",
+                ));
+            }
+            let uses_managed_image_path = request.image_color_policy.unwrap_or_default()
+                != ImageColorPolicy::Preserve
+                || request.image_alpha_policy.is_some();
+            if request.image_options.is_some()
+                && *format != ImageFormat::Jpeg
+                && !uses_managed_image_path
+            {
+                return Err(invalid(
+                    "Explicit image samples are available for JPEG sources only",
+                ));
+            }
+            validate_pixels(*width, *height)?;
+            if *decoded_bytes > MAX_SOURCE_PIXELS * 16 {
+                return Err(invalid("Decoded image exceeds preview memory limit"));
+            }
+            if request.target == TargetFormat::Jpeg
+                && *has_alpha
+                && request.image_alpha_policy.is_none()
+            {
+                return Err(invalid(
+                    "JPEG removes transparency; choose an explicit background before previewing.",
+                ));
+            }
+        }
+        #[cfg(feature = "heic-thumbnail-preview")]
+        PreviewSourceFacts::Heic { unavailable_reason } => {
+            if let Some(reason) = unavailable_reason {
+                return Err(GoopError::PreviewUnavailable(reason.clone()));
+            }
+        }
+        PreviewSourceFacts::Unavailable(reason) => {
+            return Err(GoopError::PreviewUnavailable(reason.clone()));
+        }
+        PreviewSourceFacts::Video {
+            has_video,
+            duration_ms,
+            width,
+            height,
+        } => {
+            if !has_video || *duration_ms == 0 {
+                return Err(invalid(
+                    "Video sample requires a video stream with known duration",
+                ));
+            }
+            validate_pixels(width.unwrap_or(0), height.unwrap_or(0))?;
+            let (width, height) =
+                bounded_dimensions(width.unwrap_or(0), height.unwrap_or(0), edge(request));
+            if width < 2 || height < 2 {
+                return Err(invalid("Invalid video dimensions"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Convert only a refusal returned by the deterministic admission helpers.
+/// Inspection and worker errors must bypass this function so the client can retry them.
+fn deterministic_unavailable(error: GoopError) -> PreviewEligibility {
+    match error {
+        GoopError::InvalidRequest(reason) | GoopError::PreviewUnavailable(reason) => {
+            PreviewEligibility {
+                available: false,
+                reason: Some(reason),
+            }
+        }
+        error => unreachable!("admission helper returned a non-refusal error: {error}"),
+    }
+}
 struct ActiveRequest {
     request_id: String,
     epoch: u64,
     cancel: CancellationToken,
+}
+
+struct ActiveEligibility {
+    key: Vec<u8>,
+    epoch: u64,
+    work_cancel: CancellationToken,
+    shared: Arc<EligibilityFlight>,
+    waiters: Vec<EligibilityWaiter>,
+}
+
+struct EligibilityWaiter {
+    id: u64,
+    request_id: String,
+    cancel: CancellationToken,
+}
+
+struct EligibilityRegistration {
+    flight_epoch: u64,
+    waiter_id: u64,
+    owner: bool,
+    work_cancel: CancellationToken,
+    waiter_cancel: CancellationToken,
+    shared: Arc<EligibilityFlight>,
+}
+
+struct EligibilityFlight {
+    result: Mutex<Option<SharedEligibilityResult>>,
+    notify: Notify,
+}
+
+type SharedEligibilityResult = Result<PreviewEligibility, SharedEligibilityError>;
+
+#[derive(Clone)]
+enum SharedEligibilityError {
+    SidecarMissing(String),
+    SubprocessFailed {
+        binary: String,
+        stderr: String,
+    },
+    Queue(String),
+    Config(String),
+    InvalidRequest(String),
+    PreviewUnavailable(String),
+    Cancelled,
+    Paused,
+    Network(String),
+    WaitingExternal {
+        retry_after_ms: u64,
+    },
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
+    Serde(String),
+}
+
+impl From<&GoopError> for SharedEligibilityError {
+    fn from(error: &GoopError) -> Self {
+        match error {
+            GoopError::SidecarMissing(value) => Self::SidecarMissing(value.clone()),
+            GoopError::SubprocessFailed { binary, stderr } => Self::SubprocessFailed {
+                binary: binary.clone(),
+                stderr: stderr.clone(),
+            },
+            GoopError::Queue(value) => Self::Queue(value.clone()),
+            GoopError::Config(value) => Self::Config(value.clone()),
+            GoopError::InvalidRequest(value) => Self::InvalidRequest(value.clone()),
+            GoopError::PreviewUnavailable(value) => Self::PreviewUnavailable(value.clone()),
+            GoopError::Cancelled => Self::Cancelled,
+            GoopError::Paused => Self::Paused,
+            GoopError::Network(value) => Self::Network(value.clone()),
+            GoopError::WaitingExternal { retry_after_ms } => Self::WaitingExternal {
+                retry_after_ms: *retry_after_ms,
+            },
+            GoopError::Io(error) => Self::Io {
+                kind: error.kind(),
+                message: error.to_string(),
+            },
+            GoopError::Serde(error) => Self::Serde(error.to_string()),
+        }
+    }
+}
+
+impl SharedEligibilityError {
+    fn into_error(self) -> GoopError {
+        match self {
+            Self::SidecarMissing(value) => GoopError::SidecarMissing(value),
+            Self::SubprocessFailed { binary, stderr } => {
+                GoopError::SubprocessFailed { binary, stderr }
+            }
+            Self::Queue(value) => GoopError::Queue(value),
+            Self::Config(value) => GoopError::Config(value),
+            Self::InvalidRequest(value) => GoopError::InvalidRequest(value),
+            Self::PreviewUnavailable(value) => GoopError::PreviewUnavailable(value),
+            Self::Cancelled => GoopError::Cancelled,
+            Self::Paused => GoopError::Paused,
+            Self::Network(value) => GoopError::Network(value),
+            Self::WaitingExternal { retry_after_ms } => {
+                GoopError::WaitingExternal { retry_after_ms }
+            }
+            Self::Io { kind, message } => GoopError::Io(std::io::Error::new(kind, message)),
+            Self::Serde(message) => GoopError::Serde(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            ))),
+        }
+    }
+}
+
+impl EligibilityFlight {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    fn publish(&self, result: &Result<PreviewEligibility, GoopError>) {
+        let shared = match result {
+            Ok(value) => Ok(value.clone()),
+            Err(error) => Err(SharedEligibilityError::from(error)),
+        };
+        *self.result.lock().unwrap() = Some(shared);
+        self.notify.notify_waiters();
+    }
+
+    fn cloned_result(&self) -> Option<Result<PreviewEligibility, GoopError>> {
+        self.result
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|result| result.map_err(SharedEligibilityError::into_error))
+    }
+
+    async fn wait(
+        &self,
+        caller_cancel: &CancellationToken,
+    ) -> Result<PreviewEligibility, GoopError> {
+        loop {
+            let notified = self.notify.notified();
+            if caller_cancel.is_cancelled() {
+                return Err(GoopError::Cancelled);
+            }
+            if let Some(result) = self.cloned_result() {
+                return result;
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = caller_cancel.cancelled() => return Err(GoopError::Cancelled),
+            }
+        }
+    }
 }
 
 struct PublishedArtifacts {
@@ -107,16 +567,55 @@ struct HeicCacheEntry {
 type HeicCacheEntry = ();
 
 struct ImageWorkerContext {
+    root: PathBuf,
     cached_heic: Option<HeicCacheEntry>,
     #[cfg(feature = "heic-thumbnail-preview")]
     heic_sampler: Arc<HeicSampler>,
 }
 
+#[derive(Clone, Copy)]
+enum PreviewSourceFamily {
+    Raster,
+    Heic,
+    Video,
+}
+
+enum PreviewSourceFacts {
+    Raster {
+        format: ImageFormat,
+        width: u32,
+        height: u32,
+        decoded_bytes: u64,
+        has_alpha: bool,
+    },
+    #[cfg(feature = "heic-thumbnail-preview")]
+    Heic {
+        unavailable_reason: Option<String>,
+    },
+    Unavailable(String),
+    Video {
+        has_video: bool,
+        duration_ms: u64,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+#[derive(Clone)]
+struct HeicAdmissionCacheEntry {
+    path: PathBuf,
+    source_digest: [u8; 32],
+    unavailable_reason: Option<String>,
+}
+
 #[derive(Default)]
 struct State {
     epoch: u64,
+    eligibility_epoch: u64,
     session_id: Option<String>,
     active: Option<ActiveRequest>,
+    eligibility: Option<ActiveEligibility>,
     completed: Option<PublishedArtifacts>,
     retired: Option<PublishedArtifacts>,
     pending_cleanup: Option<PendingSessionCleanup>,
@@ -244,7 +743,110 @@ fn register_request(
     }) {
         old.cancel.cancel();
     }
+    if let Some(eligibility) = state.eligibility.take() {
+        cancel_eligibility_flight(eligibility);
+    }
     Ok(())
+}
+
+fn eligibility_key(
+    resolver: &BinaryResolver,
+    request: &PreviewRequest,
+) -> Result<Vec<u8>, GoopError> {
+    let mut admission = request.clone();
+    admission.request_id.clear();
+    admission.preview_session_id = None;
+    admission.pinned_jpeg_quality = None;
+    serde_json::to_vec(&(admission, resolver.sidecar_dir(), resolver.update_dir()))
+        .map_err(GoopError::from)
+}
+
+fn cancel_eligibility_flight(active: ActiveEligibility) {
+    active.work_cancel.cancel();
+    for waiter in active.waiters {
+        waiter.cancel.cancel();
+    }
+}
+
+fn register_eligibility(
+    state: &mut State,
+    key: Vec<u8>,
+    request_id: String,
+) -> EligibilityRegistration {
+    state.eligibility_epoch = state
+        .eligibility_epoch
+        .checked_add(1)
+        .expect("preview eligibility epoch exhausted");
+    let waiter_id = state.eligibility_epoch;
+    let waiter_cancel = CancellationToken::new();
+    if let Some(active) = state
+        .eligibility
+        .as_mut()
+        .filter(|active| active.key == key && !active.work_cancel.is_cancelled())
+    {
+        active.waiters.push(EligibilityWaiter {
+            id: waiter_id,
+            request_id,
+            cancel: waiter_cancel.clone(),
+        });
+        return EligibilityRegistration {
+            flight_epoch: active.epoch,
+            waiter_id,
+            owner: false,
+            work_cancel: active.work_cancel.clone(),
+            waiter_cancel,
+            shared: Arc::clone(&active.shared),
+        };
+    }
+    if let Some(old) = state.eligibility.take() {
+        cancel_eligibility_flight(old);
+    }
+    let work_cancel = CancellationToken::new();
+    let shared = Arc::new(EligibilityFlight::new());
+    state.eligibility = Some(ActiveEligibility {
+        key,
+        epoch: waiter_id,
+        work_cancel: work_cancel.clone(),
+        shared: Arc::clone(&shared),
+        waiters: vec![EligibilityWaiter {
+            id: waiter_id,
+            request_id,
+            cancel: waiter_cancel.clone(),
+        }],
+    });
+    EligibilityRegistration {
+        flight_epoch: waiter_id,
+        waiter_id,
+        owner: true,
+        work_cancel,
+        waiter_cancel,
+        shared,
+    }
+}
+
+fn finish_eligibility(state: &mut State, epoch: u64) {
+    if state
+        .eligibility
+        .as_ref()
+        .is_some_and(|active| active.epoch == epoch)
+    {
+        state.eligibility = None;
+    }
+}
+
+fn detach_eligibility_waiter(state: &mut State, flight_epoch: u64, waiter_id: u64) {
+    let Some(active) = state
+        .eligibility
+        .as_mut()
+        .filter(|active| active.epoch == flight_epoch)
+    else {
+        return;
+    };
+    active.waiters.retain(|waiter| waiter.id != waiter_id);
+    if active.waiters.is_empty() {
+        active.work_cancel.cancel();
+        state.eligibility = None;
+    }
 }
 
 pub struct PreviewService {
@@ -253,7 +855,11 @@ pub struct PreviewService {
     #[cfg(feature = "heic-thumbnail-preview")]
     heic_cache: Mutex<Option<HeicCacheEntry>>,
     #[cfg(feature = "heic-thumbnail-preview")]
+    heic_admission_cache: Mutex<Option<HeicAdmissionCacheEntry>>,
+    #[cfg(feature = "heic-thumbnail-preview")]
     heic_sampler: Arc<HeicSampler>,
+    #[cfg(feature = "heic-thumbnail-preview")]
+    heic_admission_inspector: Arc<HeicAdmissionInspector>,
     gate: Arc<Semaphore>,
 }
 struct Scratch(Option<PathBuf>);
@@ -264,6 +870,19 @@ impl Drop for Scratch {
         }
     }
 }
+
+fn prepare_preview_output(
+    root: &Path,
+    staging: &Path,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<(), GoopError> {
+    checkpoint(cancel, deadline)?;
+    std::fs::create_dir_all(staging)?;
+    std::fs::write(root.join(".goop-preview-session"), b"v1")?;
+    checkpoint(cancel, deadline)
+}
+
 /// Call only after acquiring the application's exclusive instance guard.
 /// Unmarked directories and symlinks are deliberately left untouched.
 pub fn cleanup_stale_sessions(root: &Path) -> Result<(), GoopError> {
@@ -297,7 +916,11 @@ impl PreviewService {
             #[cfg(feature = "heic-thumbnail-preview")]
             heic_cache: Mutex::new(None),
             #[cfg(feature = "heic-thumbnail-preview")]
+            heic_admission_cache: Mutex::new(None),
+            #[cfg(feature = "heic-thumbnail-preview")]
             heic_sampler: default_heic_sampler(),
+            #[cfg(feature = "heic-thumbnail-preview")]
+            heic_admission_inspector: default_heic_admission_inspector(),
             gate: Arc::new(Semaphore::new(1)),
         }
     }
@@ -308,7 +931,25 @@ impl PreviewService {
             root: root.join(format!("session-{}", JobId::new().0)),
             state: Mutex::new(State::default()),
             heic_cache: Mutex::new(None),
+            heic_admission_cache: Mutex::new(None),
             heic_sampler,
+            heic_admission_inspector: default_heic_admission_inspector(),
+            gate: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    #[cfg(all(test, feature = "heic-thumbnail-preview"))]
+    fn new_with_heic_admission_inspector(
+        root: PathBuf,
+        inspector: Arc<HeicAdmissionInspector>,
+    ) -> Self {
+        Self {
+            root: root.join(format!("session-{}", JobId::new().0)),
+            state: Mutex::new(State::default()),
+            heic_cache: Mutex::new(None),
+            heic_admission_cache: Mutex::new(None),
+            heic_sampler: default_heic_sampler(),
+            heic_admission_inspector: inspector,
             gate: Arc::new(Semaphore::new(1)),
         }
     }
@@ -322,6 +963,24 @@ impl PreviewService {
             if active.request_id == id {
                 active.cancel.cancel();
             }
+        }
+        let mut cancel_empty_flight = false;
+        if let Some(active) = state.eligibility.as_mut() {
+            active.waiters.retain(|waiter| {
+                if waiter.request_id == id {
+                    waiter.cancel.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
+            cancel_empty_flight = active.waiters.is_empty();
+            if cancel_empty_flight {
+                active.work_cancel.cancel();
+            }
+        }
+        if cancel_empty_flight {
+            state.eligibility = None;
         }
         if state
             .completed
@@ -338,6 +997,200 @@ impl PreviewService {
             .is_some_and(|artifact| artifact.request_id == id)
         {
             let _ = remove_slot(&mut state.retired, &mut remove);
+        }
+    }
+
+    /// Evaluate deterministic bounded-preview admission without creating a
+    /// session or output artifact. Runtime generation still revalidates the
+    /// source, session and pin state.
+    pub async fn eligibility(
+        &self,
+        resolver: &BinaryResolver,
+        request: PreviewRequest,
+    ) -> Result<PreviewEligibility, GoopError> {
+        validate_request_identity(&request)?;
+        let key = eligibility_key(resolver, &request)?;
+        let registration = {
+            let mut state = self.state.lock().unwrap();
+            register_eligibility(&mut state, key, request.request_id.clone())
+        };
+        if registration.owner {
+            let result = self
+                .eligibility_inner(resolver, &request, &registration.work_cancel)
+                .await;
+            registration.shared.publish(&result);
+            finish_eligibility(&mut self.state.lock().unwrap(), registration.flight_epoch);
+            if registration.waiter_cancel.is_cancelled() {
+                Err(GoopError::Cancelled)
+            } else {
+                result
+            }
+        } else {
+            let result = registration.shared.wait(&registration.waiter_cancel).await;
+            detach_eligibility_waiter(
+                &mut self.state.lock().unwrap(),
+                registration.flight_epoch,
+                registration.waiter_id,
+            );
+            result
+        }
+    }
+
+    async fn eligibility_inner(
+        &self,
+        resolver: &BinaryResolver,
+        request: &PreviewRequest,
+        cancel: &CancellationToken,
+    ) -> Result<PreviewEligibility, GoopError> {
+        let deadline = Instant::now() + TIMEOUT;
+        checkpoint(cancel, deadline)?;
+        if let Err(error) = validate_request_admission(request) {
+            return Ok(deterministic_unavailable(error));
+        }
+        let input = match preview_input_path(&request.input_path, cancel, deadline).await? {
+            PreviewInputPath::File(path) => path,
+            PreviewInputPath::NotFile => {
+                return Ok(PreviewEligibility {
+                    available: false,
+                    reason: Some("Sample preview requires a file".into()),
+                })
+            }
+            PreviewInputPath::Missing => {
+                return Ok(PreviewEligibility {
+                    available: false,
+                    reason: Some("Sample preview requires an existing file".into()),
+                })
+            }
+        };
+        let extension = input
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let family = match preview_source_family(request, &extension) {
+            Ok(family) => family,
+            Err(error) => return Ok(deterministic_unavailable(error)),
+        };
+        let permit = tokio::select! {
+            permit=self.gate.clone().acquire_owned()=>permit.map_err(|_|invalid("Preview service closed"))?,
+            _=cancel.cancelled()=>return Err(GoopError::Cancelled),
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>return Err(invalid("Sample preview inspection timed out")),
+        };
+        checkpoint(cancel, deadline)?;
+        let facts = self
+            .inspect_source_facts(resolver, &input, family, cancel, deadline)
+            .await?;
+        drop(permit);
+        match validate_source_facts(request, &facts) {
+            Ok(()) => Ok(PreviewEligibility {
+                available: true,
+                reason: None,
+            }),
+            Err(error) => Ok(deterministic_unavailable(error)),
+        }
+    }
+
+    async fn inspect_source_facts(
+        &self,
+        resolver: &BinaryResolver,
+        input: &Path,
+        family: PreviewSourceFamily,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<PreviewSourceFacts, GoopError> {
+        match family {
+            PreviewSourceFamily::Raster => {
+                let input = input.to_path_buf();
+                let cancel = cancel.clone();
+                tokio::task::spawn_blocking(move || {
+                    inspect_raster_source(&input, &cancel, deadline)
+                })
+                .await
+                .map_err(|error| {
+                    GoopError::InvalidRequest(format!("Preview inspection task failed: {error}"))
+                })?
+            }
+            PreviewSourceFamily::Heic => {
+                #[cfg(feature = "heic-thumbnail-preview")]
+                {
+                    let input = input.to_path_buf();
+                    let cancel = cancel.clone();
+                    let input_for_capture = input.clone();
+                    let cancel_for_capture = cancel.clone();
+                    let captured = tokio::task::spawn_blocking(move || {
+                        capture_heic_admission(&input_for_capture, &cancel_for_capture, deadline)
+                    })
+                    .await
+                    .map_err(|error| {
+                        GoopError::InvalidRequest(format!(
+                            "Preview inspection task failed: {error}"
+                        ))
+                    })??;
+                    let Some((bytes, digest)) = captured else {
+                        return Ok(PreviewSourceFacts::Unavailable(
+                            "Image preview source exceeds the 64 MiB input limit".into(),
+                        ));
+                    };
+                    let cached = {
+                        let cache = self.heic_admission_cache.lock().unwrap();
+                        cache
+                            .as_ref()
+                            .filter(|cached| cached.path == input && cached.source_digest == digest)
+                            .cloned()
+                    };
+                    if let Some(cached) = cached {
+                        let input_for_verify = input.clone();
+                        let cancel_for_verify = cancel.clone();
+                        tokio::task::spawn_blocking(move || {
+                            verify_snapshot_unchanged(
+                                &input_for_verify,
+                                &bytes,
+                                &cancel_for_verify,
+                                deadline,
+                                true,
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            GoopError::InvalidRequest(format!(
+                                "Preview inspection task failed: {error}"
+                            ))
+                        })??;
+                        return Ok(PreviewSourceFacts::Heic {
+                            unavailable_reason: cached.unavailable_reason,
+                        });
+                    }
+                    let input_for_worker = input.clone();
+                    let cancel_for_worker = cancel.clone();
+                    let inspector = Arc::clone(&self.heic_admission_inspector);
+                    let unavailable_reason = tokio::task::spawn_blocking(move || {
+                        inspect_heic_admission(
+                            &input_for_worker,
+                            bytes,
+                            &cancel_for_worker,
+                            deadline,
+                            inspector.as_ref(),
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        GoopError::InvalidRequest(format!(
+                            "Preview inspection task failed: {error}"
+                        ))
+                    })??;
+                    *self.heic_admission_cache.lock().unwrap() = Some(HeicAdmissionCacheEntry {
+                        path: input.to_path_buf(),
+                        source_digest: digest,
+                        unavailable_reason: unavailable_reason.clone(),
+                    });
+                    Ok(PreviewSourceFacts::Heic { unavailable_reason })
+                }
+                #[cfg(not(feature = "heic-thumbnail-preview"))]
+                unreachable!("feature-disabled HEIC is rejected before inspection")
+            }
+            PreviewSourceFamily::Video => {
+                inspect_video_source(resolver, input, cancel, deadline).await
+            }
         }
     }
 
@@ -419,12 +1272,8 @@ impl PreviewService {
         resolver: &BinaryResolver,
         request: PreviewRequest,
     ) -> Result<PreviewResult, GoopError> {
-        if request.video_options.is_some() {
-            return Err(invalid(crate::video_options::PREVIEW_REASON));
-        }
-        if request.request_id.is_empty() || request.request_id.len() > 200 {
-            return Err(invalid("Invalid preview request identity"));
-        }
+        validate_request_identity(&request)?;
+        validate_request_admission(&request)?;
         let requested_session = request.preview_session_id.as_deref();
         if requested_session.is_some_and(|id| !is_canonical_preview_session_id(id)) {
             return Err(invalid("Invalid preview session identity"));
@@ -442,30 +1291,6 @@ impl PreviewService {
             }
             state.epoch
         };
-        if let Some(options) = &request.image_options {
-            crate::image_options::validate_options(options)?;
-            if request.compress_mode.is_some() {
-                return Err(invalid(
-                    "Image settings cannot be combined with compression",
-                ));
-            }
-            if request.target != TargetFormat::Jpeg {
-                return Err(invalid("Explicit image samples require a JPEG target"));
-            }
-        }
-        if matches!(
-            request.compress_mode,
-            Some(CompressMode::TargetSizeBytes(_))
-        ) {
-            return Err(invalid(
-                "Sample preview unavailable for target-size compression",
-            ));
-        }
-        if request.subtitle.is_some() || request.gif_options.is_some() {
-            return Err(invalid(
-                "Sample preview unavailable for subtitles or GIF settings",
-            ));
-        }
         let input = std::fs::canonicalize(goop_core::path::expand(&request.input_path))?;
         if !input.is_file() {
             return Err(invalid("Sample preview requires a file"));
@@ -475,22 +1300,14 @@ impl PreviewService {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+        let family = preview_source_family(&request, &ext)?;
         let is_heic = matches!(ext.as_str(), "heic" | "heif");
         if is_heic {
-            #[cfg(not(feature = "heic-thumbnail-preview"))]
-            return Err(GoopError::PreviewUnavailable(
-                "Bounded HEIC preview is not enabled in this build.".into(),
-            ));
             #[cfg(feature = "heic-thumbnail-preview")]
             {
                 if requested_session.is_none() {
                     return Err(GoopError::PreviewUnavailable(
                         "Bounded HEIC preview requires a live preview session.".into(),
-                    ));
-                }
-                if request.image_options.is_none() || request.target != TargetFormat::Jpeg {
-                    return Err(invalid(
-                        "Bounded HEIC preview requires explicit JPEG conversion settings",
                     ));
                 }
                 if request
@@ -501,79 +1318,10 @@ impl PreviewService {
                 }
             }
         }
-        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
-            || cfg!(feature = "heic-thumbnail-preview") && is_heic;
-        if !is_heic
-            && request
-                .image_options
-                .as_ref()
-                .is_some_and(|options| !matches!(options.resize, ImageResize::Original))
-        {
-            return Err(invalid("Fit within image samples are not available yet"));
-        }
-        if !is_image && crate::backend_for_extension(&ext) == crate::BackendKind::ImageMagick {
-            return Err(invalid("Sample preview unavailable for this image source; bounded decoding is not supported"));
-        }
-        if is_image
-            && !matches!(
-                request.target,
-                TargetFormat::Jpeg | TargetFormat::Png | TargetFormat::Webp
-            )
-        {
-            return Err(invalid("Sample preview unavailable for this image target"));
-        }
-        if is_image
-            && request
-                .resolution_cap
-                .is_some_and(|cap| cap != ResolutionCap::Original)
-        {
-            return Err(invalid("Image conversion does not support resolution caps"));
-        }
-        if is_image
-            && request.target == TargetFormat::Jpeg
-            && matches!(
-                request.compress_mode,
-                Some(CompressMode::LosslessReoptimize)
-            )
-        {
-            return Err(invalid("Lossless JPEG sample preview is unavailable"));
-        }
-        if !is_image && request.target != TargetFormat::Mp4 {
-            return Err(invalid("Video sample preview is available for MP4 only"));
-        }
-        if is_image
-            && request
-                .quality_preset
-                .is_some_and(|q| q != QualityPreset::Original)
-        {
-            return Err(invalid(
-                "Image sample does not support video quality presets",
-            ));
-        }
-        if matches!(request.compress_mode,Some(CompressMode::Quality(q)) if q==0 || q>100) {
-            return Err(invalid("Quality must be between 1 and 100"));
-        }
-        if is_image
-            && matches!(request.compress_mode, Some(CompressMode::Quality(_)))
-            && !matches!(request.target, TargetFormat::Jpeg | TargetFormat::Webp)
-        {
-            return Err(invalid(
-                "Sample quality control is available for JPEG and WebP only",
-            ));
-        }
-        if !is_image
-            && matches!(
-                request.compress_mode,
-                Some(CompressMode::LosslessReoptimize)
-            )
-        {
-            return Err(invalid("Lossless video sample preview is unavailable"));
-        }
-        if request.image_options.is_some() && !is_image {
-            return Err(invalid(
-                "Explicit image samples are available for JPEG sources only",
-            ));
-        }
+        let is_image = matches!(
+            family,
+            PreviewSourceFamily::Raster | PreviewSourceFamily::Heic
+        );
         let cancel = CancellationToken::new();
         let cached_heic = {
             let mut state = self.state.lock().unwrap();
@@ -608,9 +1356,7 @@ impl PreviewService {
         let artifact_id = JobId::new().0.to_string();
         let directory = self.root.join(&artifact_id);
         let staging_directory = self.root.join(format!(".staging-{artifact_id}"));
-        std::fs::create_dir_all(&staging_directory)?;
         let mut scratch = Some(Scratch(Some(staging_directory.clone())));
-        std::fs::write(self.root.join(".goop-preview-session"), b"v1")?;
         let original_video_metadata = if is_image {
             None
         } else {
@@ -623,6 +1369,7 @@ impl PreviewService {
             let token = cancel.clone();
             let image_scratch = scratch.take().expect("preview scratch is armed");
             let worker_context = ImageWorkerContext {
+                root: self.root.clone(),
                 cached_heic,
                 #[cfg(feature = "heic-thumbnail-preview")]
                 heic_sampler: Arc::clone(&self.heic_sampler),
@@ -667,6 +1414,7 @@ impl PreviewService {
             video_sample(
                 resolver,
                 &input,
+                &self.root,
                 &staging_directory,
                 &request,
                 &cancel,
@@ -830,9 +1578,11 @@ fn image_sample(
             extension.eq_ignore_ascii_case("heic") || extension.eq_ignore_ascii_case("heif")
         })
     {
-        let (result, heic_cache) = heic_image_sample_bytes(
+        let (result, heic_cache) = heic_image_sample_bytes_with_prepare(
             bytes.clone(),
-            dir,
+            (dir, || {
+                prepare_preview_output(&worker_context.root, dir, cancel, deadline)
+            }),
             request,
             cancel,
             deadline,
@@ -844,7 +1594,15 @@ fn image_sample(
     }
     #[cfg(not(feature = "heic-thumbnail-preview"))]
     let _ = worker_context.cached_heic;
-    let result = image_sample_bytes(bytes.clone(), dir, request, cancel, deadline)?;
+    let result = image_sample_bytes_with_prepare(
+        bytes.clone(),
+        (dir, || {
+            prepare_preview_output(&worker_context.root, dir, cancel, deadline)
+        }),
+        request,
+        cancel,
+        deadline,
+    )?;
     verify_snapshot_unchanged(input, &bytes, cancel, deadline, false)?;
     Ok(ImageWorkerOutput {
         result,
@@ -908,6 +1666,125 @@ fn capture_image(
     )?;
     checkpoint(cancel, deadline)?;
     Ok(bytes)
+}
+
+fn inspect_raster_source(
+    input: &Path,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewSourceFacts, GoopError> {
+    checkpoint(cancel, deadline)?;
+    let metadata = std::fs::metadata(input)?;
+    if metadata.len() > MAX_INPUT_BYTES {
+        return Ok(PreviewSourceFacts::Unavailable(
+            "Image preview source exceeds the 64 MiB input limit".into(),
+        ));
+    }
+    let bytes = capture_image(input, MAX_INPUT_BYTES, cancel, deadline)?;
+    let facts = raster_facts_from_bytes(bytes.clone())?;
+    verify_snapshot_unchanged(input, &bytes, cancel, deadline, false)?;
+    Ok(facts)
+}
+
+fn raster_facts_from_bytes(bytes: Bytes) -> Result<PreviewSourceFacts, GoopError> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let format = reader
+        .format()
+        .ok_or_else(|| invalid("Could not identify the image format during preview inspection"))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let decoder = reader
+        .into_decoder()
+        .map_err(|error| invalid(format!("Could not inspect image preview: {error}")))?;
+    let (width, height) = decoder.dimensions();
+    let facts = PreviewSourceFacts::Raster {
+        format,
+        width,
+        height,
+        decoded_bytes: decoder.total_bytes(),
+        has_alpha: decoder.color_type().has_alpha(),
+    };
+    Ok(facts)
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn capture_heic_admission(
+    input: &Path,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<Option<(Bytes, [u8; 32])>, GoopError> {
+    checkpoint(cancel, deadline)?;
+    let metadata = std::fs::metadata(input)?;
+    if !metadata.is_file() {
+        return Err(invalid("Sample preview requires a file"));
+    }
+    if metadata.len() > MAX_INPUT_BYTES {
+        return Ok(None);
+    }
+    let bytes = capture_image(input, MAX_INPUT_BYTES, cancel, deadline)?;
+    let digest = Sha256::digest(bytes.as_ref()).into();
+    Ok(Some((bytes, digest)))
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn inspect_heic_admission(
+    input: &Path,
+    bytes: Bytes,
+    cancel: &CancellationToken,
+    deadline: Instant,
+    inspector: &HeicAdmissionInspector,
+) -> Result<Option<String>, GoopError> {
+    let result = inspector(bytes.as_ref(), cancel, deadline);
+    checkpoint(cancel, deadline)?;
+    let unavailable_reason = match result {
+        Ok(()) => None,
+        Err(SamplerError::NoAdmittedThumbnail) => {
+            Some("This source has no bounded embedded thumbnail.".into())
+        }
+        Err(
+            error @ (SamplerError::InvalidPrimaryDimensions { .. }
+            | SamplerError::TooManyThumbnails { .. }
+            | SamplerError::ContainerWorkLimitExceeded),
+        ) => Some(format!("HEIC preview unavailable: {error}.")),
+        Err(SamplerError::Interrupted { .. }) => {
+            checkpoint(cancel, deadline)?;
+            return Err(invalid("HEIC preview inspection was interrupted"));
+        }
+        Err(error) => {
+            return Err(invalid(format!(
+                "Could not inspect the bounded HEIC thumbnail: {error}"
+            )))
+        }
+    };
+    verify_snapshot_unchanged(input, &bytes, cancel, deadline, true)?;
+    Ok(unavailable_reason)
+}
+
+async fn inspect_video_source(
+    resolver: &BinaryResolver,
+    input: &Path,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewSourceFacts, GoopError> {
+    let mut probe = Command::new(resolver.resolve("ffprobe")?.path);
+    probe
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+        ])
+        .arg(input);
+    let source = crate::parse_probe_json(&child_output(probe, cancel, deadline).await?)?;
+    Ok(PreviewSourceFacts::Video {
+        has_video: source.has_video,
+        duration_ms: source.duration_ms,
+        width: source.width,
+        height: source.height,
+    })
 }
 
 #[cfg(feature = "heic-thumbnail-preview")]
@@ -1016,7 +1893,7 @@ fn encode_heic_jpeg_round_trip(
     Ok((jpeg, encode_heic_png(&decoded)?))
 }
 
-#[cfg(feature = "heic-thumbnail-preview")]
+#[cfg(all(test, feature = "heic-thumbnail-preview"))]
 fn heic_image_sample_bytes(
     bytes: Bytes,
     dir: &Path,
@@ -1026,6 +1903,28 @@ fn heic_image_sample_bytes(
     cached: Option<HeicCacheEntry>,
     sampler: &HeicSampler,
 ) -> Result<(PreviewResult, Option<HeicCacheEntry>), GoopError> {
+    heic_image_sample_bytes_with_prepare(
+        bytes,
+        (dir, || Ok(())),
+        request,
+        cancel,
+        deadline,
+        cached,
+        sampler,
+    )
+}
+
+#[cfg(feature = "heic-thumbnail-preview")]
+fn heic_image_sample_bytes_with_prepare(
+    bytes: Bytes,
+    output: (&Path, impl FnOnce() -> Result<(), GoopError>),
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+    cached: Option<HeicCacheEntry>,
+    sampler: &HeicSampler,
+) -> Result<(PreviewResult, Option<HeicCacheEntry>), GoopError> {
+    let (dir, prepare_output) = output;
     checkpoint(cancel, deadline)?;
     let session_id = request.preview_session_id.as_ref().ok_or_else(|| {
         GoopError::PreviewUnavailable(
@@ -1111,6 +2010,7 @@ fn heic_image_sample_bytes(
         ));
     }
 
+    prepare_output()?;
     let source_path = dir.join("before.png");
     let current_jpeg_path = dir.join("after.tmp.jpg");
     let current_path = dir.join("after.png");
@@ -1166,6 +2066,7 @@ fn heic_image_sample_bytes(
     Ok((result, cache_update))
 }
 
+#[cfg(test)]
 fn image_sample_bytes(
     bytes: Bytes,
     dir: &Path,
@@ -1173,42 +2074,34 @@ fn image_sample_bytes(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<PreviewResult, GoopError> {
+    image_sample_bytes_with_prepare(bytes, (dir, || Ok(())), request, cancel, deadline)
+}
+
+fn image_sample_bytes_with_prepare(
+    bytes: Bytes,
+    output: (&Path, impl FnOnce() -> Result<(), GoopError>),
+    request: &PreviewRequest,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<PreviewResult, GoopError> {
+    let (dir, prepare_output) = output;
     checkpoint(cancel, deadline)?;
+    let facts = raster_facts_from_bytes(bytes.clone())?;
+    validate_source_facts(request, &facts)?;
+    prepare_output()?;
     if request.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve
         || request.image_alpha_policy.is_some()
     {
         return color_managed_image_sample(bytes, dir, request, cancel, deadline);
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    if !matches!(
-        reader.format(),
-        Some(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP)
-    ) {
-        return Err(invalid(
-            "Sample preview unavailable for this image encoding",
-        ));
-    }
-    if request.image_options.is_some() && reader.format() != Some(ImageFormat::Jpeg) {
-        return Err(invalid(
-            "Explicit image samples are available for JPEG sources only",
-        ));
-    }
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().map_err(|e| invalid(e.to_string()))?;
     let (width, height) = decoder.dimensions();
-    validate_pixels(width, height)?;
     if let Some(options) = &request.image_options {
         crate::image_options::output_dimensions((width, height), &options.resize)?;
-    }
-    if decoder.total_bytes() > MAX_SOURCE_PIXELS * 16 {
-        return Err(invalid("Decoded image exceeds preview memory limit"));
-    }
-    if request.target == TargetFormat::Jpeg && decoder.color_type().has_alpha() {
-        return Err(invalid(
-            "JPEG removes transparency; choose an explicit background before previewing.",
-        ));
     }
     let orientation = if request.image_options.is_some() {
         let orientation = decoder
@@ -1524,6 +2417,7 @@ async fn child_output(
 async fn video_sample(
     resolver: &BinaryResolver,
     input: &Path,
+    root: &Path,
     dir: &Path,
     request: &PreviewRequest,
     cancel: &CancellationToken,
@@ -1541,20 +2435,16 @@ async fn video_sample(
         ])
         .arg(input);
     let source = crate::parse_probe_json(&child_output(probe, cancel, deadline).await?)?;
-    if !source.has_video || source.duration_ms == 0 {
-        return Err(invalid(
-            "Video sample requires a video stream with known duration",
-        ));
-    }
-    validate_pixels(source.width.unwrap_or(0), source.height.unwrap_or(0))?;
-    let (w, h) = bounded_dimensions(
-        source.width.unwrap_or(0),
-        source.height.unwrap_or(0),
-        edge(request),
-    );
-    if w < 2 || h < 2 {
-        return Err(invalid("Invalid video dimensions"));
-    }
+    validate_source_facts(
+        request,
+        &PreviewSourceFacts::Video {
+            has_video: source.has_video,
+            duration_ms: source.duration_ms,
+            width: source.width,
+            height: source.height,
+        },
+    )?;
+    prepare_preview_output(root, dir, cancel, deadline)?;
     let duration = source.duration_ms.min(3000) as u32;
     let (mut preset, crf) =
         crate::compat::h264_preset(request.quality_preset.unwrap_or(QualityPreset::Balanced));
@@ -1706,6 +2596,42 @@ mod tests {
         entered: tokio::sync::Notify,
         resumed: std::sync::Mutex<bool>,
         resume: std::sync::Condvar,
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    struct BlockingHeicInspector {
+        entered: tokio::sync::Notify,
+        calls: std::sync::atomic::AtomicUsize,
+        resumed: std::sync::Mutex<bool>,
+        resume: std::sync::Condvar,
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    impl BlockingHeicInspector {
+        fn inspect(&self) -> Result<(), SamplerError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            let mut resumed = self.resumed.lock().unwrap();
+            while !*resumed {
+                resumed = self.resume.wait(resumed).unwrap();
+            }
+            Ok(())
+        }
+
+        fn unblock(&self) {
+            *self.resumed.lock().unwrap() = true;
+            self.resume.notify_all();
+        }
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    struct UnblockInspectorOnDrop(Arc<BlockingHeicInspector>);
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    impl Drop for UnblockInspectorOnDrop {
+        fn drop(&mut self) {
+            self.0.unblock();
+        }
     }
 
     #[cfg(feature = "heic-thumbnail-preview")]
@@ -2125,6 +3051,686 @@ mod tests {
         .unwrap()
     }
 
+    fn automatic_request(input: &Path, target: TargetFormat) -> PreviewRequest {
+        PreviewRequest {
+            request_id: "eligibility".into(),
+            preview_session_id: None,
+            input_path: input.to_string_lossy().into_owned(),
+            source_revision: "revision-1".into(),
+            target,
+            quality_preset: None,
+            resolution_cap: None,
+            compress_mode: None,
+            metadata_policy: None,
+            image_color_policy: None,
+            image_alpha_policy: None,
+            subtitle: None,
+            gif_options: None,
+            image_options: None,
+            pinned_jpeg_quality: None,
+            video_options: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_reports_static_matrix_without_creating_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+
+        let available = service
+            .eligibility(&resolver, automatic_request(&input, TargetFormat::Jpeg))
+            .await
+            .unwrap();
+        assert!(available.available);
+
+        let cases = [
+            (
+                Some(CompressMode::TargetSizeBytes(32_000)),
+                TargetFormat::Jpeg,
+                "target-size compression",
+            ),
+            (
+                Some(CompressMode::LosslessReoptimize),
+                TargetFormat::Jpeg,
+                "Lossless JPEG",
+            ),
+            (None, TargetFormat::Avif, "this image target"),
+        ];
+        for (compress_mode, target, reason) in cases {
+            let mut request = automatic_request(&input, target);
+            request.compress_mode = compress_mode;
+            let eligibility = service
+                .eligibility(&resolver, request.clone())
+                .await
+                .unwrap();
+            assert!(!eligibility.available);
+            let eligibility_reason = eligibility.reason.unwrap();
+            assert!(
+                eligibility_reason.contains(reason),
+                "expected reason containing {reason}"
+            );
+            assert_eq!(
+                service
+                    .generate(&resolver, request)
+                    .await
+                    .unwrap_err()
+                    .user_message(),
+                eligibility_reason
+            );
+        }
+
+        let mut subtitle = automatic_request(&input, TargetFormat::Jpeg);
+        subtitle.subtitle = Some(goop_core::SubtitleOptions {
+            source_path: "captions.srt".into(),
+            mode: goop_core::SubtitleMode::Soft,
+        });
+        let eligibility = service
+            .eligibility(&resolver, subtitle.clone())
+            .await
+            .unwrap();
+        assert!(!eligibility.available);
+        let eligibility_reason = eligibility.reason.unwrap();
+        assert!(eligibility_reason.contains("subtitles or GIF"));
+        assert_eq!(
+            service
+                .generate(&resolver, subtitle)
+                .await
+                .unwrap_err()
+                .user_message(),
+            eligibility_reason
+        );
+
+        assert!(service.state.lock().unwrap().session_id.is_none());
+        assert!(service.state.lock().unwrap().active.is_none());
+        assert!(!service.root.exists());
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_request_only_options_before_path_inspection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let request: PreviewRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "request-only-ordering",
+            "source_revision": "revision-1",
+            "input_path": tmp.path().join("missing-source.mp4"),
+            "target": "mp4",
+            "preview_session_id": "not-a-live-session",
+            "video_options": { "kind": "copy" }
+        }))
+        .unwrap();
+
+        let result = service.eligibility(&resolver, request).await.unwrap();
+
+        assert!(!result.available);
+        assert!(result.reason.unwrap().contains("Explicit video previews"));
+        assert!(service.state.lock().unwrap().eligibility.is_none());
+        assert!(!service.root.exists());
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_unbounded_image_sources_and_non_mp4_video_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = tmp.path().join("source.dng");
+        std::fs::write(&raw, b"not decoded").unwrap();
+        let video = tmp.path().join("source.mov");
+        std::fs::write(&video, b"not probed").unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+
+        let raw_request = automatic_request(&raw, TargetFormat::Jpeg);
+        let raw_result = service
+            .eligibility(&resolver, raw_request.clone())
+            .await
+            .unwrap();
+        assert!(!raw_result.available);
+        let raw_reason = raw_result.reason.unwrap();
+        assert!(raw_reason.contains("bounded decoding is not supported"));
+        assert_eq!(
+            service
+                .generate(&resolver, raw_request)
+                .await
+                .unwrap_err()
+                .user_message(),
+            raw_reason
+        );
+
+        let video_request = automatic_request(&video, TargetFormat::Webm);
+        let video_result = service
+            .eligibility(&resolver, video_request.clone())
+            .await
+            .unwrap();
+        assert!(!video_result.available);
+        let video_reason = video_result.reason.unwrap();
+        assert!(video_reason.contains("MP4 only"));
+        assert_eq!(
+            service
+                .generate(&resolver, video_request)
+                .await
+                .unwrap_err()
+                .user_message(),
+            video_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn eligibility_distinguishes_retryable_inspection_failure_and_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        std::fs::write(&input, b"corrupt jpeg").unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let request = automatic_request(&input, TargetFormat::Jpeg);
+
+        assert!(service
+            .eligibility(&resolver, request.clone())
+            .await
+            .is_err());
+
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let recovered = service.eligibility(&resolver, request).await.unwrap();
+        assert!(recovered.available);
+    }
+
+    #[tokio::test]
+    async fn eligibility_reports_missing_and_oversized_sources_without_worker_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let missing = tmp.path().join("missing.jpg");
+        let missing = service
+            .eligibility(&resolver, automatic_request(&missing, TargetFormat::Jpeg))
+            .await
+            .unwrap();
+        assert!(!missing.available);
+        assert!(missing.reason.unwrap().contains("existing file"));
+
+        let directory = service
+            .eligibility(&resolver, automatic_request(tmp.path(), TargetFormat::Jpeg))
+            .await
+            .unwrap();
+        assert!(!directory.available);
+        assert_eq!(
+            directory.reason.as_deref(),
+            Some("Sample preview requires a file")
+        );
+
+        let oversized = tmp.path().join("oversized.png");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_INPUT_BYTES + 1)
+            .unwrap();
+        let oversized = service
+            .eligibility(&resolver, automatic_request(&oversized, TargetFormat::Png))
+            .await
+            .unwrap();
+        assert!(!oversized.available);
+        assert!(oversized.reason.unwrap().contains("64 MiB"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_eligibility_while_waiting_for_the_shared_lane_is_retryable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let service = Arc::new(PreviewService::new(tmp.path().join("previews")));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let held = service.gate.clone().acquire_owned().await.unwrap();
+        let worker_service = Arc::clone(&service);
+        let worker = tokio::spawn(async move {
+            worker_service
+                .eligibility(&resolver, automatic_request(&input, TargetFormat::Jpeg))
+                .await
+        });
+        for _ in 0..100 {
+            if service.state.lock().unwrap().eligibility.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        service.cancel("eligibility");
+        drop(held);
+
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(service.state.lock().unwrap().eligibility.is_none());
+        assert!(service.state.lock().unwrap().active.is_none());
+        assert!(!service.root.exists());
+    }
+
+    #[tokio::test]
+    async fn static_refusal_supersedes_and_cancels_a_blocked_eligibility_inspection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.jpg");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([40, 80, 120]))
+            .save(&input)
+            .unwrap();
+        let service = Arc::new(PreviewService::new(tmp.path().join("previews")));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let held = service.gate.clone().acquire_owned().await.unwrap();
+        let worker_service = Arc::clone(&service);
+        let worker_input = input.clone();
+        let worker = tokio::spawn(async move {
+            worker_service
+                .eligibility(
+                    &resolver,
+                    automatic_request(&worker_input, TargetFormat::Jpeg),
+                )
+                .await
+        });
+        for _ in 0..100 {
+            if service.state.lock().unwrap().eligibility.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let mut refusal = automatic_request(&input, TargetFormat::Jpeg);
+        refusal.request_id = "static-refusal".into();
+        refusal.compress_mode = Some(CompressMode::TargetSizeBytes(32_000));
+        let result = service
+            .eligibility(&BinaryResolver::new(tmp.path().join("sidecars")), refusal)
+            .await
+            .unwrap();
+        assert!(!result.available);
+        assert!(result.reason.unwrap().contains("target-size compression"));
+
+        drop(held);
+        assert!(matches!(worker.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(service.state.lock().unwrap().eligibility.is_none());
+        assert!(!service.root.exists());
+    }
+
+    #[test]
+    fn stale_eligibility_completion_cannot_clear_a_newer_matching_request_id() {
+        let mut state = State::default();
+        let request_id = "same-request-id".to_string();
+        let first = register_eligibility(&mut state, b"first".to_vec(), request_id.clone());
+        let second = register_eligibility(&mut state, b"second".to_vec(), request_id);
+
+        finish_eligibility(&mut state, first.flight_epoch);
+        assert_eq!(
+            state.eligibility.as_ref().map(|active| active.epoch),
+            Some(second.flight_epoch)
+        );
+
+        finish_eligibility(&mut state, second.flight_epoch);
+        assert!(state.eligibility.is_none());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn eligibility_admits_heic_without_a_session_but_requires_explicit_jpeg_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+
+        let automatic = service
+            .eligibility(&resolver, automatic_request(&input, TargetFormat::Jpeg))
+            .await
+            .unwrap();
+        assert!(!automatic.available);
+        assert!(automatic.reason.unwrap().contains("explicit JPEG"));
+
+        let mut explicit = explicit_request(&input);
+        explicit.preview_session_id = Some("not-a-runtime-session".into());
+        explicit.pinned_jpeg_quality = Some(101);
+        let available = service.eligibility(&resolver, explicit).await.unwrap();
+        assert!(available.available);
+        assert!(service.state.lock().unwrap().session_id.is_none());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn eligibility_caches_only_heic_admission_facts_by_path_and_content_digest() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inspector: Arc<HeicAdmissionInspector> = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_bytes, _cancel, _deadline| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+        let service = PreviewService::new_with_heic_admission_inspector(
+            tmp.path().join("previews"),
+            inspector,
+        );
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let mut request = explicit_request(&input);
+
+        assert!(
+            service
+                .eligibility(&resolver, request.clone())
+                .await
+                .unwrap()
+                .available
+        );
+        request.request_id = "new-quality".into();
+        request.image_options.as_mut().unwrap().jpeg_quality = 61;
+        assert!(
+            service
+                .eligibility(&resolver, request.clone())
+                .await
+                .unwrap()
+                .available
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        {
+            let cached = service.heic_admission_cache.lock().unwrap();
+            assert_eq!(
+                cached.as_ref().unwrap().path,
+                std::fs::canonicalize(&input).unwrap()
+            );
+        }
+
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+            &input,
+        )
+        .unwrap();
+        request.request_id = "changed-source".into();
+        assert!(
+            service
+                .eligibility(&resolver, request)
+                .await
+                .unwrap()
+                .available
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn identical_in_flight_eligibility_requests_share_one_heic_inspection() {
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let blocker = Arc::new(BlockingHeicInspector {
+            entered: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::Mutex::new(false),
+            resume: std::sync::Condvar::new(),
+        });
+        let inspector: Arc<HeicAdmissionInspector> = {
+            let blocker = Arc::clone(&blocker);
+            Arc::new(move |_bytes, _cancel, _deadline| blocker.inspect())
+        };
+        let service = Arc::new(PreviewService::new_with_heic_admission_inspector(
+            tmp.path().join("previews"),
+            inspector,
+        ));
+        let _unblock_on_drop = UnblockInspectorOnDrop(Arc::clone(&blocker));
+
+        let first_service = Arc::clone(&service);
+        let first_input = input.clone();
+        let first = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(first_input.parent().unwrap().join("sidecars"));
+            first_service
+                .eligibility(&resolver, explicit_request(&first_input))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), blocker.entered.notified())
+            .await
+            .expect("first eligibility request did not enter HEIC inspection");
+
+        let second_service = Arc::clone(&service);
+        let second_input = input.clone();
+        let second = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(second_input.parent().unwrap().join("sidecars"));
+            let mut request = explicit_request(&second_input);
+            request.request_id = "coalesced-second".into();
+            second_service.eligibility(&resolver, request).await
+        });
+        for _ in 0..100 {
+            if service
+                .state
+                .lock()
+                .unwrap()
+                .eligibility
+                .as_ref()
+                .is_some_and(|active| active.waiters.len() == 2)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(blocker.calls.load(Ordering::SeqCst), 1);
+        blocker.unblock();
+        assert!(first.await.unwrap().unwrap().available);
+        assert!(second.await.unwrap().unwrap().available);
+        assert_eq!(blocker.calls.load(Ordering::SeqCst), 1);
+        assert!(!service.root.exists());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn cancelling_one_coalesced_eligibility_caller_preserves_the_shared_inspection() {
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let blocker = Arc::new(BlockingHeicInspector {
+            entered: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::Mutex::new(false),
+            resume: std::sync::Condvar::new(),
+        });
+        let inspector: Arc<HeicAdmissionInspector> = {
+            let blocker = Arc::clone(&blocker);
+            Arc::new(move |_bytes, _cancel, _deadline| blocker.inspect())
+        };
+        let service = Arc::new(PreviewService::new_with_heic_admission_inspector(
+            tmp.path().join("previews"),
+            inspector,
+        ));
+        let _unblock_on_drop = UnblockInspectorOnDrop(Arc::clone(&blocker));
+
+        let first_service = Arc::clone(&service);
+        let first_input = input.clone();
+        let first = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(first_input.parent().unwrap().join("sidecars"));
+            first_service
+                .eligibility(&resolver, explicit_request(&first_input))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), blocker.entered.notified())
+            .await
+            .expect("first eligibility request did not enter HEIC inspection");
+
+        let second_service = Arc::clone(&service);
+        let second_input = input.clone();
+        let second = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(second_input.parent().unwrap().join("sidecars"));
+            let mut request = explicit_request(&second_input);
+            request.request_id = "coalesced-second".into();
+            second_service.eligibility(&resolver, request).await
+        });
+        for _ in 0..100 {
+            if service
+                .state
+                .lock()
+                .unwrap()
+                .eligibility
+                .as_ref()
+                .is_some_and(|active| active.waiters.len() == 2)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            service
+                .state
+                .lock()
+                .unwrap()
+                .eligibility
+                .as_ref()
+                .map(|active| active.waiters.len()),
+            Some(2)
+        );
+
+        service.cancel("captured");
+        assert_eq!(
+            service
+                .state
+                .lock()
+                .unwrap()
+                .eligibility
+                .as_ref()
+                .map(|active| active.waiters.len()),
+            Some(1)
+        );
+        blocker.unblock();
+
+        assert!(matches!(first.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(second.await.unwrap().unwrap().available);
+        assert_eq!(blocker.calls.load(Ordering::SeqCst), 1);
+        assert!(service.state.lock().unwrap().eligibility.is_none());
+        assert!(!service.root.exists());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn rapid_same_source_eligibility_replacement_runs_one_heic_inspection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/heic-with-thumbnail.heic"
+            ),
+            &input,
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inspector: Arc<HeicAdmissionInspector> = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_bytes, _cancel, _deadline| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+        let service = Arc::new(PreviewService::new_with_heic_admission_inspector(
+            tmp.path().join("previews"),
+            inspector,
+        ));
+        let held = service.gate.clone().acquire_owned().await.unwrap();
+
+        let first_service = Arc::clone(&service);
+        let first_input = input.clone();
+        let first = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(first_input.parent().unwrap().join("sidecars"));
+            first_service
+                .eligibility(&resolver, explicit_request(&first_input))
+                .await
+        });
+        for _ in 0..100 {
+            if service.state.lock().unwrap().eligibility.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let second_service = Arc::clone(&service);
+        let second_input = input.clone();
+        let second = tokio::spawn(async move {
+            let resolver = BinaryResolver::new(second_input.parent().unwrap().join("sidecars"));
+            let mut request = explicit_request(&second_input);
+            request.request_id = "replacement".into();
+            request.image_options.as_mut().unwrap().jpeg_quality = 60;
+            second_service.eligibility(&resolver, request).await
+        });
+        for _ in 0..100 {
+            if service
+                .state
+                .lock()
+                .unwrap()
+                .eligibility
+                .as_ref()
+                .is_some_and(|active| {
+                    active
+                        .waiters
+                        .iter()
+                        .any(|waiter| waiter.request_id == "replacement")
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(held);
+
+        assert!(matches!(first.await.unwrap(), Err(GoopError::Cancelled)));
+        assert!(second.await.unwrap().unwrap().available);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(not(feature = "heic-thumbnail-preview"))]
+    #[tokio::test]
+    async fn eligibility_reports_feature_disabled_heic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::write(&input, b"bounded input").unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let result = service
+            .eligibility(&resolver, explicit_request(&input))
+            .await
+            .unwrap();
+        assert!(!result.available);
+        assert!(result.reason.unwrap().contains("not enabled"));
+    }
+
     fn wide_rgb_profile() -> Vec<u8> {
         use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
 
@@ -2218,6 +3824,73 @@ mod tests {
         assert!((i16::from(pixel[2]) - 56).abs() <= 3);
     }
 
+    #[tokio::test]
+    async fn rejected_raster_source_facts_do_not_create_preview_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 255, 0]))
+            .save(&input)
+            .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+
+        let error = service
+            .generate(&resolver, automatic_request(&input, TargetFormat::Jpeg))
+            .await
+            .unwrap_err();
+
+        assert!(error.user_message().contains("background"));
+        assert!(!service.root.exists());
+    }
+
+    #[cfg(feature = "heic-thumbnail-preview")]
+    #[tokio::test]
+    async fn rejected_heic_source_facts_do_not_create_preview_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.heic");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.heic"),
+            &input,
+        )
+        .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let session = service.begin_session().unwrap();
+        let resolver = BinaryResolver::new(tmp.path().join("sidecars"));
+        let mut request = explicit_request(&input);
+        request.preview_session_id = Some(session);
+
+        let error = service.generate(&resolver, request).await.unwrap_err();
+
+        assert!(error.user_message().contains("HEIC preview unavailable"));
+        assert!(!service.root.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_video_source_inspection_does_not_create_preview_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("source.mp4");
+        std::fs::write(&input, b"not a video").unwrap();
+        let sidecars = tmp.path().join("sidecars");
+        std::fs::create_dir(&sidecars).unwrap();
+        std::fs::write(
+            sidecars.join(if cfg!(windows) {
+                "ffprobe.exe"
+            } else {
+                "ffprobe"
+            }),
+            b"not executable",
+        )
+        .unwrap();
+        let service = PreviewService::new(tmp.path().join("previews"));
+        let resolver = BinaryResolver::new(sidecars);
+
+        assert!(service
+            .generate(&resolver, automatic_request(&input, TargetFormat::Mp4))
+            .await
+            .is_err());
+        assert!(!service.root.exists());
+    }
+
     #[test]
     fn explicit_alpha_policy_with_preserve_uses_managed_validation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2284,6 +3957,7 @@ mod tests {
             &CancellationToken::new(),
             Instant::now() + TIMEOUT,
             ImageWorkerContext {
+                root: tmp.path().to_path_buf(),
                 cached_heic: None,
                 #[cfg(feature = "heic-thumbnail-preview")]
                 heic_sampler: default_heic_sampler(),

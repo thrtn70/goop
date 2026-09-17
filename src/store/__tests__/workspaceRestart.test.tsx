@@ -29,7 +29,10 @@ it("loads editable intent into a fresh store and preserves subsequent clearing o
 });
 
 const jpegMocks = vi.hoisted(() => ({ inspect: vi.fn(), open: vi.fn(), save: vi.fn() }));
-vi.mock("@/ipc/commands", () => ({ api: { convert: { inspect: jpegMocks.inspect }, preview: { cancel: vi.fn().mockResolvedValue(null) } } }));
+vi.mock("@/ipc/commands", () => ({ api: { convert: { inspect: jpegMocks.inspect }, preview: {
+  eligibility: vi.fn().mockResolvedValue({available:true,reason:null}),
+  cancel: vi.fn().mockResolvedValue(null),
+} } }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: jpegMocks.open, save: jpegMocks.save }));
 vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/features/presets/PresetChips", () => ({ default: () => null }));

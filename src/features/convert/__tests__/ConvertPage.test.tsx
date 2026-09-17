@@ -9,7 +9,7 @@ import type { PreviewRequest, PreviewResult, ProbeResult, Settings, Preset } fro
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease } = vi.hoisted(() => ({
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
@@ -17,6 +17,7 @@ const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPla
   mockOpen: vi.fn(),
   mockSave: vi.fn(),
   mockPreviewBegin: vi.fn().mockResolvedValue("11111111-1111-4111-8111-111111111111"),
+  mockPreviewEligibility: vi.fn(async (_request: PreviewRequest): Promise<{available:boolean;reason:string|null}> => ({available:true,reason:null})),
   mockPreviewGenerate: vi.fn(async (request: PreviewRequest): Promise<PreviewResult> => ({
     request_id: request.request_id,
     source_revision: request.source_revision,
@@ -187,6 +188,7 @@ vi.mock("@/ipc/commands", () => ({
     settings: { get: vi.fn().mockResolvedValue({}) },
     preview: {
       begin: () => mockPreviewBegin(),
+      eligibility: (request: PreviewRequest) => mockPreviewEligibility(request),
       generate: (request: PreviewRequest) => mockPreviewGenerate(request),
       cancel: (requestId: string) => mockPreviewCancel(requestId),
       release: (sessionId: string) => mockPreviewRelease(sessionId),
@@ -369,6 +371,7 @@ describe("ConvertPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPreviewEligibility.mockResolvedValue({available:true,reason:null});
     mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]);
     mockSave.mockResolvedValue("/tmp/out.mp4");
   });
@@ -419,6 +422,30 @@ describe("ConvertPage", () => {
 
     const mp4Btn = screen.getByRole("button", { name: "MP4" });
     expect(mp4Btn.className).toContain("bg-accent");
+  });
+
+  it("rechecks and blocks GIF and non-MP4 video preview requests before generation", async () => {
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockPreviewEligibility.mockImplementation(async (request: PreviewRequest) => (
+      request.target === "gif"
+        ? {available:false,reason:"GIF previews are unavailable."}
+        : request.target !== "mp4"
+          ? {available:false,reason:"Video previews require MP4 output."}
+          : {available:true,reason:null}
+    ));
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await screen.findByText("test-video.mp4");
+
+    await userEvent.click(screen.getByRole("button", {name:"GIF"}));
+    expect(await screen.findByText("GIF previews are unavailable.")).toBeTruthy();
+    expect(screen.getByRole("button", {name:"Preview sample"})).toHaveProperty("disabled",true);
+
+    await userEvent.click(screen.getByRole("button", {name:"MKV"}));
+    expect(await screen.findByText("Video previews require MP4 output.")).toBeTruthy();
+    expect(screen.getByRole("button", {name:"Preview sample"})).toHaveProperty("disabled",true);
+    expect(mockPreviewGenerate).not.toHaveBeenCalled();
+    expect(mockPreviewEligibility.mock.calls.at(-1)?.[0]).toMatchObject({input_path:"/tmp/test-video.mp4",target:"mkv"});
   });
 
   it("hides video targets for audio-only files", async () => {
@@ -989,12 +1016,12 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByText(/pick from your computer/i));
     await screen.findByText("photo.heic");
     await userEvent.click(screen.getByRole("button", { name: "JPEG" }));
-    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Preview sample" }));
     await userEvent.click(await screen.findByRole("button", { name: "Pin current quality 75" }));
     await screen.findByRole("button", { name: "Pinned quality 75" });
 
     fireEvent.change(screen.getByLabelText("JPEG quality"), { target: { value: "40" } });
-    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Preview sample" }));
     await screen.findByRole("button", { name: "Pinned quality 75" });
 
     expect(mockPreviewGenerate.mock.calls.at(-1)?.[0].pinned_jpeg_quality).toBe(75);
@@ -1022,7 +1049,7 @@ describe("ConvertPage", () => {
     await screen.findByText("tagged.png");
     await userEvent.click(screen.getByRole("button", { name: "Color managed" }));
     expect(screen.queryByText(/Settings were not applied/)).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Preview sample" }));
     await waitFor(() => expect(mockPreviewGenerate).toHaveBeenCalled());
     expect(mockPreviewGenerate.mock.calls[0][0]).toMatchObject({
       target: "png",
@@ -1380,6 +1407,8 @@ describe("explicit video inspector", () => {
     });
   });
   it("keeps Custom and dimensions usable when source timing disables only FPS editing", async () => {
+    let resolvePlan!: (value: unknown) => void;
+    mockVideoPlan.mockImplementationOnce(() => new Promise(resolve => { resolvePlan = resolve; }));
     mockOpen.mockResolvedValue(["/tmp/no-timing.mp4"]);
     await stage();
     await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
@@ -1390,6 +1419,7 @@ describe("explicit video inspector", () => {
     await waitFor(() => expect(mockVideoPlan).toHaveBeenCalled());
     expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).toMatchObject({ resize: { kind: "original" } });
     expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).not.toHaveProperty("frame_rate");
+    await act(async () => resolvePlan(noAudioPlan));
     await waitFor(() => expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", false));
   });
   it("keeps partial fit-within text visible, blocks actions, then sends exact independent controls", async () => {
@@ -1414,6 +1444,21 @@ describe("explicit video inspector", () => {
       resize: { kind: "fit_within", width: 1280, height: 721 },
       frame_rate: { kind: "constant", numerator: 24000, denominator: 1001 },
     });
+  });
+  it("does not check or generate a preview for an invalid explicit-video draft", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"), "encode");
+    await waitFor(() => expect(mockPreviewEligibility).toHaveBeenCalled());
+    mockPreviewEligibility.mockClear();
+    mockPreviewGenerate.mockClear();
+
+    await userEvent.clear(screen.getByLabelText("CRF"));
+
+    expect(screen.getByRole("button", { name: "Convert 1 file" })).toHaveProperty("disabled", true);
+    expect(screen.getAllByText(/whole number from 1 to 51/i).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Preview sample" })).toHaveProperty("disabled", true));
+    expect(mockPreviewEligibility).not.toHaveBeenCalled();
+    expect(mockPreviewGenerate).not.toHaveBeenCalled();
   });
   it("explains duplicate/drop timing and preserves dimensions while timing changes", async () => {
     await stage();

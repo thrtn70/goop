@@ -6,10 +6,10 @@ import ConvertPage from "@/pages/ConvertPage";
 import CompressPage from "@/pages/CompressPage";
 import type { ImageAlphaCapabilities, ImageSettingsCapabilities, Preset } from "@/types";
 
-const mocks = vi.hoisted(() => ({ inspect: vi.fn(), enqueue: vi.fn(), open: vi.fn(), save: vi.fn(), preset: null as Preset | null, preview: vi.fn(), previewCancel: vi.fn(), presetSave: vi.fn() }));
+const mocks = vi.hoisted(() => ({ inspect: vi.fn(), enqueue: vi.fn(), open: vi.fn(), save: vi.fn(), preset: null as Preset | null, eligibility: vi.fn(), preview: vi.fn(), previewCancel: vi.fn(), presetSave: vi.fn() }));
 vi.mock("@/ipc/commands", () => ({ api: {
   convert: { inspect: mocks.inspect, fromFile: mocks.enqueue },
-  preview: { generate: mocks.preview, cancel: mocks.previewCancel },
+  preview: { eligibility: mocks.eligibility, generate: mocks.preview, cancel: mocks.previewCancel },
   preset: { save: mocks.presetSave, list: vi.fn().mockResolvedValue([]) },
 } }));
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => "asset://" + path }));
@@ -26,7 +26,7 @@ const inspect = (video = false, sourceFormat = "jpeg", tagged = true, sourceHasA
   } : null,
     image_metadata: video ? null : {
       preserve: { available: true, reason: null, summary: "Metadata retained." },
-      rgb_reencode_preserve: { available: true, reason: null, summary: "Metadata retained." },
+      rgb_reencode_preserve: { available: true, reason: null as string | null, summary: "Metadata retained." },
       remove_personal: sourceFormat === "jpeg" && target === "jpeg"
         ? { available: true, reason: null, summary: "Personal metadata removed." }
         : { available: false, reason: "Remove personal data is currently available only for JPEG to JPEG processing.", summary: "Unavailable" },
@@ -52,6 +52,7 @@ const fit = { jpeg_quality: 90, resize: { kind: "fit_within" as const, width: 20
 const preset = (image_options: Preset["image_options"] = fit) => ({ name: "Photo", target: "jpeg", image_options, quality_preset: null, resolution_cap: null, compress_mode: null, gif_options: null, subtitle: null, metadata_policy: "preserve" }) as Preset;
 beforeEach(() => {
   vi.clearAllMocks(); mocks.preset = null;
+  mocks.eligibility.mockResolvedValue({available:true,reason:null});
   mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(path.endsWith("mp4"), path.endsWith(".png") ? "png" : path.endsWith(".webp") ? "webp" : "jpeg", !path.includes("untagged"), !path.includes("opaque") && (path.endsWith(".png") || path.endsWith(".webp")))));
   mocks.open.mockResolvedValue(["/a.jpg"]); mocks.save.mockResolvedValue("/out.jpg"); mocks.enqueue.mockResolvedValue("job"); mocks.previewCancel.mockResolvedValue(null);
 });
@@ -71,6 +72,10 @@ async function setFit() {
   await user.selectOptions(screen.getByRole("combobox", { name: "Image dimensions" }), "fit_within");
 }
 const disabled = (name: string) => (screen.getByRole("button", { name }) as HTMLButtonElement).disabled;
+async function enabledPreview() {
+  await waitFor(()=>expect(disabled("Preview sample")).toBe(false));
+  return screen.getByRole("button", {name:"Preview sample"});
+}
 
 it("edits explicit JPEG quality and fit bounds through the inspector and submits exactly that intent", async () => {
   render(page()); await add(); await setFit();
@@ -287,7 +292,7 @@ it("forwards selected JPEG quality to preview and disables Fit within with the e
   mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
   render(page()); await add();
   fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "30" } });
-  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   expect(mocks.preview.mock.calls[0][0].image_options).toEqual({jpeg_quality:30,resize:{kind:"original"}});
   await userEvent.setup().selectOptions(screen.getByRole("combobox", { name: "Image dimensions" }), "fit_within");
@@ -296,13 +301,75 @@ it("forwards selected JPEG quality to preview and disables Fit within with the e
   expect(screen.queryByAltText("Output sample")).toBeNull();
   expect(mocks.preview).toHaveBeenCalledTimes(1);
 });
+it("uses request eligibility to block HEIC to PNG before generation", async () => {
+  mocks.eligibility.mockImplementation(async (request: {input_path:string;target:string}) => (
+    request.input_path.endsWith(".heic") && request.target === "png"
+      ? {available:false,reason:"HEIC previews require JPEG output."}
+      : {available:true,reason:null}
+  ));
+  render(page()); await add(["/photo.heic"]);
+  fireEvent.click(screen.getByRole("button", {name:"PNG"}));
+  fireEvent.click(screen.getByRole("button", {name:"Clear image settings"}));
+
+  expect(await screen.findByText("HEIC previews require JPEG output.")).toBeTruthy();
+  expect(disabled("Preview sample")).toBe(true);
+  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  expect(mocks.preview).not.toHaveBeenCalled();
+  expect(mocks.eligibility.mock.calls.at(-1)?.[0]).toMatchObject({input_path:"/photo.heic",target:"png"});
+});
+
+it("checks Compress Quality, Target size, and Lossless through the same request contract", async () => {
+  const inspected=inspect();
+  inspected.capabilities.compression={quality:true,target_size:true,lossless:true,reason:null};
+  mocks.inspect.mockResolvedValue(inspected);
+  mocks.eligibility.mockImplementation(async (request: {compress_mode:{kind:string}|null}) => {
+    const kind=request.compress_mode?.kind;
+    return kind === "target_size_bytes"
+      ? {available:false,reason:"Target size previews cannot predict output size."}
+      : kind === "lossless_reoptimize"
+        ? {available:false,reason:"Lossless previews are unavailable."}
+        : {available:true,reason:null};
+  });
+  render(<MemoryRouter><CompressPage /></MemoryRouter>);
+  fireEvent.click(screen.getByRole("button", {name:"Add files"}));
+  await screen.findByRole("slider", {name:"Compression quality"});
+
+  await waitFor(()=>expect(disabled("Preview sample")).toBe(false));
+  expect(mocks.eligibility.mock.calls.at(-1)?.[0].compress_mode).toEqual({kind:"quality",value:75});
+
+  fireEvent.click(screen.getByRole("button", {name:"Target size"}));
+  expect(await screen.findByText("Target size previews cannot predict output size.")).toBeTruthy();
+  expect(disabled("Preview sample")).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", {name:"Lossless"}));
+  expect(await screen.findByText("Lossless previews are unavailable.")).toBeTruthy();
+  expect(disabled("Preview sample")).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", {name:"Quality"}));
+  await waitFor(()=>expect(disabled("Preview sample")).toBe(false));
+});
+it("does not check or generate a Compress preview for a draft blocked by metadata readiness", async () => {
+  const inspected=inspect();
+  const jpeg=inspected.capabilities.targets.find(target=>target.target === "jpeg");
+  if (!jpeg?.image_metadata) throw new Error("Expected JPEG metadata capabilities");
+  jpeg.image_metadata.rgb_reencode_preserve={available:false,reason:"Metadata cannot be preserved for this source.",summary:"Unavailable"};
+  mocks.inspect.mockResolvedValue(inspected);
+  render(<MemoryRouter><CompressPage /></MemoryRouter>);
+  fireEvent.click(screen.getByRole("button", {name:"Add files"}));
+  await screen.findByRole("slider", {name:"Compression quality"});
+
+  expect((await screen.findAllByText("Metadata cannot be preserved for this source.")).length).toBeGreaterThan(0);
+  expect(disabled("Preview sample")).toBe(true);
+  expect(mocks.eligibility).not.toHaveBeenCalled();
+  expect(mocks.preview).not.toHaveBeenCalled();
+});
 it("forwards a directly selected sRGB conversion to preview and conversion requests", async () => {
   mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/after.png",width:160,height:100,sample_bytes:100}));
   render(page()); await add();
   const color = within(screen.getByRole("group", { name: "Color handling" }));
   await userEvent.setup().click(color.getByRole("button", { name: "Convert to sRGB" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   expect(mocks.preview.mock.calls[0][0]).toMatchObject({
     target: "jpeg",
@@ -327,7 +394,7 @@ it("uses the managed PNG image-settings color requirement and permits Original p
   const color = within(screen.getByRole("group", {name:"Color handling"}));
   await userEvent.setup().click(color.getByRole("button", {name:"Convert to sRGB"}));
   expect(disabled("Convert 1 file")).toBe(false);
-  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   expect(mocks.preview.mock.calls[0][0]).toMatchObject({
     target:"jpeg",
@@ -352,7 +419,7 @@ it("requires a deliberate background and forwards it to preview and conversion",
   const color = within(screen.getByRole("group", { name: "Color handling" }));
   await userEvent.setup().click(color.getByRole("button", { name: "Convert to sRGB" }));
   expect(disabled("Convert 1 file")).toBe(false);
-  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   expect(mocks.preview.mock.calls[0][0].image_alpha_policy).toEqual({kind:"flatten",background:{red:255,green:255,blue:255}});
   fireEvent.click(screen.getByRole("button", {name:"Convert 1 file"}));
@@ -432,7 +499,7 @@ it("blocks every effective action while custom background text differs from the 
   expect(disabled("Convert 2 files")).toBe(false);
   expect(disabled("Save as preset")).toBe(false);
   expect(disabled("Apply first to all")).toBe(false);
-  fireEvent.click(screen.getByRole("button", {name:"Preview sample"}));
+  fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   const displayedRequest = mocks.preview.mock.calls[0][0];
 
@@ -453,7 +520,7 @@ it("blocks every effective action while custom background text differs from the 
   expect(disabled("Convert 2 files")).toBe(false);
   expect(disabled("Save as preset")).toBe(false);
   expect(disabled("Apply first to all")).toBe(false);
-  expect(screen.getByRole("button", {name:"Preview sample"})).toBeTruthy();
+  expect(await enabledPreview()).toBeTruthy();
 });
 
 it("refuses an alpha preset atomically across different required color-policy groups", async () => {
@@ -496,14 +563,14 @@ it("retires an in-flight preview on a raw invalid edit and ignores its late resp
   let resolve!: (value:unknown) => void;
   mocks.preview.mockImplementationOnce(() => new Promise(r => {resolve = r;}));
   render(page()); await add();
-  fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+  fireEvent.click(await enabledPreview());
   const request = mocks.preview.mock.calls[0][0];
   fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "" } });
   expect(disabled("Preview sample")).toBe(true);
   fireEvent.change(screen.getByRole("textbox", { name: "JPEG quality" }), { target: { value: "90" } });
   await act(async () => resolve({...request,kind:"image",before_path:"/before.png",after_path:"/stale.png",width:160,height:100,sample_bytes:100}));
   expect(screen.queryByAltText("Output sample")).toBeNull();
-  expect(disabled("Preview sample")).toBe(false);
+  await waitFor(()=>expect(disabled("Preview sample")).toBe(false));
 });
 
 it.each([
