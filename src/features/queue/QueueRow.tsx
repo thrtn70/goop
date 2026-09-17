@@ -7,6 +7,8 @@ import { formatError, parseIpcError } from "@/ipc/error";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { useSpringValue } from "@/hooks/useSpringValue";
 import { canRetryKind, failureView } from "@/lib/jobFailure";
+import type { HandoffDestination } from "@/features/workspace/handoff";
+import { useCompletedOutputActions } from "@/features/workspace/useCompletedOutputActions";
 
 type StateName = "queued" | "running" | "paused" | "done" | "cancelled" | "error";
 
@@ -113,6 +115,41 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+const FOCUSABLE_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "select",
+  "textarea",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function willReceiveFocus(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(FOCUSABLE_SELECTOR) !== null;
+}
+
+function focusNextToMenu(
+  menu: HTMLElement,
+  trigger: HTMLButtonElement | null,
+  backwards: boolean,
+): void {
+  const controls = Array.from(
+    document.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  ).filter((element) => {
+    if (menu.contains(element)) return false;
+    if (element instanceof HTMLButtonElement && element.disabled) return false;
+    return element.getAttribute("aria-hidden") !== "true";
+  });
+  const triggerIndex = trigger ? controls.indexOf(trigger) : -1;
+  const adjacent =
+    triggerIndex >= 0
+      ? controls[triggerIndex + (backwards ? -1 : 1)]
+      : undefined;
+  const destination =
+    adjacent ?? (backwards ? controls.at(-1) : controls[0]);
+  (destination ?? trigger)?.focus();
+}
+
 function shortLabel(job: Job): string {
   const payload = job.payload as PayloadShape | null;
   if (job.kind === "convert") {
@@ -179,7 +216,15 @@ async function pauseWithRetry(jobId: Job["id"]): Promise<void> {
   throw lastErr;
 }
 
-export default function QueueRow({ job, index }: { job: Job; index: number }) {
+export default function QueueRow({
+  job,
+  index,
+  onHandoff,
+}: {
+  job: Job;
+  index: number;
+  onHandoff?: (job: Job, destination: HandoffDestination) => void;
+}) {
   const progress = useAppStore((s) => s.progressById[jobIdKey(job.id)] ?? null);
   const isSelected = useAppStore((s) =>
     s.ui.queueSelectedIds.has(jobIdKey(job.id)),
@@ -210,6 +255,11 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
   }, [copied]);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const completedMenuId = `completed-output-menu-${jobIdKey(job.id)}`;
+  const completedActions = useCompletedOutputActions(job, onHandoff);
+  const revealAction = completedActions.find((action) => action.id === "reveal");
+  const menuActions = completedActions.filter((action) => action.id !== "reveal");
   // Download pauses are asynchronous: the IPC returns once the pause is
   // initiated and the row only flips when the worker yields (usually
   // <1s, up to a slow connect's timeout). Disable the button and show
@@ -292,13 +342,58 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
 
   useEffect(() => {
     if (!menuOpen) return;
+    menuRef.current
+      ?.querySelector<HTMLButtonElement>("[role='menuitem']")
+      ?.focus();
+
     function onClickOutside(e: MouseEvent): void {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
+      const menu = menuRef.current;
+      if (!menu || menu.contains(e.target as Node)) return;
+      if (menuTriggerRef.current?.contains(e.target as Node)) return;
+      const focusWasInMenu = menu.contains(document.activeElement);
+      setMenuOpen(false);
+      if (focusWasInMenu && !willReceiveFocus(e.target)) {
+        menuTriggerRef.current?.focus();
       }
     }
+    function onKeyDown(e: KeyboardEvent): void {
+      const menu = menuRef.current;
+      if (!menu) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMenuOpen(false);
+        menuTriggerRef.current?.focus();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        focusNextToMenu(menu, menuTriggerRef.current, e.shiftKey);
+        setMenuOpen(false);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      const items = Array.from(
+        menu.querySelectorAll<HTMLButtonElement>("[role='menuitem']"),
+      );
+      if (items.length === 0) return;
+      e.preventDefault();
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next =
+        e.key === "Home"
+          ? 0
+          : e.key === "End"
+            ? items.length - 1
+            : e.key === "ArrowDown"
+              ? (current + 1 + items.length) % items.length
+              : (current - 1 + items.length) % items.length;
+      items[next]?.focus();
+    }
     document.addEventListener("mousedown", onClickOutside);
-    return () => document.removeEventListener("mousedown", onClickOutside);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [menuOpen]);
 
   function handleContextMenu(e: React.MouseEvent): void {
@@ -336,6 +431,12 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
   async function handleCancelFromMenu(): Promise<void> {
     setMenuOpen(false);
     await handleCancel();
+  }
+
+  async function handleCompletedAction(action: (typeof menuActions)[number]): Promise<void> {
+    setMenuOpen(false);
+    menuTriggerRef.current?.focus();
+    await action.run();
   }
 
   return (
@@ -428,15 +529,52 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
             </button>
           </div>
         )}
-        {name === "done" && outputPath && (
-          <button
-            type="button"
-            onClick={() => void api.queue.reveal(outputPath)}
-            aria-label={`Reveal ${shortLabel(job)} in file manager`}
-            className="btn-press shrink-0 rounded-md px-2 py-1 text-xs text-accent transition duration-fast ease-out hover:bg-accent-subtle hover:text-accent-hover"
-          >
-            reveal
-          </button>
+        {name === "done" && outputPath && revealAction && (
+          <div className="relative flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void revealAction.run()}
+              aria-label={`Show ${basename(outputPath)} in Finder`}
+              className="btn-press rounded-md px-2 py-1 text-xs text-accent transition duration-fast ease-out hover:bg-accent-subtle hover:text-accent-hover"
+            >
+              show
+            </button>
+            {menuActions.length > 0 && (
+              <button
+                ref={menuTriggerRef}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-controls={completedMenuId}
+                aria-label={`More actions for ${basename(outputPath)}`}
+                onClick={() => setMenuOpen((open) => !open)}
+                className="btn-press rounded-md px-2 py-1 text-xs text-fg-muted transition duration-fast ease-out hover:bg-surface-3 hover:text-fg"
+              >
+                more
+              </button>
+            )}
+            {menuOpen && (
+              <div
+                id={completedMenuId}
+                ref={menuRef}
+                role="menu"
+                className="absolute right-0 top-full z-20 mt-1 min-w-[160px] overflow-hidden rounded-md border border-subtle bg-surface-1 shadow-lg"
+              >
+                {menuActions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    onClick={() => void handleCompletedAction(action)}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-fg hover:bg-accent-subtle hover:text-accent"
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         {isRetryable(job) && (
           <button
@@ -513,6 +651,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             onClick={() => void handleMoveToTop()}
             className="block w-full px-3 py-1.5 text-left text-xs text-fg hover:bg-accent-subtle hover:text-accent"
           >
@@ -521,6 +660,7 @@ export default function QueueRow({ job, index }: { job: Job; index: number }) {
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             onClick={() => void handleCancelFromMenu()}
             className="block w-full px-3 py-1.5 text-left text-xs text-error hover:bg-error-subtle"
           >

@@ -34,6 +34,7 @@ import type {
   PreviewRequest,
   PreviewResult,
   ResizeMode,
+  ResultKind,
   RotationDegrees,
   Settings,
   SettingsPatch,
@@ -207,6 +208,10 @@ export const api = {
     completedSince: (sinceMs: number) =>
       invoke<number>("queue_completed_since", { sinceMs }),
     reveal: (path: string) => invoke<void>("queue_reveal", { path }),
+  },
+  output: {
+    open: (path: string, expectedKind: ResultKind) =>
+      invoke<void>("output_open", { path, expectedKind }),
   },
   sidecar: {
     status: () => invoke<SidecarStatus>("sidecar_status"),

@@ -3,7 +3,10 @@ import type { Job } from "@/types";
 import { createHandoff, readHandoff } from "../handoff";
 const job = {id:"source-job",kind:"extract",state:"done",result:{output_path:"/movie.mp4",result_kind:"file"}} as unknown as Job;
 it("hands a completed extract to either tool with its origin retained", () => {
-  expect(createHandoff(job,"compress")).toMatchObject({sourceJobId:"source-job",path:"/movie.mp4",destination:"compress"});
+  const first = createHandoff(job,"compress");
+  const second = createHandoff(job,"compress");
+  expect(first).toMatchObject({sourceJobId:"source-job",path:"/movie.mp4",destination:"compress"});
+  expect(first?.id).not.toBe(second?.id);
   expect(createHandoff(job,"convert")?.destination).toBe("convert");
 });
 it("excludes failures, folders and absent paths", () => {

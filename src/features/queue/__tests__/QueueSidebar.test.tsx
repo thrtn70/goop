@@ -7,8 +7,13 @@ import { api } from "@/ipc/commands";
 import type { Job } from "@/types";
 
 const patch = vi.fn().mockResolvedValue(undefined);
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock("react-router-dom", async () => ({
+  ...(await vi.importActual<typeof import("react-router-dom")>("react-router-dom")),
+  useNavigate: () => navigate,
+}));
 vi.mock("@/ipc/commands", () => ({ api: { queue: { cancelMany: vi.fn().mockResolvedValue(1) } } }));
-vi.mock("../QueueRow", () => ({ default: ({job}: {job: Job}) => <button>Job {String(job.id)}</button> }));
+vi.mock("../QueueRow", () => ({ default: ({job,onHandoff}: {job: Job;onHandoff?:(job:Job,destination:"convert"|"compress")=>void}) => <button onClick={()=>onHandoff?.(job,"convert")}>Job {String(job.id)}</button> }));
 vi.mock("../SortableQueueRow", () => ({ default: ({job}: {job: Job}) => <button>Job {String(job.id)}</button> }));
 const job = { id: "queued-one", kind: "convert", state: "queued", payload: {}, result: null } as Job;
 
@@ -16,6 +21,7 @@ beforeEach(() => {
   useAppStore.setState({ jobs: [job], unseenCompletions: 1, progressById: {}, patchSettings: patch,
     ui: { queueCollapsed: true, queueSelectedIds: new Set(), doneToday: 0 } });
   patch.mockClear();
+  navigate.mockClear();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -58,6 +64,28 @@ describe("bottom queue", () => {
     fireEvent.click(screen.getByRole("button", {name: "Expand queue"}));
     act(() => useAppStore.setState({ jobs: [] }));
     expect(screen.getByRole("button", {name: "Collapse queue"}).getAttribute("aria-expanded")).toBe("true");
+  });
+  it("creates a fresh deliberate handoff from a completed row", () => {
+    useAppStore.setState({
+      jobs: [{
+        ...job,
+        id: "done-one",
+        state: "done",
+        result: { output_path: "/tmp/movie.mp4", result_kind: "file", file_count: 1, bytes: 1n, duration_ms: 1n },
+      } as Job],
+      ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 1 },
+    });
+    render(<QueueSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: "Job done-one" }));
+    expect(navigate).toHaveBeenCalledWith("/convert", {
+      state: {
+        handoff: expect.objectContaining({
+          sourceJobId: "done-one",
+          path: "/tmp/movie.mp4",
+          destination: "convert",
+        }),
+      },
+    });
   });
   it("restores the preferred height when a pointer resize is cancelled", () => {
     vi.stubGlobal("PointerEvent", MouseEvent);

@@ -16,13 +16,29 @@ interface UseQuickViewReturn {
   indexLabel: string;
 }
 
+const INTERACTIVE_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "select",
+  "textarea",
+  "[role='button']",
+  "[role='menuitem']",
+  "[contenteditable='true']",
+].join(",");
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(INTERACTIVE_SELECTOR) !== null;
+}
+
 /**
  * Owns Quick View state: open/close, keyboard navigation, and translation
  * between a selected `JobId` and the surrounding filtered list.
  *
  * Keyboard: Space toggles open/close when any History row is focused (the
  * Space handler lives in the list/grid components; this hook just exposes
- * the open function). While open, Escape closes, arrow keys navigate.
+ * the open function). While open, Escape closes, and Space/arrows operate
+ * the Quick View itself only when focus is not on an interactive control.
  */
 export function useQuickView(): UseQuickViewReturn {
   const jobs = useAppStore((s) => s.history.jobs);
@@ -51,9 +67,14 @@ export function useQuickView(): UseQuickViewReturn {
   useEffect(() => {
     if (!currentKey) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" || e.key === " " || e.code === "Space") {
+      if (e.key === "Escape") {
         e.preventDefault();
         close();
+      } else if ((e.key === " " || e.code === "Space") && !isInteractiveTarget(e.target)) {
+        e.preventDefault();
+        close();
+      } else if (isInteractiveTarget(e.target)) {
+        return;
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         stepPrev();

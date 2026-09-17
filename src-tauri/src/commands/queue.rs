@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use goop_core::{IpcError, Job, JobId, JobKind, JobState};
+use goop_core::{IpcError, Job, JobId, JobKind, JobState, ResultKind};
 use goop_queue::SchedulerError;
 use tauri::State;
 
@@ -285,4 +285,146 @@ pub fn queue_reveal(path: String, app: tauri::AppHandle) -> Result<(), IpcError>
     app.opener()
         .reveal_item_in_dir(canonical)
         .map_err(|e| IpcError::Unknown(e.to_string()))
+}
+
+fn resolve_output_path(
+    path: &str,
+    expected_kind: ResultKind,
+) -> Result<std::path::PathBuf, IpcError> {
+    let expanded = goop_core::path::expand(path);
+    let canonical = std::fs::canonicalize(&expanded).map_err(|e| {
+        IpcError::Config(format!(
+            "output is not available: {} ({e})",
+            expanded.display()
+        ))
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|e| {
+        IpcError::Config(format!(
+            "output is not available: {} ({e})",
+            canonical.display()
+        ))
+    })?;
+    match expected_kind {
+        ResultKind::File if !metadata.is_file() => Err(IpcError::Config(format!(
+            "expected a file but found another output kind: {}",
+            canonical.display()
+        ))),
+        ResultKind::Folder if !metadata.is_dir() => Err(IpcError::Config(format!(
+            "expected a folder but found another output kind: {}",
+            canonical.display()
+        ))),
+        _ => Ok(canonical),
+    }
+}
+
+fn open_resolved_output(
+    path: &str,
+    expected_kind: ResultKind,
+    open: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), IpcError> {
+    let canonical = resolve_output_path(path, expected_kind)?;
+    open(&canonical).map_err(|e| IpcError::Unknown(format!("open output failed: {e}")))
+}
+
+#[tauri::command]
+pub fn output_open(
+    path: String,
+    expected_kind: ResultKind,
+    app: tauri::AppHandle,
+) -> Result<(), IpcError> {
+    use tauri_plugin_opener::OpenerExt;
+    open_resolved_output(&path, expected_kind, |canonical| {
+        app.opener()
+            .open_path(canonical.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|error| error.to_string())
+    })
+}
+
+#[cfg(test)]
+mod output_path_tests {
+    use super::*;
+    use goop_core::ResultKind;
+
+    fn config_message(error: IpcError) -> String {
+        match error {
+            IpcError::Config(message) => message,
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_existing_file_and_folder_with_the_expected_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        std::fs::write(&file, b"done").unwrap();
+
+        let mut opened_file = None;
+        open_resolved_output(file.to_str().unwrap(), ResultKind::File, |path| {
+            opened_file = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened_file, Some(std::fs::canonicalize(&file).unwrap()));
+
+        let mut opened_folder = None;
+        open_resolved_output(dir.path().to_str().unwrap(), ResultKind::Folder, |path| {
+            opened_folder = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            opened_folder,
+            Some(std::fs::canonicalize(dir.path()).unwrap())
+        );
+
+        assert_eq!(
+            resolve_output_path(file.to_str().unwrap(), ResultKind::File).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
+        assert_eq!(
+            resolve_output_path(dir.path().to_str().unwrap(), ResultKind::Folder).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_paths_and_result_kind_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        std::fs::write(&file, b"done").unwrap();
+
+        assert!(config_message(
+            resolve_output_path(
+                dir.path().join("missing").to_str().unwrap(),
+                ResultKind::File
+            )
+            .unwrap_err()
+        )
+        .contains("not available"));
+        assert!(config_message(
+            resolve_output_path(file.to_str().unwrap(), ResultKind::Folder).unwrap_err()
+        )
+        .contains("expected a folder"));
+        assert!(config_message(
+            resolve_output_path(dir.path().to_str().unwrap(), ResultKind::File).unwrap_err()
+        )
+        .contains("expected a file"));
+    }
+
+    #[test]
+    fn maps_os_open_failures_without_mutating_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        std::fs::write(&file, b"unchanged").unwrap();
+
+        let error = open_resolved_output(file.to_str().unwrap(), ResultKind::File, |_| {
+            Err("no default application".to_string())
+        })
+        .unwrap_err();
+        match error {
+            IpcError::Unknown(message) => assert!(message.contains("no default application")),
+            other => panic!("expected open error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
+    }
 }

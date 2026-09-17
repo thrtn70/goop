@@ -663,6 +663,7 @@ pub fn run() {
             commands::queue::queue_clear_completed,
             commands::queue::queue_completed_since,
             commands::queue::queue_reveal,
+            commands::queue::output_open,
             commands::sidecar::sidecar_status,
             commands::sidecar::sidecar_update_yt_dlp,
             commands::sidecar::sidecar_update_gallery_dl,
