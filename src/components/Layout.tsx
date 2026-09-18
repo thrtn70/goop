@@ -5,7 +5,6 @@ import TopBar from "./TopBar";
 import CommandPalette from "./CommandPalette";
 import Onboarding from "./Onboarding";
 import SkipNav from "./SkipNav";
-import JobStateAnnouncer from "./JobStateAnnouncer";
 import QueueSidebar from "@/features/queue/QueueSidebar";
 import { useTheme } from "@/hooks/useTheme";
 import { useQueueHotkey } from "@/hooks/useQueueHotkey";
@@ -36,7 +35,6 @@ export default function Layout() {
       </div>
       <CommandPalette />
       <Onboarding />
-      <JobStateAnnouncer />
     </div>
   );
 }

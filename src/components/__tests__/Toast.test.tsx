@@ -46,6 +46,47 @@ describe("Toast variant a11y semantics", () => {
     expect(node.getAttribute("aria-live")).toBe("assertive");
   });
 
+  it("gives an error alert the actionable reason before details are expanded", () => {
+    render(
+      <Toast
+        toast={makeToast({
+          variant: "error",
+          title: "clip.mp4 failed",
+          detail: "The source file moved. Add it again.",
+        })}
+        onDismiss={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole("alert", {
+        name: "clip.mp4 failed: The source file moved. Add it again.",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByText("The source file moved. Add it again.")).toBeNull();
+  });
+
+  it("bounds the spoken error summary while preserving expandable detail", async () => {
+    const user = userEvent.setup();
+    const detail = `First actionable line ${"x".repeat(500)}\nsecond diagnostic line`;
+    render(
+      <Toast
+        toast={makeToast({ variant: "error", title: "clip.mp4 failed", detail })}
+        onDismiss={() => {}}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    const announcement = alert.getAttribute("aria-label") ?? "";
+    expect(announcement.length).toBeLessThanOrEqual(241);
+    expect(announcement).toContain("clip.mp4 failed: First actionable line");
+    expect(announcement).not.toContain("second diagnostic line");
+    expect(announcement.endsWith("…")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(document.querySelector("pre")?.textContent).toBe(detail);
+  });
+
   it("cancelled variant uses role=status + aria-live=polite", () => {
     render(<Toast toast={makeToast({ variant: "cancelled" })} onDismiss={() => {}} />);
     const node = screen.getByRole("status");

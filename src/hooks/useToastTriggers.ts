@@ -95,6 +95,9 @@ function pageForKind(kind: JobKind): string {
 export function useToastTriggers(): void {
   const location = useLocation();
   const previousStatesRef = useRef<Map<string, string>>(new Map());
+  const bootstrapSnapshotSeenRef = useRef(
+    useAppStore.getState().queueSnapshotGeneration > 0,
+  );
   const batchesRef = useRef<Map<string, Batch>>(new Map());
   const pathRef = useRef(location.pathname);
 
@@ -106,8 +109,38 @@ export function useToastTriggers(): void {
   }, [location.pathname]);
 
   useEffect(() => {
+    // Treat terminal jobs that already exist when the observer mounts as
+    // history, not as new events. Without this snapshot, the first later
+    // queue update replays every old completion/error because the transition
+    // memo starts empty. Newly added terminal jobs after mount still toast.
+    const current = useAppStore.getState();
+    const initial = terminalSnapshot(current.jobs);
+    previousStatesRef.current = initial.states;
+    batchesRef.current = initial.openBatches;
+    // Hydration can resolve after render initialized the ref but before this
+    // passive effect subscribes. Treat the current accepted snapshot as the
+    // bootstrap in that window so the next generation is not swallowed.
+    if (current.queueSnapshotGeneration > 0) {
+      bootstrapSnapshotSeenRef.current = true;
+    }
+
     const unsubscribe = useAppStore.subscribe((state, prevState) => {
       if (state.jobs === prevState.jobs) return;
+
+      // `bootstrapStoreSubscriptions()` starts before React renders but its
+      // queue request resolves asynchronously. If this hook mounts first,
+      // the initial durable queue arrives as the first jobs update. Seed that
+      // snapshot as history exactly as we do when it arrived before mount.
+      if (
+        !bootstrapSnapshotSeenRef.current &&
+        state.queueSnapshotGeneration > prevState.queueSnapshotGeneration
+      ) {
+        const snapshot = terminalSnapshot(state.jobs);
+        previousStatesRef.current = snapshot.states;
+        batchesRef.current = snapshot.openBatches;
+        bootstrapSnapshotSeenRef.current = true;
+        return;
+      }
 
       const prev = previousStatesRef.current;
       const { enqueueToast, incrementUnseen } = state;
@@ -218,6 +251,59 @@ export function useToastTriggers(): void {
     });
     return () => unsubscribe();
   }, []);
+}
+
+function terminalSnapshot(jobs: Job[]): {
+  states: Map<string, string>;
+  openBatches: Map<string, Batch>;
+} {
+  const states = new Map<string, string>();
+  const openBatches = new Map<string, Batch>();
+  const openBatchIds = new Set<string>();
+
+  for (const job of jobs) {
+    if (terminalName(job.state)) continue;
+    const payload = job.payload as JobPayload | null;
+    if (payload?.batch_id) openBatchIds.add(payload.batch_id);
+  }
+
+  for (const job of jobs) {
+    const terminal = terminalName(job.state);
+    if (!terminal) continue;
+    states.set(jobIdKey(job.id), terminal);
+
+    const payload = job.payload as JobPayload | null;
+    const batchId = payload?.batch_id;
+    if (!batchId || !openBatchIds.has(batchId)) continue;
+
+    const key = jobIdKey(job.id);
+    const sourceLabel = jobLabel(job, payload);
+    const outputPath = job.result?.output_path ?? null;
+    const batch = openBatches.get(batchId) ?? {
+      ids: new Set<string>(),
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+      lastOutputPath: null,
+      kind: null,
+      failedLabels: [],
+    };
+    batch.ids.add(key);
+    if (terminal === "done") batch.done += 1;
+    else if (terminal === "error") {
+      batch.failed += 1;
+      if (batch.failedLabels.length < MAX_FAILED_LABELS) {
+        const why = failureView(job.state, canRetryKind(job.kind))?.message;
+        batch.failedLabels.push(
+          why ? clampLabel(`${sourceLabel} — ${why}`) : sourceLabel,
+        );
+      }
+    } else batch.cancelled += 1;
+    if (outputPath) batch.lastOutputPath = outputPath;
+    batch.kind = job.kind;
+    openBatches.set(batchId, batch);
+  }
+  return { states, openBatches };
 }
 
 function jobLabel(

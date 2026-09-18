@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { useToastTriggers } from "@/hooks/useToastTriggers";
 import { useAppStore } from "@/store/appStore";
@@ -13,6 +14,13 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 function Probe() {
   useToastTriggers();
   return null;
+}
+
+function HydrateBeforePassiveEffect({ jobs }: { jobs: Job[] }) {
+  useLayoutEffect(() => {
+    useAppStore.setState({ jobs, queueSnapshotGeneration: 1 });
+  }, [jobs]);
+  return <Probe />;
 }
 
 function makeJob(state: JobState, overrides: Partial<Job> = {}): Job {
@@ -50,7 +58,12 @@ function errorToastCount(): number {
 }
 
 beforeEach(() => {
-  useAppStore.setState({ jobs: [], toasts: [] });
+  useAppStore.setState({
+    jobs: [],
+    toasts: [],
+    queueRequestGeneration: 0,
+    queueSnapshotGeneration: 0,
+  });
 });
 
 afterEach(() => {
@@ -58,6 +71,135 @@ afterEach(() => {
 });
 
 describe("useToastTriggers across retry transitions", () => {
+  it("treats the delayed bootstrap snapshot as history", () => {
+    render(
+      <MemoryRouter>
+        <Probe />
+      </MemoryRouter>,
+    );
+
+    const completed = makeJob("done", {
+      result: {
+        output_path: "/tmp/restored-history.mp4",
+        bytes: BigInt(128),
+        duration_ms: BigInt(10),
+        result_kind: "file",
+        file_count: 1,
+      },
+    });
+    act(() => {
+      useAppStore.setState({ jobs: [completed], queueSnapshotGeneration: 1 });
+    });
+
+    expect(useAppStore.getState().toasts).toHaveLength(0);
+
+    const newJob = makeJob("running", {
+      id: "00000000-0000-7000-8000-000000000003" as Job["id"],
+      payload: { url: "https://example.com/after-bootstrap" },
+    });
+    act(() => {
+      useAppStore.setState({
+        jobs: [completed, newJob],
+        queueSnapshotGeneration: 2,
+      });
+    });
+    act(() => {
+      useAppStore.setState({
+        jobs: [completed, { ...newJob, state: "done" }],
+        queueSnapshotGeneration: 3,
+      });
+    });
+
+    const toasts = useAppStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.title).toContain("after-bootstrap");
+  });
+
+  it("does not suppress the first completion when hydration lands before effect setup", () => {
+    const running = makeJob("running", {
+      payload: { url: "https://example.com/render-effect-race" },
+    });
+    render(
+      <MemoryRouter>
+        <HydrateBeforePassiveEffect jobs={[running]} />
+      </MemoryRouter>,
+    );
+
+    act(() => {
+      useAppStore.setState({
+        jobs: [{ ...running, state: "done" }],
+        queueSnapshotGeneration: 2,
+      });
+    });
+
+    expect(useAppStore.getState().toasts).toHaveLength(1);
+    expect(useAppStore.getState().toasts[0]?.title).toContain("render-effect-race");
+  });
+
+  it("retains settled members from a partially complete bootstrap batch", () => {
+    render(
+      <MemoryRouter>
+        <Probe />
+      </MemoryRouter>,
+    );
+
+    const completed = batchJob(1, "done", "https://example.com/already-done");
+    const running = batchJob(2, "running", "https://example.com/finishes-later");
+    act(() => {
+      useAppStore.setState({
+        jobs: [completed, running],
+        queueSnapshotGeneration: 1,
+      });
+    });
+    expect(useAppStore.getState().toasts).toHaveLength(0);
+
+    act(() => {
+      useAppStore.setState({
+        jobs: [completed, { ...running, state: "done" }],
+        queueSnapshotGeneration: 2,
+      });
+    });
+
+    expect(useAppStore.getState().toasts).toHaveLength(1);
+    expect(useAppStore.getState().toasts[0]?.title).toBe("2 files downloaded");
+  });
+
+  it("does not replay terminal history when a later queue update arrives", () => {
+    const completed = makeJob("done", {
+      result: {
+        output_path: "/tmp/already-finished.mp4",
+        bytes: BigInt(128),
+        duration_ms: BigInt(10),
+        result_kind: "file",
+        file_count: 1,
+      },
+    });
+    useAppStore.setState({ jobs: [completed] });
+
+    render(
+      <MemoryRouter>
+        <Probe />
+      </MemoryRouter>,
+    );
+
+    const newJob = makeJob("running", {
+      id: "00000000-0000-7000-8000-000000000002" as Job["id"],
+      payload: { url: "https://example.com/new-video" },
+    });
+    act(() => {
+      useAppStore.setState({ jobs: [completed, newJob] });
+    });
+
+    expect(useAppStore.getState().toasts).toHaveLength(0);
+
+    act(() => {
+      useAppStore.setState({ jobs: [completed, { ...newJob, state: "done" }] });
+    });
+    const toasts = useAppStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.title).toContain("new-video");
+  });
+
   it("re-toasts when a retried job fails again", () => {
     render(
       <MemoryRouter>

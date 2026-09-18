@@ -8,6 +8,7 @@ import type { Toast as ToastData } from "@/store/appStore";
 interface ToastProps {
   toast: ToastData;
   onDismiss: (id: string) => void;
+  visuallyHidden?: boolean;
 }
 
 const VARIANT_STYLES: Record<ToastData["variant"], string> = {
@@ -38,7 +39,16 @@ function truncateForAria(text: string): string {
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
-export default function Toast({ toast, onDismiss }: ToastProps) {
+const MAX_ANNOUNCEMENT_CHARS = 240;
+
+function toastAnnouncement(title: string, detail: string | undefined): string {
+  const firstLine = detail?.split("\n", 1)[0]?.trim();
+  const summary = firstLine ? `${title}: ${firstLine}` : title;
+  if (summary.length <= MAX_ANNOUNCEMENT_CHARS) return summary;
+  return `${summary.slice(0, MAX_ANNOUNCEMENT_CHARS - 1).trimEnd()}…`;
+}
+
+export default function Toast({ toast, onDismiss, visuallyHidden = false }: ToastProps) {
   const [expanded, setExpanded] = useState(false);
   const [paused, setPaused] = useState(false);
   const revealFile = useRevealFile();
@@ -65,77 +75,90 @@ export default function Toast({ toast, onDismiss }: ToastProps) {
   // Errors should pre-empt other content (`role="alert"` +
   // `aria-live="assertive"`); successes / info / cancels queue politely.
   const isError = toast.variant === "error";
+  const announcement = toastAnnouncement(toast.title, toast.detail);
   const Icon = VARIANT_ICONS[toast.variant];
   return (
     <div
+      data-toast-id={toast.id}
       role={isError ? "alert" : "status"}
       aria-live={isError ? "assertive" : "polite"}
+      aria-label={announcement}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       className={clsx(
-        "enter-up pointer-events-auto flex min-w-[280px] max-w-[360px] items-start gap-3 rounded-lg border p-3 shadow-lg backdrop-blur",
-        VARIANT_STYLES[toast.variant],
+        visuallyHidden
+          ? "sr-only"
+          : "enter-up pointer-events-auto flex min-w-[280px] max-w-[360px] items-start gap-3 rounded-lg border p-3 shadow-lg backdrop-blur",
+        !visuallyHidden && VARIANT_STYLES[toast.variant],
       )}
     >
-      <span
-        aria-hidden="true"
-        className={clsx(
-          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-1",
-          VARIANT_ICON_COLORS[toast.variant],
-        )}
+      <div
+        className="contents"
+        aria-hidden={visuallyHidden || undefined}
       >
-        <Icon size={12} strokeWidth={2.5} />
-      </span>
-      <div className="flex-1 min-w-0">
-        <p className="truncate text-sm font-medium text-fg">{toast.title}</p>
-        {toast.detail && toast.variant !== "error" && (
-          <p className="mt-0.5 truncate text-xs text-fg-secondary">
-            {toast.detail}
-          </p>
-        )}
-        {canExpand && (
-          <>
+        <span
+          aria-hidden="true"
+          className={clsx(
+            "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-1",
+            VARIANT_ICON_COLORS[toast.variant],
+          )}
+        >
+          <Icon size={12} strokeWidth={2.5} />
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="truncate text-sm font-medium text-fg">{toast.title}</p>
+          {toast.detail && toast.variant !== "error" && (
+            <p className="mt-0.5 truncate text-xs text-fg-secondary">
+              {toast.detail}
+            </p>
+          )}
+          {canExpand && (
+            <>
+              <button
+                type="button"
+                tabIndex={visuallyHidden ? -1 : undefined}
+                onClick={() => setExpanded((v) => !v)}
+                className="mt-1 text-xs text-accent hover:text-accent-hover"
+              >
+                {expanded ? "Hide details" : "Details"}
+              </button>
+              {/* Capped and scrollable. The container grows upward from the
+               *  bottom of the viewport and an error toast never
+               *  auto-dismisses, so an uncapped block pushes this toast's own
+               *  dismiss button off the top of the screen and strands it
+               *  there. `tabIndex` because a scroll container a keyboard user
+               *  cannot focus is a scroll container they cannot read. */}
+              {expanded && (
+                <pre
+                  tabIndex={visuallyHidden ? -1 : 0}
+                  className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-xs text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                >
+                  {toast.detail}
+                </pre>
+              )}
+            </>
+          )}
+          {canReveal && (
             <button
               type="button"
-              onClick={() => setExpanded((v) => !v)}
-              className="mt-1 text-xs text-accent hover:text-accent-hover"
+              tabIndex={visuallyHidden ? -1 : undefined}
+              onClick={handleReveal}
+              className="mt-1 text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
             >
-              {expanded ? "Hide details" : "Details"}
+              Reveal
             </button>
-            {/* Capped and scrollable. The container grows upward from the
-             *  bottom of the viewport and an error toast never
-             *  auto-dismisses, so an uncapped block pushes this toast's own
-             *  dismiss button off the top of the screen and strands it
-             *  there. `tabIndex` because a scroll container a keyboard user
-             *  cannot focus is a scroll container they cannot read. */}
-            {expanded && (
-              <pre
-                tabIndex={0}
-                className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-xs text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-              >
-                {toast.detail}
-              </pre>
-            )}
-          </>
-        )}
-        {canReveal && (
-          <button
-            type="button"
-            onClick={handleReveal}
-            className="mt-1 text-xs text-accent transition duration-fast ease-out hover:text-accent-hover"
-          >
-            Reveal
-          </button>
-        )}
+          )}
+        </div>
+        <button
+          type="button"
+          tabIndex={visuallyHidden ? -1 : undefined}
+          aria-label={`Dismiss: ${truncateForAria(toast.title)}`}
+          onClick={() => onDismiss(toast.id)}
+          className="shrink-0 text-fg-muted transition duration-fast ease-out hover:text-fg"
+        >
+          <X size={14} strokeWidth={2.5} aria-hidden="true" />
+        </button>
       </div>
-      <button
-        type="button"
-        aria-label={`Dismiss: ${truncateForAria(toast.title)}`}
-        onClick={() => onDismiss(toast.id)}
-        className="shrink-0 text-fg-muted transition duration-fast ease-out hover:text-fg"
-      >
-        <X size={14} strokeWidth={2.5} aria-hidden="true" />
-      </button>
     </div>
   );
 }
