@@ -420,27 +420,17 @@ case "$TARGET" in
     echo "arch sweep clean — every macOS sidecar carries an arm64 slice"
     ;;
   x86_64-unknown-linux-gnu)
-    # Linux targets are not part of the v0.1 release matrix; kept for
-    # local dev / CI clippy + test only. We don't ship Ghostscript on
-    # Linux because we don't ship Linux. Tauri's build script still
-    # insists every `externalBin` listed in tauri.conf.json exists for
-    # the active target, so we drop a stub `gs` placeholder. The audit
-    # job never runs the binary — it only needs the file to exist.
-    EXTRACT_DIR="$(mktemp -d)"
-    trap 'rm -rf "$EXTRACT_DIR"' EXIT
-    fetch_verified \
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-05-13-10/ffmpeg-N-126416-g9997fd0606-linux64-lgpl.tar.xz" \
-      "8ad0f604bbeb6f580840d47b65001ba370d69eec4263423235a604dd3728cab6" \
-      "$EXTRACT_DIR/ffmpeg.tar.xz"
-    tar -xf "$EXTRACT_DIR/ffmpeg.tar.xz" -C "$EXTRACT_DIR/"
-    FFMPEG_BIN="$(find "$EXTRACT_DIR" -name 'ffmpeg' -type f -perm -u+x 2>/dev/null | head -1)"
-    [[ -n "$FFMPEG_BIN" ]] || { echo "ffmpeg binary not found in archive"; exit 1; }
-    cp "$FFMPEG_BIN" "$OUT_DIR/ffmpeg-$TARGET"
-    chmod +x "$OUT_DIR/ffmpeg-$TARGET"
-    FFPROBE_BIN="$(find "$EXTRACT_DIR" -name 'ffprobe' -type f -perm -u+x 2>/dev/null | head -1)"
-    [[ -n "$FFPROBE_BIN" ]] || { echo "ffprobe binary not found in archive"; exit 1; }
-    cp "$FFPROBE_BIN" "$OUT_DIR/ffprobe-$TARGET"
-    chmod +x "$OUT_DIR/ffprobe-$TARGET"
+    # Linux is not a product target. This branch exists only because the Rust
+    # audit compiles goop-tauri, whose build script insists that every
+    # `externalBin` path exists for the active target. The audit never invokes
+    # ffmpeg or ffprobe. Use explicit failing placeholders rather than a dated
+    # BtbN autobuild: those releases are retained only briefly, so an unchanged
+    # source tree otherwise starts returning 404s after the pin expires.
+    for name in ffmpeg ffprobe; do
+      printf '#!/bin/sh\necho "%s is not available in the Linux audit bootstrap" >&2\nexit 1\n' \
+        "$name" > "$OUT_DIR/$name-$TARGET"
+      chmod +x "$OUT_DIR/$name-$TARGET"
+    done
     # yt-dlp
     fetch_verified \
       "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp" \

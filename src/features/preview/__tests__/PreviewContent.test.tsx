@@ -16,7 +16,7 @@ vi.mock("@/hooks/useThumbnail", () => ({
   useThumbnail: () => thumbMock.state,
 }));
 
-function makeJob(outputPath: string): Job {
+function makeJob(outputPath: string, resultKind: "file" | "folder" = "file"): Job {
   return {
     id: "00000000-0000-7000-8000-000000000000",
     kind: "extract",
@@ -24,6 +24,8 @@ function makeJob(outputPath: string): Job {
     payload: null,
     result: {
       output_path: outputPath,
+      result_kind: resultKind,
+      file_count: resultKind === "folder" ? 3 : 1,
       bytes: BigInt(1024),
       duration_ms: BigInt(1000),
     },
@@ -52,7 +54,7 @@ describe("PreviewContent — audio waveform rendering (Phase J)", () => {
         job={makeJob("/path/to/song.mp3")}
         variant="panel"
         onConvertAgain={() => {}}
-        onReveal={() => {}}
+        onCompress={() => {}}
       />,
     );
     const img = screen.getByRole("img", { name: /audio waveform/i }) as HTMLImageElement;
@@ -66,7 +68,7 @@ describe("PreviewContent — audio waveform rendering (Phase J)", () => {
         job={makeJob("/path/to/song.mp3")}
         variant="panel"
         onConvertAgain={() => {}}
-        onReveal={() => {}}
+        onCompress={() => {}}
       />,
     );
     expect(screen.getByText(/♫ audio/)).toBeTruthy();
@@ -79,9 +81,40 @@ describe("PreviewContent — audio waveform rendering (Phase J)", () => {
         job={makeJob("/path/to/clip.mp4")}
         variant="panel"
         onConvertAgain={() => {}}
-        onReveal={() => {}}
+        onCompress={() => {}}
       />,
     );
     expect(screen.getByText(/preview unavailable/i)).toBeTruthy();
+  });
+});
+
+describe("PreviewContent — completed output actions", () => {
+  it("shows the full shared file action set", () => {
+    render(
+      <PreviewContent
+        job={makeJob("/path/to/clip.mp4")}
+        variant="panel"
+        onConvertAgain={() => {}}
+        onCompress={() => {}}
+      />,
+    );
+    for (const name of ["Open", "Show in Finder", "Copy path", "Convert…", "Compress…"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+  });
+
+  it("does not mislabel a folder reveal as opening the folder", () => {
+    render(
+      <PreviewContent
+        job={makeJob("/path/to/album", "folder")}
+        variant="modal"
+        onConvertAgain={() => {}}
+        onCompress={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show in Finder" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open folder" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Convert…" })).toBeNull();
   });
 });

@@ -213,7 +213,7 @@ else
   echo "  ok   a refused final install preserves the destination and cleans up"
 fi
 
-# 8. The sidecar build must not bypass verification, and the expected 13
+# 8. The sidecar build must not bypass verification, and the expected 12
 # external artifacts lock the coverage count. Adding or removing a download
 # requires this assertion to move with it.
 unverified_fetches="$({
@@ -224,11 +224,22 @@ if [ -n "$unverified_fetches" ]; then
   echo "  FAIL fetch-sidecars.sh contains unverified downloads:"
   echo "$unverified_fetches" | sed 's/^/       /'
   fail=1
-elif [ "$verified_count" != "13" ]; then
-  echo "  FAIL expected 13 verified sidecar artifacts, found $verified_count"
+elif [ "$verified_count" != "12" ]; then
+  echo "  FAIL expected 12 verified sidecar artifacts, found $verified_count"
   fail=1
 else
-  echo "  ok   all 13 sidecar artifacts are checksum-verified"
+  echo "  ok   all 12 sidecar artifacts are checksum-verified"
+fi
+
+# Linux is audit-only and needs externalBin paths to exist, but the Rust job
+# never invokes ffmpeg or ffprobe. BtbN retains dated autobuild releases only
+# briefly, so pinning one makes an unchanged tree start returning 404s. Keep
+# these two Linux artifacts local placeholders instead of a remote download.
+if grep -q 'releases/download/autobuild-' ./fetch-sidecars.sh; then
+  echo "  FAIL Linux audit bootstrap depends on an expiring BtbN autobuild"
+  fail=1
+else
+  echo "  ok   Linux audit bootstrap has no expiring BtbN autobuild"
 fi
 
 # 9. Keep the macOS freezer and prebuilt sidecar on the same gallery-dl

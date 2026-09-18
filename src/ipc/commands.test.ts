@@ -26,6 +26,15 @@ import {
 } from "./commands";
 import { api } from "./commands";
 
+it("sends the expected output kind with a local open request", async () => {
+  invokeMock.mockClear();
+  await api.output.open("/tmp/album", "folder");
+  expect(invokeMock).toHaveBeenCalledWith("output_open", {
+    path: "/tmp/album",
+    expectedKind: "folder",
+  });
+});
+
 // Lock the discriminator + field names emitted by each PdfOperation
 // builder. The Rust side uses #[serde(tag = "kind", rename_all =
 // "snake_case")]; if the wire shape ever drifts, the backend's

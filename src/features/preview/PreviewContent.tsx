@@ -4,14 +4,14 @@ import { useThumbnail } from "@/hooks/useThumbnail";
 import { jobIdKey } from "@/store/appStore";
 import DeleteMenu from "./DeleteMenu";
 import { outputSummary } from "./outputSummary";
+import CompletedOutputActions from "@/features/workspace/CompletedOutputActions";
 
 interface PreviewContentProps {
   job: Job;
   /** "panel" keeps the preview compact for the slide-out; "modal" stretches for Quick View. */
   variant: "panel" | "modal";
   onConvertAgain: (job: Job) => void;
-  onCompress?: (job: Job) => void;
-  onReveal: (path: string) => void;
+  onCompress: (job: Job) => void;
   onClose?: () => void;
 }
 
@@ -41,7 +41,6 @@ export default function PreviewContent({
   variant,
   onConvertAgain,
   onCompress,
-  onReveal,
   onClose,
 }: PreviewContentProps) {
   const outputPath = job.result?.output_path ?? null;
@@ -142,32 +141,14 @@ export default function PreviewContent({
               : "flex flex-col gap-2"
           }
         >
-          {outputPath && (
-            <button
-              type="button"
-              onClick={() => onReveal(outputPath)}
-              className={`btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:text-fg ${variant === "panel" ? "w-full" : ""}`}
-            >
-              {/* "Open folder" applies for any folder result, even if
-               *  file_count === 1. The output_path IS a directory so
-               *  "Reveal in Finder" would mis-describe the action — it
-               *  would open the parent of the folder rather than the
-               *  folder itself. The "(N files)" badge is gated on
-               *  file_count > 1 separately because a single-file
-               *  badge reads as noise. */}
-              {job.result?.result_kind === "folder" ? "Open folder" : "Reveal in Finder"}
-            </button>
-          )}
-          {job.state === "done" && outputPath && job.result?.result_kind !== "folder" && (
-            <button
-              type="button"
-              onClick={() => onConvertAgain(job)}
-              className={`btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary transition duration-fast ease-out hover:text-fg ${variant === "panel" ? "w-full" : ""}`}
-            >
-              Convert…
-            </button>
-          )}
-          {onCompress && job.state === "done" && outputPath && job.result?.result_kind !== "folder" && <button type="button" onClick={() => onCompress(job)} className="btn-press rounded-md bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg-secondary hover:text-fg">Compress…</button>}
+          <CompletedOutputActions
+            job={job}
+            variant={variant}
+            onHandoff={(source, destination) => {
+              if (destination === "convert") onConvertAgain(source);
+              else onCompress(source);
+            }}
+          />
           <DeleteMenu job={job} fullWidth={variant === "panel"} />
         </div>
       </div>

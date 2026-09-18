@@ -7,7 +7,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
 import CompressPage from "@/pages/CompressPage";
 import { clearWorkspaceDrafts } from "@/store/workspaceDrafts";
@@ -81,6 +81,11 @@ const page = (tool: "convert" | "compress") => (
     {tool === "convert" ? <ConvertPage /> : <CompressPage />}
   </MemoryRouter>
 );
+
+function NavigationStateProbe() {
+  const location = useLocation();
+  return <output data-testid="navigation-state">{JSON.stringify(location.state)}</output>;
+}
 for (const tool of ["convert", "compress"] as const) {
   const label = tool === "convert" ? "Convert" : "Compress";
   it(`${tool} snapshots a dialog request, retains later edits/new files and reconciles once after remount`, async () => {
@@ -284,6 +289,35 @@ for (const tool of ["convert", "compress"] as const) {
     await act(async () => choose(null));
     expect(mocks.enqueue).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Select a.mp4" })).toBeTruthy();
+  });
+}
+
+for (const tool of ["convert", "compress"] as const) {
+  it(`${tool} selects an existing handoff path once and consumes navigation state`, async () => {
+    clearWorkspaceDrafts(tool);
+    const first = render(page(tool));
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await screen.findByRole("button", { name: "Select a.mp4" });
+    first.unmount();
+
+    const handoff = {
+      id: "transfer-existing",
+      sourceJobId: "finished-job",
+      path: "/a.mp4",
+      destination: tool,
+    };
+    render(
+      <MemoryRouter initialEntries={[{ pathname: `/${tool}`, state: { handoff } }]}>
+        {tool === "convert" ? <ConvertPage /> : <CompressPage />}
+        <NavigationStateProbe />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Select a.mp4" })).toHaveLength(1);
+      expect(screen.getByTestId("navigation-state").textContent).toBe("null");
+    });
+    expect(mocks.enqueue).not.toHaveBeenCalled();
   });
 }
 

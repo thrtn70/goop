@@ -2,7 +2,6 @@ import { useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import type { Job } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
-import { api } from "@/ipc/commands";
 import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
 import PreviewContent from "./PreviewContent";
 
@@ -26,10 +25,6 @@ export default function PreviewPanel() {
     if (!handoff) return;
     nav("/" + destination, { state: { handoff } });
   }
-  function handleReveal(path: string) {
-    void api.queue.reveal(path);
-  }
-
   return (
     <aside
       aria-label="Preview"
@@ -51,7 +46,6 @@ export default function PreviewPanel() {
         variant="panel"
         onConvertAgain={job => handleHandoff(job, "convert")}
         onCompress={job => handleHandoff(job, "compress")}
-        onReveal={handleReveal}
       />
     </aside>
   );

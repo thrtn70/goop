@@ -13,7 +13,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import type { JobId, JobState } from "@/types";
+import type { Job, JobId, JobState } from "@/types";
 import { api } from "@/ipc/commands";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { formatError } from "@/ipc/error";
@@ -21,6 +21,8 @@ import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
 import SortableQueueRow from "./SortableQueueRow";
+import { useNavigate } from "react-router-dom";
+import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
 
 /** Active = running or paused. Paused rows stay in this group so the
  *  user can resume them; whether the job still holds its concurrency
@@ -48,6 +50,7 @@ function formatEta(secs: number | null): string {
 }
 
 export default function QueueSidebar() {
+  const navigate = useNavigate();
   const jobs = useAppStore((s) => s.jobs);
   const unseen = useAppStore((s) => s.unseenCompletions);
   const clearUnseen = useAppStore((s) => s.clearUnseen);
@@ -76,6 +79,12 @@ export default function QueueSidebar() {
   // — if the selection changes (add/remove), the confirm resets so we
   // don't act on a stale count.
   const [confirmingCount, setConfirmingCount] = useState<number | null>(null);
+
+  function handleHandoff(job: Job, destination: HandoffDestination): void {
+    const handoff = createHandoff(job, destination);
+    if (!handoff) return;
+    navigate(`/${destination}`, { state: { handoff } });
+  }
 
   useEffect(() => {
     const parent = panelRef.current?.parentElement;
@@ -340,7 +349,7 @@ export default function QueueSidebar() {
           </div>
           <div className="mt-2 space-y-1">
             {done.map((j, i) => (
-              <QueueRow key={jobIdKey(j.id)} job={j} index={i} />
+              <QueueRow key={jobIdKey(j.id)} job={j} index={i} onHandoff={handleHandoff} />
             ))}
           </div>
         </>

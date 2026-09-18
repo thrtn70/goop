@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import QueueRow from "@/features/queue/QueueRow";
 import { useAppStore } from "@/store/appStore";
@@ -12,11 +12,14 @@ const queueMocks = vi.hoisted(() => ({
   resume: vi.fn().mockResolvedValue(undefined),
   cancel: vi.fn().mockResolvedValue(undefined),
   retry: vi.fn().mockResolvedValue(undefined),
+  reveal: vi.fn().mockResolvedValue(undefined),
+  open: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/ipc/commands", () => ({
   api: {
     queue: queueMocks,
+    output: { open: queueMocks.open },
   },
 }));
 
@@ -53,6 +56,10 @@ beforeEach(() => {
   queueMocks.cancel.mockClear();
   queueMocks.retry.mockClear();
   queueMocks.retry.mockResolvedValue(undefined);
+  queueMocks.reveal.mockClear();
+  queueMocks.reveal.mockResolvedValue(undefined);
+  queueMocks.open.mockClear();
+  queueMocks.open.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -820,6 +827,155 @@ describe("Extract finishing stages", () => {
     expect(screen.queryByText("Ready")).toBeNull();
     expect(screen.getByRole("button", { name: /^Cancel/ })).toBeTruthy();
     view.rerender(<QueueRow job={{ ...job, state: "done", result: { output_path: "/tmp/video.mp4", bytes: 1n, duration_ms: 1n, result_kind: "file", file_count: 1, source_bytes: null, target_bytes: null, reencoded: null } }} index={0} />);
-    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByTitle("Ready")).toBeTruthy();
+  });
+});
+
+describe("QueueRow completed output actions", () => {
+  const result = {
+    output_path: "/tmp/movie.mp4",
+    bytes: 1n,
+    duration_ms: 1n,
+    result_kind: "file" as const,
+    file_count: 1,
+    source_bytes: null,
+    target_bytes: null,
+    reencoded: null,
+  };
+
+  it("keeps Show in Finder primary and exposes the remaining file actions in a menu", async () => {
+    const user = userEvent.setup();
+    const onHandoff = vi.fn();
+    const job = makeJob({ state: "done", result });
+    render(<QueueRow job={job} index={0} onHandoff={onHandoff} />);
+
+    await user.click(screen.getByRole("button", { name: /Show .* in Finder/ }));
+    expect(queueMocks.reveal).toHaveBeenCalledWith("/tmp/movie.mp4");
+    await user.click(screen.getByRole("button", { name: "More actions for movie.mp4" }));
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Copy path" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Convert…" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Compress…" })).toBeTruthy();
+
+    await user.click(screen.getByRole("menuitem", { name: "Convert…" }));
+    expect(onHandoff).toHaveBeenCalledWith(job, "convert");
+  });
+
+  it("opens folders but never offers folder handoffs", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      state: "done",
+      result: { ...result, output_path: "/tmp/album", result_kind: "folder", file_count: 3 },
+    });
+    render(<QueueRow job={job} index={0} onHandoff={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "More actions for album" }));
+    await user.click(screen.getByRole("menuitem", { name: "Open" }));
+    expect(queueMocks.open).toHaveBeenCalledWith("/tmp/album", "folder");
+    await user.click(screen.getByRole("button", { name: "More actions for album" }));
+    expect(screen.queryByRole("menuitem", { name: "Convert…" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Compress…" })).toBeNull();
+  });
+
+  it("closes the completed menu on Escape and restores trigger focus", async () => {
+    const user = userEvent.setup();
+    render(<QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "More actions for movie.mp4" });
+    await user.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("focuses menu items, supports arrow navigation, and dismisses on Tab", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={vi.fn()} />
+        <button type="button">After row</button>
+      </>,
+    );
+    const trigger = screen.getByRole("button", { name: "More actions for movie.mp4" });
+    const show = screen.getByRole("button", { name: /Show .* in Finder/ });
+    const after = screen.getByRole("button", { name: "After row" });
+    await user.click(trigger);
+
+    const items = screen.getAllByRole("menuitem");
+    expect(document.activeElement).toBe(items[0]);
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(items[1]);
+    await user.keyboard("{End}");
+    expect(document.activeElement).toBe(items.at(-1));
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(items[0]);
+    await user.keyboard("{Tab}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(after);
+
+    await user.click(trigger);
+    expect(document.activeElement).toBe(screen.getAllByRole("menuitem")[0]);
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(show);
+  });
+
+  it("restores the trigger after outside dismissal from a focused menu item", async () => {
+    const user = userEvent.setup();
+    render(<QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "More actions for movie.mp4" });
+    await user.click(trigger);
+    expect(document.activeElement).toBe(screen.getAllByRole("menuitem")[0]);
+
+    fireEvent.mouseDown(document.body);
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("does not steal focus from a clicked control outside the menu", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <button type="button">Outside control</button>
+        <QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={vi.fn()} />
+      </>,
+    );
+    await user.click(screen.getByRole("button", { name: "More actions for movie.mp4" }));
+    const outside = screen.getByRole("button", { name: "Outside control" });
+
+    await user.click(outside);
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("wraps forward focus instead of trapping it on a last-row menu trigger", async () => {
+    const user = userEvent.setup();
+    render(<QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "More actions for movie.mp4" });
+    const firstControl = screen.getByRole("button", { name: /Show .* in Finder/ });
+    await user.click(trigger);
+
+    await user.keyboard("{Tab}");
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(firstControl);
+  });
+
+  it("dispatches only the chosen action and retains the completed row after an error", async () => {
+    const user = userEvent.setup();
+    const onHandoff = vi.fn();
+    queueMocks.open.mockRejectedValueOnce(new Error("moved"));
+    render(<QueueRow job={makeJob({ state: "done", result })} index={0} onHandoff={onHandoff} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions for movie.mp4" }));
+    await user.click(screen.getByRole("menuitem", { name: "Open" }));
+
+    expect(queueMocks.open).toHaveBeenCalledOnce();
+    expect(queueMocks.reveal).not.toHaveBeenCalled();
+    expect(onHandoff).not.toHaveBeenCalled();
+    expect(useAppStore.getState().toasts.at(-1)?.title).toBe("Couldn't open output");
+    expect(screen.getByTitle("Ready")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "More actions for movie.mp4" })).toBeTruthy();
   });
 });
