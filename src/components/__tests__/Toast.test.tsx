@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Toast from "@/components/Toast";
 import type { Toast as ToastData } from "@/store/appStore";
@@ -46,7 +46,7 @@ describe("Toast variant a11y semantics", () => {
     expect(node.getAttribute("aria-live")).toBe("assertive");
   });
 
-  it("lets a neutral mixed-result toast announce assertively", () => {
+  it("lets a neutral mixed-result toast announce assertively after a live-region mutation", async () => {
     render(
       <Toast
         toast={makeToast({
@@ -59,9 +59,42 @@ describe("Toast variant a11y semantics", () => {
     );
     const node = screen.getByRole("alert");
     expect(node.getAttribute("aria-live")).toBe("assertive");
+    expect(node.textContent).toBe("");
+    await waitFor(() =>
+      expect(node.textContent).toBe("1 done · 1 failed · 1 cancelled"),
+    );
   });
 
-  it("gives an error alert the actionable reason before details are expanded", () => {
+  it("replaces a pending announcement and clears its timer on unmount", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender, unmount } = render(
+        <Toast toast={makeToast({ title: "First" })} onDismiss={() => {}} />,
+      );
+      const node = screen.getByRole("status");
+      expect(vi.getTimerCount()).toBe(1);
+
+      rerender(
+        <Toast toast={makeToast({ title: "Second" })} onDismiss={() => {}} />,
+      );
+      expect(vi.getTimerCount()).toBe(1);
+      act(() => vi.advanceTimersByTime(49));
+      expect(node.textContent).toBe("");
+      act(() => vi.advanceTimersByTime(1));
+      expect(node.textContent).toBe("Second");
+
+      rerender(
+        <Toast toast={makeToast({ title: "Third" })} onDismiss={() => {}} />,
+      );
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives an error alert the actionable reason before details are expanded", async () => {
     render(
       <Toast
         toast={makeToast({
@@ -73,11 +106,12 @@ describe("Toast variant a11y semantics", () => {
       />,
     );
 
-    expect(
-      screen.getByRole("alert", {
-        name: "clip.mp4 failed: The source file moved. Add it again.",
-      }),
-    ).toBeTruthy();
+    const alert = screen.getByRole("alert");
+    await waitFor(() =>
+      expect(alert.textContent).toBe(
+        "clip.mp4 failed: The source file moved. Add it again.",
+      ),
+    );
     expect(screen.queryByText("The source file moved. Add it again.")).toBeNull();
   });
 
@@ -92,7 +126,8 @@ describe("Toast variant a11y semantics", () => {
     );
 
     const alert = screen.getByRole("alert");
-    const announcement = alert.getAttribute("aria-label") ?? "";
+    await waitFor(() => expect(alert.textContent).not.toBe(""));
+    const announcement = alert.textContent ?? "";
     expect(announcement.length).toBeLessThanOrEqual(241);
     expect(announcement).toContain("clip.mp4 failed: First actionable line");
     expect(announcement).not.toContain("second diagnostic line");

@@ -51,6 +51,7 @@ function toastAnnouncement(title: string, detail: string | undefined): string {
 export default function Toast({ toast, onDismiss, visuallyHidden = false }: ToastProps) {
   const [expanded, setExpanded] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [announcementText, setAnnouncementText] = useState("");
   const revealFile = useRevealFile();
 
   useEffect(() => {
@@ -80,13 +81,19 @@ export default function Toast({ toast, onDismiss, visuallyHidden = false }: Toas
   const isError = toast.variant === "error";
   const announceAssertively = isError || toast.announceAssertively === true;
   const announcement = toastAnnouncement(toast.title, toast.detail);
+  useEffect(() => {
+    // WebKit/VoiceOver does not reliably announce a live region whose final
+    // text arrives in the same render that mounts the region. Mount it empty,
+    // then mutate its text so every toast produces one observable change.
+    setAnnouncementText("");
+    const handle = setTimeout(() => setAnnouncementText(announcement), 50);
+    return () => clearTimeout(handle);
+  }, [announcement]);
+
   const Icon = VARIANT_ICONS[toast.variant];
   return (
     <div
       data-toast-id={toast.id}
-      role={announceAssertively ? "alert" : "status"}
-      aria-live={announceAssertively ? "assertive" : "polite"}
-      aria-label={announcement}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       className={clsx(
@@ -96,6 +103,14 @@ export default function Toast({ toast, onDismiss, visuallyHidden = false }: Toas
         !visuallyHidden && VARIANT_STYLES[toast.variant],
       )}
     >
+      <div
+        role={announceAssertively ? "alert" : "status"}
+        aria-live={announceAssertively ? "assertive" : "polite"}
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {announcementText}
+      </div>
       <div
         className="contents"
         aria-hidden={visuallyHidden || undefined}
