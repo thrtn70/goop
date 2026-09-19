@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
@@ -17,6 +17,12 @@ const windowsHeifInstaller = readFileSync(
   new URL("./install-windows-heif-deps.sh", import.meta.url),
   "utf8",
 );
+const workflowDirectory = new URL("../.github/workflows/", import.meta.url);
+const workflows = readdirSync(workflowDirectory)
+  .filter((name) => /\.ya?ml$/.test(name))
+  .map((name) => ({ name, body: readFileSync(new URL(name, workflowDirectory), "utf8") }));
+const checkoutNode24Ref = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+const setupNode24Ref = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
 
 function job(name) {
   const start = lines.findIndex((line) => line === `  ${name}:`);
@@ -31,6 +37,25 @@ function auditJob(name) {
   const end = auditLines.findIndex((line, index) => index > start && /^ {2}[a-z][a-z0-9-]*:$/.test(line));
   return auditLines.slice(start, end === -1 ? undefined : end).join("\n");
 }
+
+test("all workflows pin the current Node 24 checkout and setup-node actions", () => {
+  let checkoutCount = 0;
+  let setupNodeCount = 0;
+
+  for (const { name, body } of workflows) {
+    for (const match of body.matchAll(/actions\/checkout@[^\s]+/g)) {
+      checkoutCount += 1;
+      assert.equal(match[0], checkoutNode24Ref, `${name} has a stale or mutable checkout action`);
+    }
+    for (const match of body.matchAll(/actions\/setup-node@[^\s]+/g)) {
+      setupNodeCount += 1;
+      assert.equal(match[0], setupNode24Ref, `${name} has a stale or mutable setup-node action`);
+    }
+  }
+
+  assert.ok(checkoutCount > 0, "no checkout actions found to validate");
+  assert.ok(setupNodeCount > 0, "no setup-node actions found to validate");
+});
 
 test("release builds run read-only and without persisted checkout credentials", () => {
   assert.match(workflow, /^permissions:\n {2}contents: read$/m);
