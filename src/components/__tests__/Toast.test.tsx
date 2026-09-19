@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Toast from "@/components/Toast";
 import type { Toast as ToastData } from "@/store/appStore";
@@ -44,6 +44,97 @@ describe("Toast variant a11y semantics", () => {
     render(<Toast toast={makeToast({ variant: "error", title: "Boom" })} onDismiss={() => {}} />);
     const node = screen.getByRole("alert");
     expect(node.getAttribute("aria-live")).toBe("assertive");
+  });
+
+  it("lets a neutral mixed-result toast announce assertively after a live-region mutation", async () => {
+    render(
+      <Toast
+        toast={makeToast({
+          variant: "info",
+          title: "1 done · 1 failed · 1 cancelled",
+          announceAssertively: true,
+        })}
+        onDismiss={() => {}}
+      />,
+    );
+    const node = screen.getByRole("alert");
+    expect(node.getAttribute("aria-live")).toBe("assertive");
+    expect(node.textContent).toBe("");
+    await waitFor(() =>
+      expect(node.textContent).toBe("1 done · 1 failed · 1 cancelled"),
+    );
+  });
+
+  it("replaces a pending announcement and clears its timer on unmount", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender, unmount } = render(
+        <Toast toast={makeToast({ title: "First" })} onDismiss={() => {}} />,
+      );
+      const node = screen.getByRole("status");
+      expect(vi.getTimerCount()).toBe(1);
+
+      rerender(
+        <Toast toast={makeToast({ title: "Second" })} onDismiss={() => {}} />,
+      );
+      expect(vi.getTimerCount()).toBe(1);
+      act(() => vi.advanceTimersByTime(49));
+      expect(node.textContent).toBe("");
+      act(() => vi.advanceTimersByTime(1));
+      expect(node.textContent).toBe("Second");
+
+      rerender(
+        <Toast toast={makeToast({ title: "Third" })} onDismiss={() => {}} />,
+      );
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives an error alert the actionable reason before details are expanded", async () => {
+    render(
+      <Toast
+        toast={makeToast({
+          variant: "error",
+          title: "clip.mp4 failed",
+          detail: "The source file moved. Add it again.",
+        })}
+        onDismiss={() => {}}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    await waitFor(() =>
+      expect(alert.textContent).toBe(
+        "clip.mp4 failed: The source file moved. Add it again.",
+      ),
+    );
+    expect(screen.queryByText("The source file moved. Add it again.")).toBeNull();
+  });
+
+  it("bounds the spoken error summary while preserving expandable detail", async () => {
+    const user = userEvent.setup();
+    const detail = `First actionable line ${"x".repeat(500)}\nsecond diagnostic line`;
+    render(
+      <Toast
+        toast={makeToast({ variant: "error", title: "clip.mp4 failed", detail })}
+        onDismiss={() => {}}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    await waitFor(() => expect(alert.textContent).not.toBe(""));
+    const announcement = alert.textContent ?? "";
+    expect(announcement.length).toBeLessThanOrEqual(241);
+    expect(announcement).toContain("clip.mp4 failed: First actionable line");
+    expect(announcement).not.toContain("second diagnostic line");
+    expect(announcement.endsWith("…")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(document.querySelector("pre")?.textContent).toBe(detail);
   });
 
   it("cancelled variant uses role=status + aria-live=polite", () => {

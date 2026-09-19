@@ -108,8 +108,8 @@ function StartButton({
         {phase === "starting" && "Starting…"}
         {phase === "started" && "Added to queue"}
       </button>
-      {/* JobStateAnnouncer deliberately skips a job's first-seen state, so
-          without this the enqueue has no non-visual signal at all: a
+      {/* Queue toasts report terminal outcomes, not a successful enqueue, so
+          this local status is the immediate non-visual confirmation: a
           disabled control's label change is not reliably announced. It
           renders even when empty — a live region that is removed and
           re-added does not announce. A failed start is announced by the

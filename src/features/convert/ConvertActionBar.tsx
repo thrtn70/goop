@@ -10,6 +10,7 @@ import {
   beginDestinationChoice,
   isCurrentDestinationChoice,
   tryBegin,
+  setSubmissionBatch,
   setSubmissionPhase,
   finishSubmission,
   useWorkspaceSubmissions,
@@ -189,6 +190,7 @@ export default function ConvertActionBar({
       }
       setSubmissionPhase("convert", token, "enqueuing");
       const batchId = snapshot.length > 1 ? newBatchId() : null;
+      if (batchId) setSubmissionBatch("convert", token, batchId);
       const results = await Promise.allSettled(
         snapshot.map((f) => {
           const output = destination ?? outputFolder ?? dirname(f.path);

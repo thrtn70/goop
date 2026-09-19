@@ -77,7 +77,7 @@ async fn bounded_probe_timeout_recovers_legacy_inspection_only() {
 
 #[tokio::test]
 async fn repeated_probe_overflow_stays_bounded() {
-    let (_directory, resolver, source) = fixture("head -c 1052672 /dev/zero | tr '\\0' x");
+    let (_directory, resolver, source) = fixture("exec head -c 1052672 /dev/zero");
     let error = inspect_source(&resolver, &source).await.unwrap_err();
     assert_eq!(
         error.user_message(),
