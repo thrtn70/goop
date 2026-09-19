@@ -73,15 +73,19 @@ export default function Toast({ toast, onDismiss, visuallyHidden = false }: Toas
   const canExpand = Boolean(toast.detail) && toast.variant === "error";
 
   // Errors should pre-empt other content (`role="alert"` +
-  // `aria-live="assertive"`); successes / info / cancels queue politely.
+  // `aria-live="assertive"`). A mixed batch with a failed member keeps its
+  // neutral visual treatment, but native WebKit/VoiceOver testing showed its
+  // polite region could go entirely unspoken, so that producer opts into the
+  // same announcement urgency without becoming a sticky error toast.
   const isError = toast.variant === "error";
+  const announceAssertively = isError || toast.announceAssertively === true;
   const announcement = toastAnnouncement(toast.title, toast.detail);
   const Icon = VARIANT_ICONS[toast.variant];
   return (
     <div
       data-toast-id={toast.id}
-      role={isError ? "alert" : "status"}
-      aria-live={isError ? "assertive" : "polite"}
+      role={announceAssertively ? "alert" : "status"}
+      aria-live={announceAssertively ? "assertive" : "polite"}
       aria-label={announcement}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}

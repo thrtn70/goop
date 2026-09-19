@@ -46,6 +46,21 @@ describe("Toast variant a11y semantics", () => {
     expect(node.getAttribute("aria-live")).toBe("assertive");
   });
 
+  it("lets a neutral mixed-result toast announce assertively", () => {
+    render(
+      <Toast
+        toast={makeToast({
+          variant: "info",
+          title: "1 done · 1 failed · 1 cancelled",
+          announceAssertively: true,
+        })}
+        onDismiss={() => {}}
+      />,
+    );
+    const node = screen.getByRole("alert");
+    expect(node.getAttribute("aria-live")).toBe("assertive");
+  });
+
   it("gives an error alert the actionable reason before details are expanded", () => {
     render(
       <Toast

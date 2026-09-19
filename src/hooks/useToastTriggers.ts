@@ -522,7 +522,7 @@ function failedDetail(batch: Batch): string | undefined {
 }
 
 function emitBatchToast(
-  enqueueToast: (t: { variant: "success" | "error" | "cancelled" | "info"; title: string; detail?: string; outputPath?: string; ttlMs?: number | null }) => string,
+  enqueueToast: (t: { variant: "success" | "error" | "cancelled" | "info"; title: string; detail?: string; outputPath?: string; announceAssertively?: boolean; ttlMs?: number | null }) => string,
   batch: Batch,
 ) {
   const total = batch.ids.size;
@@ -555,6 +555,7 @@ function emitBatchToast(
       // one shows and the rest are in History.
       detail: failedDetail(batch),
       outputPath: batch.lastOutputPath ?? undefined,
+      announceAssertively: batch.failed > 0,
     });
   }
 }

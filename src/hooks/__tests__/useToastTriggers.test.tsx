@@ -364,6 +364,7 @@ describe("useToastTriggers batch failure detail", () => {
     const toast = lastToast();
     expect(toast?.title).toBe("1 done · 1 failed");
     expect(toast?.detail).toContain("b.example/two — The site blocked the request.");
+    expect(toast?.announceAssertively).toBe(true);
   });
 
   it("bounds each reason so a stderr dump cannot swallow the screen", () => {

@@ -51,6 +51,8 @@ export interface Toast {
   detail?: string;
   /** Optional output path — if present, the toast gets a Reveal action. */
   outputPath?: string;
+  /** Use assertive live-region semantics without changing visual severity. */
+  announceAssertively?: boolean;
   /** When this toast should auto-dismiss (ms epoch). null = sticky. */
   dismissAt: number | null;
   createdAt: number;
@@ -414,6 +416,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       title: t.title,
       detail: t.detail,
       outputPath: t.outputPath,
+      announceAssertively: t.announceAssertively,
       dismissAt,
       createdAt: now,
     };
