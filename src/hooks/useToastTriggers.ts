@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
 import type { Job, JobKind, JobState } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
+import { useWorkspaceSubmissions } from "@/store/workspaceSubmissions";
 import { canRetryKind, failureView } from "@/lib/jobFailure";
 
 async function fireNativeNotification(title: string, body?: string): Promise<void> {
@@ -92,6 +93,24 @@ function pageForKind(kind: JobKind): string {
   return "/convert";
 }
 
+function batchAdmissionInProgress(): boolean {
+  const submissions = useWorkspaceSubmissions.getState();
+  return (
+    submissions.convert.active?.phase === "enqueuing" ||
+    submissions.compress.active?.phase === "enqueuing"
+  );
+}
+
+function activeSubmissionBatchIds(): Set<string> {
+  const submissions = useWorkspaceSubmissions.getState();
+  return new Set(
+    [
+      submissions.convert.active?.batchId,
+      submissions.compress.active?.batchId,
+    ].filter((id): id is string => Boolean(id)),
+  );
+}
+
 export function useToastTriggers(): void {
   const location = useLocation();
   const previousStatesRef = useRef<Map<string, string>>(new Map());
@@ -99,6 +118,10 @@ export function useToastTriggers(): void {
     useAppStore.getState().queueSnapshotGeneration > 0,
   );
   const batchesRef = useRef<Map<string, Batch>>(new Map());
+  const pendingBatchFlushesRef = useRef<Set<string>>(new Set());
+  const closingBatchIdsRef = useRef<Set<string>>(new Set());
+  const admissionBarrierGenerationRef = useRef<number | null>(null);
+  const admissionRefreshRunRef = useRef(0);
   const pathRef = useRef(location.pathname);
 
   // Keep pathRef in sync without re-subscribing to the store on every
@@ -135,19 +158,37 @@ export function useToastTriggers(): void {
         !bootstrapSnapshotSeenRef.current &&
         state.queueSnapshotGeneration > prevState.queueSnapshotGeneration
       ) {
-        const snapshot = terminalSnapshot(state.jobs);
+        const activeBatchIds = activeSubmissionBatchIds();
+        for (const batchId of closingBatchIdsRef.current) {
+          activeBatchIds.add(batchId);
+        }
+        const historicalJobs =
+          activeBatchIds.size === 0
+            ? state.jobs
+            : state.jobs.filter((job) => {
+                const payload = job.payload as JobPayload | null;
+                return !payload?.batch_id || !activeBatchIds.has(payload.batch_id);
+              });
+        const snapshot = terminalSnapshot(historicalJobs);
         previousStatesRef.current = snapshot.states;
         batchesRef.current = snapshot.openBatches;
         bootstrapSnapshotSeenRef.current = true;
-        return;
+        // Queue hydration is history, but a batch being admitted right now is
+        // not. Continue through the transition fold for only those active
+        // batch IDs; the historical jobs above are already memoized.
+        if (activeBatchIds.size === 0) return;
       }
 
       const prev = previousStatesRef.current;
       const { enqueueToast, incrementUnseen } = state;
       const notificationsEnabled = state.settings?.notifications_enabled === true;
+      const barrierGeneration = admissionBarrierGenerationRef.current;
+      const snapshotIsAuthoritative =
+        barrierGeneration === null ||
+        state.queueSnapshotGeneration >= barrierGeneration;
       // Batches touched by this publish, flushed once the whole snapshot has
       // been folded in — see the loop below this one.
-      const touchedBatches = new Set<string>();
+      const touchedBatches = new Set<string>(pendingBatchFlushesRef.current);
 
       for (const job of state.jobs) {
         const key = jobIdKey(job.id);
@@ -242,14 +283,88 @@ export function useToastTriggers(): void {
         });
         if (stillOpen) continue;
 
+        // Convert and Compress admit sibling jobs through separate IPC calls.
+        // A fast first member can finish before the other calls have inserted
+        // their rows, so the current queue snapshot is not yet authoritative
+        // for the batch's membership. Hold the accumulator until the action
+        // bar closes its enqueuing phase, then refresh the durable queue and
+        // flush all of the siblings together.
+        if (batchAdmissionInProgress() || !snapshotIsAuthoritative) {
+          pendingBatchFlushesRef.current.add(batchId);
+          continue;
+        }
+
         emitBatchToast(enqueueToast, batch);
         if (notificationsEnabled) {
           void fireNativeNotification(batchNotificationTitle(batch));
         }
         batchesRef.current.delete(batchId);
+        pendingBatchFlushesRef.current.delete(batchId);
+      }
+
+      if (
+        barrierGeneration !== null &&
+        state.queueSnapshotGeneration >= barrierGeneration
+      ) {
+        admissionBarrierGenerationRef.current = null;
+        closingBatchIdsRef.current.clear();
       }
     });
-    return () => unsubscribe();
+
+    const refreshAfterAdmission = async (): Promise<void> => {
+      const run = ++admissionRefreshRunRef.current;
+      const maxAttempts = 3;
+
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const refresh = useAppStore.getState().refreshJobs();
+        admissionBarrierGenerationRef.current =
+          useAppStore.getState().queueRequestGeneration;
+        try {
+          await refresh;
+          return;
+        } catch {
+          if (run !== admissionRefreshRunRef.current) return;
+        }
+      }
+
+      if (run !== admissionRefreshRunRef.current) return;
+      // Three durable-queue reads failed after admission had already closed.
+      // Release the barrier against the best complete snapshot observed so
+      // far rather than permanently suppressing the toast/live announcement.
+      admissionBarrierGenerationRef.current = null;
+      useAppStore.setState((state) => ({ jobs: [...state.jobs] }));
+      closingBatchIdsRef.current.clear();
+    };
+
+    const unsubscribeSubmissions = useWorkspaceSubmissions.subscribe(
+      (state, prevState) => {
+        for (const tool of ["convert", "compress"] as const) {
+          const previous = prevState[tool].active;
+          const current = state[tool].active;
+          if (
+            previous?.phase === "enqueuing" &&
+            previous.batchId &&
+            current?.id !== previous.id
+          ) {
+            closingBatchIdsRef.current.add(previous.batchId);
+          }
+        }
+        const wasEnqueuing =
+          prevState.convert.active?.phase === "enqueuing" ||
+          prevState.compress.active?.phase === "enqueuing";
+        const isEnqueuing =
+          state.convert.active?.phase === "enqueuing" ||
+          state.compress.active?.phase === "enqueuing";
+        if (wasEnqueuing && !isEnqueuing) {
+          void refreshAfterAdmission();
+        }
+      },
+    );
+
+    return () => {
+      unsubscribe();
+      unsubscribeSubmissions();
+    };
   }, []);
 }
 

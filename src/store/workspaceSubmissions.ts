@@ -2,7 +2,7 @@ import { create } from "zustand";
 export type SubmissionTool = "convert" | "compress";
 type Phase = "choosing_destination" | "enqueuing";
 type Slot = {
-  active: { id: number; phase: Phase } | null;
+  active: { id: number; phase: Phase; batchId: string | null } | null;
   error: string | null;
 };
 export const useWorkspaceSubmissions = create<{
@@ -17,7 +17,10 @@ export function tryBegin(tool: SubmissionTool): number | null {
   if (useWorkspaceSubmissions.getState()[tool].active) return null;
   const id = ++nextId;
   useWorkspaceSubmissions.setState({
-    [tool]: { active: { id, phase: "choosing_destination" }, error: null },
+    [tool]: {
+      active: { id, phase: "choosing_destination", batchId: null },
+      error: null,
+    },
   });
   return id;
 }
@@ -26,9 +29,21 @@ export function setSubmissionPhase(
   id: number,
   phase: Phase,
 ) {
-  if (useWorkspaceSubmissions.getState()[tool].active?.id !== id) return;
+  const active = useWorkspaceSubmissions.getState()[tool].active;
+  if (active?.id !== id) return;
   useWorkspaceSubmissions.setState({
-    [tool]: { active: { id, phase }, error: null },
+    [tool]: { active: { ...active, phase }, error: null },
+  });
+}
+export function setSubmissionBatch(
+  tool: SubmissionTool,
+  id: number,
+  batchId: string,
+) {
+  const active = useWorkspaceSubmissions.getState()[tool].active;
+  if (active?.id !== id) return;
+  useWorkspaceSubmissions.setState({
+    [tool]: { active: { ...active, batchId }, error: null },
   });
 }
 export function finishSubmission(

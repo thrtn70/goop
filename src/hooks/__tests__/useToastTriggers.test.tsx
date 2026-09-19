@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { useToastTriggers } from "@/hooks/useToastTriggers";
+import { api } from "@/ipc/commands";
 import { useAppStore } from "@/store/appStore";
+import {
+  finishSubmission,
+  setSubmissionBatch,
+  setSubmissionPhase,
+  tryBegin,
+  useWorkspaceSubmissions,
+} from "@/store/workspaceSubmissions";
 import type { Job, JobState } from "@/types";
 
 vi.mock("@tauri-apps/plugin-notification", () => ({
@@ -68,6 +76,11 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  useWorkspaceSubmissions.setState({
+    convert: { active: null, error: null },
+    compress: { active: null, error: null },
+  });
 });
 
 describe("useToastTriggers across retry transitions", () => {
@@ -470,6 +483,194 @@ describe("useToastTriggers batch aggregation across snapshots", () => {
     const toast = lastToast();
     expect(toast?.title).toBe("1 done · 1 failed · 1 cancelled");
     expect(toast?.detail).toContain("b.example/two — The site blocked the request.");
+  });
+
+  it("waits for batch submission to finish before summarizing fast members", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    act(() => {
+      useAppStore.setState({
+        jobs: [],
+        queueRequestGeneration: 1,
+        queueSnapshotGeneration: 1,
+      });
+    });
+    let token = 0;
+    act(() => {
+      token = tryBegin("convert")!;
+      setSubmissionPhase("convert", token, "enqueuing");
+    });
+
+    // Native IPC can publish a very fast first completion while sibling
+    // queue commands are still being admitted. That partial snapshot must
+    // not be mistaken for a one-item batch.
+    publish([jobs[0]!]);
+    expect(toastCount()).toBe(0);
+
+    const list = vi.spyOn(api.queue, "list").mockResolvedValueOnce([...jobs]);
+    act(() => finishSubmission("convert", token, null));
+
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+    await waitFor(() => expect(useAppStore.getState().jobs).toEqual(jobs));
+    expect(toastCount()).toBe(1);
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
+  });
+
+  it("does not classify an active batch as history during delayed bootstrap", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    let token = 0;
+    act(() => {
+      token = tryBegin("convert")!;
+      setSubmissionPhase("convert", token, "enqueuing");
+      setSubmissionBatch("convert", token, "batch-1");
+    });
+
+    // This is the first accepted queue snapshot after mount. Existing
+    // terminal history must be seeded, but the active batch member is live.
+    act(() => {
+      useAppStore.setState({
+        jobs: [jobs[0]!],
+        queueRequestGeneration: 1,
+        queueSnapshotGeneration: 1,
+      });
+    });
+    expect(toastCount()).toBe(0);
+
+    vi.spyOn(api.queue, "list").mockResolvedValueOnce([...jobs]);
+    act(() => finishSubmission("convert", token, null));
+
+    await waitFor(() => expect(toastCount()).toBe(1));
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
+  });
+
+  it("retains a closing batch when its refresh is the first snapshot", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    let token = 0;
+    act(() => {
+      token = tryBegin("convert")!;
+      setSubmissionPhase("convert", token, "enqueuing");
+      setSubmissionBatch("convert", token, "batch-1");
+    });
+
+    const list = vi.spyOn(api.queue, "list").mockResolvedValueOnce([...jobs]);
+    act(() => finishSubmission("convert", token, null));
+
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+    await waitFor(() => expect(toastCount()).toBe(1));
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
+  });
+
+  it("retains one closing batch while the other tool is still enqueuing", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    let convertToken = 0;
+    let compressToken = 0;
+    act(() => {
+      convertToken = tryBegin("convert")!;
+      setSubmissionPhase("convert", convertToken, "enqueuing");
+      setSubmissionBatch("convert", convertToken, "batch-1");
+      compressToken = tryBegin("compress")!;
+      setSubmissionPhase("compress", compressToken, "enqueuing");
+      setSubmissionBatch("compress", compressToken, "batch-2");
+      finishSubmission("convert", convertToken, null);
+    });
+
+    act(() => {
+      useAppStore.setState({
+        jobs,
+        queueRequestGeneration: 1,
+        queueSnapshotGeneration: 1,
+      });
+    });
+    expect(toastCount()).toBe(0);
+
+    vi.spyOn(api.queue, "list").mockResolvedValueOnce([...jobs]);
+    act(() => finishSubmission("compress", compressToken, null));
+
+    await waitFor(() => expect(toastCount()).toBe(1));
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
+  });
+
+  it("does not flush a partial batch while the closing refresh is unresolved", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    act(() => {
+      useAppStore.setState({
+        jobs: [],
+        queueRequestGeneration: 1,
+        queueSnapshotGeneration: 1,
+      });
+    });
+    let token = 0;
+    act(() => {
+      token = tryBegin("convert")!;
+      setSubmissionPhase("convert", token, "enqueuing");
+    });
+
+    let resolveList!: (jobs: Job[]) => void;
+    const closingSnapshot = new Promise<Job[]>((resolve) => {
+      resolveList = resolve;
+    });
+    const list = vi.spyOn(api.queue, "list").mockReturnValueOnce(closingSnapshot);
+    act(() => finishSubmission("convert", token, null));
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+
+    // A queue event can finish an older partial refresh after admission has
+    // closed. Its generation is below the closing refresh's barrier.
+    publish([jobs[0]!]);
+    expect(toastCount()).toBe(0);
+
+    await act(async () => resolveList([...jobs]));
+    await waitFor(() => expect(toastCount()).toBe(1));
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
+  });
+
+  it("retries a failed closing refresh and eventually releases the batch", async () => {
+    const jobs = [
+      batchJob(1, "done", "https://a.example/one"),
+      batchJob(2, failed("The site blocked the request."), "https://b.example/two"),
+      batchJob(3, "cancelled", "https://c.example/three"),
+    ];
+    act(() => {
+      useAppStore.setState({
+        jobs: [],
+        queueRequestGeneration: 1,
+        queueSnapshotGeneration: 1,
+      });
+    });
+    let token = 0;
+    act(() => {
+      token = tryBegin("convert")!;
+      setSubmissionPhase("convert", token, "enqueuing");
+    });
+    publish(jobs);
+    expect(toastCount()).toBe(0);
+
+    const list = vi
+      .spyOn(api.queue, "list")
+      .mockRejectedValue(new Error("queue unavailable"));
+    act(() => finishSubmission("convert", token, null));
+
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(toastCount()).toBe(1));
+    expect(lastToast()?.title).toBe("1 done · 1 failed · 1 cancelled");
   });
 
   it("waits for the stragglers when a snapshot settles only part of the batch", () => {
