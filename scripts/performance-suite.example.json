@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "suite_id": "perf-01a-release-reference",
+  "limitations": [
+    "Fresh processes with warm filesystem caches; this is not a cold-cache measurement.",
+    "Background applications may remain during measurement.",
+    "WebKit/XPC attribution is incomplete for descendant RSS.",
+    "No dedicated laboratory environment is claimed."
+  ],
+  "defaults": {
+    "warmups": 1,
+    "repetitions": 5,
+    "timeout_ms": 600000,
+    "suite_timeout_ms": 86400000,
+    "log_limit_bytes": 4194304,
+    "suite_log_limit_bytes": 536870912,
+    "storage_budget_bytes": 107374182400,
+    "suite_storage_budget_bytes": 107374182400
+  },
+  "fixture_roles": [
+    "raw_48mp",
+    "inspect_image",
+    "inspect_video",
+    "video_1080_encode",
+    "video_4k_encode",
+    "video_h264_copy",
+    "video_hevc_copy"
+  ],
+  "workloads": [
+    {
+      "id": "raw-single",
+      "adapter": "single_conversion",
+      "fixture_role": "raw_48mp",
+      "request": {
+        "target": "jpeg",
+        "quality_preset": null,
+        "resolution_cap": null,
+        "gif_options": null,
+        "compress_mode": null,
+        "batch_id": null,
+        "metadata_policy": "strip_all",
+        "subtitle": null,
+        "image_options": null,
+        "video_options": null,
+        "audio_options": null,
+        "track_options": null,
+        "image_alpha_policy": null,
+        "image_color_policy": null
+      },
+      "expected_output": { "extension": "jpg", "probe": "media", "format_names": ["image2"], "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }] },
+      "timeout_ms": 3600000
+    },
+    {
+      "id": "raw-batch-4",
+      "adapter": "workload",
+      "mode": "conversion_batch",
+      "concurrency": 2,
+      "items": [
+        { "id": "raw-1", "fixture_role": "raw_48mp", "request": { "target": "jpeg", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "strip_all", "subtitle": null, "image_options": null, "video_options": null, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null }, "expected_output": { "extension": "jpg", "probe": "media", "format_names": ["image2"], "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }] } },
+        { "id": "raw-2", "fixture_role": "raw_48mp", "request": { "target": "jpeg", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "strip_all", "subtitle": null, "image_options": null, "video_options": null, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null }, "expected_output": { "extension": "jpg", "probe": "media", "format_names": ["image2"], "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }] } },
+        { "id": "raw-3", "fixture_role": "raw_48mp", "request": { "target": "jpeg", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "strip_all", "subtitle": null, "image_options": null, "video_options": null, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null }, "expected_output": { "extension": "jpg", "probe": "media", "format_names": ["image2"], "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }] } },
+        { "id": "raw-4", "fixture_role": "raw_48mp", "request": { "target": "jpeg", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "strip_all", "subtitle": null, "image_options": null, "video_options": null, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null }, "expected_output": { "extension": "jpg", "probe": "media", "format_names": ["image2"], "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }] } }
+      ],
+      "expected_output": { "kind": "metrics_only" },
+      "timeout_ms": 3600000
+    },
+    {
+      "id": "inspection-single",
+      "adapter": "workload",
+      "mode": "inspection_burst",
+      "fixture_roles": ["inspect_image"],
+      "source_count": 1,
+      "expected_output": { "kind": "metrics_only" }
+    },
+    {
+      "id": "inspection-burst-32",
+      "adapter": "workload",
+      "mode": "inspection_burst",
+      "fixture_roles": ["inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video", "inspect_image", "inspect_video"],
+      "source_count": 32,
+      "expected_output": { "kind": "metrics_only" }
+    },
+    {
+      "id": "video-1080-software-encode",
+      "adapter": "single_conversion",
+      "fixture_role": "video_1080_encode",
+      "request": { "target": "mp4", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "preserve", "subtitle": null, "image_options": null, "video_options": { "kind": "encode", "codec": "h264", "rate_control": { "kind": "constant_quality", "crf": 23 }, "speed": "medium", "processor": "software" }, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null },
+      "expected_output": { "extension": "mp4", "probe": "media", "format_names": ["mp4"], "required_streams": [{ "codec_type": "video", "codec_name": "h264" }] }
+    },
+    {
+      "id": "video-4k-software-encode",
+      "adapter": "single_conversion",
+      "fixture_role": "video_4k_encode",
+      "request": { "target": "mp4", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "preserve", "subtitle": null, "image_options": null, "video_options": { "kind": "encode", "codec": "h264", "rate_control": { "kind": "constant_quality", "crf": 23 }, "speed": "medium", "processor": "software" }, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null },
+      "expected_output": { "extension": "mp4", "probe": "media", "format_names": ["mp4"], "required_streams": [{ "codec_type": "video", "codec_name": "h264" }] }
+    },
+    {
+      "id": "video-h264-copy",
+      "adapter": "single_conversion",
+      "fixture_role": "video_h264_copy",
+      "request": { "target": "mp4", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "preserve", "subtitle": null, "image_options": null, "video_options": { "kind": "copy" }, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null },
+      "expected_output": { "extension": "mp4", "probe": "media", "format_names": ["mp4"], "required_streams": [{ "codec_type": "video", "codec_name": "h264" }] }
+    },
+    {
+      "id": "video-hevc-copy",
+      "adapter": "single_conversion",
+      "fixture_role": "video_hevc_copy",
+      "request": { "target": "mkv", "quality_preset": null, "resolution_cap": null, "gif_options": null, "compress_mode": null, "batch_id": null, "metadata_policy": "preserve", "subtitle": null, "image_options": null, "video_options": { "kind": "copy" }, "audio_options": null, "track_options": null, "image_alpha_policy": null, "image_color_policy": null },
+      "expected_output": { "extension": "mkv", "probe": "media", "format_names": ["matroska"], "required_streams": [{ "codec_type": "video", "codec_name": "hevc" }] }
+    },
+    { "id": "queue-0", "adapter": "startup", "jobs": 0, "expected_output": { "kind": "startup_marker" } },
+    { "id": "queue-200", "adapter": "startup", "jobs": 200, "expected_output": { "kind": "startup_marker" } },
+    { "id": "queue-1000", "adapter": "startup", "jobs": 1000, "expected_output": { "kind": "startup_marker" } }
+  ]
+}

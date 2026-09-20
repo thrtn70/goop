@@ -1,9 +1,10 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, rmSync, statSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { treeRss, summarize } from './performance-baseline.mjs';
+import { treeRss, summarize, directoryBytes, ownedSymlinks } from './performance-baseline.mjs';
+import { withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -11,7 +12,7 @@ const schema = readFileSync(new URL('../crates/goop-queue/migrations/0001_init.s
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 
 export function seedQueue(path, count) {
-  if (![0, 200].includes(count)) throw Error('Queue scenario must contain zero or 200 finished jobs');
+  if (![0, 200, 1000].includes(count)) throw Error('Queue scenario must contain zero, 200, or 1000 finished jobs');
   const statements = [schema,
     'ALTER TABLE jobs ADD COLUMN hidden_from_queue INTEGER NOT NULL DEFAULT 0;',
     'ALTER TABLE jobs ADD COLUMN not_before INTEGER;',
@@ -25,7 +26,8 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+  if (abortSignal?.aborted) throw Error('Startup run aborted before launch');
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
   for (const name of ['config', 'data', 'outputs']) mkdirSync(join(directory, name));
@@ -39,16 +41,30 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   writeFileSync(join(directory, 'config', 'settings.json'), JSON.stringify({ theme, extract_concurrency: extractConcurrency, convert_concurrency: convertConcurrency, yt_dlp_last_update_ms: null, output_dir: join(directory, 'outputs'), auto_check_updates: false, yt_dlp_auto_update: false, notifications_enabled: false, has_seen_onboarding: true }, null, 2));
   seedQueue(join(directory, 'data', 'queue.db'), jobs);
   const start = performance.now();
+  const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
   const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
-  let exited = false, exitCode = null, exitSignal = null, spawnError = null;
+  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false;
   const closed = new Promise(resolve => {
     child.once('error', error => { spawnError = error.message; });
     child.once('close', (code, signal) => { exited = true; exitCode = code; exitSignal = signal; resolve(); });
   });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0);
-  const retain = (buffer, chunk) => Buffer.concat([buffer, chunk.subarray(0, Math.max(0, 1024 * 1024 - buffer.length))]);
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, budgetExceeded = false;
+  const retain = (buffer, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([buffer,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
   child.stderr.on('data', chunk => { stderr = retain(stderr, chunk); });
+  const signal = name => { if (child.pid) { try { process.kill(-child.pid, name); } catch { /* Already gone. */ } } };
+  const abort = () => { aborted = true; signal('SIGTERM'); };
+  abortSignal?.addEventListener('abort', abort, { once: true });
+  let budgetKillTimer = null;
+  const budgetCheck = setInterval(() => {
+    try {
+      if (directoryBytes(directory) + stdout.length + stderr.length > budgetBytes) {
+        budgetExceeded = true;
+        signal('SIGTERM');
+        budgetKillTimer ??= setTimeout(() => signal('SIGKILL'), killGraceMs);
+      }
+    } catch { /* Owned output can change between snapshots. */ }
+  }, 100);
   const samples = [];
   const sample = () => {
     try {
@@ -65,9 +81,9 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const sampling = setInterval(sample, 100);
   let marker = null, launchMs = null, idleRss = null, timedOut = false;
   try {
-    while (!exited && performance.now() - start < readinessTimeoutMs) {
+    while (!exited && !aborted && performance.now() < activeDeadline) {
       try {
-        if (statSync(reportPath).size < 4096) {
+        if (lstatSync(reportPath).isFile() && statSync(reportPath).size < 4096) {
           const value = JSON.parse(readFileSync(reportPath, 'utf8'));
           if (value.schema_version === 1 && value.pid === child.pid && Number.isFinite(value.backend_ready_ms) && value.backend_ready_ms >= 0) {
             marker = value; launchMs = performance.now() - start; break;
@@ -76,15 +92,19 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
       } catch { /* Writer may still be writing the newly-created marker. */ }
       await sleep(10);
     }
-    timedOut = !marker && !exited;
-    if (marker) {
+    timedOut = !marker && !exited && !aborted;
+    if (marker && !aborted) {
       const idleStart = performance.now();
-      while (!exited && performance.now() - idleStart < idleMs) await sleep(Math.min(50, idleMs));
-      if (!exited) idleRss = sample()?.rssKiB ?? null;
+      while (!exited && !aborted && performance.now() - idleStart < idleMs && performance.now() < activeDeadline) await sleep(Math.min(50, idleMs));
+      const idleComplete = performance.now() - idleStart >= idleMs;
+      if (!exited && idleComplete) idleRss = sample()?.rssKiB ?? null;
+      if (!idleComplete && !exited) timedOut = true;
     }
   } finally {
     clearInterval(sampling);
-    const signal = name => { if (child.pid) { try { process.kill(-child.pid, name); } catch { /* Already gone. */ } } };
+    clearInterval(budgetCheck);
+    clearTimeout(budgetKillTimer);
+    abortSignal?.removeEventListener('abort', abort);
     signal('SIGTERM');
     // Always finish the grace period before returning: descendants may outlive
     // a parent that handles TERM. Each run owns its detached process group.
@@ -92,7 +112,14 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     signal('SIGKILL');
     await closed;
   }
-  const result = { success: marker !== null && idleRss !== null && spawnError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: Math.max(0, ...samples.map(v => v.rssKiB)), sampling_interval_ms: 100, samples, timed_out: timedOut, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
+  try {
+    budgetExceeded ||= directoryBytes(directory) + retainedLogBytes > budgetBytes;
+  } catch {
+    budgetExceeded = true;
+  }
+  const createdSymlinks=ownedSymlinks(directory);let outputError=createdSymlinks.length?`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`:null;
+  for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
+  const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
   writeFileSync(join(directory, 'stdout.log'), stdout);
   writeFileSync(join(directory, 'stderr.log'), stderr);
   writeFileSync(join(directory, 'sample.json'), JSON.stringify(result, null, 2));
@@ -108,7 +135,7 @@ export function summarizeStartup(samples) {
   };
 }
 
-async function main() {
+async function main(abortSignal) {
   if (process.platform !== 'darwin') throw Error('Startup harness supports macOS only');
   const options = {};
   for (let i = 2; i < process.argv.length; i += 2) {
@@ -121,12 +148,12 @@ async function main() {
   const settings = JSON.parse(readFileSync(config, 'utf8'));
   const binaryHash = hash(binary);
   mkdirSync(output, { recursive: true });
-  writeFileSync(join(output, 'identity.json'), JSON.stringify({ binary, binary_sha256: binaryHash, argv: [], config_sha256: hash(config), warmups: 1, repetitions: 5, scenarios: [0, 200], sampling_interval_ms: 100, node: process.version, platform: process.platform, arch: process.arch, limitation: 'Fresh process with warm filesystem cache. RSS sums app descendants; shared and XPC-hosted WebKit processes may be excluded or shared. Frame marker does not prove display presentation.' }, null, 2));
+  writeFileSync(join(output, 'identity.json'), JSON.stringify({ binary, binary_sha256: binaryHash, argv: [], config_sha256: hash(config), warmups: 1, repetitions: 5, scenarios: [0, 200, 1000], sampling_interval_ms: 100, node: process.version, platform: process.platform, arch: process.arch, limitation: 'Fresh process with warm filesystem cache. RSS sums app descendants; shared and XPC-hosted WebKit processes may be excluded or shared. Frame marker does not prove display presentation.' }, null, 2));
   const summary = {};
-  for (const jobs of [0, 200]) {
+  for (const jobs of [0, 200, 1000]) {
     const samples = [];
     for (let i = -1; i < 5; i++) {
-      const result = await runStartup({ binary, directory: join(output, `${jobs}-${i < 0 ? 'warmup' : i}`), settings, jobs });
+      const result = await runStartup({ binary, directory: join(output, `${jobs}-${i < 0 ? 'warmup' : i}`), settings, jobs, abortSignal });
       if (i >= 0) samples.push(result);
       if (!result.success) {
         summary[jobs] = summarizeStartup(samples);
@@ -139,4 +166,4 @@ async function main() {
   }
   if (hash(binary) !== binaryHash) throw Error('Executable changed during startup suite');
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) withTerminationSignals(main).catch(error => { console.error(error); process.exitCode = 1; });

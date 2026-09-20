@@ -20,6 +20,12 @@ test('timeout kills a TERM-resistant child before returning', async () => {
   assert.equal(result.exit_signal, 'SIGKILL');
   assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' });
 });
+test('abort kills a TERM-resistant startup process before returning', async () => {
+  const controller=new AbortController();setTimeout(()=>controller.abort(),100);
+  const result=await fake("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{readinessTimeoutMs:5000,abortSignal:controller.signal});
+  assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);
+  assert.throws(()=>process.kill(result.pid,0),{code:'ESRCH'});
+});
 test('invalid and failed readiness excluded from medians', async () => {
   const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:-1,pid:process.pid}));setInterval(()=>{},10)");
   assert.equal(result.success, false);
@@ -49,7 +55,7 @@ test('empty and populated fixtures have identical schema and no runnable rows', 
   const root = mkdtempSync(join(tmpdir(), 'goop-startup-db-'));
   try {
     const schemas = [];
-    for (const count of [0, 200]) {
+    for (const count of [0, 200, 1000]) {
       const path = join(root, `${count}.db`);
       seedQueue(path, count);
       schemas.push(execFileSync('/usr/bin/sqlite3', [path, '.schema'], { encoding: 'utf8' }));
@@ -68,4 +74,29 @@ test('a ready marker cannot turn an absent process into a successful idle sample
   assert.ok(result.marker);
   assert.equal(result.success, false);
   assert.equal(result.idle_tree_rss_KiB, null);
+  assert.equal(result.sampled_tree_peak_KiB, null);
+});
+test('startup rejects and removes child-created symlink output', async () => {
+  const result=await fake("const fs=require('node:fs'),path=require('node:path');fs.symlinkSync(path.join(process.env.GOOP_CONFIG_DIR,'settings.json'),path.join(process.env.GOOP_DATA_DIR,'link'));fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)");
+  assert.equal(result.success,false);assert.match(result.output_error,/symbolic-link/i);assert.equal(result.removed_symlink_outputs,1);
+});
+test('startup logs and owned storage are bounded', async () => {
+  const result = await fake("const fs=require('node:fs'),path=require('node:path');fs.writeFileSync(path.join(process.env.GOOP_DATA_DIR,'large'),Buffer.alloc(10000));process.stdout.write('y'.repeat(10000));process.stderr.write('x'.repeat(10000));setInterval(()=>{},10)", { budgetBytes: 4096, logLimitBytes: 100 });
+  assert.equal(result.success, false);
+  assert.equal(result.budget_exceeded, true);
+  assert.ok(result.log_bytes_retained <= 100);
+});
+test('startup catches a fast storage overrun before returning', async () => {
+  const result = await fake("const fs=require('node:fs'),path=require('node:path');fs.writeFileSync(path.join(process.env.GOOP_DATA_DIR,'large'),Buffer.alloc(10000));");
+  assert.equal(result.success, false);
+  assert.equal(result.budget_exceeded, false);
+  const bounded = await fake("const fs=require('node:fs'),path=require('node:path');fs.writeFileSync(path.join(process.env.GOOP_DATA_DIR,'large'),Buffer.alloc(10000));", { budgetBytes: 4096 });
+  assert.equal(bounded.budget_exceeded, true);
+});
+test('total timeout includes idle observation and cleanup grace', async () => {
+  const start = performance.now();
+  const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)", { readinessTimeoutMs: 120, idleMs: 1000, killGraceMs: 30 });
+  assert.equal(result.success, false);
+  assert.equal(result.timed_out, true);
+  assert.ok(performance.now() - start < 600);
 });
