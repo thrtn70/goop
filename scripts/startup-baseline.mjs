@@ -26,7 +26,7 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, environment = process.env, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
   if (abortSignal?.aborted) throw Error('Startup run aborted before launch');
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
@@ -42,7 +42,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   seedQueue(join(directory, 'data', 'queue.db'), jobs);
   const start = performance.now();
   const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
-  const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
+  const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...environment, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
   let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false;
   const closed = new Promise(resolve => {
     child.once('error', error => { spawnError = error.message; });

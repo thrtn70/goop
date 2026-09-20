@@ -1,3 +1,5 @@
+mod support;
+
 use goop_converter::{
     capabilities, detect_encoders, ConversionBackend, DetectedEncoders, FfmpegBackend,
     ImageMagickBackend,
@@ -10,7 +12,7 @@ use goop_sidecar::BinaryResolver;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     future::Future,
     io::{ErrorKind, Read, Write},
@@ -21,6 +23,8 @@ use std::{
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use support::runtime_sidecars::{self, SidecarEvidence};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_CONCURRENCY: usize = 16;
@@ -81,6 +85,13 @@ enum PreparedWorkload {
 }
 
 impl PreparedWorkload {
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::InspectionBurst { .. } => "inspection_burst",
+            Self::ConversionBatch { .. } => "conversion_batch",
+        }
+    }
+
     fn suite_dirs(&self) -> (&Path, &Path) {
         match self {
             Self::InspectionBurst {
@@ -106,6 +117,7 @@ struct WorkloadMetrics {
     wall_ms: f64,
     encoder_detection_ms: Option<f64>,
     max_observed_concurrency: Option<usize>,
+    sidecars: BTreeMap<&'static str, SidecarEvidence>,
     items: Vec<Value>,
     memory_evidence: &'static str,
     path_safety_limitation: &'static str,
@@ -903,15 +915,14 @@ struct ConversionAttempt {
 
 async fn run_conversion(
     suite_dir: &Path,
-    sidecar_dir: &Path,
+    resolver: &BinaryResolver,
     encoders: Arc<DetectedEncoders>,
     request: &ConvertRequest,
 ) -> ConversionAttempt {
-    let resolver = BinaryResolver::new(sidecar_dir.to_path_buf());
     let admission_started = Instant::now();
     let admission = match revalidate_secured_new_path(suite_dir, Path::new(&request.output_path)) {
         Ok(()) => {
-            capabilities::validate_request_source_with_encoders(&resolver, request, &encoders).await
+            capabilities::validate_request_source_with_encoders(resolver, request, &encoders).await
         }
         Err(error) => Err(GoopError::InvalidRequest(error)),
     };
@@ -927,11 +938,11 @@ async fn run_conversion(
     let cancel = CancellationToken::new();
     let process_started = Instant::now();
     let result = if uses_image_backend(request) {
-        ImageMagickBackend::new(&resolver, sink)
+        ImageMagickBackend::new(resolver, sink)
             .convert(JobId::new(), request, cancel)
             .await
     } else {
-        FfmpegBackend::new(&resolver, sink)
+        FfmpegBackend::new(resolver, sink)
             .with_encoders(encoders, false)
             .convert(JobId::new(), request, cancel)
             .await
@@ -956,7 +967,7 @@ struct ConversionEngineItem {
 
 async fn convert_engine(
     suite_dir: PathBuf,
-    sidecar_dir: PathBuf,
+    resolver: Arc<BinaryResolver>,
     encoders: Arc<DetectedEncoders>,
     engine_epoch: Instant,
     item: Fingerprinted<ConversionItem>,
@@ -964,7 +975,7 @@ async fn convert_engine(
     let Fingerprinted { item, evidence } = item;
     debug_assert!(evidence.before_error.is_none());
     let start_offset_ms = engine_epoch.elapsed().as_secs_f64() * 1000.0;
-    let attempt = run_conversion(&suite_dir, &sidecar_dir, encoders, &item.request).await;
+    let attempt = run_conversion(&suite_dir, &resolver, encoders, &item.request).await;
     let end_offset_ms = engine_epoch.elapsed().as_secs_f64() * 1000.0;
     let timing = ItemTiming {
         start_offset_ms,
@@ -1089,9 +1100,28 @@ fn reliable_engine_span_ms(items: &[Value], join_failed: bool) -> Option<f64> {
 }
 
 async fn execute_workload(workload: PreparedWorkload, sidecar_dir: PathBuf) -> WorkloadMetrics {
-    execute_workload_with_fingerprinter(workload, sidecar_dir, Arc::new(source_fingerprint)).await
+    let started = Instant::now();
+    let resolver = Arc::new(BinaryResolver::new(sidecar_dir));
+    let (sidecars, sidecar_error) = runtime_sidecars::inspect(&resolver).into_parts();
+    if let Some(error) = sidecar_error {
+        return invalid_metrics(
+            workload.mode().into(),
+            error,
+            started.elapsed().as_secs_f64() * 1000.0,
+            sidecars,
+        );
+    }
+    execute_workload_with_resolver_and_hooks(
+        workload,
+        resolver,
+        sidecars,
+        Arc::new(source_fingerprint),
+        Arc::new(|_| {}),
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn execute_workload_with_fingerprinter(
     workload: PreparedWorkload,
     sidecar_dir: PathBuf,
@@ -1100,9 +1130,32 @@ async fn execute_workload_with_fingerprinter(
     execute_workload_with_hooks(workload, sidecar_dir, fingerprinter, Arc::new(|_| {})).await
 }
 
+#[cfg(test)]
 async fn execute_workload_with_hooks(
     workload: PreparedWorkload,
     sidecar_dir: PathBuf,
+    fingerprinter: Fingerprinter,
+    phase_observer: PhaseObserver,
+) -> WorkloadMetrics {
+    let resolver = Arc::new(BinaryResolver::new(sidecar_dir));
+    let (sidecars, sidecar_error) = runtime_sidecars::inspect(&resolver).into_parts();
+    if let Some(error) = sidecar_error {
+        return invalid_metrics(workload.mode().into(), error, 0.0, sidecars);
+    }
+    execute_workload_with_resolver_and_hooks(
+        workload,
+        resolver,
+        sidecars,
+        fingerprinter,
+        phase_observer,
+    )
+    .await
+}
+
+async fn execute_workload_with_resolver_and_hooks(
+    workload: PreparedWorkload,
+    resolver: Arc<BinaryResolver>,
+    sidecars: BTreeMap<&'static str, SidecarEvidence>,
     fingerprinter: Fingerprinter,
     phase_observer: PhaseObserver,
 ) -> WorkloadMetrics {
@@ -1136,7 +1189,6 @@ async fn execute_workload_with_hooks(
                     ready.push((index, source));
                 }
             }
-            let resolver = BinaryResolver::new(sidecar_dir);
             let detection_started = Instant::now();
             let encoders = detect_encoders(&resolver).await;
             let encoder_detection_ms = detection_started.elapsed().as_secs_f64() * 1000.0;
@@ -1171,6 +1223,7 @@ async fn execute_workload_with_hooks(
                 wall_ms: wall_started.elapsed().as_secs_f64() * 1000.0,
                 encoder_detection_ms: Some(encoder_detection_ms),
                 max_observed_concurrency: None,
+                sidecars,
                 items,
                 memory_evidence: MEMORY_EVIDENCE,
                 path_safety_limitation: PATH_SAFETY_LIMITATION,
@@ -1209,7 +1262,6 @@ async fn execute_workload_with_hooks(
                 .iter()
                 .map(|(index, item)| (*index, item.item.id.clone(), item.evidence.clone()))
                 .collect();
-            let resolver = BinaryResolver::new(sidecar_dir.clone());
             let detection_started = Instant::now();
             let encoders = Arc::new(detect_encoders(&resolver).await);
             let encoder_detection_ms = detection_started.elapsed().as_secs_f64() * 1000.0;
@@ -1218,13 +1270,12 @@ async fn execute_workload_with_hooks(
             let (results, max_observed_concurrency) = run_bounded(ready, concurrency, {
                 move |(index, item)| {
                     let suite_dir = suite_dir.clone();
-                    let sidecar_dir = sidecar_dir.clone();
+                    let resolver = resolver.clone();
                     let encoders = encoders.clone();
                     async move {
                         (
                             index,
-                            convert_engine(suite_dir, sidecar_dir, encoders, engine_epoch, item)
-                                .await,
+                            convert_engine(suite_dir, resolver, encoders, engine_epoch, item).await,
                         )
                     }
                 }
@@ -1267,6 +1318,7 @@ async fn execute_workload_with_hooks(
                 wall_ms: wall_started.elapsed().as_secs_f64() * 1000.0,
                 encoder_detection_ms: Some(encoder_detection_ms),
                 max_observed_concurrency: Some(max_observed_concurrency),
+                sidecars,
                 items,
                 memory_evidence: MEMORY_EVIDENCE,
                 path_safety_limitation: PATH_SAFETY_LIMITATION,
@@ -1276,7 +1328,12 @@ async fn execute_workload_with_hooks(
     }
 }
 
-fn invalid_metrics(mode: String, error: String, wall_ms: f64) -> WorkloadMetrics {
+fn invalid_metrics(
+    mode: String,
+    error: String,
+    wall_ms: f64,
+    sidecars: BTreeMap<&'static str, SidecarEvidence>,
+) -> WorkloadMetrics {
     WorkloadMetrics {
         schema_version: SCHEMA_VERSION,
         mode,
@@ -1285,6 +1342,7 @@ fn invalid_metrics(mode: String, error: String, wall_ms: f64) -> WorkloadMetrics
         wall_ms,
         encoder_detection_ms: None,
         max_observed_concurrency: None,
+        sidecars,
         items: Vec::new(),
         memory_evidence: MEMORY_EVIDENCE,
         path_safety_limitation: PATH_SAFETY_LIMITATION,
@@ -1403,10 +1461,13 @@ async fn run_paths(sidecar_dir: PathBuf, request_path: PathBuf, metrics_path: Pa
     let workload = match parse_and_validate(&raw) {
         Ok(workload) => workload,
         Err(error) => {
+            let resolver = BinaryResolver::new(sidecar_dir);
+            let (sidecars, _sidecar_error) = runtime_sidecars::inspect(&resolver).into_parts();
             let metrics = invalid_metrics(
                 mode_hint(&raw),
                 error,
                 started.elapsed().as_secs_f64() * 1000.0,
+                sidecars,
             );
             if let Err(write_error) = write_metrics(&hint_suite, &metrics_path, &metrics) {
                 eprintln!("{write_error}");
@@ -1471,6 +1532,17 @@ mod tests {
             "output_path": output,
             "target": "jpeg"
         })
+    }
+
+    fn install_runtime_sidecars(directory: &Path) {
+        for name in ["ffmpeg", "ffprobe"] {
+            let file_name = if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            };
+            fs::write(directory.join(file_name), b"test sidecar").unwrap();
+        }
     }
 
     #[test]
@@ -1725,7 +1797,10 @@ mod tests {
 
         let metrics_path = suite.path().join("metrics.json");
         fs::write(&metrics_path, b"keep me").unwrap();
-        let metrics = invalid_metrics("invalid".into(), "failure".into(), 1.0);
+        let (sidecars, _sidecar_error) =
+            runtime_sidecars::inspect(&BinaryResolver::new(suite.path().to_path_buf()))
+                .into_parts();
+        let metrics = invalid_metrics("invalid".into(), "failure".into(), 1.0, sidecars);
         assert!(write_metrics(&canonical, &metrics_path, &metrics).is_err());
         assert_eq!(fs::read(&metrics_path).unwrap(), b"keep me");
     }
@@ -1764,6 +1839,7 @@ mod tests {
     #[tokio::test]
     async fn partial_batch_reports_every_item_once_and_preserves_sources() {
         let dir = tempdir().unwrap();
+        install_runtime_sidecars(dir.path());
         let valid = dir.path().join("valid.png");
         image::RgbImage::from_pixel(2, 2, image::Rgb([32, 64, 96]))
             .save(&valid)
@@ -1825,6 +1901,7 @@ mod tests {
     #[tokio::test]
     async fn inspection_burst_reports_explicit_cache_facts_and_partial_failure() {
         let dir = tempdir().unwrap();
+        install_runtime_sidecars(dir.path());
         let valid = dir.path().join("valid.png");
         image::RgbImage::from_pixel(2, 2, image::Rgb([16, 32, 48]))
             .save(&valid)
@@ -1865,6 +1942,7 @@ mod tests {
     #[tokio::test]
     async fn cli_returns_nonzero_and_writes_complete_partial_failure_metrics() {
         let suite = tempdir().unwrap();
+        install_runtime_sidecars(suite.path());
         let invalid = suite.path().join("invalid.png");
         fs::write(&invalid, b"not an image").unwrap();
         let request_path = suite.path().join("request.json");
@@ -1932,6 +2010,7 @@ mod tests {
     #[tokio::test]
     async fn aggregate_excludes_injected_pre_and_post_fingerprint_delays() {
         let suite = tempdir().unwrap();
+        install_runtime_sidecars(suite.path());
         let source = suite.path().join("source.png");
         let second = suite.path().join("second.png");
         image::RgbImage::from_pixel(2, 2, image::Rgb([5, 10, 15]))
@@ -2003,6 +2082,7 @@ mod tests {
     #[tokio::test]
     async fn pre_fingerprint_failures_do_not_enter_the_bounded_engine_scheduler() {
         let suite = tempdir().unwrap();
+        install_runtime_sidecars(suite.path());
         let source = suite.path().join("source.png");
         image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
             .save(&source)

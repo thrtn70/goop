@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   lstatSync,
+  realpathSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -53,6 +54,7 @@ export function validateCapturedIdentity(identity, label = 'identity') {
   for (const field of ['executables', 'sidecars', 'parameters']) if (Object.keys(identity[field]).length === 0) throw Error(`Invalid ${label} ${field}`);
   for (const [field, descriptors] of [['executables', identity.executables], ['sidecars', identity.sidecars]]) for (const descriptor of Object.values(descriptors)) {
     if (descriptor === null || typeof descriptor !== 'object' || !available(descriptor.path) || !digest(descriptor.sha256)) throw Error(`Invalid ${label} ${field}`);
+    if (field === 'sidecars' && (!Number.isSafeInteger(descriptor.bytes) || descriptor.bytes < 1)) throw Error(`Invalid ${label} sidecar bytes`);
     if (field === 'sidecars' && (!available(descriptor.version) || descriptor.version === 'unavailable')) throw Error(`Invalid ${label} sidecar version`);
   }
   for (const field of ['node', 'rustc', 'cargo']) if (!available(identity.toolchain[field])) throw Error(`Invalid ${label} toolchain.${field}`);
@@ -150,6 +152,16 @@ export const withoutGitRepositoryEnvironment = environment => Object.fromEntries
   Object.entries(environment).filter(([name]) => !gitRepositoryEnvironment.has(name)),
 );
 
+export function runtimeSidecarEnvironment(runtimeSidecarsDirectory, environment = process.env, platform = process.platform) {
+  const pathValue = existsSync(runtimeSidecarsDirectory) ? realpathSync(runtimeSidecarsDirectory) : runtimeSidecarsDirectory;
+  const entries = Object.entries(environment).filter(([name]) => name.toLowerCase() !== 'path');
+  const existingPathKeys = Object.keys(environment).filter(name => name.toLowerCase() === 'path');
+  const pathKey = platform === 'win32'
+    ? (existingPathKeys.find(name => name === 'Path') ?? existingPathKeys[0] ?? 'Path')
+    : 'PATH';
+  return { ...Object.fromEntries(entries), [pathKey]: pathValue };
+}
+
 function commandValue(command, args, options = {}) {
   try {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, ...options });
@@ -192,10 +204,12 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
       : /^mutool(-|\.|$)/.test(name) ? '-v'
         : /^(yt-dlp|gallery-dl|gs|tesseract)(-|\.|$)/.test(name) ? '--version'
         : null;
+    const canonicalPath = existsSync(path) ? realpathSync(path) : path;
     return [name, {
-      path,
-      sha256: existsSync(path) ? sha256File(path) : 'unavailable',
-      version: versionFlag && existsSync(path) ? commandValue(path, [versionFlag]).split('\n')[0] : 'not_applicable',
+      path: canonicalPath,
+      sha256: existsSync(canonicalPath) ? sha256File(canonicalPath) : 'unavailable',
+      bytes: existsSync(canonicalPath) ? lstatSync(canonicalPath).size : 'unavailable',
+      version: versionFlag && existsSync(canonicalPath) ? commandValue(canonicalPath, [versionFlag]).split('\n')[0] : 'not_applicable',
     }];
   }));
   return {
