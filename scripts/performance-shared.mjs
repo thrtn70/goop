@@ -139,9 +139,20 @@ export async function withTerminationSignals(operation) {
   if (receivedSignal !== null) process.exitCode = receivedSignal === 'SIGINT' ? 130 : 143;
 }
 
-function commandValue(command, args) {
+const gitRepositoryEnvironment = new Set([
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
+  'GIT_OBJECT_DIRECTORY', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE',
+  'GIT_INDEX_FILE', 'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX',
+  'GIT_INTERNAL_SUPER_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR',
+]);
+
+export const withoutGitRepositoryEnvironment = environment => Object.fromEntries(
+  Object.entries(environment).filter(([name]) => !gitRepositoryEnvironment.has(name)),
+);
+
+function commandValue(command, args, options = {}) {
   try {
-    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 });
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, ...options });
     if (result.status !== 0 || result.error) throw result.error ?? Error(`Command exited ${result.status}`);
     return `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
   } catch {
@@ -149,20 +160,21 @@ function commandValue(command, args) {
   }
 }
 
-function commandBuffer(command, args) {
+function commandBuffer(command, args, options = {}) {
   try {
-    return execFileSync(command, args, { timeout: 5000, maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync(command, args, { timeout: 5000, maxBuffer: 64 * 1024 * 1024, ...options });
   } catch {
     return null;
   }
 }
 
-export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsText, executables = {}, sidecars = {}, parameters = {} }) {
-  const head = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD']);
-  const tree = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}']);
-  const status = commandValue('git', ['-C', cwd, 'status', '--porcelain=v1', '--untracked-files=all']);
-  const binaryDiff = commandBuffer('git', ['-C', cwd, 'diff', '--binary', '--no-ext-diff', 'HEAD', '--']);
-  const untrackedOutput = commandBuffer('git', ['-C', cwd, 'ls-files', '--others', '--exclude-standard', '-z']);
+export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsText, executables = {}, sidecars = {}, parameters = {}, environment = process.env }) {
+  const gitOptions = { env: withoutGitRepositoryEnvironment(environment) };
+  const head = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD'], gitOptions);
+  const tree = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}'], gitOptions);
+  const status = commandValue('git', ['-C', cwd, 'status', '--porcelain=v1', '--untracked-files=all'], gitOptions);
+  const binaryDiff = commandBuffer('git', ['-C', cwd, 'diff', '--binary', '--no-ext-diff', 'HEAD', '--'], gitOptions);
+  const untrackedOutput = commandBuffer('git', ['-C', cwd, 'ls-files', '--others', '--exclude-standard', '-z'], gitOptions);
   const untracked = untrackedOutput === null ? 'unavailable' : untrackedOutput.toString().split('\0').filter(Boolean).sort().map(path => {
     const absolute = join(cwd, path);
     const stats = lstatSync(absolute);

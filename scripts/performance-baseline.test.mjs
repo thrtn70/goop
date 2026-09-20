@@ -9,7 +9,7 @@ import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync} from
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { captureIdentity, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity, writeJsonAtomic } from './performance-shared.mjs';
+import { captureIdentity, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity, withoutGitRepositoryEnvironment, writeJsonAtomic } from './performance-shared.mjs';
 test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:1},1,false),false);
  assert.equal(normalizeSuccess({success:true},0,false),false);
@@ -90,13 +90,19 @@ test('budget failure also removes new owned staging artifacts after metrics',asy
 test('dirty source identity changes when already-dirty file content changes', () => {
  const root=mkdtempSync(join(tmpdir(),'goop-identity-'));
  try {
-  execFileSync('git',['init','-q'],{cwd:root});
-  execFileSync('git',['config','user.email','test@example.invalid'],{cwd:root});
-  execFileSync('git',['config','user.name','Test'],{cwd:root});
+  const gitEnv={
+   ...withoutGitRepositoryEnvironment(process.env),
+   GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_TERMINAL_PROMPT:'0',GIT_OPTIONAL_LOCKS:'0',
+   GIT_CONFIG_COUNT:'2',GIT_CONFIG_KEY_0:'core.hooksPath',GIT_CONFIG_VALUE_0:'/dev/null',GIT_CONFIG_KEY_1:'commit.gpgSign',GIT_CONFIG_VALUE_1:'false',
+  };
+  execFileSync('git',['init','-q'],{cwd:root,env:gitEnv});
+  execFileSync('git',['config','user.email','test@example.invalid'],{cwd:root,env:gitEnv});
+  execFileSync('git',['config','user.name','Test'],{cwd:root,env:gitEnv});
   const tracked=join(root,'tracked.txt'),untracked=join(root,'untracked.txt');
-  writeFileSync(tracked,'base');execFileSync('git',['add','tracked.txt'],{cwd:root});execFileSync('git',['commit','-qm','base'],{cwd:root});
+  writeFileSync(tracked,'base');execFileSync('git',['add','tracked.txt'],{cwd:root,env:gitEnv});execFileSync('git',['commit','-qm','base'],{cwd:root,env:gitEnv});
   writeFileSync(tracked,'first');writeFileSync(untracked,'one');
-  const firstIdentity=captureIdentity({cwd:root,manifestText:'{}',bindingsText:'{}',sidecars:{fixture:tracked}});const first=firstIdentity.source.dirty_digest;
+  const firstIdentity=captureIdentity({cwd:root,manifestText:'{}',bindingsText:'{}',sidecars:{fixture:tracked},environment:{...process.env,GIT_DIR:'/invalid/inherited/git-dir',GIT_WORK_TREE:'/invalid/inherited/work-tree'}});const first=firstIdentity.source.dirty_digest;
+  assert.notEqual(firstIdentity.source.head,'unavailable');
   assert.equal(firstIdentity.sidecars.fixture.sha256,execFileSync('shasum',['-a','256',tracked],{encoding:'utf8'}).split(' ')[0]);
   writeFileSync(tracked,'second');writeFileSync(untracked,'two');
   const second=captureIdentity({cwd:root,manifestText:'{}',bindingsText:'{}'}).source.dirty_digest;
