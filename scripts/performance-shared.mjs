@@ -100,13 +100,18 @@ export function createOwnedDirectory(directory, label = 'Output directory') {
   mkdirSync(directory, { recursive: true });
 }
 
-export function writeJsonAtomic(path, value) {
+export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetBytes = null } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
+  const serialized = `${JSON.stringify(value)}\n`;
+  if (budgetDirectory !== null) {
+    if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 1) throw Error('Atomic JSON budget must be a positive safe integer');
+    if (directoryBytes(budgetDirectory) + Buffer.byteLength(serialized) > budgetBytes) throw Error('Atomic JSON replacement would exceed the storage budget');
+  }
   // Budget calculations use the exact compact representation retained here.
   // Pretty printing can multiply nested-array evidence well beyond its measured
   // JSON byte count and violate the declared hard storage ceiling.
-  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { flag: 'wx' });
+  writeFileSync(temporary, serialized, { flag: 'wx' });
   try {
     renameSync(temporary, path);
   } catch (error) {
@@ -114,6 +119,24 @@ export function writeJsonAtomic(path, value) {
     rmSync(path, { force: true });
     renameSync(temporary, path);
   }
+}
+
+export async function withTerminationSignals(operation) {
+  const controller = new AbortController();
+  let receivedSignal = null;
+  const handlers = Object.fromEntries(['SIGINT', 'SIGTERM'].map(name => [name, () => {
+    receivedSignal ??= name;
+    controller.abort(name);
+  }]));
+  for (const [name, handler] of Object.entries(handlers)) process.on(name, handler);
+  try {
+    await operation(controller.signal);
+  } catch (error) {
+    if (receivedSignal === null) throw error;
+  } finally {
+    for (const [name, handler] of Object.entries(handlers)) process.removeListener(name, handler);
+  }
+  if (receivedSignal !== null) process.exitCode = receivedSignal === 'SIGINT' ? 130 : 143;
 }
 
 function commandValue(command, args) {
@@ -199,13 +222,15 @@ export async function runBoundedProcess({
   killGraceMs = 2000,
   logLimitBytes,
   storageBudgetBytes,
+  abortSignal = null,
 }) {
+  if (abortSignal?.aborted) throw Error('Process run aborted before launch');
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
   if (symlinksBelow(outputDirectory).length > 0) throw Error('Owned output directory must not contain symbolic links');
   const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, spawnError = null, killTimer;
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null, killTimer;
   let stopRequested = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
   const windowsCleanupPids = new Set();
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
@@ -243,6 +268,8 @@ export async function runBoundedProcess({
       killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
     });
   };
+  const abort = () => { aborted = true; stop(); };
+  abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
     try {
       if (process.platform !== 'win32') {
@@ -266,6 +293,7 @@ export async function runBoundedProcess({
   });
   clearInterval(monitor);
   clearTimeout(timeout);
+  abortSignal?.removeEventListener('abort', abort);
   try {
     budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
   } catch {
@@ -282,7 +310,7 @@ export async function runBoundedProcess({
     outputError = 'Owned process created symbolic-link output';
     for (const path of createdSymlinks) try { rmSync(path, { force: true }); } catch (error) { cleanupError ??= error.message; }
   }
-  if (timedOut || budgetExceeded || outputError !== null) {
+  if (timedOut || budgetExceeded || aborted || outputError !== null) {
     try {
       for (const entry of readdirSync(outputDirectory, { withFileTypes: true })) {
         if (entry.isDirectory() && !initialEntries.has(entry.name) && /^\.goop-output-\d+-\d+$/.test(entry.name)) {
@@ -297,10 +325,11 @@ export async function runBoundedProcess({
   }
   const timePeakMatch = process.platform === 'darwin' ? stderr.toString().match(/(\d+)\s+maximum resident set size/) : null;
   return {
-    success: code === 0 && !timedOut && !budgetExceeded && spawnError === null && cleanupError === null && outputError === null,
+    success: code === 0 && !timedOut && !budgetExceeded && !aborted && spawnError === null && cleanupError === null && outputError === null,
     exit_code: code,
     timed_out: timedOut,
     budget_exceeded: budgetExceeded,
+    aborted,
     spawn_error: spawnError,
     cleanup_error: cleanupError,
     output_error: outputError,

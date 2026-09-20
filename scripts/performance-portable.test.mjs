@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { directoryBytes, runBoundedProcess } from './performance-shared.mjs';
 
@@ -30,6 +31,39 @@ test('portable bounded runner terminates its descendant tree', async () => {
     if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already gone. */ } }
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('portable bounded runner aborts and reaps its descendant tree', async () => {
+  const root=mkdtempSync(join(tmpdir(),'goop-portable-abort-')),output=join(root,'output');mkdirSync(output);
+  const pidPath=join(root,'descendant.pid'),runner=join(root,'runner.cjs');
+  const descendant=`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
+  writeFileSync(runner,`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
+  const controller=new AbortController();let descendantPid=null;
+  try {
+    setTimeout(()=>controller.abort(),150);
+    const result=await runBoundedProcess({command:process.execPath,args:[runner],outputDirectory:output,timeoutMs:5000,killGraceMs:100,logLimitBytes:1024,storageBudgetBytes:1024*1024,abortSignal:controller.signal});
+    descendantPid=Number(readFileSync(pidPath,'utf8'));
+    assert.equal(result.aborted,true);assert.equal(result.success,false);assert.equal(result.timed_out,false);
+    if(process.platform==='win32')assert.throws(()=>process.kill(descendantPid,0),{code:'ESRCH'});
+    else {let state='';try{state=execFileSync('ps',['-o','stat=','-p',String(descendantPid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}
+  } finally {if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true});}
+});
+
+test('termination signal wrapper waits for owned process cleanup', { skip: process.platform === 'win32', timeout: 5000 }, async () => {
+  const root=mkdtempSync(join(tmpdir(),'goop-portable-signal-')),output=join(root,'output');mkdirSync(output);
+  const pidPath=join(root,'descendant.pid'),resultPath=join(root,'result.json'),runner=join(root,'runner.cjs'),harness=join(root,'harness.mjs');
+  const descendant=`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
+  writeFileSync(runner,`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
+  writeFileSync(harness,`import{writeFileSync}from'node:fs';import{runBoundedProcess,withTerminationSignals}from${JSON.stringify(pathToFileURL(join(import.meta.dirname,'performance-shared.mjs')).href)};await withTerminationSignals(async signal=>{const result=await runBoundedProcess({command:process.execPath,args:[${JSON.stringify(runner)}],outputDirectory:${JSON.stringify(output)},timeoutMs:5000,killGraceMs:100,logLimitBytes:1024,storageBudgetBytes:1048576,abortSignal:signal});writeFileSync(${JSON.stringify(resultPath)},JSON.stringify(result));});`);
+  let descendantPid=null,child=null;
+  try {
+    child=spawn(process.execPath,[harness],{stdio:'ignore'});
+    const deadline=Date.now()+2000;while(!existsSync(pidPath)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+    descendantPid=Number(readFileSync(pidPath,'utf8'));child.kill('SIGTERM');
+    const exit=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
+    assert.deepEqual(exit,{code:143,signal:null});assert.equal(JSON.parse(readFileSync(resultPath,'utf8')).aborted,true);
+    let state='';try{state=execFileSync('ps',['-o','stat=','-p',String(descendantPid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);
+  } finally {if(child&&!child.killed){try{child.kill('SIGKILL');}catch{/* Gone. */}}if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true});}
 });
 
 test('portable bounded runner removes only newly owned staging after timeout', async () => {

@@ -1,11 +1,15 @@
 import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, writeJsonAtomic } from './performance-shared.mjs';
+import { createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
 const PAIRED_RESULT_LIMIT_BYTES = 64 * 1024;
+const PAIRED_LEDGER_FIXED_RESERVE_BYTES = 65536;
+const PAIRED_LEDGER_SAMPLE_RESERVE_BYTES = PAIRED_RESULT_LIMIT_BYTES + 2048;
+const futureAtomicPairedLedgerReserveBytes = (totalSamples, completedSamples) => PAIRED_LEDGER_FIXED_RESERVE_BYTES + (2 * totalSamples - completedSamples) * PAIRED_LEDGER_SAMPLE_RESERVE_BYTES;
+const pairedStepName = step => step.phase === 'warmup' ? `warmup-${step.revision}` : `${step.repetition}-${step.revision}`;
 
 const median = values => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -20,34 +24,45 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
   const statePath = join(outputDirectory, 'paired-state.json');
   const state = { schema_version: 1, status: 'running', repetitions, workload_ids: [...workloadIds], plan, samples: [], ...(metadata === null ? {} : { metadata }) };
   if (totalLimits) {
-    const requiredLedgerBytes = Buffer.byteLength(JSON.stringify(state)) + plan.length * (PAIRED_RESULT_LIMIT_BYTES + 2048) + 65536;
+    const requiredLedgerBytes = Buffer.byteLength(JSON.stringify(state)) + futureAtomicPairedLedgerReserveBytes(plan.length, 0);
     if (totalLimits.suite_storage_budget_bytes < requiredLedgerBytes) throw Error(`Paired suite storage budget is too small for the bounded evidence ledger; require at least ${requiredLedgerBytes} bytes`);
   }
   createOwnedDirectory(outputDirectory, 'Paired output directory');
-  writeJsonAtomic(statePath, state);
+  const writeState = () => writeJsonAtomic(statePath, state, { budgetDirectory: outputDirectory, budgetBytes: totalLimits?.suite_storage_budget_bytes ?? Number.MAX_SAFE_INTEGER });
+  writeState();
   const started = performance.now();
   let retainedLogBytes = 0;
-  for (const step of plan) {
+  for (const [planIndex, step] of plan.entries()) {
     if (totalLimits && directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes) {
       state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, storage_budget_exceeded: true, error: 'Paired total storage budget exceeded before launch' } });
-      writeJsonAtomic(statePath, state);
+      writeState();
       break;
     }
     const rawRemainingMs = totalLimits ? totalLimits.suite_timeout_ms - (performance.now() - started) : null;
     if (rawRemainingMs !== null && rawRemainingMs <= 0) {
       state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, time_budget_exceeded: true, error: 'Paired total time budget exceeded before launch' } });
-      writeJsonAtomic(statePath, state);
+      writeState();
+      break;
+    }
+    const suiteRemainingMs = rawRemainingMs === null ? null : Math.max(1, Math.floor(rawRemainingMs));
+    const suiteRemainingStorageBytes = totalLimits ? totalLimits.suite_storage_budget_bytes - directoryBytes(outputDirectory) - futureAtomicPairedLedgerReserveBytes(plan.length, planIndex) : null;
+    const suiteRemainingLogBytes = totalLimits ? totalLimits.suite_log_limit_bytes - retainedLogBytes : null;
+    if ((suiteRemainingStorageBytes !== null && suiteRemainingStorageBytes <= 0) || (suiteRemainingLogBytes !== null && suiteRemainingLogBytes <= 0)) {
+      const storage = suiteRemainingStorageBytes !== null && suiteRemainingStorageBytes <= 0;
+      state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, ...(storage ? { storage_budget_exceeded: true } : { log_budget_exceeded: true }), error: `Paired total ${storage ? 'storage' : 'retained-log'} budget exhausted before launch` } });
+      writeState();
       break;
     }
     let result;
     try {
-      const suiteRemainingMs = rawRemainingMs === null ? null : Math.max(1, Math.floor(rawRemainingMs));
-      result = await execute({ ...step, suite_remaining_ms: suiteRemainingMs });
+      result = await execute({ ...step, suite_remaining_ms: suiteRemainingMs, suite_remaining_storage_bytes: suiteRemainingStorageBytes, suite_remaining_log_bytes: suiteRemainingLogBytes });
       if (result === null || typeof result !== 'object') throw Error('Adapter returned no result');
     } catch (error) {
       result = { success: false, error: error.message };
     }
     retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
+    const resultBytes = Buffer.byteLength(JSON.stringify(result));
+    if (resultBytes > PAIRED_RESULT_LIMIT_BYTES) result = { success: false, result_too_large: true, result_bytes: resultBytes, error: 'Paired adapter result exceeded the retained evidence limit' };
     const exceeded = totalLimits ? {
       time: performance.now() - started > totalLimits.suite_timeout_ms,
       storage: directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes,
@@ -61,25 +76,18 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
       ...(exceeded.log ? { log_budget_exceeded: true } : {}),
       error: `Paired total ${exceeded.time ? 'time' : exceeded.storage ? 'storage' : 'retained-log'} budget exceeded`,
     };
-    state.samples.push({ ...step, status: result.success === true ? 'success' : 'failed', result });
-    writeJsonAtomic(statePath, state);
-    if (totalLimits && directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes && !exceeded.storage) {
-      removeOwnedDirectory(join(outputDirectory, 'runs', step.workload_id, `${step.repetition}-${step.revision}`));
-      state.samples.at(-1).status = 'failed';
-      state.samples.at(-1).result = { ...result, success: false, storage_budget_exceeded: true, owned_payload_removed: true, error: 'Paired total storage budget exceeded while retaining evidence' };
-      writeJsonAtomic(statePath, state);
-      break;
-    }
     if (exceeded.storage) {
-      removeOwnedDirectory(join(outputDirectory, 'runs', step.workload_id, `${step.repetition}-${step.revision}`));
-      state.samples.at(-1).result = { ...state.samples.at(-1).result, owned_payload_removed: true };
-      writeJsonAtomic(statePath, state);
+      removeOwnedDirectory(join(outputDirectory, 'runs', step.workload_id, pairedStepName(step)));
+      result = { ...result, owned_payload_removed: true };
     }
+    state.samples.push({ ...step, status: result.success === true ? (step.phase === 'warmup' ? 'excluded' : 'success') : 'failed', result });
+    writeState();
+    if (result.aborted === true) break;
     if (exceeded.time || exceeded.storage || exceeded.log) break;
   }
-  state.success = state.samples.every(sample => sample.status === 'success');
+  state.success = state.samples.length === plan.length && state.samples.every(sample => sample.status === 'success' || sample.status === 'excluded');
   state.status = state.success ? 'complete' : 'failed';
-  writeJsonAtomic(statePath, state);
+  writeState();
   return state;
 }
 
@@ -88,9 +96,10 @@ export function pairedExecutionOrder(workloadIds, repetitions) {
   if (!Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 20) throw Error('Invalid repetitions');
   const order = [];
   for (const workloadId of workloadIds) {
+    for (const revision of ['baseline', 'candidate']) order.push({ workload_id: workloadId, phase: 'warmup', repetition: null, sample: 'warmup-0', revision });
     for (let repetition = 0; repetition < repetitions; repetition++) {
       const revisions = repetition % 2 === 0 ? ['baseline', 'candidate'] : ['candidate', 'baseline'];
-      for (const revision of revisions) order.push({ workload_id: workloadId, repetition, revision });
+      for (const revision of revisions) order.push({ workload_id: workloadId, phase: 'measured', repetition, sample: String(repetition), revision });
     }
   }
   return order;
@@ -194,7 +203,7 @@ export function validatePairedVerification(result, step, contract) {
   return evidence.marker?.schema_version === contract.expected_facts.marker_schema_version && Number.isFinite(evidence.marker.backend_ready_ms) && evidence.marker.backend_ready_ms >= 0 && evidence.jobs === contract.expected_facts.jobs;
 }
 
-export async function runPairedPlan({ plan: planInput, outputDirectory }) {
+export async function runPairedPlan({ plan: planInput, outputDirectory, abortSignal = null }) {
   const plan = validatePairedPlan(planInput);
   for (const [name, revision] of Object.entries(plan.revisions)) {
     let actual;
@@ -208,8 +217,9 @@ export async function runPairedPlan({ plan: planInput, outputDirectory }) {
     metadata: { revisions: plan.revisions },
     totalLimits: plan.limits,
     execute: async step => {
+      if (abortSignal?.aborted) return { success: false, aborted: true, error: 'Paired execution interrupted before launch' };
       const revision = plan.revisions[step.revision];
-      const runDirectory = join(outputDirectory, 'runs', step.workload_id, `${step.repetition}-${step.revision}`);
+      const runDirectory = join(outputDirectory, 'runs', step.workload_id, pairedStepName(step));
       mkdirSync(runDirectory, { recursive: true });
       const resultPath = join(runDirectory, 'result.json');
       const processResult = await runBoundedProcess({
@@ -218,22 +228,24 @@ export async function runPairedPlan({ plan: planInput, outputDirectory }) {
         env: {
           ...process.env,
           GOOP_PERF_WORKLOAD_ID: step.workload_id,
-          GOOP_PERF_REPETITION: String(step.repetition),
+          GOOP_PERF_REPETITION: step.sample,
+          GOOP_PERF_PHASE: step.phase,
           GOOP_PERF_REVISION: step.revision,
           GOOP_PERF_OUTPUT_DIR: runDirectory,
           GOOP_PERF_RESULT_PATH: resultPath,
         },
         outputDirectory: runDirectory,
         timeoutMs: Math.min(plan.limits.timeout_ms, step.suite_remaining_ms),
-        logLimitBytes: plan.limits.log_limit_bytes,
-        storageBudgetBytes: plan.limits.storage_budget_bytes,
+        logLimitBytes: Math.min(plan.limits.log_limit_bytes, step.suite_remaining_log_bytes),
+        storageBudgetBytes: Math.min(plan.limits.storage_budget_bytes, step.suite_remaining_storage_bytes),
+        abortSignal,
       });
       writeFileSync(join(runDirectory, 'stdout.log'), processResult.stdout);
       writeFileSync(join(runDirectory, 'stderr.log'), processResult.stderr);
       const sanitizedProcess = { ...processResult, stdout: undefined, stderr: undefined };
       try {
         if (sha256File(revision.command) !== revision.command_sha256) return { success: false, process: sanitizedProcess, error: 'Paired command changed during execution' };
-        if (!processResult.success || statSync(resultPath).size > PAIRED_RESULT_LIMIT_BYTES) return { success: false, process: sanitizedProcess, error: 'Paired workload process failed or produced oversized evidence' };
+        if (!processResult.success || statSync(resultPath).size > PAIRED_RESULT_LIMIT_BYTES) return { success: false, aborted: processResult.aborted, process: sanitizedProcess, error: 'Paired workload process failed or produced oversized evidence' };
         const result = JSON.parse(readFileSync(resultPath, 'utf8'));
         const valid = validatePairedVerification(result, step, plan.workload_contracts[step.workload_id]);
         return { ...result, success: valid, process: sanitizedProcess, error: valid ? result.error : (result?.error ?? 'Invalid paired workload result') };
@@ -245,11 +257,12 @@ export async function runPairedPlan({ plan: planInput, outputDirectory }) {
   const comparisons = {};
   try {
     for (const workloadId of plan.workload_ids) {
-      const samples = state.samples.filter(sample => sample.workload_id === workloadId);
-      if (samples.some(sample => sample.status !== 'success')) {
+      const allSamples = state.samples.filter(sample => sample.workload_id === workloadId);
+      if (allSamples.some(sample => sample.status !== 'success' && sample.status !== 'excluded')) {
         comparisons[workloadId] = { success: false, error: 'At least one paired sample failed; no timing comparison produced' };
         continue;
       }
+      const samples = allSamples.filter(sample => sample.phase === 'measured');
       const contractFacts = samples.map(sample => stableStringify(sample.result.verification.contract_facts));
       if (new Set(contractFacts).size !== 1) throw Error(`Paired output contract facts differ for ${workloadId}`);
       const summary = revision => ({
@@ -264,19 +277,19 @@ export async function runPairedPlan({ plan: planInput, outputDirectory }) {
     state.success = false;
     state.status = 'failed';
     state.comparison_error = error.message;
-    writeJsonAtomic(join(outputDirectory, 'paired-state.json'), state);
-    writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons);
+    writeJsonAtomic(join(outputDirectory, 'paired-state.json'), state, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
+    writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
     throw error;
   }
-  writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons);
+  writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
   if (!state.success) throw Error('Paired execution failed; retained incremental evidence');
   return { state, comparisons };
 }
 
-async function main() {
+async function main(abortSignal) {
   if (process.argv.length !== 6 || process.argv[2] !== '--paired-plan' || process.argv[4] !== '--output') throw Error('Usage: --paired-plan PLAN_JSON --output NEW_DIRECTORY');
   const plan = readFileSync(resolve(process.argv[3]), 'utf8');
-  await runPairedPlan({ plan, outputDirectory: resolve(process.argv[5]) });
+  await runPairedPlan({ plan, outputDirectory: resolve(process.argv[5]), abortSignal });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === modulePath) main().catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === modulePath) withTerminationSignals(main).catch(error => { console.error(error); process.exitCode = 1; });

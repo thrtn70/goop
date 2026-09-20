@@ -4,6 +4,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeRss, summarize, directoryBytes, ownedSymlinks } from './performance-baseline.mjs';
+import { withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -25,7 +26,8 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+  if (abortSignal?.aborted) throw Error('Startup run aborted before launch');
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
   for (const name of ['config', 'data', 'outputs']) mkdirSync(join(directory, name));
@@ -41,7 +43,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const start = performance.now();
   const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
   const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
-  let exited = false, exitCode = null, exitSignal = null, spawnError = null;
+  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false;
   const closed = new Promise(resolve => {
     child.once('error', error => { spawnError = error.message; });
     child.once('close', (code, signal) => { exited = true; exitCode = code; exitSignal = signal; resolve(); });
@@ -51,6 +53,8 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
   child.stderr.on('data', chunk => { stderr = retain(stderr, chunk); });
   const signal = name => { if (child.pid) { try { process.kill(-child.pid, name); } catch { /* Already gone. */ } } };
+  const abort = () => { aborted = true; signal('SIGTERM'); };
+  abortSignal?.addEventListener('abort', abort, { once: true });
   let budgetKillTimer = null;
   const budgetCheck = setInterval(() => {
     try {
@@ -77,7 +81,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const sampling = setInterval(sample, 100);
   let marker = null, launchMs = null, idleRss = null, timedOut = false;
   try {
-    while (!exited && performance.now() < activeDeadline) {
+    while (!exited && !aborted && performance.now() < activeDeadline) {
       try {
         if (lstatSync(reportPath).isFile() && statSync(reportPath).size < 4096) {
           const value = JSON.parse(readFileSync(reportPath, 'utf8'));
@@ -88,10 +92,10 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
       } catch { /* Writer may still be writing the newly-created marker. */ }
       await sleep(10);
     }
-    timedOut = !marker && !exited;
-    if (marker) {
+    timedOut = !marker && !exited && !aborted;
+    if (marker && !aborted) {
       const idleStart = performance.now();
-      while (!exited && performance.now() - idleStart < idleMs && performance.now() < activeDeadline) await sleep(Math.min(50, idleMs));
+      while (!exited && !aborted && performance.now() - idleStart < idleMs && performance.now() < activeDeadline) await sleep(Math.min(50, idleMs));
       const idleComplete = performance.now() - idleStart >= idleMs;
       if (!exited && idleComplete) idleRss = sample()?.rssKiB ?? null;
       if (!idleComplete && !exited) timedOut = true;
@@ -100,6 +104,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     clearInterval(sampling);
     clearInterval(budgetCheck);
     clearTimeout(budgetKillTimer);
+    abortSignal?.removeEventListener('abort', abort);
     signal('SIGTERM');
     // Always finish the grace period before returning: descendants may outlive
     // a parent that handles TERM. Each run owns its detached process group.
@@ -114,7 +119,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   }
   const createdSymlinks=ownedSymlinks(directory);let outputError=createdSymlinks.length?`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`:null;
   for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
-  const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
+  const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
   writeFileSync(join(directory, 'stdout.log'), stdout);
   writeFileSync(join(directory, 'stderr.log'), stderr);
   writeFileSync(join(directory, 'sample.json'), JSON.stringify(result, null, 2));
@@ -130,7 +135,7 @@ export function summarizeStartup(samples) {
   };
 }
 
-async function main() {
+async function main(abortSignal) {
   if (process.platform !== 'darwin') throw Error('Startup harness supports macOS only');
   const options = {};
   for (let i = 2; i < process.argv.length; i += 2) {
@@ -148,7 +153,7 @@ async function main() {
   for (const jobs of [0, 200, 1000]) {
     const samples = [];
     for (let i = -1; i < 5; i++) {
-      const result = await runStartup({ binary, directory: join(output, `${jobs}-${i < 0 ? 'warmup' : i}`), settings, jobs });
+      const result = await runStartup({ binary, directory: join(output, `${jobs}-${i < 0 ? 'warmup' : i}`), settings, jobs, abortSignal });
       if (i >= 0) samples.push(result);
       if (!result.success) {
         summary[jobs] = summarizeStartup(samples);
@@ -161,4 +166,4 @@ async function main() {
   }
   if (hash(binary) !== binaryHash) throw Error('Executable changed during startup suite');
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) withTerminationSignals(main).catch(error => { console.error(error); process.exitCode = 1; });

@@ -5,11 +5,11 @@ test('aggregates only descendants in KiB',()=>assert.deepEqual(treeRss('10 1 100
 test('failed operations excluded from throughput',()=>assert.deepEqual(summarize([{success:true,process_ms:20},{success:false,process_ms:1},{success:true,process_ms:40}]),{successes:2,failures:1,median_ms:30,min_ms:20,max_ms:40}));
 test('output names differ for warmup and every repetition',()=>assert.equal(new Set([-1,0,1,2,3,4].map(i=>outputName('video',i,'mp4'))).size,6));
 import {run, normalizeSuccess, directoryBytes} from './performance-baseline.mjs';
-import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { captureIdentity, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity } from './performance-shared.mjs';
+import { captureIdentity, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity, writeJsonAtomic } from './performance-shared.mjs';
 test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:1},1,false),false);
  assert.equal(normalizeSuccess({success:true},0,false),false);
@@ -18,6 +18,7 @@ test('success requires clean exit and finite nonnegative duration',()=>{
 });
 async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeDelay?'sleep '+options.probeDelay+'\n':''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeDelay;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
 test('timeout escalates for a process ignoring TERM',async()=>{const start=performance.now();const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:30});assert.equal(result.success,false);assert.equal(result.timed_out,true);assert.ok(performance.now()-start<3000);});
+test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
 test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
  const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:50});
  let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(result.descendant_pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}
@@ -72,6 +73,7 @@ test('effective execution summary proves explicit software and copy',async()=>{
 test('storage budget stops oversized output and logs are bounded',async()=>{const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,Buffer.alloc(10000));process.stdout.write('y'.repeat(10000));process.stderr.write('x'.repeat(10000));setInterval(()=>{},10)",{budgetBytes:4096,logLimitBytes:100,killGraceMs:30});assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);assert.ok(result.log_bytes_retained<=100);});
 test('storage budget catches an oversized output written immediately before exit',async()=>{const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,Buffer.alloc(10000));fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:10000}}));",{budgetBytes:4096,logLimitBytes:100,killGraceMs:30});assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);});
 test('directory byte count includes only files in suite',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{writeFileSync(join(dir,'one'),'1234');assert.equal(directoryBytes(dir),4);}finally{rmSync(dir,{recursive:true,force:true});}});
+test('bounded atomic JSON refuses the temporary replacement high-water peak',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-atomic-budget-'));try{const path=join(dir,'state.json');writeFileSync(path,'{"old":true}\n');const value={next:'x'.repeat(1000)};const nextBytes=Buffer.byteLength(`${JSON.stringify(value)}\n`);const budget=directoryBytes(dir)+nextBytes-1;assert.throws(()=>writeJsonAtomic(path,value,{budgetDirectory:dir,budgetBytes:budget}),/atomic.*budget/i);assert.equal(readFileSync(path,'utf8'),'{"old":true}\n');assert.deepEqual(readdirSync(dir),['state.json']);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('child lifetime excludes subsequent output verification',async()=>{
  const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[{codec_type:'video',codec_name:'mjpeg'}],format:{format_name:'image2'}},probeDelay:0.5,expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
  assert.equal(result.success,true);
@@ -168,7 +170,7 @@ const validManifest = () => ({
   log_limit_bytes: 65536,
   suite_log_limit_bytes: 1048576,
   storage_budget_bytes: 1048576,
-  suite_storage_budget_bytes: 8388608,
+  suite_storage_budget_bytes: 16777216,
  },
  fixture_roles: ['raw_48mp', 'inspect_mixed'],
  workloads: [
@@ -348,7 +350,7 @@ test('compact ledger serialization keeps adversarial nested arrays within the de
  try {
   const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
-  const manifest=validManifest();manifest.defaults.repetitions=1;manifest.defaults.suite_storage_budget_bytes=600000;manifest.workloads=[manifest.workloads[0]];
+  const manifest=validManifest();manifest.defaults.repetitions=1;manifest.defaults.suite_storage_budget_bytes=1300000;manifest.workloads=[manifest.workloads[0]];
   const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
   const output=join(root,'output');await runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async()=>({success:true,process_ms:1,padding:Array(80000).fill(0)})});
   assert.ok(directoryBytes(output)<=manifest.defaults.suite_storage_budget_bytes);
@@ -356,7 +358,7 @@ test('compact ledger serialization keeps adversarial nested arrays within the de
 });
 
 test('compact paired ledger serialization keeps nested arrays within its declared bound', async () => {
- const root=mkdtempSync(join(tmpdir(),'goop-paired-ledger-bound-')),output=join(root,'output'),budget=350000;
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-ledger-bound-')),output=join(root,'output'),budget=1048576;
  try {
   const state=await collectPairedSamples({workloadIds:['copy'],repetitions:2,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:budget},execute:async()=>({success:true,process_ms:1,padding:Array(20000).fill(0)})});
   assert.equal(state.status,'complete');assert.ok(directoryBytes(output)<=budget);
@@ -374,8 +376,10 @@ test('persisted full results remain inside the per-run storage bound', async () 
  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-test('paired order alternates revisions within every repetition', () => {
- assert.deepEqual(pairedExecutionOrder(['raw-single'], 4).map(v => v.revision), ['baseline', 'candidate', 'candidate', 'baseline', 'baseline', 'candidate', 'candidate', 'baseline']);
+test('paired order warms both revisions before alternating measured repetitions', () => {
+ const order=pairedExecutionOrder(['raw-single'],4);
+ assert.deepEqual(order.map(v=>`${v.phase}:${v.revision}`),['warmup:baseline','warmup:candidate','measured:baseline','measured:candidate','measured:candidate','measured:baseline','measured:baseline','measured:candidate','measured:candidate','measured:baseline']);
+ assert.deepEqual(order.slice(0,2).map(v=>v.repetition),[null,null]);
 });
 
 test('paired comparison requires equivalent identity and flags over ten percent without failing', () => {
@@ -394,12 +398,13 @@ test('paired collector executes the frozen alternating order and retains failure
  const visited = [];
  try {
   const result = await collectPairedSamples({ workloadIds: ['copy'], repetitions: 2, outputDirectory: join(root, 'output'), execute: async step => {
-   visited.push(`${step.repetition}:${step.revision}`);
+   visited.push(`${step.phase}:${step.repetition}:${step.revision}`);
    return { success: step.revision === 'baseline', process_ms: 1 };
   } });
-  assert.deepEqual(visited, ['0:baseline', '0:candidate', '1:candidate', '1:baseline']);
-  assert.equal(result.samples.length, 4);
-  assert.equal(result.samples.filter(sample => sample.status === 'failed').length, 2);
+  assert.deepEqual(visited, ['warmup:null:baseline','warmup:null:candidate','measured:0:baseline','measured:0:candidate','measured:1:candidate','measured:1:baseline']);
+  assert.equal(result.samples.length, 6);
+  assert.equal(result.samples.filter(sample => sample.status === 'excluded').length, 1);
+  assert.equal(result.samples.filter(sample => sample.status === 'failed').length, 3);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'output', 'paired-state.json'), 'utf8')), result);
   await assert.rejects(collectPairedSamples({ workloadIds: ['copy'], repetitions: 1, outputDirectory: join(root, 'output'), execute: async () => ({ success: true }) }), /must be new/i);
  } finally { rmSync(root, { recursive: true, force: true }); }
@@ -421,7 +426,8 @@ test('paired plan is runnable and writes bound comparisons', async () => {
   } };
   const result = await runPairedPlan({ plan, outputDirectory: join(root, 'output') });
   assert.equal(result.state.status, 'complete');
-  assert.deepEqual(result.state.samples.map(sample => `${sample.repetition}:${sample.revision}`), ['0:baseline', '0:candidate', '1:candidate', '1:baseline']);
+  assert.deepEqual(result.state.samples.map(sample => `${sample.phase}:${sample.repetition}:${sample.revision}`), ['warmup:null:baseline','warmup:null:candidate','measured:0:baseline','measured:0:candidate','measured:1:candidate','measured:1:baseline']);
+  assert.deepEqual(result.state.samples.slice(0,2).map(sample=>sample.status),['excluded','excluded']);
   assert.equal(result.comparisons.copy.percent_change, 20);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'output', 'comparison.json'), 'utf8')), result.comparisons);
   await assert.rejects(runPairedPlan({ plan: { ...plan, workload_ids: ['../escape'] }, outputDirectory: join(root, 'escape') }), /workload.*identifier/i);
@@ -461,6 +467,25 @@ test('paired collection stops on the first total-budget overrun', async () => {
   let runs=0;
   const state=await collectPairedSamples({workloadIds:['copy'],repetitions:2,outputDirectory:join(root,'output'),totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1024,suite_storage_budget_bytes:1048576},execute:async()=>{runs+=1;return {success:true,process_ms:1,process:{log_bytes_retained:1025}};}});
   assert.equal(runs,1);assert.equal(state.status,'failed');assert.equal(state.samples[0].result.log_budget_exceeded,true);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('paired collector exposes decreasing suite allowances to every launch', async () => {
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-allowances-'));
+ try {
+  const seen=[];
+  const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:join(root,'output'),totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:450,suite_storage_budget_bytes:1048576},execute:async step=>{seen.push({log:step.suite_remaining_log_bytes,storage:step.suite_remaining_storage_bytes});return {success:true,process_ms:1,process:{log_bytes_retained:100}};}});
+  assert.equal(state.status,'complete');
+  assert.deepEqual(seen.map(value=>value.log),[450,350,250,150]);
+  assert.equal(seen.every(value=>Number.isSafeInteger(value.storage)&&value.storage>0&&value.storage<1048576),true);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('paired collector compacts oversized direct adapter results before ledger writes', async () => {
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-result-bound-')),output=join(root,'output');
+ try {
+  const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:1048576},execute:async()=>({success:true,process_ms:1,padding:'x'.repeat(100000)})});
+  assert.equal(state.status,'failed');assert.equal(state.samples.every(sample=>sample.result.result_too_large===true),true);assert.equal(state.samples.every(sample=>sample.result.padding===undefined),true);assert.ok(directoryBytes(output)<=1048576);
  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
@@ -616,7 +641,7 @@ test('suite storage cleanup removes only the current over-budget run', async () 
  try {
   const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
-  const manifest=validManifest();manifest.defaults.warmups=1;manifest.defaults.repetitions=1;manifest.defaults.suite_storage_budget_bytes=1048576;manifest.workloads=[manifest.workloads[0]];
+  const manifest=validManifest();manifest.defaults.warmups=1;manifest.defaults.repetitions=1;manifest.defaults.suite_storage_budget_bytes=1300000;manifest.workloads=[manifest.workloads[0]];
   const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
   const undersized={...manifest,defaults:{...manifest.defaults,suite_storage_budget_bytes:1024}};const undersizedOutput=join(root,'undersized');
   await assert.rejects(runPerformanceSuite({manifest:undersized,bindings,prevalidatedBindings:true,outputDirectory:undersizedOutput,execute:async()=>({success:true,process_ms:1})}),/evidence ledger/i);assert.equal(existsSync(undersizedOutput),false);
@@ -631,8 +656,24 @@ test('paired storage cleanup preserves prior completed run evidence', async () =
  try {
  let runs=0;const budget=1048576;
   const undersized=join(root,'undersized');await assert.rejects(collectPairedSamples({workloadIds:['copy'],repetitions:2,outputDirectory:undersized,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1024,suite_storage_budget_bytes:1024},execute:async()=>({success:true,process_ms:1})}),/evidence ledger/i);assert.equal(existsSync(undersized),false);
-  const state=await collectPairedSamples({workloadIds:['copy'],repetitions:2,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:budget},execute:async step=>{runs+=1;const directory=join(output,'runs',step.workload_id,`${step.repetition}-${step.revision}`);mkdirSync(directory,{recursive:true});writeFileSync(join(directory,runs===1?'first.raw':'oversized.raw'),Buffer.alloc(runs===1?100:2*1024*1024));return {success:true,process_ms:1};}});
-  assert.equal(state.status,'failed');assert.equal(runs,2);assert.equal(existsSync(join(output,'runs','copy','0-baseline','first.raw')),true);assert.equal(existsSync(join(output,'runs','copy','0-candidate')),false);assert.ok(directoryBytes(output)<=budget);
+  const state=await collectPairedSamples({workloadIds:['copy'],repetitions:2,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:budget},execute:async step=>{runs+=1;const sample=step.phase==='warmup'?`warmup-${step.revision}`:`${step.repetition}-${step.revision}`;const directory=join(output,'runs',step.workload_id,sample);mkdirSync(directory,{recursive:true});writeFileSync(join(directory,runs===1?'first.raw':'oversized.raw'),Buffer.alloc(runs===1?100:2*1024*1024));return {success:true,process_ms:1};}});
+  assert.equal(state.status,'failed');assert.equal(runs,2);assert.equal(existsSync(join(output,'runs','copy','warmup-baseline','first.raw')),true);assert.equal(existsSync(join(output,'runs','copy','warmup-candidate')),false);assert.ok(directoryBytes(output)<=budget);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('suite clamps every run to remaining storage and retained-log budgets', async () => {
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-allowances-'));
+ try {
+  const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+  const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+  const manifest=validManifest();manifest.defaults.warmups=1;manifest.defaults.repetitions=1;manifest.defaults.log_limit_bytes=1500;manifest.defaults.suite_log_limit_bytes=2000;manifest.defaults.suite_storage_budget_bytes=1400000;manifest.workloads=[manifest.workloads[0]];
+  const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+  const seen=[];const output=join(root,'output');
+  const state=await runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{seen.push({...run.limits});mkdirSync(run.output_directory,{recursive:true});writeFileSync(join(run.output_directory,'payload'),Buffer.alloc(1024));return {success:true,process_ms:1,process:{log_bytes_retained:run.limits.log_limit_bytes}};}});
+  assert.equal(state.status,'complete');
+  assert.deepEqual(seen.map(value=>value.log_limit_bytes),[1500,500]);
+  assert.equal(seen.every(value=>value.storage_budget_bytes>0&&value.storage_budget_bytes<manifest.defaults.storage_budget_bytes),true);
+  assert.ok(directoryBytes(output)<=manifest.defaults.suite_storage_budget_bytes);
  } finally {rmSync(root,{recursive:true,force:true});}
 });
 

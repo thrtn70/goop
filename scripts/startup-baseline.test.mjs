@@ -20,6 +20,12 @@ test('timeout kills a TERM-resistant child before returning', async () => {
   assert.equal(result.exit_signal, 'SIGKILL');
   assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' });
 });
+test('abort kills a TERM-resistant startup process before returning', async () => {
+  const controller=new AbortController();setTimeout(()=>controller.abort(),100);
+  const result=await fake("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{readinessTimeoutMs:5000,abortSignal:controller.signal});
+  assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);
+  assert.throws(()=>process.kill(result.pid,0),{code:'ESRCH'});
+});
 test('invalid and failed readiness excluded from medians', async () => {
   const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:-1,pid:process.pid}));setInterval(()=>{},10)");
   assert.equal(result.success, false);

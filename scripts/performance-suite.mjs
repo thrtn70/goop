@@ -22,6 +22,7 @@ import {
   sha256File,
   stableStringify,
   validateCapturedIdentity,
+  withTerminationSignals,
   writeJsonAtomic,
 } from './performance-shared.mjs';
 import {
@@ -35,6 +36,9 @@ import {
 
 const modulePath = fileURLToPath(import.meta.url);
 const STATE_RESULT_LIMIT_BYTES = 256 * 1024;
+const LEDGER_FIXED_RESERVE_BYTES = 65536;
+const LEDGER_SAMPLE_RESERVE_BYTES = STATE_RESULT_LIMIT_BYTES + 2048;
+const futureAtomicLedgerReserveBytes = (totalSamples, completedSamples) => LEDGER_FIXED_RESERVE_BYTES + (2 * totalSamples - completedSamples) * LEDGER_SAMPLE_RESERVE_BYTES;
 
 const extensionFor = expected => expected.extension === 'jpeg' ? 'jpg' : expected.extension;
 
@@ -92,8 +96,10 @@ function outputBytes(result) {
   return null;
 }
 
-function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory) {
+function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory, maxAdditionalBytes) {
   if (Buffer.byteLength(JSON.stringify(result)) <= STATE_RESULT_LIMIT_BYTES) return null;
+  const retainedBytes = Buffer.byteLength(JSON.stringify(result)) + 1;
+  if (retainedBytes > maxAdditionalBytes) return { budget_exceeded: true, retained_bytes: retainedBytes };
   mkdirSync(absoluteEvidenceDirectory, { recursive: true });
   const absolutePath = join(absoluteEvidenceDirectory, 'full-result.json');
   writeJsonAtomic(absolutePath, result);
@@ -150,6 +156,7 @@ export async function runPerformanceSuite({
   execute,
   prevalidatedBindings = false,
   identity = null,
+  abortSignal = null,
 }) {
   const manifest = parseManifest(manifestInput);
   const bindings = prevalidatedBindings ? bindingInput : validateBindings(manifest, bindingInput);
@@ -164,22 +171,27 @@ export async function runPerformanceSuite({
     samples: [],
     summary: null,
   };
-  const requiredLedgerBytes = Buffer.byteLength(JSON.stringify(state)) + plan.length * (STATE_RESULT_LIMIT_BYTES + 2048) + 65536;
+  const requiredLedgerBytes = Buffer.byteLength(JSON.stringify(state)) + futureAtomicLedgerReserveBytes(plan.length, 0);
   if (manifest.defaults.suite_storage_budget_bytes < requiredLedgerBytes) throw Error(`Suite storage budget is too small for the bounded evidence ledger; require at least ${requiredLedgerBytes} bytes`);
   createOwnedDirectory(outputDirectory);
-  writeJsonAtomic(statePath, state);
+  const writeState = () => writeJsonAtomic(statePath, state, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
+  writeState();
   let fatal = null;
   const suiteStarted = performance.now();
   let retainedLogBytes = 0;
   const summarySamples = [];
-  for (const run of plan) {
+  for (const [planIndex, run] of plan.entries()) {
+    if (abortSignal?.aborted) {
+      fatal = 'Suite interrupted';
+      break;
+    }
     if (directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes) {
       const result = { success: false, not_run: true, budget_exceeded: true, error: 'Suite storage budget exceeded before launch' };
       const sample = { id: run.id, workload_id: run.workload_id, phase: run.phase, repetition: run.repetition, status: 'failed', result };
       summarySamples.push(sample);state.samples.push(sample);
       fatal = 'Suite storage budget exceeded before launch';
       state.summary = summarizeSuite(summarySamples, manifest);
-      writeJsonAtomic(statePath, state);
+      writeState();
       break;
     }
     const rawRemainingMs = manifest.defaults.suite_timeout_ms - (performance.now() - suiteStarted);
@@ -189,28 +201,60 @@ export async function runPerformanceSuite({
       summarySamples.push(sample);state.samples.push(sample);
       fatal = 'Suite time budget exceeded before launch';
       state.summary = summarizeSuite(summarySamples, manifest);
-      writeJsonAtomic(statePath, state);
+      writeState();
       break;
     }
     const remainingMs = Math.max(1, Math.floor(rawRemainingMs));
-    run.limits.timeout_ms = Math.min(run.limits.timeout_ms, remainingMs);
+    const currentBytes = directoryBytes(outputDirectory);
+    const reservedLedgerBytes = futureAtomicLedgerReserveBytes(plan.length, planIndex);
+    const remainingStorageBytes = manifest.defaults.suite_storage_budget_bytes - currentBytes - reservedLedgerBytes;
+    const remainingLogBytes = manifest.defaults.suite_log_limit_bytes - retainedLogBytes;
+    if (remainingStorageBytes <= 0 || remainingLogBytes <= 0) {
+      const storage = remainingStorageBytes <= 0;
+      const result = { success: false, not_run: true, ...(storage ? { budget_exceeded: true } : { log_budget_exceeded: true }), error: `Suite ${storage ? 'storage' : 'retained-log'} budget exhausted before launch` };
+      const sample = { id: run.id, workload_id: run.workload_id, phase: run.phase, repetition: run.repetition, status: 'failed', result };
+      summarySamples.push(sample); state.samples.push(sample);
+      fatal = result.error;
+      state.summary = summarizeSuite(summarySamples, manifest);
+      writeState();
+      break;
+    }
+    const effectiveRun = {
+      ...run,
+      limits: {
+        ...run.limits,
+        timeout_ms: Math.min(run.limits.timeout_ms, remainingMs),
+        log_limit_bytes: Math.min(run.limits.log_limit_bytes, remainingLogBytes),
+        storage_budget_bytes: Math.min(run.limits.storage_budget_bytes, remainingStorageBytes),
+      },
+      abort_signal: abortSignal,
+    };
     let result;
     try {
-      result = await execute({ ...run, output_directory: join(outputDirectory, run.destination), bindings, manifest });
+      result = await execute({ ...effectiveRun, output_directory: join(outputDirectory, run.destination), bindings, manifest });
       if (result === null || typeof result !== 'object') throw Error('Adapter returned no result');
     } catch (error) {
       result = { success: false, error: error.message };
     }
-    const fullResult = persistFullResult(result, join(outputDirectory, run.destination), run.destination);
+    const runDirectory = join(outputDirectory, run.destination);
+    const maxAdditionalBytes = Math.max(0, Math.min(
+      effectiveRun.limits.storage_budget_bytes - directoryBytes(runDirectory),
+      manifest.defaults.suite_storage_budget_bytes - directoryBytes(outputDirectory) - futureAtomicLedgerReserveBytes(plan.length, planIndex),
+    ));
+    const persistedResult = persistFullResult(result, runDirectory, run.destination, maxAdditionalBytes);
+    const evidenceWriteBudgetExceeded = persistedResult?.budget_exceeded === true;
+    const fullResult = evidenceWriteBudgetExceeded
+      ? { full_result_retained: false, full_result_bytes: persistedResult.retained_bytes }
+      : persistedResult;
     let status = result.success === true ? (run.phase === 'warmup' ? 'excluded' : 'success') : 'failed';
-    const runBudgetExceeded = directoryBytes(join(outputDirectory, run.destination)) > run.limits.storage_budget_bytes;
+    const runBudgetExceeded = evidenceWriteBudgetExceeded || directoryBytes(runDirectory) > effectiveRun.limits.storage_budget_bytes;
     const totalBudgetExceeded = directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes;
     retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
     const logBudgetExceeded = retainedLogBytes > manifest.defaults.suite_log_limit_bytes;
     const timeBudgetExceeded = performance.now() - suiteStarted > manifest.defaults.suite_timeout_ms;
     if (runBudgetExceeded) {
       status = 'failed';
-      result = { ...result, success: false, budget_exceeded: true, error: 'Workload storage budget exceeded while retaining full evidence' };
+      result = { ...result, success: false, budget_exceeded: true, ...(evidenceWriteBudgetExceeded ? { full_result_retained: false } : {}), error: 'Workload storage budget exceeded while retaining full evidence' };
       fatal ??= `Workload storage budget exceeded: ${run.id}`;
     } else if (totalBudgetExceeded) {
       status = 'failed';
@@ -248,37 +292,18 @@ export async function runPerformanceSuite({
       summarySamples.at(-1).status = 'failed';
       summarySamples.at(-1).result = { ...summarySamples.at(-1).result, success: false, source_integrity_error: error.message };
     }
+    if (runBudgetExceeded || totalBudgetExceeded) {
+      removeOwnedDirectory(runDirectory);
+      state.samples.at(-1).result = markOwnedPayloadRemoved(state.samples.at(-1).result);
+      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, owned_payload_removed: true };
+    }
     state.summary = summarizeSuite(summarySamples, manifest);
-    writeJsonAtomic(statePath, state);
-    if (runBudgetExceeded) {
-      removeOwnedDirectory(join(outputDirectory, run.destination));
-      state.samples.at(-1).result = markOwnedPayloadRemoved(state.samples.at(-1).result);
-      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, owned_payload_removed: true };
-      writeJsonAtomic(statePath, state);
-      break;
-    }
-    if (directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes && !totalBudgetExceeded) {
-      state.samples.at(-1).status = 'failed';
-      removeOwnedDirectory(join(outputDirectory, run.destination));
-      state.samples.at(-1).result = { ...markOwnedPayloadRemoved(state.samples.at(-1).result), success: false, budget_exceeded: true, error: 'Suite storage budget exceeded while retaining evidence' };
-      summarySamples.at(-1).status = 'failed';
-      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, success: false, budget_exceeded: true, owned_payload_removed: true, error: 'Suite storage budget exceeded while retaining evidence' };
-      fatal ??= 'Suite storage budget exceeded while retaining evidence';
-      state.summary = summarizeSuite(summarySamples, manifest);
-      writeJsonAtomic(statePath, state);
-      break;
-    }
-    if (totalBudgetExceeded) {
-      removeOwnedDirectory(join(outputDirectory, run.destination));
-      state.samples.at(-1).result = markOwnedPayloadRemoved(state.samples.at(-1).result);
-      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, owned_payload_removed: true };
-      writeJsonAtomic(statePath, state);
-    }
+    writeState();
     if (sourceIntegrityFailed || runBudgetExceeded || totalBudgetExceeded || timeBudgetExceeded || logBudgetExceeded) break;
   }
   state.status = fatal ? 'failed' : 'complete';
   state.summary = summarizeSuite(summarySamples, manifest);
-  writeJsonAtomic(statePath, state);
+  writeState();
   if (fatal) throw Error(fatal);
   return state;
 }
@@ -395,6 +420,7 @@ export async function executeWorkloadAdapter(run, drivers) {
     timeoutMs: run.limits.timeout_ms,
     logLimitBytes: run.limits.log_limit_bytes,
     storageBudgetBytes: run.limits.storage_budget_bytes,
+    abortSignal: run.abort_signal,
   });
   writeFileSync(join(run.output_directory, 'stdout.log'), processResult.stdout);
   writeFileSync(join(run.output_directory, 'stderr.log'), processResult.stderr);
@@ -432,6 +458,7 @@ async function executeRealAdapter(run, drivers) {
       hardwareEnabled: drivers.hardwareEnabled,
       ffprobe: drivers.ffprobe,
       expectedOutput: run.workload.expected_output,
+      abortSignal: run.abort_signal,
     });
   }
   if (run.workload.adapter === 'workload') return executeWorkloadAdapter(run, drivers);
@@ -444,6 +471,7 @@ async function executeRealAdapter(run, drivers) {
     readinessTimeoutMs: run.limits.timeout_ms,
     logLimitBytes: run.limits.log_limit_bytes,
     budgetBytes: run.limits.storage_budget_bytes,
+    abortSignal: run.abort_signal,
   });
 }
 
@@ -459,6 +487,7 @@ async function executeSyntheticAdapter(run) {
     timeoutMs: run.limits.timeout_ms,
     logLimitBytes: run.limits.log_limit_bytes,
     storageBudgetBytes: run.limits.storage_budget_bytes,
+    abortSignal: run.abort_signal,
   });
   const result = JSON.parse(readFileSync(resultPath, 'utf8'));
   return { ...result, success: processResult.success && result.success === true, process: { ...processResult, stdout: undefined, stderr: undefined } };
@@ -476,7 +505,7 @@ function parseOptions(argv) {
   return options;
 }
 
-async function syntheticSmoke(outputDirectory) {
+async function syntheticSmoke(outputDirectory, abortSignal = null) {
   const manifestPath = new URL('./performance-suite.synthetic.json', import.meta.url);
   const manifestText = readFileSync(manifestPath, 'utf8');
   const manifest = parseManifest(manifestText);
@@ -487,14 +516,14 @@ async function syntheticSmoke(outputDirectory) {
   const fixture = { path: fixturePath, sha256: sha256File(fixturePath), bytes: statSync(fixturePath).size };
   const binding = { schema_version: 1, fixtures: Object.fromEntries(manifest.fixture_roles.map(role => [role, fixture])) };
   try {
-    return await runPerformanceSuite({ manifest, bindings: binding, outputDirectory, execute: executeSyntheticAdapter });
+    return await runPerformanceSuite({ manifest, bindings: binding, outputDirectory, abortSignal, execute: executeSyntheticAdapter });
   } finally {
     const { rmSync } = await import('node:fs');
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 }
 
-async function rustContractSmoke(options) {
+async function rustContractSmoke(options, abortSignal = null) {
   const required = ['workload-driver', 'sidecars', 'fixture', 'output'];
   for (const name of Object.keys(options)) if (!required.includes(name)) throw Error(`Unknown Rust contract option: --${name}`);
   for (const name of required) if (!options[name]) throw Error(`Missing --${name}`);
@@ -519,11 +548,12 @@ async function rustContractSmoke(options) {
     bindings,
     prevalidatedBindings: true,
     outputDirectory,
+    abortSignal,
     execute: run => executeWorkloadAdapter(run, { workloadDriver, sidecars }),
   });
 }
 
-export async function normalSuite(options) {
+export async function normalSuite(options, abortSignal = null) {
   const required = ['manifest', 'bindings', 'output', 'single-driver', 'workload-driver', 'sidecars', 'startup-binary', 'startup-config', 'build-command'];
   const allowed = new Set([...required, 'hardware-enabled']);
   for (const name of Object.keys(options)) if (!allowed.has(name)) throw Error(`Unknown option: --${name}`);
@@ -567,7 +597,7 @@ export async function normalSuite(options) {
   validateCapturedIdentity(identity, 'pre-run identity');
   let result = null, runError = null, integrityError = null;
   try {
-    result = await runPerformanceSuite({ manifest, bindings, prevalidatedBindings: true, outputDirectory, identity, execute: run => executeRealAdapter(run, drivers) });
+    result = await runPerformanceSuite({ manifest, bindings, prevalidatedBindings: true, outputDirectory, identity, abortSignal, execute: run => executeRealAdapter(run, drivers) });
   } catch (error) {
     runError = error;
   }
@@ -590,20 +620,20 @@ export async function normalSuite(options) {
   } catch (error) {
     integrityError = error.message;
   }
-  writeJsonAtomic(join(outputDirectory, 'integrity.json'), { success: integrityError === null, error: integrityError, pre: identity, post });
+  writeJsonAtomic(join(outputDirectory, 'integrity.json'), { success: integrityError === null, error: integrityError, pre: identity, post }, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
   if (integrityError) {
     const statePath = join(outputDirectory, 'suite-state.json');
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     state.status = 'failed';
     state.integrity_error = integrityError;
-    writeJsonAtomic(statePath, state);
+    writeJsonAtomic(statePath, state, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
   }
   if (runError) throw runError;
   if (integrityError) throw Error(integrityError);
   return result;
 }
 
-async function main() {
+async function main(abortSignal) {
   if (process.argv[2] === '--synthetic-adapter') {
     const request = JSON.parse(readFileSync(process.argv[3], 'utf8'));
     writeFileSync(process.argv[4], `${JSON.stringify({ success: true, process_ms: 1, request_id: request.id })}\n`);
@@ -612,14 +642,14 @@ async function main() {
   if (process.argv[2] === '--synthetic-smoke') {
     const options = parseOptions(process.argv.slice(3));
     if (!options.output || Object.keys(options).length !== 1) throw Error('Usage: --synthetic-smoke --output NEW_DIRECTORY');
-    await syntheticSmoke(resolve(options.output));
+    await syntheticSmoke(resolve(options.output), abortSignal);
     return;
   }
   if (process.argv[2] === '--rust-contract-smoke') {
-    await rustContractSmoke(parseOptions(process.argv.slice(3)));
+    await rustContractSmoke(parseOptions(process.argv.slice(3)), abortSignal);
     return;
   }
-  await normalSuite(parseOptions(process.argv.slice(2)));
+  await normalSuite(parseOptions(process.argv.slice(2)), abortSignal);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === modulePath) main().catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === modulePath) withTerminationSignals(main).catch(error => { console.error(error); process.exitCode = 1; });
