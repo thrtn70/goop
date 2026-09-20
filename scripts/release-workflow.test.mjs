@@ -84,21 +84,14 @@ test("audit runs the PERF-01 synthetic harness smoke on both supported platforms
   );
 });
 
-test("audit executes the strict PERF-01 Rust adapter tests", () => {
+test("Linux audit compiles and tests PERF-01 drivers without executing unavailable sidecars", () => {
   const rust = auditJob("rust");
-  const setupNode = rust.indexOf(setupNode24Ref);
-  const contract = rust.indexOf("scripts/performance-suite.mjs --rust-contract-smoke");
-  assert.ok(setupNode >= 0 && setupNode < contract, "rust contract smoke must use pinned setup-node first");
-  assert.match(rust.slice(setupNode, contract), /node-version: "22"/);
   assert.match(rust, /cargo test -p goop-converter --example performance_workload --all-features/);
-  assert.match(rust, /cargo build -p goop-converter --example performance_baseline --example performance_workload --all-features/);
-  assert.match(rust, /"\$NODE_BINARY" scripts\/performance-suite\.mjs --rust-contract-smoke/);
-  assert.match(rust, /--workload-driver target\/debug\/examples\/performance_workload/);
-  assert.match(rust, /--single-driver target\/debug\/examples\/performance_baseline/);
-  assert.match(rust, /POISON_PATH=/);
-  assert.match(rust, /--runtime-sidecars "\$RUNNER_TEMP\/goop-runtime-sidecars"/);
-  assert.doesNotMatch(rust, /--sidecars src-tauri\/bin/);
-  assert.match(rust, /--fixture crates\/goop-metadata\/tests\/fixtures\/red\.jpg/);
+  assert.doesNotMatch(
+    rust,
+    /scripts\/performance-suite\.mjs --rust-contract-smoke/,
+    "Linux bootstrap sidecars are intentional availability stubs; real runtime-sidecar execution belongs to the macOS/Windows matrix",
+  );
 });
 
 test("hosted PERF-01 contract stages exact runtime sidecar names on macOS and Windows", () => {

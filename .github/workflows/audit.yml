@@ -60,28 +60,6 @@ jobs:
           cargo test -p goop-converter --no-default-features
           cargo test -p goop-converter --example performance_workload --all-features
           cargo test --workspace --all-features
-      - name: PERF-01 Rust and Node contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build -p goop-converter --example performance_baseline --example performance_workload --all-features
-          RUNTIME_SIDECARS="$RUNNER_TEMP/goop-runtime-sidecars"
-          POISON_PATH="$RUNNER_TEMP/goop-poison-path"
-          mkdir -p "$RUNTIME_SIDECARS"
-          mkdir -p "$POISON_PATH"
-          cp "src-tauri/bin/ffmpeg-$TARGET" "$RUNTIME_SIDECARS/ffmpeg"
-          cp "src-tauri/bin/ffprobe-$TARGET" "$RUNTIME_SIDECARS/ffprobe"
-          chmod +x "$RUNTIME_SIDECARS/ffmpeg" "$RUNTIME_SIDECARS/ffprobe"
-          printf '#!/bin/sh\nexit 97\n' > "$POISON_PATH/ffmpeg"
-          printf '#!/bin/sh\nexit 97\n' > "$POISON_PATH/ffprobe"
-          chmod +x "$POISON_PATH/ffmpeg" "$POISON_PATH/ffprobe"
-          NODE_BINARY=$(command -v node)
-          PATH="$POISON_PATH:$PATH" "$NODE_BINARY" scripts/performance-suite.mjs --rust-contract-smoke \
-            --single-driver target/debug/examples/performance_baseline \
-            --workload-driver target/debug/examples/performance_workload \
-            --runtime-sidecars "$RUNNER_TEMP/goop-runtime-sidecars" \
-            --fixture crates/goop-metadata/tests/fixtures/red.jpg \
-            --output "$RUNNER_TEMP/goop-perf-rust-contract"
       # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
       # sit on different major.minor versions. They drift on their own here:
       # Cargo.lock is gitignored by design, so the crate re-resolves to the
