@@ -127,6 +127,18 @@ test('portable bounded runner reaps descendants after a clean parent exit', asyn
   } finally { if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true}); }
 });
 
+test('portable bounded runner returns promptly after a clean Windows exit', { skip: process.platform !== 'win32' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-clean-prompt-'));
+  const output = join(root, 'output');
+  mkdirSync(output);
+  try {
+    const startedAt = performance.now();
+    const result = await runBoundedProcess({ command: process.execPath, args: ['-e', ''], outputDirectory: output, timeoutMs: 5000, killGraceMs: 3000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
+    assert.equal(result.success, true);
+    assert.ok(performance.now() - startedAt < 1500, 'clean exit waited for forced-kill grace');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('portable bounded runner catches a fast successful storage overrun', async () => {
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-fast-storage-'));
   const output = join(root, 'output');

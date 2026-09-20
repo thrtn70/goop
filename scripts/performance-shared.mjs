@@ -243,7 +243,7 @@ export async function runBoundedProcess({
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null, killTimer;
-  let stopRequested = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
+  let stopRequested = false, childSettled = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
   const windowsCleanupPids = new Set();
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
@@ -275,7 +275,9 @@ export async function runBoundedProcess({
   const stop = () => {
     if (stopRequested) return;
     stopRequested = true;
-    if (!signal('SIGTERM')) { killEscalation = Promise.resolve(); return; }
+    const softSignalSent = signal('SIGTERM');
+    const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
+    if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
     killEscalation = new Promise(resolveKill => {
       killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
     });
@@ -300,8 +302,8 @@ export async function runBoundedProcess({
   const timeout = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
   const start = performance.now();
   const code = await new Promise(resolve => {
-    child.once('error', error => { spawnError = error.message; resolve(null); });
-    child.once('close', value => resolve(value));
+    child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
+    child.once('close', value => { childSettled = true; resolve(value); });
   });
   clearInterval(monitor);
   clearTimeout(timeout);
