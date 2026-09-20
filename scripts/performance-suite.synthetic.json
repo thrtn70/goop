@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "suite_id": "perf-01a-synthetic-smoke",
+  "limitations": [
+    "Fresh processes with warm filesystem caches; this is not a cold-cache measurement.",
+    "Background applications may remain during measurement.",
+    "WebKit/XPC attribution is incomplete for descendant RSS.",
+    "No dedicated laboratory environment is claimed."
+  ],
+  "defaults": {
+    "warmups": 1,
+    "repetitions": 1,
+    "timeout_ms": 10000,
+    "suite_timeout_ms": 60000,
+    "log_limit_bytes": 65536,
+    "suite_log_limit_bytes": 1048576,
+    "storage_budget_bytes": 8388608,
+    "suite_storage_budget_bytes": 16777216
+  },
+  "fixture_roles": [
+    "synthetic_source"
+  ],
+  "workloads": [
+    {
+      "id": "synthetic-single",
+      "adapter": "single_conversion",
+      "fixture_role": "synthetic_source",
+      "request": {
+        "target": "jpeg",
+        "quality_preset": null,
+        "resolution_cap": null,
+        "gif_options": null,
+        "compress_mode": null,
+        "batch_id": null,
+        "metadata_policy": "preserve",
+        "subtitle": null
+      },
+      "expected_output": {
+        "extension": "jpg",
+        "probe": "media",
+        "format_names": ["image2"],
+        "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }]
+      }
+    },
+    {
+      "id": "synthetic-inspection",
+      "adapter": "workload",
+      "mode": "inspection_burst",
+      "fixture_roles": [
+        "synthetic_source"
+      ],
+      "source_count": 2,
+      "expected_output": {
+        "kind": "metrics_only"
+      }
+    },
+    {
+      "id": "synthetic-batch",
+      "adapter": "workload",
+      "mode": "conversion_batch",
+      "concurrency": 1,
+      "items": [
+        {
+          "id": "synthetic-item",
+          "fixture_role": "synthetic_source",
+          "request": {
+            "target": "jpeg",
+            "quality_preset": null,
+            "resolution_cap": null,
+            "gif_options": null,
+            "compress_mode": null,
+            "batch_id": null,
+            "metadata_policy": "preserve",
+            "subtitle": null
+          },
+          "expected_output": {
+            "extension": "jpg",
+            "probe": "media",
+            "format_names": ["image2"],
+            "required_streams": [{ "codec_type": "video", "codec_name": "mjpeg" }]
+          }
+        }
+      ],
+      "expected_output": {
+        "kind": "metrics_only"
+      }
+    },
+    {
+      "id": "synthetic-startup",
+      "adapter": "startup",
+      "jobs": 0,
+      "expected_output": {
+        "kind": "startup_marker"
+      }
+    }
+  ]
+}

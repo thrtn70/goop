@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with: { node-version: "22" }
       # Seconds, and placed first so a broken download helper fails here
       # rather than after the ten-minute HEIC build. Covers fetch_url's
       # retry and fail-on-error-status behaviour plus the guard that no
@@ -56,7 +58,16 @@ jobs:
       - name: test
         run: |
           cargo test -p goop-converter --no-default-features
+          cargo test -p goop-converter --example performance_workload --all-features
           cargo test --workspace --all-features
+      - name: PERF-01 Rust and Node contract
+        run: |
+          cargo build -p goop-converter --example performance_workload --all-features
+          node scripts/performance-suite.mjs --rust-contract-smoke \
+            --workload-driver target/debug/examples/performance_workload \
+            --sidecars src-tauri/bin \
+            --fixture crates/goop-metadata/tests/fixtures/red.jpg \
+            --output "$RUNNER_TEMP/goop-perf-rust-contract"
       # Tauri's CLI refuses to build when the Rust crate and @tauri-apps/api
       # sit on different major.minor versions. They drift on their own here:
       # Cargo.lock is gitignored by design, so the crate re-resolves to the
@@ -102,6 +113,7 @@ jobs:
       # can be bypassed; this is the only lint enforcement that always runs.
       - run: npm run lint
       - run: npm run test
+      - run: node --test scripts/release-workflow.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: npm run build
@@ -155,6 +167,12 @@ jobs:
       - name: Startup and performance harnesses (macOS)
         if: matrix.os == 'macos-14'
         run: node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
+      - name: PERF-01 portable harness tests
+        shell: bash
+        run: node --test scripts/performance-portable.test.mjs
+      - name: PERF-01 harness synthetic smoke
+        shell: bash
+        run: node scripts/performance-suite.mjs --synthetic-smoke --output "$RUNNER_TEMP/goop-perf-smoke"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }

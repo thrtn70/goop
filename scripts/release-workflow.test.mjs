@@ -57,6 +57,39 @@ test("all workflows pin the current Node 24 checkout and setup-node actions", ()
   assert.ok(setupNodeCount > 0, "no setup-node actions found to validate");
 });
 
+test("audit runs the PERF-01 synthetic harness smoke on both supported platforms", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const portable = smoke.match(
+    / {6}- name: PERF-01 portable harness tests\n([\s\S]*?)\n {6}- name: PERF-01 harness synthetic smoke/,
+  );
+  assert.ok(portable, "missing portable PERF-01 harness tests");
+  assert.doesNotMatch(portable[0], /^\s*if:/m);
+  assert.match(portable[0], /node --test scripts\/performance-portable\.test\.mjs/);
+  const step = smoke.match(
+    / {6}- name: PERF-01 harness synthetic smoke\n([\s\S]*?)\n {6}- uses: actions\/setup-python/,
+  );
+  assert.ok(step, "missing portable PERF-01 synthetic smoke before platform-only setup");
+  assert.doesNotMatch(step[0], /^\s*if:/m);
+  assert.match(step[0], /shell: bash/);
+  assert.match(
+    step[0],
+    /node scripts\/performance-suite\.mjs --synthetic-smoke --output "\$RUNNER_TEMP\/goop-perf-smoke"/,
+  );
+});
+
+test("audit executes the strict PERF-01 Rust adapter tests", () => {
+  const rust = auditJob("rust");
+  const setupNode = rust.indexOf(setupNode24Ref);
+  const contract = rust.indexOf("node scripts/performance-suite.mjs --rust-contract-smoke");
+  assert.ok(setupNode >= 0 && setupNode < contract, "rust contract smoke must use pinned setup-node first");
+  assert.match(rust.slice(setupNode, contract), /node-version: "22"/);
+  assert.match(rust, /cargo test -p goop-converter --example performance_workload --all-features/);
+  assert.match(rust, /cargo build -p goop-converter --example performance_workload --all-features/);
+  assert.match(rust, /node scripts\/performance-suite\.mjs --rust-contract-smoke/);
+  assert.match(rust, /--workload-driver target\/debug\/examples\/performance_workload/);
+  assert.match(rust, /--fixture crates\/goop-metadata\/tests\/fixtures\/red\.jpg/);
+});
+
 test("release builds run read-only and without persisted checkout credentials", () => {
   assert.match(workflow, /^permissions:\n {2}contents: read$/m);
   assert.doesNotMatch(workflow, /^permissions:\n {2}contents: write$/m);
