@@ -560,7 +560,7 @@ impl Sha256State {
         let block = self.buffer;
         self.compress(&block);
         let mut digest = [0u8; 32];
-        for (chunk, value) in digest.chunks_exact_mut(4).zip(self.state) {
+        for (chunk, value) in digest.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
             chunk.copy_from_slice(&value.to_be_bytes());
         }
         digest
@@ -580,8 +580,8 @@ impl Sha256State {
             0xc67178f2,
         ];
         let mut words = [0u32; 64];
-        for (index, chunk) in block.chunks_exact(4).enumerate() {
-            words[index] = u32::from_be_bytes(chunk.try_into().expect("four-byte word"));
+        for (index, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+            words[index] = u32::from_be_bytes(*chunk);
         }
         for index in 16..64 {
             let s0 = words[index - 15].rotate_right(7)
