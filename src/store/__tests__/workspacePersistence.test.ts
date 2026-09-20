@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { decodeDraftEntries, encodeDraftEntries, loadDraftEntries, saveDraftEntries } from "../workspacePersistence";
+import { decodeDraftEntries, encodeDraftEntries, loadDraftEntries, persistDraftEntries, saveDraftEntries } from "../workspacePersistence";
+import type { CausalOwner, ResponsivenessRecorder, SpanKind } from "@/performance/responsiveness";
 const key = (slot: string) => JSON.stringify(["image", slot]);
+
+function recordingRecorder() {
+  const calls: Array<readonly unknown[]> = [];
+  const owner: CausalOwner = { kind: "setup", setup_id: 1 };
+  let nextSpan = 1;
+  const recorder = {
+    startSetup: (targetId: string) => { calls.push(["startSetup", targetId]); return owner; },
+    settleSetup: (actual: CausalOwner) => { calls.push(["settleSetup", actual]); },
+    cancelSetup: (actual: CausalOwner) => { calls.push(["cancelSetup", actual]); },
+    startSpan: ({ kind }: { kind: SpanKind }) => { calls.push(["startSpan", kind]); return nextSpan++; },
+    endSpan: (spanId: number) => { calls.push(["endSpan", spanId]); },
+    cancelSpan: (spanId: number) => { calls.push(["cancelSpan", spanId]); },
+  } as unknown as ResponsivenessRecorder;
+  return { calls, recorder, owner };
+}
+
 describe("durable editable drafts", () => {
   it("roundtrips editable source lists and app-icon sets", () => {
     const entries = { [key("ImagePage.files")]: {value:["/photo.png"]},
@@ -32,6 +49,73 @@ describe("durable editable drafts", () => {
     const storage={getItem:()=>{throw Error("unavailable");},setItem:()=>{throw Error("quota");}};
     expect(loadDraftEntries(storage)).toEqual({});
     expect(saveDraftEntries(storage,{})).toBe(false);
+  });
+});
+
+describe("instrumented draft persistence", () => {
+  it("encodes and writes once with ordered bounded spans", () => {
+    const { calls, recorder, owner } = recordingRecorder();
+    const writes: Array<[string, string]> = [];
+    const entries = { [key("ImagePage.files")]: { value: ["/a.png"] } };
+    const result = persistDraftEntries(
+      { getItem: () => null, setItem: (storageKey, value) => { writes.push([storageKey, value]); } },
+      entries,
+      recorder,
+    );
+    expect(result).toEqual({
+      ok: true,
+      encoded_bytes: new TextEncoder().encode(writes[0][1]).length,
+    });
+    expect(writes).toHaveLength(1);
+    expect(decodeDraftEntries(writes[0][1])).toEqual(entries);
+    expect(calls).toEqual([
+      ["startSetup", "workspace_drafts"],
+      ["startSpan", "draft_encode"],
+      ["endSpan", 1],
+      ["startSpan", "storage_write"],
+      ["endSpan", 2],
+      ["settleSetup", owner],
+    ]);
+  });
+
+  it("reports encode failure without writing or retaining exception text", () => {
+    const { calls, recorder, owner } = recordingRecorder();
+    let writes = 0;
+    const result = persistDraftEntries(
+      { getItem: () => null, setItem: () => { writes += 1; } },
+      { [key("test.value")]: { value: 0x20_0000_0000_0000n } },
+      recorder,
+    );
+    expect(result).toEqual({ ok: false, phase: "encode" });
+    expect(writes).toBe(0);
+    expect(JSON.stringify(result)).not.toContain("Draft number");
+    expect(calls).toEqual([
+      ["startSetup", "workspace_drafts"],
+      ["startSpan", "draft_encode"],
+      ["cancelSpan", 1],
+      ["cancelSetup", owner],
+    ]);
+  });
+
+  it("reports one failed write after a successful single encode", () => {
+    const { calls, recorder, owner } = recordingRecorder();
+    let writes = 0;
+    const result = persistDraftEntries(
+      { getItem: () => null, setItem: () => { writes += 1; throw new Error("private quota detail"); } },
+      {},
+      recorder,
+    );
+    expect(result).toEqual({ ok: false, phase: "write" });
+    expect(writes).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("private quota detail");
+    expect(calls).toEqual([
+      ["startSetup", "workspace_drafts"],
+      ["startSpan", "draft_encode"],
+      ["endSpan", 1],
+      ["startSpan", "storage_write"],
+      ["cancelSpan", 2],
+      ["cancelSetup", owner],
+    ]);
   });
 });
 
