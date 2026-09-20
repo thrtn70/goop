@@ -3,13 +3,14 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
+  realpathSync,
   readdirSync,
   mkdirSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { run as runSingleConversion } from './performance-baseline.mjs';
 import { runStartup } from './startup-baseline.mjs';
@@ -18,6 +19,7 @@ import {
   createOwnedDirectory,
   directoryBytes,
   removeOwnedDirectory,
+  runtimeSidecarEnvironment,
   runBoundedProcess,
   sha256File,
   stableStringify,
@@ -108,7 +110,7 @@ function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory,
 
 function ledgerResult(result, fullResult) {
   if (fullResult === null) return result;
-  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded'];
+  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'sidecars', 'sidecar_identity_error'];
   return {
     ...Object.fromEntries(fields.filter(field => result[field] !== undefined).map(field => [field, result[field]])),
     evidence_compacted: true,
@@ -314,11 +316,12 @@ function expectedWorkloadIds(request) {
     : request.items.map(item => item.id);
 }
 
-export function validateWorkloadMetrics(metrics, request, processResult, expectedSources) {
-  const rootFields = new Set(['schema_version', 'mode', 'success', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'max_observed_concurrency', 'items', 'error', 'memory_evidence', 'path_safety_limitation']);
+export function validateWorkloadMetrics(metrics, request, processResult, expectedSources, expectedSidecars) {
+  const rootFields = new Set(['schema_version', 'mode', 'success', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'max_observed_concurrency', 'items', 'error', 'memory_evidence', 'path_safety_limitation', 'sidecars']);
   if (metrics === null || typeof metrics !== 'object' || Array.isArray(metrics) || Object.keys(metrics).some(field => !rootFields.has(field))) return false;
   if (metrics?.schema_version !== 1 || metrics.mode !== request.mode || typeof metrics.success !== 'boolean' || !Number.isFinite(metrics.aggregate_ms) || metrics.aggregate_ms < 0 || !Number.isFinite(metrics.wall_ms) || metrics.wall_ms < 0 || !Number.isFinite(metrics.encoder_detection_ms) || metrics.encoder_detection_ms < 0 || !Array.isArray(metrics.items)) return false;
   if (typeof metrics.memory_evidence !== 'string' || metrics.memory_evidence === '' || typeof metrics.path_safety_limitation !== 'string' || metrics.path_safety_limitation === '') return false;
+  if (validateDriverSidecars(metrics.sidecars, expectedSidecars) !== null) return false;
   if (request.mode === 'inspection_burst' && metrics.max_observed_concurrency !== null) return false;
   if (request.mode === 'conversion_batch' && (!Number.isSafeInteger(metrics.max_observed_concurrency) || metrics.max_observed_concurrency < 0 || metrics.max_observed_concurrency > request.concurrency)) return false;
   const expected = expectedWorkloadIds(request);
@@ -342,21 +345,56 @@ export function validateWorkloadMetrics(metrics, request, processResult, expecte
   return metrics.success === true && processResult.success === true && itemsValid;
 }
 
-export function resolveBundledSidecar(directory, name) {
-  const named = readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.name === name || entry.name === `${name}.exe` || entry.name.startsWith(`${name}-`))
-    .map(entry => join(directory, entry.name));
-  if (named.some(path => !lstatSync(path).isFile())) throw Error(`Bundled ${name} sidecar must be a regular non-symlink file`);
-  const candidates = named;
-  if (candidates.length !== 1) throw Error(`Expected exactly one bundled ${name} sidecar, found ${candidates.length}`);
-  return candidates[0];
+export function resolveRuntimeSidecars(directory, platform = process.platform) {
+  const requestedDirectory = resolve(directory);
+  const directoryStats = lstatSync(requestedDirectory);
+  if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) throw Error('--runtime-sidecars must be a regular non-symlink directory');
+  const canonicalDirectory = realpathSync(requestedDirectory);
+  const entries = readdirSync(canonicalDirectory, { withFileTypes: true });
+  const extension = platform === 'win32' ? '.exe' : '';
+  const resolvedSidecars = {};
+  for (const name of ['ffmpeg', 'ffprobe']) {
+    const expectedName = `${name}${extension}`;
+    const candidates = entries.filter(entry => entry.name === name || entry.name === `${name}.exe` || entry.name.startsWith(`${name}-`));
+    if (candidates.length !== 1 || candidates[0].name !== expectedName) throw Error(`Expected exactly one exact runtime sidecar ${expectedName}; found ${candidates.map(entry => entry.name).join(', ') || 'none'}`);
+    const path = join(canonicalDirectory, expectedName);
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw Error(`Exact runtime sidecar ${expectedName} must be a regular non-symlink file`);
+    const canonicalPath = realpathSync(path);
+    if (dirname(canonicalPath) !== canonicalDirectory) throw Error(`Exact runtime sidecar ${expectedName} escaped the declared runtime directory`);
+    resolvedSidecars[name] = canonicalPath;
+  }
+  return resolvedSidecars;
 }
 
-function sidecarFiles(directory) {
-  const entries = readdirSync(directory, { withFileTypes: true });
-  const unsupported = entries.find(entry => entry.isSymbolicLink());
-  if (unsupported) throw Error(`Bundled sidecar entries must not be symlinks: ${unsupported.name}`);
-  return Object.fromEntries(entries.filter(entry => entry.isFile()).map(entry => [entry.name, join(directory, entry.name)]));
+export function validateDriverSidecars(reported, expected, platform = process.platform) {
+  if (reported === null || typeof reported !== 'object' || Array.isArray(reported)) return 'Driver sidecar identity must report exactly ffmpeg and ffprobe';
+  const keys = Object.keys(reported).sort();
+  if (stableStringify(keys) !== stableStringify(['ffmpeg', 'ffprobe'])) return 'Driver sidecar identity must report exactly ffmpeg and ffprobe';
+  for (const name of ['ffmpeg', 'ffprobe']) {
+    const descriptor = reported[name];
+    if (descriptor === null || typeof descriptor !== 'object' || Array.isArray(descriptor) || stableStringify(Object.keys(descriptor).sort()) !== stableStringify(['canonical_path', 'source_is_path'])) return `Driver ${name} sidecar identity must contain exactly canonical_path and source_is_path`;
+    if (descriptor.source_is_path !== false) return `Driver ${name} sidecar used or attempted PATH fallback`;
+    const expectedPath = typeof expected?.[name] === 'string' ? expected[name] : expected?.[name]?.path;
+    if (typeof expectedPath !== 'string' || normalizeCanonicalPathForComparison(descriptor.canonical_path, platform) !== normalizeCanonicalPathForComparison(expectedPath, platform)) return `Driver ${name} canonical path does not match preflight identity`;
+  }
+  return null;
+}
+
+export function normalizeCanonicalPathForComparison(path, platform = process.platform) {
+  if (typeof path !== 'string') return path;
+  if (platform !== 'win32') return path;
+  let normalized = path.replaceAll('/', '\\');
+  const uncPrefix = '\\\\?\\UNC\\';
+  const namespacePrefix = '\\\\?\\';
+  if (normalized.toLowerCase().startsWith(uncPrefix.toLowerCase())) normalized = `\\\\${normalized.slice(uncPrefix.length)}`;
+  else if (normalized.startsWith(namespacePrefix)) normalized = normalized.slice(namespacePrefix.length);
+  return normalized.toLowerCase();
+}
+
+function validateStartupRuntimeSidecars(startupBinary, runtimeSidecars) {
+  const adjacent = resolveRuntimeSidecars(dirname(startupBinary));
+  for (const name of ['ffmpeg', 'ffprobe']) if (adjacent[name] !== runtimeSidecars[name]) throw Error(`Startup binary adjacent ${name} does not match --runtime-sidecars`);
 }
 
 export function verifyBatchOutputs(metrics, request, ffprobe, expectedItems = request.items) {
@@ -415,7 +453,8 @@ export async function executeWorkloadAdapter(run, drivers) {
   writeFileSync(requestPath, `${JSON.stringify(request, null, 2)}\n`);
   const processResult = await runBoundedProcess({
     command: drivers.workloadDriver,
-    args: [drivers.sidecars, requestPath, metricsPath],
+    args: [drivers.runtimeSidecarsDirectory, requestPath, metricsPath],
+    env: runtimeSidecarEnvironment(drivers.runtimeSidecarsDirectory),
     outputDirectory: run.output_directory,
     timeoutMs: run.limits.timeout_ms,
     logLimitBytes: run.limits.log_limit_bytes,
@@ -431,7 +470,8 @@ export async function executeWorkloadAdapter(run, drivers) {
   } catch (error) {
     return { ...processResult, stdout: undefined, stderr: undefined, success: false, error: `Invalid workload metrics: ${error.message}` };
   }
-  const metricsValid = validateWorkloadMetrics(metrics, request, processResult, expectedSources);
+  const sidecarIdentityError = metrics.success === true ? validateDriverSidecars(metrics.sidecars, drivers.runtimeSidecars) : null;
+  const metricsValid = validateWorkloadMetrics(metrics, request, processResult, expectedSources, drivers.runtimeSidecars);
   const verification = request.mode === 'conversion_batch' && metricsValid
     ? verifyBatchOutputs(metrics, request, drivers.ffprobe, workload.items)
     : { success: request.mode !== 'conversion_batch' };
@@ -439,6 +479,7 @@ export async function executeWorkloadAdapter(run, drivers) {
     ...metrics,
     process: { ...processResult, stdout: undefined, stderr: undefined },
     verification,
+    ...(sidecarIdentityError ? { sidecar_identity_error: sidecarIdentityError, error: sidecarIdentityError } : {}),
     success: metricsValid && verification.success,
   };
 }
@@ -451,7 +492,7 @@ async function executeRealAdapter(run, drivers) {
       input_path: run.bindings[run.workload.fixture_role].path,
       output_path: join(run.output_directory, `output.${extensionFor(run.workload.expected_output)}`),
     };
-    return runSingleConversion(drivers.singleDriver, drivers.sidecars, request, join(run.output_directory, 'driver'), {
+    const result = await runSingleConversion(drivers.singleDriver, drivers.runtimeSidecarsDirectory, request, join(run.output_directory, 'driver'), {
       timeoutMs: run.limits.timeout_ms,
       logLimitBytes: run.limits.log_limit_bytes,
       budgetBytes: run.limits.storage_budget_bytes,
@@ -459,7 +500,10 @@ async function executeRealAdapter(run, drivers) {
       ffprobe: drivers.ffprobe,
       expectedOutput: run.workload.expected_output,
       abortSignal: run.abort_signal,
+      environment: runtimeSidecarEnvironment(drivers.runtimeSidecarsDirectory),
     });
+    const sidecarIdentityError = result.success === true ? validateDriverSidecars(result.sidecars, drivers.runtimeSidecars) : null;
+    return sidecarIdentityError ? { ...result, success: false, error: sidecarIdentityError, sidecar_identity_error: sidecarIdentityError } : result;
   }
   if (run.workload.adapter === 'workload') return executeWorkloadAdapter(run, drivers);
   return runStartup({
@@ -472,6 +516,7 @@ async function executeRealAdapter(run, drivers) {
     logLimitBytes: run.limits.log_limit_bytes,
     budgetBytes: run.limits.storage_budget_bytes,
     abortSignal: run.abort_signal,
+    environment: runtimeSidecarEnvironment(drivers.runtimeSidecarsDirectory),
   });
 }
 
@@ -524,15 +569,17 @@ async function syntheticSmoke(outputDirectory, abortSignal = null) {
 }
 
 async function rustContractSmoke(options, abortSignal = null) {
-  const required = ['workload-driver', 'sidecars', 'fixture', 'output'];
+  const required = ['single-driver', 'workload-driver', 'runtime-sidecars', 'fixture', 'output'];
   for (const name of Object.keys(options)) if (!required.includes(name)) throw Error(`Unknown Rust contract option: --${name}`);
   for (const name of required) if (!options[name]) throw Error(`Missing --${name}`);
+  const singleDriver = resolve(options['single-driver']);
   const workloadDriver = resolve(options['workload-driver']);
-  const sidecars = resolve(options.sidecars);
+  const runtimeSidecarsDirectory = resolve(options['runtime-sidecars']);
   const fixturePath = resolve(options.fixture);
   const outputDirectory = resolve(options.output);
+  if (!statSync(singleDriver).isFile()) throw Error('--single-driver must be a file');
   if (!statSync(workloadDriver).isFile()) throw Error('--workload-driver must be a file');
-  if (!statSync(sidecars).isDirectory()) throw Error('--sidecars must be a directory');
+  const runtimeSidecars = resolveRuntimeSidecars(runtimeSidecarsDirectory);
   if (!statSync(fixturePath).isFile()) throw Error('--fixture must be a file');
   const manifest = parseManifest({
     schema_version: 1,
@@ -540,7 +587,16 @@ async function rustContractSmoke(options, abortSignal = null) {
     limitations: [...PERFORMANCE_LIMITATIONS],
     defaults: { warmups: 1, repetitions: 1, timeout_ms: 120000, suite_timeout_ms: 300000, log_limit_bytes: 1048576, suite_log_limit_bytes: 4194304, storage_budget_bytes: 67108864, suite_storage_budget_bytes: 134217728 },
     fixture_roles: ['contract_fixture'],
-    workloads: [{ id: 'inspection-contract', adapter: 'workload', mode: 'inspection_burst', fixture_roles: ['contract_fixture'], source_count: 1, expected_output: { kind: 'metrics_only' } }],
+    workloads: [
+      {
+        id: 'single-jpeg-contract',
+        adapter: 'single_conversion',
+        fixture_role: 'contract_fixture',
+        request: { target: 'jpeg', quality_preset: null, resolution_cap: null, gif_options: null, compress_mode: null, batch_id: null, metadata_policy: 'preserve', subtitle: null },
+        expected_output: { extension: 'jpg', probe: 'media', format_names: ['jpeg_pipe', 'image2'], required_streams: [{ codec_type: 'video', codec_name: 'mjpeg' }] },
+      },
+      { id: 'inspection-contract', adapter: 'workload', mode: 'inspection_burst', fixture_roles: ['contract_fixture'], source_count: 1, expected_output: { kind: 'metrics_only' } },
+    ],
   });
   const bindings = validateBindings(manifest, { schema_version: 1, fixtures: { contract_fixture: { path: fixturePath, sha256: sha256File(fixturePath), bytes: statSync(fixturePath).size } } });
   return runPerformanceSuite({
@@ -549,12 +605,12 @@ async function rustContractSmoke(options, abortSignal = null) {
     prevalidatedBindings: true,
     outputDirectory,
     abortSignal,
-    execute: run => executeWorkloadAdapter(run, { workloadDriver, sidecars }),
+    execute: run => executeRealAdapter(run, { singleDriver, workloadDriver, runtimeSidecarsDirectory, runtimeSidecars, ffprobe: runtimeSidecars.ffprobe, hardwareEnabled: false }),
   });
 }
 
 export async function normalSuite(options, abortSignal = null) {
-  const required = ['manifest', 'bindings', 'output', 'single-driver', 'workload-driver', 'sidecars', 'startup-binary', 'startup-config', 'build-command'];
+  const required = ['manifest', 'bindings', 'output', 'single-driver', 'workload-driver', 'runtime-sidecars', 'startup-binary', 'startup-config', 'build-command'];
   const allowed = new Set([...required, 'hardware-enabled']);
   for (const name of Object.keys(options)) if (!allowed.has(name)) throw Error(`Unknown option: --${name}`);
   for (const name of required) if (!options[name]) throw Error(`Missing --${name}`);
@@ -567,7 +623,8 @@ export async function normalSuite(options, abortSignal = null) {
   const drivers = {
     singleDriver: resolve(options['single-driver']),
     workloadDriver: resolve(options['workload-driver']),
-    sidecars: resolve(options.sidecars),
+    runtimeSidecarsDirectory: resolve(options['runtime-sidecars']),
+    runtimeSidecars: null,
     ffprobe: null,
     startupBinary: resolve(options['startup-binary']),
     startupArgs: [],
@@ -576,9 +633,9 @@ export async function normalSuite(options, abortSignal = null) {
   };
   if (options['hardware-enabled'] !== undefined && !['true', 'false'].includes(options['hardware-enabled'])) throw Error('--hardware-enabled must be true or false');
   for (const [name, path] of Object.entries({ singleDriver: drivers.singleDriver, workloadDriver: drivers.workloadDriver, startupBinary: drivers.startupBinary })) if (!lstatSync(path).isFile()) throw Error(`${name} must be a regular non-symlink file`);
-  if (!statSync(drivers.sidecars).isDirectory()) throw Error('--sidecars must be a directory');
-  const initialSidecarFiles = sidecarFiles(drivers.sidecars);
-  drivers.ffprobe = resolveBundledSidecar(drivers.sidecars, 'ffprobe');
+  drivers.runtimeSidecars = resolveRuntimeSidecars(drivers.runtimeSidecarsDirectory);
+  drivers.ffprobe = drivers.runtimeSidecars.ffprobe;
+  validateStartupRuntimeSidecars(drivers.startupBinary, drivers.runtimeSidecars);
   const identityParameters = {
     build_command: options['build-command'],
     hardware_enabled: drivers.hardwareEnabled,
@@ -591,7 +648,7 @@ export async function normalSuite(options, abortSignal = null) {
     manifestText,
     bindingsText,
     executables: { single_driver: drivers.singleDriver, workload_driver: drivers.workloadDriver, startup_binary: drivers.startupBinary },
-    sidecars: initialSidecarFiles,
+    sidecars: drivers.runtimeSidecars,
     parameters: identityParameters,
   });
   validateCapturedIdentity(identity, 'pre-run identity');
@@ -612,7 +669,9 @@ export async function normalSuite(options, abortSignal = null) {
       startup_config_sha256: sha256File(startupConfigPath),
       startup_settings: JSON.parse(postStartupConfigText),
     };
-    post = captureIdentity({ manifestText: postManifestText, bindingsText: postBindingsText, executables: { single_driver: drivers.singleDriver, workload_driver: drivers.workloadDriver, startup_binary: drivers.startupBinary }, sidecars: sidecarFiles(drivers.sidecars), parameters: postIdentityParameters });
+    const postRuntimeSidecars = resolveRuntimeSidecars(drivers.runtimeSidecarsDirectory);
+    validateStartupRuntimeSidecars(drivers.startupBinary, postRuntimeSidecars);
+    post = captureIdentity({ manifestText: postManifestText, bindingsText: postBindingsText, executables: { single_driver: drivers.singleDriver, workload_driver: drivers.workloadDriver, startup_binary: drivers.startupBinary }, sidecars: postRuntimeSidecars, parameters: postIdentityParameters });
     validateCapturedIdentity(post, 'post-run identity');
     const stableFields = ['source', 'manifest_sha256', 'bindings_sha256', 'executables', 'sidecars', 'parameters', 'toolchain'];
     const stableMachine = value => ({ platform: value.platform, arch: value.arch, os: value.os, hardware_model: value.hardware_model });

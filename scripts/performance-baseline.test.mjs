@@ -5,7 +5,7 @@ test('aggregates only descendants in KiB',()=>assert.deepEqual(treeRss('10 1 100
 test('failed operations excluded from throughput',()=>assert.deepEqual(summarize([{success:true,process_ms:20},{success:false,process_ms:1},{success:true,process_ms:40}]),{successes:2,failures:1,median_ms:30,min_ms:20,max_ms:40}));
 test('output names differ for warmup and every repetition',()=>assert.equal(new Set([-1,0,1,2,3,4].map(i=>outputName('video',i,'mp4'))).size,6));
 import {run, normalizeSuccess, directoryBytes} from './performance-baseline.mjs';
-import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync,realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -104,6 +104,8 @@ test('dirty source identity changes when already-dirty file content changes', ()
   const firstIdentity=captureIdentity({cwd:root,manifestText:'{}',bindingsText:'{}',sidecars:{fixture:tracked},environment:{...process.env,GIT_DIR:'/invalid/inherited/git-dir',GIT_WORK_TREE:'/invalid/inherited/work-tree'}});const first=firstIdentity.source.dirty_digest;
   assert.notEqual(firstIdentity.source.head,'unavailable');
   assert.equal(firstIdentity.sidecars.fixture.sha256,execFileSync('shasum',['-a','256',tracked],{encoding:'utf8'}).split(' ')[0]);
+  assert.equal(firstIdentity.sidecars.fixture.path, realpathSync(tracked));
+  assert.equal(firstIdentity.sidecars.fixture.bytes, 5);
   writeFileSync(tracked,'second');writeFileSync(untracked,'two');
   const second=captureIdentity({cwd:root,manifestText:'{}',bindingsText:'{}'}).source.dirty_digest;
   assert.notEqual(first,second);
@@ -111,7 +113,7 @@ test('dirty source identity changes when already-dirty file content changes', ()
 });
 
 test('captured identity fails closed on unavailable toolchain or sidecar facts', () => {
- const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'d'.repeat(64),bindings_sha256:'e'.repeat(64),executables:{engine:{path:'/engine',sha256:'f'.repeat(64)}},sidecars:{ffprobe:{path:'/ffprobe',sha256:'1'.repeat(64),version:'test'}},parameters:{test:true},toolchain:{node:'test',rustc:'test',cargo:'test'},machine:{platform:'darwin',arch:'arm64',os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+ const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'d'.repeat(64),bindings_sha256:'e'.repeat(64),executables:{engine:{path:'/engine',sha256:'f'.repeat(64)}},sidecars:{ffprobe:{path:'/ffprobe',sha256:'1'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},toolchain:{node:'test',rustc:'test',cargo:'test'},machine:{platform:'darwin',arch:'arm64',os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
  assert.equal(validateCapturedIdentity(identity),identity);
  assert.equal(validateCapturedIdentity({...identity,machine:{...identity.machine,power_source:'unavailable',low_power_mode:'unavailable',thermal:'unavailable'}}).machine.thermal,'unavailable');
  assert.throws(()=>validateCapturedIdentity({...identity,toolchain:{...identity.toolchain,rustc:'unavailable'}}),/toolchain\.rustc/i);
@@ -149,13 +151,16 @@ import {
 import {
  buildRunPlan,
  executeWorkloadAdapter,
- resolveBundledSidecar,
+ resolveRuntimeSidecars,
  runPerformanceSuite,
  summarizeSuite,
  normalSuite,
+ normalizeCanonicalPathForComparison,
+ validateDriverSidecars,
  validateWorkloadMetrics,
  verifyBatchOutputs,
 } from './performance-suite.mjs';
+import { runtimeSidecarEnvironment } from './performance-shared.mjs';
 import {
  pairedExecutionOrder,
  comparePairedSummaries,
@@ -344,8 +349,10 @@ test('ledger compaction preserves truthful summaries for oversized valid results
   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
   const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=[manifest.workloads[1]];
   const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
-  const state=await runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:join(root,'output'),execute:async()=>({success:true,process_ms:10,process:{sampled_tree_peak_KiB:123,time_peak_bytes:456},verification:{output_bytes:7},items:[{probe_ms:2,elapsed_ms:3,source_fingerprint_before_ms:0.1,source_fingerprint_after_ms:0.2,admission_ms:null,process_ms:null}],padding:'x'.repeat(300000)})});
+  const sidecars={ffmpeg:{canonical_path:'/runtime/ffmpeg',source_is_path:false},ffprobe:{canonical_path:'/runtime/ffprobe',source_is_path:false}};
+  const state=await runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:join(root,'output'),execute:async()=>({success:true,process_ms:10,process:{sampled_tree_peak_KiB:123,time_peak_bytes:456},verification:{output_bytes:7},items:[{probe_ms:2,elapsed_ms:3,source_fingerprint_before_ms:0.1,source_fingerprint_after_ms:0.2,admission_ms:null,process_ms:null}],sidecars,padding:'x'.repeat(300000)})});
   assert.equal(state.samples.every(sample=>sample.result.evidence_compacted===true),true);
+  assert.equal(state.samples.every(sample=>stableStringify(sample.result.sidecars)===stableStringify(sidecars)),true);
   for(const sample of state.samples){const full=join(root,'output',sample.result.full_result_path);assert.equal(existsSync(full),true);assert.equal(sha(full),sample.result.full_result_sha256);assert.equal(statSync(full).size,sample.result.full_result_bytes);assert.equal(sample.result.full_result_retained,true);}
   const summary=state.summary.workloads['inspect-burst'];assert.equal(summary.duration_ms.median,10);assert.equal(summary.sampled_tree_peak_KiB.median,123);assert.equal(summary.time_peak_bytes.median,456);assert.equal(summary.output_bytes.median,7);assert.equal(summary.item_phase_timings_ms.probe_ms.median,2);
  } finally {rmSync(root,{recursive:true,force:true});}
@@ -389,7 +396,7 @@ test('paired order warms both revisions before alternating measured repetitions'
 });
 
 test('paired comparison requires equivalent identity and flags over ten percent without failing', () => {
- const identity = { source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256: 'a'.repeat(64), bindings_sha256: 'b'.repeat(64), executables:{engine:{path:'/engine',sha256:'d'.repeat(64)}},toolchain: { node:'test',rustc: 'test',cargo:'test' }, sidecars: { ffprobe:{path:'/ffprobe',sha256:'e'.repeat(64),version:'test'} }, parameters: { hardware_enabled: false }, machine: { platform: 'darwin', arch: 'arm64', os:'test',hardware_model: 'Mac',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test' } };
+ const identity = { source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256: 'a'.repeat(64), bindings_sha256: 'b'.repeat(64), executables:{engine:{path:'/engine',sha256:'d'.repeat(64)}},toolchain: { node:'test',rustc: 'test',cargo:'test' }, sidecars: { ffprobe:{path:'/ffprobe',sha256:'e'.repeat(64),bytes:1,version:'test'} }, parameters: { hardware_enabled: false }, machine: { platform: 'darwin', arch: 'arm64', os:'test',hardware_model: 'Mac',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test' } };
  const result = comparePairedSummaries({ workload_id: 'copy', repetitions: 5, identity, samples: [10, 10, 10, 10, 10] }, { workload_id: 'copy', repetitions: 5, identity, samples: [12, 12, 12, 12, 12] });
  assert.equal(result.percent_change, 20);
  assert.equal(result.investigation_required, true);
@@ -425,7 +432,7 @@ test('paired plan is runnable and writes bound comparisons', async () => {
   writeFileSync(runner, `const fs=require('node:fs');const value=process.env.GOOP_PERF_REVISION==='baseline'?10:12;fs.writeFileSync(process.env.GOOP_PERF_RESULT_PATH,JSON.stringify({success:true,process_ms:value,workload_id:process.env.GOOP_PERF_WORKLOAD_ID,revision:process.env.GOOP_PERF_REVISION,verification:{success:true,contract_sha256:${JSON.stringify(contractSha256)},kind:'media',contract_facts:${JSON.stringify(contractFacts)},evidence:{output_bytes:1,probe:{streams:[{codec_type:'video',codec_name:'h264'}],format:{format_name:'mov,mp4'}},effective_execution:{requested:{kind:'copy'},encoder:null}}}}));`);
   const crypto = await import('node:crypto');
   const commandSha256 = crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
-  const identity = { source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256: 'a'.repeat(64), bindings_sha256: 'b'.repeat(64), executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain: { node: process.version,rustc:'test',cargo:'test' }, sidecars: {ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),version:'test'}}, parameters: { test: true }, machine: { platform: process.platform, arch: process.arch, os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test' } };
+  const identity = { source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256: 'a'.repeat(64), bindings_sha256: 'b'.repeat(64), executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain: { node: process.version,rustc:'test',cargo:'test' }, sidecars: {ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}}, parameters: { test: true }, machine: { platform: process.platform, arch: process.arch, os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test' } };
   const plan = { schema_version: 1, repetitions: 2, workload_ids: ['copy'], workload_contracts:{copy:{contract_sha256:contractSha256,evidence_kind:'media',expected_facts:contractFacts}}, limits: { timeout_ms: 2000, suite_timeout_ms:10000, log_limit_bytes:65536, suite_log_limit_bytes:1048576, storage_budget_bytes:1048576, suite_storage_budget_bytes:4194304 }, revisions: {
    baseline: { command: process.execPath, command_sha256: commandSha256, args: [runner], identity },
    candidate: { command: process.execPath, command_sha256: commandSha256, args: [runner], identity },
@@ -499,60 +506,126 @@ test('workload metrics accept phase-separated Rust evidence and reject partial f
  const request = { mode: 'conversion_batch', concurrency: 2, items: [{ id: 'one' }, { id: 'two' }] };
  const evidence = { memory_evidence: 'external process tree required', path_safety_limitation: 'path namespace can change after validation' };
  const timing={cancelled:false,start_offset_ms:0,end_offset_ms:1,source_fingerprint_before_ms:0.1,source_fingerprint_after_ms:0.1,admission_ms:0.2,process_ms:0.8,probe_ms:null};
-  const complete = { schema_version: 1, mode: 'conversion_batch', success: true, aggregate_ms: 2, wall_ms: 3, encoder_detection_ms: 0.5, max_observed_concurrency: 2, ...evidence, items: [{ id: 'one', success: true, elapsed_ms: 1, ...timing, request: {}, result: {}, output_path: '/suite/one.jpg', source_sha256: 'a'.repeat(64), output_bytes: 1, effective_execution: {} }, { id: 'two', success: true, elapsed_ms: 1, ...timing, request: {}, result: {}, output_path: '/suite/two.jpg', source_sha256: 'b'.repeat(64), output_bytes: 1, effective_execution: {} }] };
+ const expectedSidecars={ffmpeg:{path:'/runtime/ffmpeg'},ffprobe:{path:'/runtime/ffprobe'}};
+ const sidecars={ffmpeg:{canonical_path:'/runtime/ffmpeg',source_is_path:false},ffprobe:{canonical_path:'/runtime/ffprobe',source_is_path:false}};
+  const complete = { schema_version: 1, mode: 'conversion_batch', success: true, aggregate_ms: 2, wall_ms: 3, encoder_detection_ms: 0.5, max_observed_concurrency: 2, ...evidence, sidecars, items: [{ id: 'one', success: true, elapsed_ms: 1, ...timing, request: {}, result: {}, output_path: '/suite/one.jpg', source_sha256: 'a'.repeat(64), output_bytes: 1, effective_execution: {} }, { id: 'two', success: true, elapsed_ms: 1, ...timing, request: {}, result: {}, output_path: '/suite/two.jpg', source_sha256: 'b'.repeat(64), output_bytes: 1, effective_execution: {} }] };
  const expected={one:{request:{},output_path:'/suite/one.jpg',source_sha256:'a'.repeat(64)},two:{request:{},output_path:'/suite/two.jpg',source_sha256:'b'.repeat(64)}};
- assert.equal(validateWorkloadMetrics(complete, request, { success: true }, expected), true);
- assert.equal(validateWorkloadMetrics({ ...complete, items: [...complete.items].reverse() }, request, { success: true }, expected), false);
- assert.equal(validateWorkloadMetrics({ ...complete, success: false, items: [{ id: 'one', success: true, elapsed_ms: 1 }, { id: 'two', success: false, elapsed_ms: 1 }] }, request, { success: false }, expected), false);
- assert.equal(validateWorkloadMetrics(complete, request, { success: false }, expected), false);
- assert.equal(validateWorkloadMetrics({ ...complete, unexpected: true }, request, { success: true }, expected), false);
- assert.equal(validateWorkloadMetrics({ ...complete, items: [{ ...complete.items[0], output_path: '/suite/wrong.jpg' }, complete.items[1]] }, request, { success: true }, expected), false);
- assert.equal(validateWorkloadMetrics({ ...complete, items: [{ ...complete.items[0], source_sha256: 'f'.repeat(64) }, complete.items[1]] }, request, { success: true }, expected), false);
+ assert.equal(validateWorkloadMetrics(complete, request, { success: true }, expected, expectedSidecars), true);
+ assert.equal(validateWorkloadMetrics({ ...complete, items: [...complete.items].reverse() }, request, { success: true }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics({ ...complete, success: false, items: [{ id: 'one', success: true, elapsed_ms: 1 }, { id: 'two', success: false, elapsed_ms: 1 }] }, request, { success: false }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics(complete, request, { success: false }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics({ ...complete, unexpected: true }, request, { success: true }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics({ ...complete, sidecars:{...sidecars,ffmpeg:{...sidecars.ffmpeg,source_is_path:true}} }, request, { success: true }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics({ ...complete, items: [{ ...complete.items[0], output_path: '/suite/wrong.jpg' }, complete.items[1]] }, request, { success: true }, expected, expectedSidecars), false);
+ assert.equal(validateWorkloadMetrics({ ...complete, items: [{ ...complete.items[0], source_sha256: 'f'.repeat(64) }, complete.items[1]] }, request, { success: true }, expected, expectedSidecars), false);
  const inspectionRequest = { mode: 'inspection_burst', sources: [{ id: 'one' }] };
  const inspectionTiming={...timing,admission_ms:null,process_ms:null,probe_ms:1};
- assert.equal(validateWorkloadMetrics({ schema_version: 1, mode: 'inspection_burst', success: true, aggregate_ms: 1, wall_ms: 2, encoder_detection_ms: 0.5, max_observed_concurrency: null, ...evidence, items: [{ id: 'one', success: true, elapsed_ms: 1, ...inspectionTiming, input_path: '/fixtures/one.jpg', source_sha256: 'c'.repeat(64), inspection: {}, cache_reuse: 'not_exposed' }] }, inspectionRequest, { success: true }, {one:{input_path:'/fixtures/one.jpg',source_sha256:'c'.repeat(64)}}), true);
+ assert.equal(validateWorkloadMetrics({ schema_version: 1, mode: 'inspection_burst', success: true, aggregate_ms: 1, wall_ms: 2, encoder_detection_ms: 0.5, max_observed_concurrency: null, ...evidence, sidecars, items: [{ id: 'one', success: true, elapsed_ms: 1, ...inspectionTiming, input_path: '/fixtures/one.jpg', source_sha256: 'c'.repeat(64), inspection: {}, cache_reuse: 'not_exposed' }] }, inspectionRequest, { success: true }, {one:{input_path:'/fixtures/one.jpg',source_sha256:'c'.repeat(64)}}, expectedSidecars), true);
  assert.equal(validateWorkloadMetrics({ schema_version: 1, mode: 'inspection_burst', success: true, aggregate_ms: 1, max_observed_concurrency: null, ...evidence, items: [{ id: 'one', success: true, elapsed_ms: 1, inspection: {} }] }, inspectionRequest, { success: true }), false);
+});
+
+test('runtime sidecars require exact platform names and reject source artifacts and aliases', () => {
+ const root = mkdtempSync(join(tmpdir(), 'goop-batch-probe-'));
+ try {
+  const sidecars = join(root, 'sidecars'); mkdirSync(sidecars);
+  const sourceProbe = join(sidecars, 'ffprobe-aarch64-apple-darwin');
+  const sourceFfmpeg = join(sidecars, 'ffmpeg-aarch64-apple-darwin');
+  writeFileSync(sourceProbe, 'source'); writeFileSync(sourceFfmpeg, 'source');
+  assert.throws(() => resolveRuntimeSidecars(sidecars, 'darwin'), /exact runtime sidecar.*ffmpeg/i);
+  const ffmpeg = join(sidecars, 'ffmpeg');
+  const probe = join(sidecars, 'ffprobe');
+  writeFileSync(ffmpeg, '#!/bin/sh\nprintf "ffmpeg version test"\n'); chmodSync(ffmpeg, 0o700);
+  writeFileSync(probe, '#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'\n'); chmodSync(probe, 0o700);
+  assert.throws(() => resolveRuntimeSidecars(sidecars, 'darwin'), /exactly one exact runtime sidecar/i);
+  rmSync(sourceProbe); rmSync(sourceFfmpeg);
+  const resolved = resolveRuntimeSidecars(sidecars, 'darwin');
+  assert.deepEqual(Object.keys(resolved), ['ffmpeg', 'ffprobe']);
+  assert.equal(resolved.ffmpeg, realpathSync(ffmpeg));
+  assert.equal(resolved.ffprobe, realpathSync(probe));
+  const linked = join(root, 'linked'); mkdirSync(linked);
+  symlinkSync(ffmpeg, join(linked, 'ffmpeg')); symlinkSync(probe, join(linked, 'ffprobe'));
+  assert.throws(() => resolveRuntimeSidecars(linked, 'darwin'), /non-symlink/i);
+  const windows = join(root, 'windows'); mkdirSync(windows);
+  writeFileSync(join(windows, 'ffmpeg.exe'), 'runtime'); writeFileSync(join(windows, 'ffprobe.exe'), 'runtime');
+  assert.equal(resolveRuntimeSidecars(windows, 'win32').ffmpeg, realpathSync(join(windows, 'ffmpeg.exe')));
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('driver sidecar reports must be complete, direct, and match preflight canonical paths', () => {
+ const expected={ffmpeg:{path:'/runtime/ffmpeg'},ffprobe:{path:'/runtime/ffprobe'}};
+ const valid={ffmpeg:{canonical_path:'/runtime/ffmpeg',source_is_path:false},ffprobe:{canonical_path:'/runtime/ffprobe',source_is_path:false}};
+ assert.equal(validateDriverSidecars(valid,expected),null);
+ assert.match(validateDriverSidecars({...valid,ffmpeg:{...valid.ffmpeg,source_is_path:true}},expected),/PATH fallback/i);
+ assert.match(validateDriverSidecars({...valid,ffprobe:{...valid.ffprobe,canonical_path:'/usr/bin/ffprobe'}},expected),/canonical path/i);
+ assert.match(validateDriverSidecars({ffmpeg:valid.ffmpeg},expected),/exactly ffmpeg and ffprobe/i);
+ assert.match(validateDriverSidecars({...valid,extra:{}},expected),/exactly ffmpeg and ffprobe/i);
+});
+
+test('runtime-only PATH removes case-insensitive aliases and keeps the native Windows key', () => {
+ const windows=runtimeSidecarEnvironment('C:\\Goop\\runtime',{PATH:'C:\\poison-one',Path:'C:\\poison-two',OTHER:'kept'},'win32');
+ assert.deepEqual(Object.entries(windows).filter(([name])=>name.toLowerCase()==='path'),[['Path','C:\\Goop\\runtime']]);
+ assert.equal(windows.OTHER,'kept');
+ const unix=runtimeSidecarEnvironment('/goop/runtime',{PATH:'/poison',Path:'/also-poison',OTHER:'kept'},'darwin');
+ assert.deepEqual(Object.entries(unix).filter(([name])=>name.toLowerCase()==='path'),[['PATH','/goop/runtime']]);
+});
+
+test('Windows canonical sidecar comparison accepts namespace and UNC forms without rewriting evidence', () => {
+ const reported=JSON.parse('{"ffmpeg":{"canonical_path":"\\\\\\\\?\\\\C:\\\\Goop\\\\FFMPEG.EXE","source_is_path":false},"ffprobe":{"canonical_path":"\\\\\\\\?\\\\UNC\\\\Server\\\\Share\\\\ffprobe.exe","source_is_path":false}}');
+ const raw=structuredClone(reported);
+ const expected={ffmpeg:{path:'c:\\goop\\ffmpeg.exe'},ffprobe:{path:'\\\\server\\share\\ffprobe.exe'}};
+ assert.equal(normalizeCanonicalPathForComparison(reported.ffmpeg.canonical_path,'win32'),'c:\\goop\\ffmpeg.exe');
+ assert.equal(normalizeCanonicalPathForComparison(reported.ffprobe.canonical_path,'win32'),'\\\\server\\share\\ffprobe.exe');
+ assert.equal(validateDriverSidecars(reported,expected,'win32'),null);
+ assert.deepEqual(reported,raw);
 });
 
 test('batch outputs require matching bytes and an independent media probe', () => {
  const root = mkdtempSync(join(tmpdir(), 'goop-batch-probe-'));
  try {
   const sidecars = join(root, 'sidecars'); mkdirSync(sidecars);
-  const probe = join(sidecars, 'ffprobe-aarch64-apple-darwin');
+  const probe = join(sidecars, 'ffprobe');
   writeFileSync(probe, '#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'\n'); chmodSync(probe, 0o700);
   const output = join(root, 'one.jpg'); writeFileSync(output, 'media');
   const request = { mode: 'conversion_batch', items: [{ id: 'one', request: { output_path: output, target: 'jpeg' }, expected_output: { extension:'jpg', probe:'media', format_names:['image2'], required_streams:[{codec_type:'video',codec_name:'mjpeg'}] } }] };
   const metrics = { items: [{ id: 'one', output_bytes: 5 }] };
-  assert.equal(resolveBundledSidecar(sidecars, 'ffprobe'), probe);
   assert.equal(verifyBatchOutputs(metrics, request, probe).success, true);
   assert.equal(verifyBatchOutputs({ items: [{ id: 'one', output_bytes: 4 }] }, request, probe).success, false);
   writeFileSync(probe, '#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"matroska,webm"}}\'\n');
   assert.equal(verifyBatchOutputs(metrics, request, probe).success, false);
-  writeFileSync(join(sidecars, 'ffprobe-x86_64-pc-windows-msvc.exe'), 'duplicate');
-  assert.throws(() => resolveBundledSidecar(sidecars, 'ffprobe'), /exactly one/i);
-  rmSync(join(sidecars, 'ffprobe-x86_64-pc-windows-msvc.exe'));
-  const linked=join(sidecars,'ffprobe-link');symlinkSync(probe,linked);
-  assert.throws(()=>resolveBundledSidecar(sidecars,'ffprobe'),/non-symlink/i);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('conversion-batch adapter verifies runtime outputs against manifest expectations', async () => {
+test('conversion-batch adapter uses only exact runtime sidecars despite a poisoned parent PATH', async () => {
  const root=mkdtempSync(join(tmpdir(),'goop-batch-integration-'));
+ const priorPath=process.env.PATH,priorMixedPath=process.env.Path;
  try {
   const input=join(root,'source.jpg');writeFileSync(input,'source');
   const driver=join(root,'driver');
-  writeFileSync(driver,`#!/usr/bin/env node
-const fs=require('node:fs'),crypto=require('node:crypto');const request=JSON.parse(fs.readFileSync(process.argv[3]));
+  writeFileSync(driver,`#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');const request=JSON.parse(fs.readFileSync(process.argv[3]));
+fs.writeFileSync(path.join(request.suite_dir,'driver-path.txt'),process.env.PATH??process.env.Path??'missing');
+const sidecars=Object.fromEntries(['ffmpeg','ffprobe'].map(name=>[name,{canonical_path:fs.realpathSync(path.join(process.argv[2],name)),source_is_path:false}]));
+if(process.env.GOOP_TEST_REMOVE_RUNTIME==='true')fs.rmSync(path.join(process.argv[2],'ffmpeg'));
+const marker=path.join(request.suite_dir,'ffmpeg-marker.txt');const launched=cp.spawnSync('ffmpeg',['--identity-marker',marker]);
 const items=request.items.map(item=>{fs.writeFileSync(item.request.output_path,'media');return {id:item.id,success:true,elapsed_ms:1,cancelled:false,start_offset_ms:0,end_offset_ms:1,source_fingerprint_before_ms:0.1,source_fingerprint_after_ms:0.1,admission_ms:0.2,process_ms:0.8,probe_ms:null,error:null,request:item.request,output_path:item.request.output_path,source_sha256:crypto.createHash('sha256').update(fs.readFileSync(item.request.input_path)).digest('hex'),result:{},output_bytes:5,effective_execution:{}}});
-fs.writeFileSync(process.argv[4],JSON.stringify({schema_version:1,mode:'conversion_batch',success:true,aggregate_ms:1,wall_ms:2,encoder_detection_ms:0.1,max_observed_concurrency:1,items,error:null,memory_evidence:'external process tree required',path_safety_limitation:'path namespace can change after validation'}));
+const success=launched.status===0;fs.writeFileSync(process.argv[4],JSON.stringify({schema_version:1,mode:'conversion_batch',success,aggregate_ms:1,wall_ms:2,encoder_detection_ms:0.1,max_observed_concurrency:1,items,error:success?null:'ffmpeg launch failed',memory_evidence:'external process tree required',path_safety_limitation:'path namespace can change after validation',sidecars}));
 `);chmodSync(driver,0o700);
+  const ffmpeg=join(root,'ffmpeg');writeFileSync(ffmpeg,'#!/bin/sh\nif [ "$1" = "--identity-marker" ]; then printf runtime > "$2"; else printf "ffmpeg version test"; fi\n');chmodSync(ffmpeg,0o700);
   const probe=join(root,'ffprobe');writeFileSync(probe,'#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'\n');chmodSync(probe,0o700);
   const item={id:'one',fixture_role:'image',request:{target:'jpeg'},expected_output:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}};
   const inputSha=(await import('node:crypto')).createHash('sha256').update(readFileSync(input)).digest('hex');
-  const result=await executeWorkloadAdapter({output_directory:join(root,'output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:2000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,sidecars:root,ffprobe:probe});
+  const runtimeSidecars=resolveRuntimeSidecars(root);
+  const poison=join(root,'poison');mkdirSync(poison);writeFileSync(join(poison,'ffmpeg'),'#!/bin/sh\nprintf poison > "$2"\n');chmodSync(join(poison,'ffmpeg'),0o700);process.env.PATH=poison;process.env.Path=join(root,'other-poison');
+  const result=await executeWorkloadAdapter({output_directory:join(root,'output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:2000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
   assert.equal(result.success,true);
   assert.equal(result.verification.success,true);
- } finally {rmSync(root,{recursive:true,force:true});}
+  assert.equal(readFileSync(join(root,'output','driver-path.txt'),'utf8'),realpathSync(root));
+  assert.equal(readFileSync(join(root,'output','ffmpeg-marker.txt'),'utf8'),'runtime');
+  process.env.GOOP_TEST_REMOVE_RUNTIME='true';
+  const fallbackResult=await executeWorkloadAdapter({output_directory:join(root,'late-output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:2000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
+  assert.equal(fallbackResult.success,false);
+  assert.equal(existsSync(join(root,'late-output','ffmpeg-marker.txt')),false);
+ } finally {delete process.env.GOOP_TEST_REMOVE_RUNTIME;if(priorPath===undefined)delete process.env.PATH;else process.env.PATH=priorPath;if(priorMixedPath===undefined)delete process.env.Path;else process.env.Path=priorMixedPath;rmSync(root,{recursive:true,force:true});}
 });
 
 test('prevalidated fixture bindings are still rechecked after every run', async () => {
@@ -719,37 +792,39 @@ test('normal suite refuses an existing output without writing into it', async ()
   const sha = path => crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
   writeFileSync(manifestPath, JSON.stringify(validManifest()));
   writeFileSync(bindingsPath, JSON.stringify({ schema_version: 1, fixtures: { raw_48mp: { path: raw, sha256: sha(raw), bytes: 3 }, inspect_mixed: { path: inspect, sha256: sha(inspect), bytes: 7 } } }));
-  const driver = join(root, 'driver'), startup = join(root, 'startup'), sidecars = join(root, 'sidecars');
+  const driver = join(root, 'driver'), startup = join(root, 'startup');
   writeFileSync(driver, '#!/bin/sh\nexit 0\n'); chmodSync(driver, 0o700);
   writeFileSync(startup, '#!/bin/sh\nexit 0\n'); chmodSync(startup, 0o700);
-  mkdirSync(sidecars);
-  const probe = join(sidecars, 'ffprobe-test'); writeFileSync(probe, '#!/bin/sh\nprintf "ffprobe test"\n'); chmodSync(probe, 0o700);
+  const ffmpeg = join(root, 'ffmpeg'); writeFileSync(ffmpeg, '#!/bin/sh\nprintf "ffmpeg version test"\n'); chmodSync(ffmpeg, 0o700);
+  const probe = join(root, 'ffprobe'); writeFileSync(probe, '#!/bin/sh\nprintf "ffprobe version test"\n'); chmodSync(probe, 0o700);
   const startupConfig = join(root, 'startup.json'); writeFileSync(startupConfig, '{}');
   const output = join(root, 'existing'); mkdirSync(output);
   const sentinel = join(output, 'integrity.json'); writeFileSync(sentinel, 'sentinel');
   const stateSentinel = join(output, 'suite-state.json'); writeFileSync(stateSentinel, 'planted-state');
-  await assert.rejects(normalSuite({ manifest: manifestPath, bindings: bindingsPath, output, 'single-driver': driver, 'workload-driver': driver, sidecars, 'startup-binary': startup, 'startup-config': startupConfig, 'build-command': 'test build', 'hardware-enabled': 'false' }), /must be new/i);
+  await assert.rejects(normalSuite({ manifest: manifestPath, bindings: bindingsPath, output, 'single-driver': driver, 'workload-driver': driver, 'runtime-sidecars': root, 'startup-binary': startup, 'startup-config': startupConfig, 'build-command': 'test build', 'hardware-enabled': 'false' }), /must be new/i);
   assert.equal(readFileSync(sentinel, 'utf8'), 'sentinel');
   assert.equal(readFileSync(stateSentinel, 'utf8'), 'planted-state');
+  const appDirectory=join(root,'app');mkdirSync(appDirectory);const detachedStartup=join(appDirectory,'startup');writeFileSync(detachedStartup,'#!/bin/sh\nexit 0\n');chmodSync(detachedStartup,0o700);
+  await assert.rejects(normalSuite({ manifest: manifestPath, bindings: bindingsPath, output:join(root,'new-output'), 'single-driver': driver, 'workload-driver': driver, 'runtime-sidecars': root, 'startup-binary': detachedStartup, 'startup-config': startupConfig, 'build-command': 'test build', 'hardware-enabled': 'false' }), /exact runtime sidecar/i);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('normal suite records a failed state when post-run identity capture fails', async () => {
- const root=mkdtempSync(join(tmpdir(),'goop-normal-post-'));const prior=process.env.GOOP_TEST_STARTUP_CONFIG;
+test('normal suite records a failed state when runtime sidecar bytes change', async () => {
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-post-'));const prior=process.env.GOOP_TEST_RUNTIME_FFMPEG;
  try {
   const fixture=join(root,'source.jpg');writeFileSync(fixture,'source');
   const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=[manifest.workloads[0]];
   const manifestPath=join(root,'manifest.json'),bindingsPath=join(root,'bindings.json'),startupConfig=join(root,'startup.json');
   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
   writeFileSync(manifestPath,JSON.stringify(manifest));writeFileSync(bindingsPath,JSON.stringify({schema_version:1,fixtures:{raw_48mp:{path:fixture,sha256:sha(fixture),bytes:6},inspect_mixed:{path:fixture,sha256:sha(fixture),bytes:6}}}));writeFileSync(startupConfig,'{}');
-  const driver=join(root,'driver');writeFileSync(driver,`#!/usr/bin/env node
-const fs=require('node:fs');const request=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(request.output_path,'media');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:5}}));fs.rmSync(process.env.GOOP_TEST_STARTUP_CONFIG,{force:true});
+  const driver=join(root,'driver');writeFileSync(driver,`#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path');const request=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(request.output_path,'media');const sidecars=Object.fromEntries(['ffmpeg','ffprobe'].map(name=>[name,{canonical_path:fs.realpathSync(path.join(process.argv[2],name)),source_is_path:false}]));fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:5},sidecars}));fs.appendFileSync(process.env.GOOP_TEST_RUNTIME_FFMPEG,'\\n# mutated');
 `);chmodSync(driver,0o700);
-  const sidecars=join(root,'sidecars');mkdirSync(sidecars);const probe=join(sidecars,'ffprobe-test');writeFileSync(probe,'#!/bin/sh\nprintf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'\n');chmodSync(probe,0o700);
-  const startup=join(root,'startup');writeFileSync(startup,'#!/bin/sh\nexit 0\n');chmodSync(startup,0o700);process.env.GOOP_TEST_STARTUP_CONFIG=startupConfig;
+  const ffmpeg=join(root,'ffmpeg');writeFileSync(ffmpeg,'#!/bin/sh\nprintf "ffmpeg version test"\n');chmodSync(ffmpeg,0o700);const probe=join(root,'ffprobe');writeFileSync(probe,'#!/bin/sh\nif [ "$1" = "-version" ]; then printf "ffprobe version test"; else printf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'; fi\n');chmodSync(probe,0o700);
+  const startup=join(root,'startup');writeFileSync(startup,'#!/bin/sh\nexit 0\n');chmodSync(startup,0o700);process.env.GOOP_TEST_RUNTIME_FFMPEG=ffmpeg;
   const output=join(root,'output');
-  await assert.rejects(normalSuite({manifest:manifestPath,bindings:bindingsPath,output,'single-driver':driver,'workload-driver':driver,sidecars,'startup-binary':startup,'startup-config':startupConfig,'build-command':'test build','hardware-enabled':'false'}),/ENOENT|no such file/i);
+  await assert.rejects(normalSuite({manifest:manifestPath,bindings:bindingsPath,output,'single-driver':driver,'workload-driver':driver,'runtime-sidecars':root,'startup-binary':startup,'startup-config':startupConfig,'build-command':'test build','hardware-enabled':'false'}),/identity changed/i);
   const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));const integrity=JSON.parse(readFileSync(join(output,'integrity.json'),'utf8'));
-  assert.equal(state.status,'failed');assert.equal(integrity.success,false);assert.equal(integrity.post,null);
- } finally {if(prior===undefined)delete process.env.GOOP_TEST_STARTUP_CONFIG;else process.env.GOOP_TEST_STARTUP_CONFIG=prior;rmSync(root,{recursive:true,force:true});}
+  assert.equal(state.status,'failed');assert.equal(integrity.success,false);assert.notEqual(integrity.post,null);assert.notEqual(integrity.pre.sidecars.ffmpeg.sha256,integrity.post.sidecars.ffmpeg.sha256);
+ } finally {if(prior===undefined)delete process.env.GOOP_TEST_RUNTIME_FFMPEG;else process.env.GOOP_TEST_RUNTIME_FFMPEG=prior;rmSync(root,{recursive:true,force:true});}
 });

@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStartup, summarizeStartup } from './startup-baseline.mjs';
+import { runtimeSidecarEnvironment } from './performance-shared.mjs';
 
 async function fake(code, options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'goop-startup-test-'));
@@ -68,6 +69,33 @@ test('empty and populated fixtures have identical schema and no runnable rows', 
 test('launch settings remain valid with update and notification switches disabled', async () => {
   const result = await fake("const fs=require('node:fs'),path=require('node:path');const s=JSON.parse(fs.readFileSync(path.join(process.env.GOOP_CONFIG_DIR,'settings.json')));if(s.auto_check_updates!==false||s.yt_dlp_auto_update!==false||s.notifications_enabled!==false||s.theme!=='dark'||s.extract_concurrency!==2||s.convert_concurrency!==1)process.exit(2);fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)", { settings: { auto_check_updates: true, yt_dlp_auto_update: true, notifications_enabled: true, history_view_mode: 'invalid' } });
   assert.equal(result.success, true);
+});
+test('startup app receives only the canonical runtime sidecar PATH despite poisoned aliases', async () => {
+  const root=mkdtempSync(join(tmpdir(),'goop-startup-sidecars-'));
+  try {
+    const runtime=join(root,'runtime'),poison=join(root,'poison');mkdirSync(runtime);mkdirSync(poison);
+    writeFileSync(join(runtime,'ffmpeg'),'#!/bin/sh\nprintf runtime > "$1"\n');chmodSync(join(runtime,'ffmpeg'),0o700);
+    writeFileSync(join(poison,'ffmpeg'),'#!/bin/sh\nprintf poison > "$1"\n');chmodSync(join(poison,'ffmpeg'),0o700);
+    const environment=runtimeSidecarEnvironment(runtime,{...process.env,PATH:poison,Path:join(root,'other-poison')});
+    const code="const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');const marker=path.join(process.env.GOOP_DATA_DIR,'ffmpeg-marker');const launched=cp.spawnSync('ffmpeg',[marker]);fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid,path_entries:Object.entries(process.env).filter(([name])=>name.toLowerCase()==='path'),ffmpeg_marker:launched.status===0?fs.readFileSync(marker,'utf8'):'failed'}));setInterval(()=>{},10)";
+    const result=await fake(code,{environment});
+    assert.equal(result.success,true);
+    assert.deepEqual(result.marker.path_entries,[['PATH',realpathSync(runtime)]]);
+    assert.equal(result.marker.ffmpeg_marker,'runtime');
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+test('startup app cannot rescue a late removed runtime sidecar from poisoned PATH', async () => {
+  const root=mkdtempSync(join(tmpdir(),'goop-startup-sidecar-race-'));
+  try {
+    const runtime=join(root,'runtime'),poison=join(root,'poison');mkdirSync(runtime);mkdirSync(poison);
+    const runtimeFfmpeg=join(runtime,'ffmpeg');writeFileSync(runtimeFfmpeg,'#!/bin/sh\nexit 0\n');chmodSync(runtimeFfmpeg,0o700);
+    writeFileSync(join(poison,'ffmpeg'),'#!/bin/sh\nexit 0\n');chmodSync(join(poison,'ffmpeg'),0o700);
+    const environment=runtimeSidecarEnvironment(runtime,{...process.env,PATH:poison,GOOP_TEST_RUNTIME_FFMPEG:runtimeFfmpeg});
+    const code="const fs=require('node:fs'),cp=require('node:child_process');fs.rmSync(process.env.GOOP_TEST_RUNTIME_FFMPEG);const launched=cp.spawnSync('ffmpeg');fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid,fallback_rescued:launched.status===0}));setInterval(()=>{},10)";
+    const result=await fake(code,{environment});
+    assert.equal(result.success,true);
+    assert.equal(result.marker.fallback_rescued,false);
+  } finally {rmSync(root,{recursive:true,force:true});}
 });
 test('a ready marker cannot turn an absent process into a successful idle sample', async () => {
   const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)", { readSnapshot: () => '1 0 123 init\n' });

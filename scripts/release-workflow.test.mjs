@@ -38,6 +38,13 @@ function auditJob(name) {
   return auditLines.slice(start, end === -1 ? undefined : end).join("\n");
 }
 
+function namedStep(body, name) {
+  const escaped=name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const match=body.match(new RegExp(` {6}- name: ${escaped}\\n([\\s\\S]*?)(?=\\n {6}- (?:name:|uses:)|$)`));
+  assert.ok(match,`missing ${name} step`);
+  return match[0];
+}
+
 test("all workflows pin the current Node 24 checkout and setup-node actions", () => {
   let checkoutCount = 0;
   let setupNodeCount = 0;
@@ -77,17 +84,35 @@ test("audit runs the PERF-01 synthetic harness smoke on both supported platforms
   );
 });
 
-test("audit executes the strict PERF-01 Rust adapter tests", () => {
+test("Linux audit compiles and tests PERF-01 drivers without executing unavailable sidecars", () => {
   const rust = auditJob("rust");
-  const setupNode = rust.indexOf(setupNode24Ref);
-  const contract = rust.indexOf("node scripts/performance-suite.mjs --rust-contract-smoke");
-  assert.ok(setupNode >= 0 && setupNode < contract, "rust contract smoke must use pinned setup-node first");
-  assert.match(rust.slice(setupNode, contract), /node-version: "22"/);
   assert.match(rust, /cargo test -p goop-converter --example performance_workload --all-features/);
-  assert.match(rust, /cargo build -p goop-converter --example performance_workload --all-features/);
-  assert.match(rust, /node scripts\/performance-suite\.mjs --rust-contract-smoke/);
-  assert.match(rust, /--workload-driver target\/debug\/examples\/performance_workload/);
-  assert.match(rust, /--fixture crates\/goop-metadata\/tests\/fixtures\/red\.jpg/);
+  assert.doesNotMatch(
+    rust,
+    /scripts\/performance-suite\.mjs --rust-contract-smoke/,
+    "Linux bootstrap sidecars are intentional availability stubs; real runtime-sidecar execution belongs to the macOS/Windows matrix",
+  );
+});
+
+test("hosted PERF-01 contract stages exact runtime sidecar names on macOS and Windows", () => {
+  const smoke = auditJob("sidecar-smoke");
+  assert.match(smoke,/os: \[macos-14, windows-latest\]/);
+  const step=namedStep(smoke,"PERF-01 exact runtime-sidecar contract");
+  assert.doesNotMatch(step,/^\s*if:/m);
+  assert.match(step, /cargo build -p goop-converter --example performance_baseline --example performance_workload --all-features/);
+  assert.match(step, /RUNTIME_FFMPEG="ffmpeg\$\{RUNTIME_EXT\}"/);
+  assert.match(
+    step,
+    /PATH="\$POISON_PATH:\$PATH" "\$NODE_BINARY" scripts\/performance-suite\.mjs --rust-contract-smoke/,
+    "the hosted smoke must keep Windows cleanup tools reachable while measured children receive the runtime-only PATH",
+  );
+  assert.match(step, /RUNTIME_FFPROBE="ffprobe\$\{RUNTIME_EXT\}"/);
+  assert.match(step, /SINGLE_DRIVER="target\/debug\/examples\/performance_baseline\$\{RUNTIME_EXT\}"/);
+  assert.match(step, /WORKLOAD_DRIVER="target\/debug\/examples\/performance_workload\$\{RUNTIME_EXT\}"/);
+  assert.match(step, /POISON_PATH=/);
+  assert.match(step, /--single-driver "\$SINGLE_DRIVER"/);
+  assert.match(step, /--workload-driver "\$WORKLOAD_DRIVER"/);
+  assert.match(step, /--runtime-sidecars "\$RUNNER_TEMP\/goop-runtime-sidecars"/);
 });
 
 test("release builds run read-only and without persisted checkout credentials", () => {

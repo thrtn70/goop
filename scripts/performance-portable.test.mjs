@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { directoryBytes, runBoundedProcess } from './performance-shared.mjs';
+import { resolveRuntimeSidecars } from './performance-suite.mjs';
+
+test('portable runtime-sidecar names are exact for Unix and Windows', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-sidecars-'));
+  try {
+    const unix = join(root, 'unix'); mkdirSync(unix);
+    writeFileSync(join(unix, 'ffmpeg'), 'runtime'); writeFileSync(join(unix, 'ffprobe'), 'runtime');
+    assert.equal(resolveRuntimeSidecars(unix, 'darwin').ffmpeg, realpathSync(join(unix, 'ffmpeg')));
+    const windows = join(root, 'windows'); mkdirSync(windows);
+    writeFileSync(join(windows, 'ffmpeg.exe'), 'runtime'); writeFileSync(join(windows, 'ffprobe.exe'), 'runtime');
+    assert.equal(resolveRuntimeSidecars(windows, 'win32').ffprobe, realpathSync(join(windows, 'ffprobe.exe')));
+    writeFileSync(join(windows, 'ffmpeg-x86_64-pc-windows-msvc.exe'), 'source');
+    assert.throws(() => resolveRuntimeSidecars(windows, 'win32'), /exactly one exact runtime sidecar/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('portable bounded runner terminates its descendant tree', async () => {
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-tree-'));

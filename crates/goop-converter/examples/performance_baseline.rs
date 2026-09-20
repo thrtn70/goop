@@ -1,3 +1,5 @@
+mod support;
+
 use goop_converter::{
     backend_for_extension, capabilities, detect_encoders, BackendKind, ConversionBackend,
     DetectedEncoders, FfmpegBackend, ImageMagickBackend,
@@ -11,6 +13,8 @@ use std::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
+
+use support::runtime_sidecars;
 
 const MAX_ENCODER_OBSERVATIONS: usize = 64;
 
@@ -124,13 +128,20 @@ async fn main() {
     let req: ConvertRequest = serde_json::from_value(raw.clone()).unwrap();
     let typed = serde_json::to_value(&req).unwrap();
     let resolver = BinaryResolver::new((&args[1]).into());
-    let mut metrics = json!({"request":raw,"typed_request":typed,"hardware_enabled":hardware_enabled,"success":false,"phase":"request_roundtrip","sidecars":{}});
-    for name in ["ffmpeg", "ffprobe"] {
-        if let Ok(bin) = resolver.resolve(name) {
-            metrics["sidecars"][name] = json!(bin.path);
-        }
-    }
+    let (sidecars, sidecar_error) = runtime_sidecars::inspect(&resolver).into_parts();
+    let mut metrics = json!({
+        "request":raw,
+        "typed_request":typed,
+        "hardware_enabled":hardware_enabled,
+        "success":false,
+        "phase":"runtime_sidecars",
+        "sidecars":sidecars,
+    });
     let result = async {
+        if let Some(error) = sidecar_error {
+            return Err(goop_core::GoopError::InvalidRequest(error));
+        }
+        metrics["phase"] = json!("request_roundtrip");
         meaningful_fields_survive(&raw, &typed, "")
             .map_err(goop_core::GoopError::InvalidRequest)?;
         metrics["phase"] = json!("encoder_detection");

@@ -4,7 +4,7 @@ import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {withTerminationSignals} from './performance-shared.mjs';
+import {runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -29,18 +29,20 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null}=options;
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
  const initialSymlinks=new Set(ownedSymlinks(directory));
  writeFileSync(`${stem}.request.json`,JSON.stringify(request,null,2));
- const child=spawn('/usr/bin/time',['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)],{stdio:['ignore','pipe','pipe'],detached:true});
+ const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
+ const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
+ const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
  let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killTimer,killEscalation=null,stopRequested=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
- const signal=name=>{try{process.kill(-child.pid,name);return true;}catch{return false;}};
+ const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
  const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=new Promise(resolveKill=>{killTimer=setTimeout(()=>{signal('SIGKILL');resolveKill();},killGraceMs);});};
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
@@ -77,7 +79,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
     const outputStats=lstatSync(request.output_path);
     if(!outputStats.isFile())throw Error('Conversion output must be a regular non-symlink file');
     const outputBytes=outputStats.size;
-    const probe=JSON.parse(execFileSync(ffprobe,['-v','error','-show_streams','-show_format','-of','json',request.output_path],{encoding:'utf8',timeout:20000,maxBuffer:1024*1024}));
+    const probe=JSON.parse(execFileSync(ffprobe,['-v','error','-show_streams','-show_format','-of','json',request.output_path],{encoding:'utf8',timeout:20000,maxBuffer:1024*1024,env:environment}));
     validateMediaProbe(probe,expectedOutput);
     verification={checked:true,output_bytes:outputBytes,probe,target_met:request.compress_mode?.kind==='target_size_bytes'?outputBytes<=request.compress_mode.value:null};
     if(outputBytes!==Number(metrics.result?.bytes)||verification.target_met===false)metrics.success=false;
@@ -102,7 +104,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
 }
 async function main(abortSignal){
  const options=Object.fromEntries(Array.from({length:(process.argv.length-2)/2},(_,i)=>[process.argv[2+i*2].replace(/^--/,''),process.argv[3+i*2]]));
- const binary=resolve(options.binary),sidecars=resolve(options.sidecars),fixtures=resolve(options.fixtures),out=resolve(options.output);if(existsSync(out))throw Error('Output directory must be new');
+ const binary=resolve(options.binary),sidecars=resolve(options['runtime-sidecars']),fixtures=resolve(options.fixtures),out=resolve(options.output);if(existsSync(out))throw Error('Output directory must be new');
  const repeat=Number(options.repeat??5);if(!Number.isInteger(repeat)||repeat<1||repeat>20)throw Error('Invalid repeat');
  const inputs=['photo.png','photo.heic','sample.mp4','malformed.dng'].map(v=>join(fixtures,v));for(const path of inputs)statSync(path);
  mkdirSync(out,{recursive:true});
@@ -110,7 +112,7 @@ async function main(abortSignal){
  if(options.raw&&existsSync(options.raw))cases.push(['raw-jpeg',resolve(options.raw),'jpeg',null]);
  const sources=Object.fromEntries([...new Set(cases.map(c=>c[1]))].map(path=>[path,{sha256:hash(path),bytes:statSync(path).size}]));
  writeFileSync(join(out,'identity.json'),JSON.stringify({binary,binary_sha256:hash(binary),node:process.version,sources,repeat,warmup:1,label:'Fresh process with warm filesystem cache',head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()},null,2));
- const summary={};for(const [name,input,target,compress,quality] of cases){const samples=[];for(let i=-1;i<repeat;i++){const stem=join(out,`${name}-${i<0?'warmup':i}`);const request={input_path:input,output_path:join(out,outputName(name,i,target==='jpeg'?'jpg':target)),target,quality_preset:quality??null,resolution_cap:null,gif_options:null,compress_mode:compress,batch_id:null,metadata_policy:'preserve',subtitle:null};const sample=await run(binary,sidecars,request,stem,{abortSignal});if(sample.budget_exceeded)throw Error("Suite storage budget exceeded; owned oversized media removed after recording metrics");if(i>=0)samples.push(sample);}summary[name]=summarize(samples);writeFileSync(join(out,'summary.json'),JSON.stringify(summary,null,2));}
+ const summary={};for(const [name,input,target,compress,quality] of cases){const samples=[];for(let i=-1;i<repeat;i++){const stem=join(out,`${name}-${i<0?'warmup':i}`);const request={input_path:input,output_path:join(out,outputName(name,i,target==='jpeg'?'jpg':target)),target,quality_preset:quality??null,resolution_cap:null,gif_options:null,compress_mode:compress,batch_id:null,metadata_policy:'preserve',subtitle:null};const sample=await run(binary,sidecars,request,stem,{abortSignal,environment:runtimeSidecarEnvironment(sidecars)});if(sample.budget_exceeded)throw Error("Suite storage budget exceeded; owned oversized media removed after recording metrics");if(i>=0)samples.push(sample);}summary[name]=summarize(samples);writeFileSync(join(out,'summary.json'),JSON.stringify(summary,null,2));}
  for(const [path,identity] of Object.entries(sources))if(hash(path)!==identity.sha256)throw Error(`Source changed: ${basename(path)}`);
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))withTerminationSignals(main).catch(error=>{console.error(error);process.exitCode=1;});
