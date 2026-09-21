@@ -32,6 +32,7 @@ import {
   createScheduledProcessSampler,
   deriveMeasuredLanePayload,
   analyzeInstrumentationOverhead,
+  externalAxWorkloadDurationUs,
   loadPageComponent,
   publishSampleExclusive,
   runAccessibilitySequence,
@@ -49,6 +50,7 @@ import {
   validateProcessSeries,
   waitForRecorderReady,
   waitForActionReady,
+  waitForAxActivation,
   waitForAxPreflight,
   waitForRecorderOrFailedPage,
   waitForStartupReady,
@@ -337,6 +339,9 @@ test('scenario manifests are strict, versioned, bounded, and paths are absolute/
     };
     writeFileSync(nativeManifest, JSON.stringify(manifest));
     assert.equal(validateScenarioManifest(manifest).descriptor.sessionId, uuid('1'));
+    assert.equal(validateScenarioManifest(manifest).recorderMode, 'enabled');
+    assert.equal(validateScenarioManifest({ ...manifest, recorderMode: 'control' }).recorderMode, 'control');
+    assert.throws(() => validateScenarioManifest({ ...manifest, recorderMode: 'unknown' }), /recorder mode/i);
     assert.throws(() => validateScenarioManifest({ ...manifest, extra: true }), /unknown/i);
     assert.throws(() => validateScenarioManifest({ ...manifest, actions: [{ ...manifest.actions[0], actionId: 2 }] }), /ordinal/i);
     assert.throws(() => validateScenarioManifest({ ...manifest, completion: { ...manifest.completion, timeoutMs: 120_001 } }), /120,000/i);
@@ -390,11 +395,98 @@ test('AX driver preflights permission/frontmost process/labels and never uses co
   assert.equal(result.frontmost_pid, 42);
   assert.match(scripts.join('\n'), /unixId:42/);
   assert.match(scripts.join('\n'), /AXEnhancedUserInterface/);
+  assert.match(scripts.join('\n'), /NSRunningApplication/);
+  assert.match(scripts.join('\n'), /NSApplicationActivateIgnoringOtherApps/);
+  assert.match(scripts.join('\n'), /activationDeadline/);
+  assert.match(scripts.join('\n'), /while\(Date\.now\(\)<activationDeadline\)/);
   assert.match(scripts.join('\n'), /windows\[0\]\.entireContents\(\)/);
   assert.doesNotMatch(scripts.join('\n'), /app\.entireContents\(\)/);
   assert.doesNotMatch(scripts.join('\n'), /processes\.byName/);
   assert.doesNotMatch(scripts.join('\n'), /position|click at|mouse/i);
   assert.throws(() => createAccessibilityDriver({ platform: 'linux', appName: 'Goop', expectedPid: 1, runScript: async () => '{}' }), /macOS/i);
+});
+
+test('AX driver activates, raises, and verifies the exact launched main window without coordinates', async () => {
+  const scripts = [];
+  const driver = createAccessibilityDriver({
+    platform: 'darwin',
+    appName: 'Goop',
+    expectedPid: 42,
+    runScript: async script => {
+      scripts.push(script);
+      return JSON.stringify({
+        trusted: true, enhanced_user_interface: true, process_count: 1,
+        frontmost_pid: 42, window_count: 1, main_window: true,
+        minimized: false, raise_supported: true,
+      });
+    },
+  });
+
+  const result = await driver.activate();
+
+  assert.equal(result.frontmost_pid, 42);
+  assert.match(scripts[0], /frontmost=true/);
+  assert.match(scripts[0], /AXMinimized/);
+  assert.match(scripts[0], /AXRaise/);
+  assert.match(scripts[0], /AXMain/);
+  assert.doesNotMatch(scripts[0], /position|click at|mouse/i);
+});
+
+test('AX activation fails closed unless the exact launched process owns one raised unminimized main window', async () => {
+  const valid = { trusted: true, enhanced_user_interface: true, process_count: 1, frontmost_pid: 42, window_count: 1, main_window: true, minimized: false, raise_supported: true };
+  for (const [override, pattern] of [
+    [{ process_count: 0 }, /process.*not ready/i],
+    [{ frontmost_pid: 99 }, /frontmost/i],
+    [{ window_count: 2 }, /main window.*not ready/i],
+    [{ main_window: false }, /main window.*not ready/i],
+    [{ minimized: true }, /minimized/i],
+    [{ raise_supported: false }, /AXRaise/i],
+  ]) {
+    const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ ...valid, ...override }) });
+    await assert.rejects(() => driver.activate(), pattern);
+  }
+});
+
+test('AX driver focuses one exact launched-process text field and verifies its prior value without coordinates', async () => {
+  const scripts = [];
+  const driver = createAccessibilityDriver({
+    platform: 'darwin', appName: 'Goop', expectedPid: 42,
+    runScript: async script => {
+      scripts.push(script);
+      return JSON.stringify({ frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: '', value_read: true });
+    },
+  });
+  const result = await driver.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' });
+  assert.equal(result.focused_label, 'Paste URL to download');
+  assert.match(scripts[0], /unixId:42/);
+  assert.match(scripts[0], /AXPress/);
+  assert.match(scripts[0], /target\.click\(\)/);
+  assert.match(scripts[0], /frontmost=true/);
+  assert.match(scripts[0], /AXRaise/);
+  assert.match(scripts[0], /NSRunningApplication/);
+  assert.match(scripts[0], /NSApplicationActivateIgnoringOtherApps/);
+  assert.match(scripts[0], /AXFocused/);
+  assert.match(scripts[0], /focusDeadline=Date\.now\(\)\+500/);
+  assert.doesNotMatch(scripts[0], /position|click at|mouse/i);
+
+  const duplicate = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ frontmost_pid: 42, modal_count: 0, target_count: 2, target_role: null, target_label: null, focused_role: null, focused_label: null, value: null }) });
+  await assert.rejects(() => duplicate.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' }), /exactly one/i);
+  const unreadable = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: null, value_read: false }) });
+  await assert.rejects(() => unreadable.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' }), /value.*unreadable|read.*value/i);
+});
+
+test('AX activation retries only while the exact process or main window is still mounting', async () => {
+  let attempts = 0;
+  const driver = {
+    activate: async () => {
+      attempts += 1;
+      if (attempts === 1) throw Error('Accessibility main window is not ready');
+      return { frontmost_pid: 42, window_count: 1 };
+    },
+  };
+  assert.deepEqual(await waitForAxActivation(driver, { timeoutMs: 100, pollMs: 1 }), { frontmost_pid: 42, window_count: 1 });
+  assert.equal(attempts, 2);
+  await assert.rejects(() => waitForAxActivation({ activate: async () => { throw Error('Accessibility permission is not granted'); } }, { timeoutMs: 100, pollMs: 1 }), /permission/i);
 });
 
 test('AX driver fails closed on permission, focus, modal, and missing labels', async () => {
@@ -422,6 +514,16 @@ test('driver revalidates focus before every action and validates the focused tar
   assert.equal(result.ordinal, 1);
   assert.equal(scripts.length, 2);
   assert.match(scripts.join('\n'), /const processMatches=/);
+  assert.equal(scripts.filter(script => script.includes("attributes.byName('AXFocused').value=true")).length, 2);
+  assert.equal(scripts.filter(script => script.includes('focusDeadline=Date.now()+500')).length, 2);
+  assert.equal(scripts.filter(script => script.includes('NSApplicationActivateIgnoringOtherApps')).length, 2);
+  assert.equal(scripts.filter(script => script.includes('activationDeadline')).length, 2);
+  const dispatchScript = scripts[1];
+  assert.ok(dispatchScript.indexOf('focusDeadline=Date.now()+500') < dispatchScript.indexOf('const dispatchFront='));
+  assert.ok(dispatchScript.indexOf('const dispatchFront=') < dispatchScript.indexOf('const dispatchStart='));
+  assert.ok(dispatchScript.indexOf('const dispatchStart=') < dispatchScript.indexOf('se.keystroke("h")'));
+  assert.match(dispatchScript, /dispatchFocused\.role\(\)!=="AXTextField"/);
+  assert.match(dispatchScript, /dispatchFocused\.name\(\)!=="Paste URL to download"/);
   assert.doesNotMatch(scripts.join('\n'), /const matches=se\.processes/);
   assert.match(scripts.join('\n'), /windows\[0\]\.entireContents\(\)/);
   assert.doesNotMatch(scripts.join('\n'), /app\.entireContents\(\)/);
@@ -610,6 +712,8 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
       plan: { binary, app_name: 'Goop', app_data_directory: profile, component_directory: report, limits: { log_limit_bytes: 4096, storage_budget_bytes: 1024 * 1024 } },
       page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 3000 },
       manifest, platform: 'darwin',
+    }, {
+      createDriver: () => ({ activate: async () => ({ frontmost_pid: 42, window_count: 1 }), perform: async () => { throw Error('must not dispatch'); } }),
     });
     assert.equal(result.page_component.frontend_trace.failure.code, 'observer_init');
     assert.deepEqual(result.driver_observations, []);
@@ -668,6 +772,25 @@ test('action sequence waits for initial readiness before setup and each next-act
   });
   assert.deepEqual(order, ['recorder-ready-1', 'setup', 'dispatch-1', 'action-ready-2', 'dispatch-2']);
   assert.deepEqual(observations.map(value => value.ordinal), [1, 2]);
+});
+
+test('recorder-disabled control sequence waits for control readiness and never consumes action-ready markers', async () => {
+  const order = [];
+  const driver = { perform: async action => { order.push(`dispatch-${action.ordinal}`); return { ordinal: action.ordinal, driver_duration_us: action.ordinal * 10, observed_value: true, clock_domain: 'driver_monotonic' }; } };
+  const plan = [
+    { actionId: 1, targetRole: 'AXTextField', accessibleName: 'Paste URL to download', dispatch: { kind: 'keystroke', text: 'h', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'h' }, timeout_ms: 2000 } },
+    { actionId: 2, targetRole: 'AXTextField', accessibleName: 'Paste URL to download', dispatch: { kind: 'keystroke', text: 't', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'ht' }, timeout_ms: 2000 } },
+  ];
+  const observations = await runAccessibilitySequence({
+    driver, actions: plan, recorderMode: 'control', reportDirectory: '/tmp/reports',
+    identity: { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), pid: 42 },
+    waitRecorder: async (path, expected) => { order.push('control-ready'); assert.match(path, /control-ready-/); assert.equal(expected.component_kind, 'control_ready'); assert.equal(expected.action_id, null); return expected; },
+    waitAction: async () => { throw Error('control sequence must not read action-ready markers'); },
+    afterRecorderReady: async () => { order.push('setup'); },
+  });
+  assert.deepEqual(order, ['control-ready', 'setup', 'dispatch-1', 'dispatch-2']);
+  assert.equal(externalAxWorkloadDurationUs(observations, 2), 30);
+  assert.throws(() => externalAxWorkloadDurationUs(observations.slice(0, 1), 2), /cardinality/i);
 });
 
 test('Lane 3 sequence enforces a monotonic 40-second deadline per cycle', async () => {
@@ -1125,6 +1248,87 @@ test('native page component loader preserves and validates native clock identity
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('native draft control publishes only complete external AX evidence without a frontend sample', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'goop-native-control-')));
+  try {
+    const binary = join(root, 'Goop'); writeFileSync(binary, 'release-binary');
+    const reports = join(root, 'reports'); mkdirSync(reports);
+    const profile = join(root, 'profile'); mkdirSync(profile);
+    const seededRaw = seededDraftRaw(500);
+    const typed = [...'https://x.test/a.mp4'];
+    const manifest = {
+      schema_version: 2, recorderMode: 'control', token: 'control-token', ...activationFields('pre_quit'),
+      bootstrap: { ...activationFields('pre_quit').bootstrap, initialPath: '/convert', draftStorage: { raw: seededRaw, sha256: hash(seededRaw) } },
+      descriptor: { componentRole: 'pre_quit', sessionId: uuid('1'), sampleId: 'draft:500:control:0', pageInstanceId: uuid('2'), lane: 'draft', scenario: { id: 'draft-500-control', manifestSha256: digest('a') }, workload: { id: 'draft-500', facts: { seeded_entries: 500, mutation_count: 20 } }, phase: 'measured', repetition: 0 },
+      actions: typed.map((character, index) => ({ actionId: index + 1, targetId: `draft-key-${index + 1}`, eventType: 'input', targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: typed.slice(0, index).join('') })),
+    };
+    const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
+    const page = {
+      manifest_path: manifestPath, required_labels: ['Paste URL to download'],
+      actions: manifest.actions.map((action, index) => ({ ...action, dispatch: { kind: 'keystroke', text: typed[index], ax_prior: { kind: 'attribute_equals', attribute: 'AXValue', value: action.expectedPriorValue }, completion: { kind: 'attribute_equals', attribute: 'AXValue', value: typed.slice(0, index + 1).join('') }, timeout_ms: 2000 } })),
+      timeout_ms: 10_000,
+    };
+    const plan = {
+      schema_version: 2, app_name: 'Goop', binary, report_directory: reports, app_data_directory: profile, pages: [page],
+      identity_inputs: identityInputs(binary, [manifestPath]),
+      common: { identity: evidenceIdentity(), clock_origins: { driver_monotonic: { unit: 'us' }, native_monotonic: { unit: 'us' } }, limitations: [], cleanup: { complete: true, removed_paths: 0, error_code: null }, outcome: { kind: 'success' } },
+      payload: {}, limits: { log_limit_bytes: 65_536, storage_budget_bytes: 16_777_216 }, cleanup_profile: false,
+    };
+    const observations = driverObservations(manifest.actions).map((observation, index) => ({ ...observation, driver_duration_us: index + 1 }));
+    const cleanupReceipt = { schema_version: 2, component_kind: 'data_store_cleanup', session_id: manifest.descriptor.sessionId, webview_data_store_id: manifest.webviewDataStoreId, removed: true, error_code: null, pid: 43, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 20 } };
+    const result = await runNativeResponsivenessPlan(plan, {
+      platform: 'darwin',
+      runPage: async () => ({ page_component: null, driver_observations: observations, external_ax_duration_us: 210, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runCleanup: async () => cleanupReceipt,
+    });
+    assert.equal(result.control.component_kind, 'responsiveness_instrumentation_control');
+    assert.equal(result.control.recorder_mode, 'control');
+    assert.equal(result.control.action_count, 20);
+    assert.equal(result.control.external_ax_duration_us, 210);
+    assert.deepEqual(result.control.outcome, { kind: 'success' });
+    assert.equal(existsSync(join(reports, 'control.json')), true);
+    assert.equal(existsSync(join(reports, 'sample.json')), false);
+    assert.equal(existsSync(join(reports, 'components', 'driver.json')), true);
+    assert.equal(readdirSync(join(reports, 'components')).some(name => name.startsWith('frontend-')), false);
+
+    const incompleteReports = join(root, 'incomplete-reports'); mkdirSync(incompleteReports);
+    const incompleteProfile = join(root, 'incomplete-profile'); mkdirSync(incompleteProfile);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: incompleteReports, app_data_directory: incompleteProfile }, {
+      platform: 'darwin',
+      runPage: async () => ({ page_component: null, driver_observations: observations.slice(0, -1), external_ax_duration_us: 190, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runCleanup: async () => cleanupReceipt,
+    }), /cardinality/i);
+    assert.equal(existsSync(join(incompleteReports, 'control.json')), false);
+
+    const rollbackReports = join(root, 'rollback-reports'); mkdirSync(rollbackReports);
+    const rollbackProfile = join(root, 'rollback-profile'); mkdirSync(rollbackProfile);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: rollbackReports, app_data_directory: rollbackProfile }, {
+      platform: 'darwin',
+      runPage: async () => ({ page_component: null, driver_observations: observations, external_ax_duration_us: 210, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runCleanup: async () => cleanupReceipt,
+      syncDirectory: () => { throw Error('injected directory sync failure'); },
+    }), /directory sync failure/i);
+    assert.equal(existsSync(join(rollbackReports, 'control.json')), false);
+    assert.equal(existsSync(join(rollbackReports, 'components')), false);
+    assert.equal(existsSync(join(rollbackReports, '.incomplete')), true);
+
+    const invalidManifestPath = join(root, 'invalid-manifest.json');
+    writeFileSync(invalidManifestPath, JSON.stringify({ ...manifest, descriptor: { ...manifest.descriptor, workload: { ...manifest.descriptor.workload, facts: { seeded_entries: 100, mutation_count: 20 } } } }));
+    const invalidReports = join(root, 'invalid-reports'); mkdirSync(invalidReports);
+    const invalidProfile = join(root, 'invalid-profile'); mkdirSync(invalidProfile);
+    const invalidPage = { ...page, manifest_path: invalidManifestPath };
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: invalidReports, app_data_directory: invalidProfile, pages: [invalidPage], identity_inputs: identityInputs(binary, [invalidManifestPath]) }, { platform: 'darwin' }), /control.*500|500.*control/i);
+
+    const falseCountRaw = seededDraftRaw(1);
+    const falseCountManifestPath = join(root, 'false-count-manifest.json');
+    writeFileSync(falseCountManifestPath, JSON.stringify({ ...manifest, bootstrap: { ...manifest.bootstrap, draftStorage: { raw: falseCountRaw, sha256: hash(falseCountRaw) } } }));
+    const falseCountReports = join(root, 'false-count-reports'); mkdirSync(falseCountReports);
+    const falseCountProfile = join(root, 'false-count-profile'); mkdirSync(falseCountProfile);
+    const falseCountPage = { ...page, manifest_path: falseCountManifestPath };
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: falseCountReports, app_data_directory: falseCountProfile, pages: [falseCountPage], identity_inputs: identityInputs(binary, [falseCountManifestPath]) }, { platform: 'darwin' }), /seeded entry count|500-entry/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('native draft plan runs pre-quit then recovery before exclusive publication', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'goop-native-plan-')));
   try {
@@ -1339,6 +1543,10 @@ test('exclusive canonical publication syncs a bounded create-new sample without 
     assert.equal(readFileSync(result.path, 'utf8'), canonicalizeJcs(sample));
     assert.equal(lstatSync(result.path).isFile(), true);
     assert.throws(() => publishSampleExclusive(root, sample), /exists|publish/i);
+    const rollback = join(root, 'rollback'); mkdirSync(rollback);
+    assert.throws(() => publishSampleExclusive(rollback, sample, { syncDirectory: () => { throw Error('injected sync failure'); } }), /sync failure/i);
+    assert.equal(existsSync(join(rollback, 'sample.json')), false);
+    assert.equal(readdirSync(rollback).length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -172,7 +172,7 @@ function fakeRecorder(log: string[], options: {
 
 function enabledActivation(overrides: Partial<Extract<ResponsivenessActivation, { enabled: true }>> = {}): ResponsivenessActivation {
   return {
-    enabled: true, token: "opaque-token", descriptor, actions,
+    enabled: true, recorderMode: "enabled", token: "opaque-token", descriptor, actions,
     webviewDataStoreId: Array.from({ length: 16 }, (_, index) => index),
     bootstrap: { initialPath: "/convert", draftStorage: null, failNextDraftWrite: false },
     completion: { kind: "actions_and_setups", timeoutMs: 2_000, expectedDraftSha256: null, expectedAxValue: null },
@@ -215,6 +215,67 @@ describe("PERF-02 responsiveness runtime", () => {
     runtime.observeTrustedEvent(observed(actions[0]));
     expect(writeComponent).not.toHaveBeenCalled();
     expect(setTimer).not.toHaveBeenCalled();
+  });
+
+  it("applies a validated control bootstrap without allocating recorder evidence", async () => {
+    const raw = JSON.stringify({ version: 1, entries: {} });
+    const hash = "b".repeat(64);
+    const log: string[] = [];
+    const createRecorder = vi.fn();
+    const installRecorder = vi.fn();
+    const ready = vi.fn();
+    const actionReady = vi.fn();
+    const writeComponent = vi.fn();
+    const installTrustedEventGuard = vi.fn();
+    const setTimer = vi.fn();
+    const runtime = createResponsivenessRuntime({
+      status: vi.fn().mockResolvedValue(enabledActivation({
+        recorderMode: "control",
+        bootstrap: { initialPath: "/convert", draftStorage: { raw, sha256: hash }, failNextDraftWrite: false },
+      })),
+      sha256: vi.fn(async (value) => { log.push(`hash:${value}`); return hash; }),
+      applyBootstrap: vi.fn(() => log.push("bootstrap")),
+      sealDisabled: vi.fn(() => log.push("seal")),
+      controlReady: vi.fn(async (args) => { log.push(`control-ready:${args.pageInstanceId}`); }),
+      createRecorder, installRecorder, ready, actionReady, writeComponent,
+      markScenarioStarted: vi.fn(), installTrustedEventGuard, setTimer,
+    });
+
+    await runtime.initialize();
+    await runtime.initialize();
+
+    expect(log).toEqual([
+      `hash:${raw}`,
+      "bootstrap",
+      "seal",
+      `control-ready:${descriptor.pageInstanceId}`,
+    ]);
+    expect(createRecorder).not.toHaveBeenCalled();
+    expect(installRecorder).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
+    expect(actionReady).not.toHaveBeenCalled();
+    expect(writeComponent).not.toHaveBeenCalled();
+    expect(installTrustedEventGuard).not.toHaveBeenCalled();
+    expect(setTimer).not.toHaveBeenCalled();
+    expect(runtime.workloadCount("seeded_entries")).toBeNull();
+  });
+
+  it("rejects an unknown recorder mode before applying its bootstrap", async () => {
+    const applyBootstrap = vi.fn();
+    const controlReady = vi.fn();
+    const sealDisabled = vi.fn();
+    const runtime = createResponsivenessRuntime({
+      status: vi.fn().mockResolvedValue({ ...enabledActivation(), recorderMode: "unknown" }),
+      applyBootstrap, controlReady, sealDisabled,
+      createRecorder: vi.fn(), installRecorder: vi.fn(), markScenarioStarted: vi.fn(),
+      ready: vi.fn(), actionReady: vi.fn(), writeComponent: vi.fn(),
+    });
+
+    await runtime.initialize();
+
+    expect(sealDisabled).toHaveBeenCalledTimes(1);
+    expect(applyBootstrap).not.toHaveBeenCalled();
+    expect(controlReady).not.toHaveBeenCalled();
   });
 
   it("allows ordinary bootstrap to continue when the activation query fails", async () => {

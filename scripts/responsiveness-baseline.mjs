@@ -183,8 +183,10 @@ function validateArmAction(action, expectedId) {
 
 /** Validate the exact <=2 MiB launch document consumed by the native activation query. */
 export function validateScenarioManifest(manifest) {
-  exactKeys(manifest, ['schema_version', 'token', 'webviewDataStoreId', 'bootstrap', 'completion', 'descriptor', 'actions'], 'responsiveness manifest');
+  exactRequiredAndOptionalKeys(manifest, ['schema_version', 'token', 'webviewDataStoreId', 'bootstrap', 'completion', 'descriptor', 'actions'], ['recorderMode'], 'responsiveness manifest');
   if (manifest.schema_version !== 2) throw Error('Unsupported responsiveness manifest schema version');
+  const recorderMode = manifest.recorderMode ?? 'enabled';
+  if (!['enabled', 'control'].includes(recorderMode)) throw Error('Invalid responsiveness recorder mode');
   boundedString(manifest.token, 'responsiveness token', { pattern: OPAQUE });
   if (!Array.isArray(manifest.webviewDataStoreId) || manifest.webviewDataStoreId.length !== 16 || manifest.webviewDataStoreId.every(value => value === 0) || manifest.webviewDataStoreId.some(value => !Number.isSafeInteger(value) || value < 0 || value > 255)) throw Error('Invalid WebView data-store ID');
   validateBootstrap(manifest.bootstrap);
@@ -196,7 +198,7 @@ export function validateScenarioManifest(manifest) {
   if (manifest.completion.kind === 'recovery' && manifest.descriptor.componentRole !== 'recovery') throw Error('Recovery completion requires the recovery role');
   manifest.actions.forEach((action, index) => validateArmAction(action, index + 1));
   if (byteLength(JSON.stringify(manifest)) > MAX_MANIFEST_BYTES) throw Error('Responsiveness manifest exceeds 2 MiB');
-  return manifest;
+  return { ...manifest, recorderMode };
 }
 
 const requireAction = (action, { role, label, kind, timeoutMs }, ordinal) => {
@@ -926,31 +928,42 @@ export function assembleSample({ lane, frontendComponents, nativePageComponents 
   return sample;
 }
 
-export function publishSampleExclusive(directory, sample) {
+function publishCanonicalExclusive(directory, value, { filename, temporaryPrefix, label, maximumBytes, syncDirectory = syncDirectoryPortable }) {
   if (!isAbsolute(directory)) throw Error('Publication directory must be absolute');
   const directoryStats = lstatSync(directory);
   if (directoryStats.isSymbolicLink()) throw Error('Publication directory must not be a symbolic link');
   if (!directoryStats.isDirectory()) throw Error('Publication target must be a directory');
   if (realpathSync(directory) !== directory) throw Error('Publication directory must be canonical');
-  const canonical = canonicalizeJcs(sample);
+  const canonical = canonicalizeJcs(value);
   const bytes = byteLength(canonical);
-  if (bytes > MAX_SAMPLE_BYTES) throw Error('Final sample size exceeds 8 MiB');
-  const target = join(directory, 'sample.json');
-  const temporary = join(directory, `.sample-${process.pid}-${randomUUID()}.tmp`);
-  let temporaryCreated = false;
+  if (bytes > maximumBytes) throw Error(`Final ${label} size exceeds 8 MiB`);
+  const target = join(directory, filename);
+  const temporary = join(directory, `.${temporaryPrefix}-${process.pid}-${randomUUID()}.tmp`);
+  let temporaryCreated = false, targetCreated = false;
   try {
     const descriptor = openSync(temporary, 'wx', 0o600);
     temporaryCreated = true;
     try { writeFileSync(descriptor, canonical); fsyncSync(descriptor); } finally { closeSync(descriptor); }
     linkSync(temporary, target);
+    targetCreated = true;
     unlinkSync(temporary);
     temporaryCreated = false;
-    syncDirectoryPortable(directory);
+    syncDirectory(directory);
   } catch (error) {
+    if (targetCreated) { try { unlinkSync(target); } catch { /* Best-effort rollback of an unpublished target. */ } }
     if (temporaryCreated) { try { unlinkSync(temporary); } catch { /* Best-effort removal of an unpublished temp name. */ } }
-    throw Error(`Exclusive sample publish failed: ${error.code ?? error.message}`);
+    try { syncDirectoryPortable(directory); } catch { /* The original publication failure remains authoritative. */ }
+    throw Error(`Exclusive ${label} publish failed: ${error.code ?? error.message}`);
   }
   return { path: target, bytes, sha256: createHash('sha256').update(canonical).digest('hex') };
+}
+
+export function publishSampleExclusive(directory, sample, { syncDirectory = syncDirectoryPortable } = {}) {
+  return publishCanonicalExclusive(directory, sample, { filename: 'sample.json', temporaryPrefix: 'sample', label: 'sample', maximumBytes: MAX_SAMPLE_BYTES, syncDirectory });
+}
+
+function publishControlExclusive(directory, control, { syncDirectory = syncDirectoryPortable } = {}) {
+  return publishCanonicalExclusive(directory, control, { filename: 'control.json', temporaryPrefix: 'control', label: 'control', maximumBytes: MAX_SAMPLE_BYTES, syncDirectory });
 }
 
 export function writeComponentExclusive(directory, name, value, maximumBytes = 2 * 1024 * 1024) {
@@ -1108,11 +1121,25 @@ export function createAccessibilityDriver({ platform = process.platform, appName
   if (platform !== 'darwin') throw Error('The responsiveness accessibility driver is macOS-only');
   boundedString(appName, 'application name');
   safeInteger(expectedPid, 'expected application PID', 1);
+  const reactivateExactProcess = `ObjC.import('AppKit');const nativeApp=$.NSRunningApplication.runningApplicationWithProcessIdentifier(${expectedPid});const activationDeadline=Date.now()+1000;while(Date.now()<activationDeadline){if(nativeApp){try{nativeApp.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)}catch{}}if(app){try{app.frontmost=true}catch{};const activationWindows=app.windows();if(activationWindows.length===1){try{activationWindows[0].actions.byName('AXRaise').perform()}catch{}}}delay(0.01);const activationFront=se.processes.whose({frontmost:true})();if(activationFront.length===1&&activationFront[0].unixId()===${expectedPid})break;}`;
+
+  const activate = async () => {
+    const script = `ObjC.import('ApplicationServices');\nconst se=Application('System Events');\nconst trusted=$.AXIsProcessTrusted();\nconst processMatches=se.processes.whose({unixId:${expectedPid}})();const app=processMatches.length===1?processMatches[0]:null;\nlet enhanced=false;let windowCount=0;let mainWindow=false;let minimized=null;let raiseSupported=false;\nif(app){try{const attr=app.attributes.byName('AXEnhancedUserInterface');attr.value=true;enhanced=attr.value()===true}catch{};try{app.frontmost=true}catch{};const windows=app.windows();windowCount=windows.length;if(windows.length===1){const window=windows[0];try{const attr=window.attributes.byName('AXMinimized');if(attr.value()===true)attr.value=false;minimized=attr.value()===true}catch{};try{mainWindow=window.attributes.byName('AXMain').value()===true}catch{};try{const raise=window.actions.byName('AXRaise');raise.perform();raiseSupported=true}catch{}}}\ndelay(0.05);\nconst front=se.processes.whose({frontmost:true})();\nconst frontPid=front.length===1?front[0].unixId():null;\nJSON.stringify({trusted:Boolean(trusted),enhanced_user_interface:enhanced,process_count:processMatches.length,frontmost_pid:frontPid,window_count:windowCount,main_window:mainWindow,minimized,raise_supported:raiseSupported});`;
+    const value = parseDriverReply(await runScript(script, 5000));
+    if (value.trusted !== true) throw Error('Accessibility permission is not granted');
+    if (value.process_count !== 1) throw Error('Accessibility process is not ready');
+    if (value.enhanced_user_interface !== true) throw Error('Accessibility enhanced user interface could not be enabled');
+    if (value.window_count !== 1 || value.main_window !== true) throw Error('Accessibility main window is not ready');
+    if (value.raise_supported !== true) throw Error('Accessibility main window does not expose AXRaise');
+    if (value.minimized !== false) throw Error('Accessibility main window remains minimized');
+    if (value.frontmost_pid !== expectedPid) throw Error('Accessibility main window is not frontmost yet');
+    return value;
+  };
 
   const preflight = async requiredLabels => {
     if (!Array.isArray(requiredLabels) || requiredLabels.length > 128) throw Error('Invalid AX preflight labels');
     requiredLabels.forEach(label => boundedString(label, 'AX label'));
-    const script = `ObjC.import('ApplicationServices');\nconst se=Application('System Events');\nconst trusted=$.AXIsProcessTrusted();\n${jxaPidProcess(expectedPid)}\nlet enhanced=false;\nif(app){try{const attr=app.attributes.byName('AXEnhancedUserInterface');attr.value=true;enhanced=attr.value()===true}catch{}}\ndelay(0.05);\nconst front=se.processes.whose({frontmost:true})();\nconst frontPid=front.length?front[0].unixId():null;\nconst windows=app?app.windows():[];\nconst labels=[];\nif(windows.length===1){for(const item of windows[0].entireContents()){try{const n=item.name();if(typeof n==='string'&&n.length)labels.push(n)}catch{}}}\nJSON.stringify({trusted:Boolean(trusted),enhanced_user_interface:enhanced,frontmost_pid:frontPid,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,labels});`;
+    const script = `ObjC.import('ApplicationServices');\nconst se=Application('System Events');\nconst trusted=$.AXIsProcessTrusted();\n${jxaPidProcess(expectedPid)}\n${reactivateExactProcess}\nlet enhanced=false;\nif(app){try{const attr=app.attributes.byName('AXEnhancedUserInterface');attr.value=true;enhanced=attr.value()===true}catch{}}\ndelay(0.05);\nconst front=se.processes.whose({frontmost:true})();\nconst frontPid=front.length?front[0].unixId():null;\nconst windows=app?app.windows():[];\nconst labels=[];\nif(windows.length===1){for(const item of windows[0].entireContents()){try{const n=item.name();if(typeof n==='string'&&n.length)labels.push(n)}catch{}}}\nJSON.stringify({trusted:Boolean(trusted),enhanced_user_interface:enhanced,frontmost_pid:frontPid,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,labels});`;
     const value = parseDriverReply(await runScript(script, 5000));
     if (value.trusted !== true) throw Error('Accessibility permission is not granted');
     if (value.enhanced_user_interface !== true) throw Error('Accessibility enhanced user interface could not be enabled');
@@ -1120,6 +1147,22 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     if (value.modal_count !== 0) throw Error('A modal dialog prevents AX preflight');
     for (const label of requiredLabels) if (!value.labels?.includes(label)) throw Error(`Required accessibility label is missing: ${label}`);
     return value;
+  };
+
+  const focus = async ({ role, label, expected_value: expectedValue }) => {
+    boundedString(role, 'AX focus role');
+    boundedString(label, 'AX focus label');
+    boundedString(expectedValue, 'AX focus expected value', { maximum: 4096, allowEmpty: true });
+    const axRole = normalizeAxRole(role);
+    const script = `ObjC.import('AppKit');const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');const nativeApp=$.NSRunningApplication.runningApplicationWithProcessIdentifier(${expectedPid});try{nativeApp.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)}catch{};try{app.frontmost=true}catch{};const windows=app.windows();if(windows.length===1){try{windows[0].actions.byName('AXRaise').perform()}catch{}}delay(0.05);const all=windows.length===1?windows[0].entireContents():[];const matches=all.filter(x=>{try{return x.role()===${jxaLiteral(axRole)}&&x.name()===${jxaLiteral(label)}}catch{return false}});const target=matches.length===1?matches[0]:null;let focused=null;if(target){try{target.click()}catch{};try{target.actions.byName('AXPress').perform()}catch{};const focusDeadline=Date.now()+500;while(Date.now()<focusDeadline){try{nativeApp.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)}catch{};try{app.frontmost=true}catch{};try{target.attributes.byName('AXFocused').value=true}catch{};delay(0.01);try{focused=app.attributes.byName('AXFocusedUIElement').value()}catch{};try{const currentFront=se.processes.whose({frontmost:true})();if(currentFront.length===1&&currentFront[0].unixId()===${expectedPid}&&focused&&focused.role()===${jxaLiteral(axRole)}&&focused.name()===${jxaLiteral(label)})break}catch{}}}const front=se.processes.whose({frontmost:true})();let value=null;let valueRead=false;if(target){try{value=target.attributes.byName('AXValue').value();valueRead=true}catch{}}JSON.stringify({frontmost_pid:front.length===1?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:target?target.role():null,target_label:target?target.name():null,focused_role:focused?focused.role():null,focused_label:focused?focused.name():null,value,value_read:valueRead});`;
+    const result = parseDriverReply(await runScript(script, 5000));
+    if (result.frontmost_pid !== expectedPid) throw Error(`Accessibility focus was lost during setup (${String(result.frontmost_pid)})`);
+    if (result.modal_count !== 0) throw Error('A modal dialog prevents accessibility focus setup');
+    if (result.target_count !== 1 || result.target_role !== axRole || result.target_label !== label) throw Error('Accessibility focus setup must resolve exactly one manifest target');
+    if (result.focused_role !== axRole || result.focused_label !== label) throw Error(`Accessibility focus setup did not focus the manifest target (${String(result.focused_role)} / ${String(result.focused_label)})`);
+    if (result.value_read !== true) throw Error('Accessibility focus setup could not read the target value');
+    if (String(normalizeAxValue('AXValue', result.value)) !== expectedValue) throw Error('Accessibility focus setup found an unexpected prior value');
+    return result;
   };
 
   const perform = async action => {
@@ -1147,13 +1190,16 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     const priorAttribute = axPrior.kind === 'attribute_equals' ? axPrior.attribute : 'AXValue';
     boundedString(priorAttribute, 'accessibility prior-value attribute');
     const targetLookup = `const all=windows.length===1?windows[0].entireContents():[];const matches=all.filter(x=>{try{return x.role()===${jxaLiteral(axRole)}&&x.name()===${jxaLiteral(action.label)}}catch{return false}});const target=matches.length===1?matches[0]:null;`;
-    const checkScript = `const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}const f=app.attributes.byName('AXFocusedUIElement').value();let current=null;if(target){try{current=target.attributes.byName(${jxaLiteral(priorAttribute)}).value()}catch{}}JSON.stringify({trusted:true,frontmost_pid:front.length?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:target?target.role():null,target_label:target?target.name():null,focused_role:f?f.role():null,focused_label:f?f.name():null,value:current});`;
+    const keyboardAction = ['keystroke', 'key_chord', 'key_code'].includes(action.kind);
+    const focusTarget = keyboardAction ? `if(target){const focusDeadline=Date.now()+500;while(Date.now()<focusDeadline){try{target.attributes.byName('AXFocused').value=true}catch{};delay(0.01);let focusCandidate=null;try{focusCandidate=app.attributes.byName('AXFocusedUIElement').value()}catch{};try{if(focusCandidate&&focusCandidate.role()===${jxaLiteral(axRole)}&&focusCandidate.name()===${jxaLiteral(action.label)})break}catch{}}}` : '';
+    const postFocusGuard = keyboardAction ? `const dispatchFront=se.processes.whose({frontmost:true})();const dispatchWindows=app.windows();const dispatchModal=dispatchWindows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;let dispatchFocused=null;try{dispatchFocused=app.attributes.byName('AXFocusedUIElement').value()}catch{};if(dispatchFront.length!==1||dispatchFront[0].unixId()!==${expectedPid}||dispatchModal!==${expectedModalBefore}||!dispatchFocused||dispatchFocused.role()!==${jxaLiteral(axRole)}||dispatchFocused.name()!==${jxaLiteral(action.label)})throw new Error('interrupted before keyboard dispatch');` : '';
+    const checkScript = `const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');${reactivateExactProcess}const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}${focusTarget}const f=app.attributes.byName('AXFocusedUIElement').value();let current=null;if(target){try{current=target.attributes.byName(${jxaLiteral(priorAttribute)}).value()}catch{}}JSON.stringify({trusted:true,frontmost_pid:front.length?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:target?target.role():null,target_label:target?target.name():null,focused_role:f?f.role():null,focused_label:f?f.name():null,value:current});`;
     const before = parseDriverReply(await runScript(checkScript, 5000));
     if (before.frontmost_pid !== expectedPid) throw Error('Accessibility focus was lost before action dispatch');
     if (before.modal_count !== expectedModalBefore) throw Error('Unexpected modal state before accessibility dispatch');
     if (before.target_count !== 1 || before.target_role !== axRole || before.target_label !== action.label) throw Error('Accessibility action must resolve exactly one manifest target');
     if (axPrior.kind === 'attribute_equals' && JSON.stringify(normalizeAxValue(priorAttribute, before.value)) !== JSON.stringify(normalizeAxValue(priorAttribute, axPrior.value))) throw Error('Accessibility target prior value does not match the driver plan');
-    if (['keystroke', 'key_chord', 'key_code'].includes(action.kind) && (before.focused_role !== axRole || before.focused_label !== action.label)) throw Error('Focused accessibility target does not match the manifest');
+    if (['keystroke', 'key_chord', 'key_code'].includes(action.kind) && (before.focused_role !== axRole || before.focused_label !== action.label)) throw Error(`Focused accessibility target does not match the manifest (${String(before.focused_role)} / ${String(before.focused_label)})`);
     const modifiers = action.modifiers ?? [];
     if (!Array.isArray(modifiers) || modifiers.some(value => !['command', 'shift', 'option', 'control'].includes(value))) throw Error('Invalid accessibility modifier keys');
     const using = modifiers.map(value => `${value} down`);
@@ -1178,9 +1224,9 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     const completionLoop = completion.kind === 'attribute_equals'
       ? `const current=allNow.filter(x=>{try{return x.role()===${jxaLiteral(completionRole)}&&x.name()===${jxaLiteral(completionLabel)}}catch{return false}});if(current.length===1){try{value=current[0].attributes.byName(${jxaLiteral(completion.attribute)}).value()}catch{}const normalized=(${jxaLiteral(completion.attribute)}==='AXSelected'||${jxaLiteral(completion.attribute)}==='AXEnabled')?(value===true||value===1||value==='1'||value==='true'):(${jxaLiteral(completion.attribute)}==='AXValue'?(value==null?'':String(value)):value);if(JSON.stringify(normalized)===${jxaLiteral(JSON.stringify(normalizedExpected))}){done=true;break}}`
       : `const current=allNow.filter(x=>{try{return x.role()===${jxaLiteral(completionRole)}&&x.name()===${jxaLiteral(completionLabel)}}catch{return false}});value=current.length;if(current.length===0){done=true;break}`;
-    const dispatchScript = `ObjC.import('QuartzCore');const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}const modalBefore=windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;if(front.length!==1||front[0].unixId()!==${expectedPid}||modalBefore!==${expectedModalBefore}||matches.length!==1)throw new Error('interrupted');const targetRole=target.role();const targetLabel=target.name();const dispatchStart=$.CACurrentMediaTime();${operation}const deadline=Date.now()+${action.timeout_ms};let value=null;let done=false;while(Date.now()<deadline){const activeWindows=app.windows();const allNow=activeWindows.length===1?activeWindows[0].entireContents():[];${completionLoop}delay(0.01)}const observedAt=$.CACurrentMediaTime();const frontAfter=se.processes.whose({frontmost:true})();const windowsAfter=app.windows();const modalAfter=windowsAfter.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;const f=app.attributes.byName('AXFocusedUIElement').value();JSON.stringify({trusted:true,frontmost_pid:frontAfter.length?frontAfter[0].unixId():null,modal_count:modalAfter,target_count:matches.length,target_role:targetRole,target_label:targetLabel,focused_role:f?f.role():null,focused_label:f?f.name():null,value,done,driver_duration_us:Math.round((observedAt-dispatchStart)*1000000)});`;
+    const dispatchScript = `ObjC.import('QuartzCore');const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');${reactivateExactProcess}const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}const modalBefore=windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;if(front.length!==1||front[0].unixId()!==${expectedPid}||modalBefore!==${expectedModalBefore}||matches.length!==1)throw new Error('interrupted');${focusTarget}${postFocusGuard}const targetRole=target.role();const targetLabel=target.name();const dispatchStart=$.CACurrentMediaTime();${operation}const deadline=Date.now()+${action.timeout_ms};let value=null;let done=false;while(Date.now()<deadline){const activeWindows=app.windows();const allNow=activeWindows.length===1?activeWindows[0].entireContents():[];${completionLoop}delay(0.01)}const observedAt=$.CACurrentMediaTime();const frontAfter=se.processes.whose({frontmost:true})();const windowsAfter=app.windows();const modalAfter=windowsAfter.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;const f=app.attributes.byName('AXFocusedUIElement').value();JSON.stringify({trusted:true,frontmost_pid:frontAfter.length?frontAfter[0].unixId():null,modal_count:modalAfter,target_count:matches.length,target_role:targetRole,target_label:targetLabel,focused_role:f?f.role():null,focused_label:f?f.name():null,value,done,driver_duration_us:Math.round((observedAt-dispatchStart)*1000000)});`;
     const after = parseDriverReply(await runScript(dispatchScript, action.timeout_ms + 5000));
-    if (after.frontmost_pid !== expectedPid || after.modal_count !== expectedModalAfter || after.target_count !== 1 || after.target_role !== axRole || after.target_label !== action.label) throw Error('Accessibility interruption invalidated the action');
+    if (after.frontmost_pid !== expectedPid || after.modal_count !== expectedModalAfter || after.target_count !== 1 || after.target_role !== axRole || after.target_label !== action.label) throw Error(`Accessibility interruption invalidated action ${action.ordinal} (${String(after.frontmost_pid)} / ${String(after.modal_count)} / ${String(after.target_count)} / ${String(after.target_role)} / ${String(after.target_label)})`);
     if (['keystroke', 'key_chord', 'key_code'].includes(action.kind) && (after.focused_role !== axRole || after.focused_label !== action.label)) throw Error('Accessibility focus changed during the action');
     if (!Number.isSafeInteger(after.driver_duration_us) || after.driver_duration_us < 0) throw Error('Accessibility driver duration is invalid');
     const observed = normalizeAxValue(completion.attribute, after.value);
@@ -1201,7 +1247,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     if (value.frontmost_pid !== expectedPid || value.quit_requested !== true) throw Error('Normal Command-Q request failed');
     return value;
   };
-  return Object.freeze({ preflight, perform, readValue, quit });
+  return Object.freeze({ activate, preflight, focus, perform, readValue, quit });
 }
 
 const throwIfAborted = abortSignal => { if (abortSignal?.aborted) throw Error('Responsiveness operation aborted'); };
@@ -1232,13 +1278,18 @@ async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate 
 function validateReadinessMarker(value, kind) {
   exactKeys(value, ['schema_version', 'component_kind', 'session_id', 'sample_id', 'page_instance_id', 'action_id', 'pid', 'native_clock'], 'readiness marker');
   if (value.schema_version !== 2 || value.component_kind !== kind || !UUID.test(value.session_id) || !UUID.test(value.page_instance_id) || typeof value.sample_id !== 'string' || !Number.isSafeInteger(value.pid) || value.pid < 1) throw Error('Invalid readiness marker identity');
-  if (kind === 'recorder_ready' ? value.action_id !== null && (!Number.isSafeInteger(value.action_id) || value.action_id < 1) : !Number.isSafeInteger(value.action_id) || value.action_id < 1) throw Error('Invalid readiness marker action ID');
+  const validActionId = Number.isSafeInteger(value.action_id) && value.action_id >= 1;
+  if (kind === 'recorder_ready' ? value.action_id !== null && !validActionId : kind === 'control_ready' ? value.action_id !== null : !validActionId) throw Error('Invalid readiness marker action ID');
   exactKeys(value.native_clock, ['domain', 'unit', 'elapsed_us'], 'readiness native clock');
   if (value.native_clock.domain !== 'native_monotonic' || value.native_clock.unit !== 'us' || !Number.isSafeInteger(value.native_clock.elapsed_us) || value.native_clock.elapsed_us < 0) throw Error('Invalid readiness native clock');
 }
 
 export function waitForRecorderReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
   return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, label: 'Recorder readiness marker', validate: value => validateReadinessMarker(value, 'recorder_ready') });
+}
+
+export function waitForControlReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
+  return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, label: 'Control readiness marker', validate: value => validateReadinessMarker(value, 'control_ready') });
 }
 
 export function waitForActionReady(reportDirectory, { session_id, sample_id, page_instance_id, action_id, pid }, options = {}) {
@@ -1292,9 +1343,40 @@ export async function waitForAxPreflight(driver, labels, { timeoutMs = 5000, pol
   throw lastError ?? Error('Accessibility targets did not mount before timeout');
 }
 
+export async function waitForAxActivation(driver, { timeoutMs = 5000, pollMs = 25, abortSignal = null } = {}) {
+  if (!driver || typeof driver.activate !== 'function') throw Error('Invalid accessibility activation driver');
+  const deadline = performance.now() + timeoutMs;
+  let lastError = null;
+  while (performance.now() < deadline) {
+    throwIfAborted(abortSignal);
+    try { return await driver.activate(); }
+    catch (error) {
+      if (!/(process|main window) is not ready|main window is not frontmost yet/i.test(error.message)) throw error;
+      lastError = error;
+      await sleep(pollMs);
+    }
+  }
+  throwIfAborted(abortSignal);
+  throw lastError ?? Error('Accessibility main window did not become ready');
+}
+
+export function externalAxWorkloadDurationUs(observations, expectedCount) {
+  safeInteger(expectedCount, 'external AX action count', 1);
+  if (!Array.isArray(observations) || observations.length !== expectedCount) throw Error('External AX observation cardinality mismatch');
+  let total = 0;
+  observations.forEach((observation, index) => {
+    if (!plainObject(observation) || observation.ordinal !== index + 1 || observation.clock_domain !== 'driver_monotonic') throw Error('Invalid external AX observation identity');
+    safeInteger(observation.driver_duration_us, 'external AX driver duration');
+    total += observation.driver_duration_us;
+    if (!Number.isSafeInteger(total)) throw Error('External AX workload duration exceeds the safe integer limit');
+  });
+  return total;
+}
+
 export async function runAccessibilitySequence({
   driver,
   actions,
+  recorderMode = 'enabled',
   reportDirectory,
   identity,
   waitRecorder = waitForRecorderReady,
@@ -1305,11 +1387,12 @@ export async function runAccessibilitySequence({
   nowMs = () => performance.now(),
   abortSignal = null,
 }) {
-  if (!driver || typeof driver.perform !== 'function' || !Array.isArray(actions) || actions.length > 2048) throw Error('Invalid accessibility sequence');
+  if (!driver || typeof driver.perform !== 'function' || !Array.isArray(actions) || actions.length > 2048 || !['enabled', 'control'].includes(recorderMode)) throw Error('Invalid accessibility sequence');
   const first = actions[0] ?? null;
   if (first !== null && first.actionId !== 1) throw Error('Accessibility action IDs must begin at one');
-  const recorderPath = join(reportDirectory, `recorder-ready-${identity.page_instance_id}.json`);
-  await waitRecorder(recorderPath, { schema_version: 2, component_kind: 'recorder_ready', ...identity, action_id: first?.actionId ?? null }, { timeoutMs: readinessTimeoutMs, pollMs: 10, abortSignal });
+  const readinessKind = recorderMode === 'control' ? 'control_ready' : 'recorder_ready';
+  const recorderPath = join(reportDirectory, `${recorderMode === 'control' ? 'control' : 'recorder'}-ready-${identity.page_instance_id}.json`);
+  await waitRecorder(recorderPath, { schema_version: 2, component_kind: readinessKind, ...identity, action_id: recorderMode === 'control' ? null : first?.actionId ?? null }, { timeoutMs: readinessTimeoutMs, pollMs: 10, abortSignal });
   await afterRecorderReady();
   const observations = [];
   const laneThree = actions.length === SESSION_CYCLES * SESSION_ACTIONS_PER_CYCLE;
@@ -1324,7 +1407,7 @@ export async function runAccessibilitySequence({
     if (laneThree && index % SESSION_ACTIONS_PER_CYCLE === 0) cycleDeadline = before + 40_000;
     if (cycleDeadline !== null && before > cycleDeadline) throw Error(`Lane 3 cycle ${Math.floor(index / SESSION_ACTIONS_PER_CYCLE) + 1} exceeded 40 seconds`);
     throwIfAborted(abortSignal);
-    if (index > 0) await waitAction(reportDirectory, { ...identity, action_id: action.actionId }, { timeoutMs: action.dispatch.timeout_ms, pollMs: 10, abortSignal });
+    if (recorderMode === 'enabled' && index > 0) await waitAction(reportDirectory, { ...identity, action_id: action.actionId }, { timeoutMs: action.dispatch.timeout_ms, pollMs: 10, abortSignal });
     observations.push(await driver.perform({
       ordinal: action.actionId,
       role: action.targetRole,
@@ -1479,7 +1562,10 @@ const waitForClose = (closed, timeoutMs) => new Promise(resolveClose => {
   });
 });
 
-export async function runNativePage({ plan, page, manifest, platform = process.platform, abortSignal = null }) {
+export async function runNativePage(
+  { plan, page, manifest, platform = process.platform, abortSignal = null },
+  { createDriver = createAccessibilityDriver, waitActivation = waitForAxActivation } = {},
+) {
   if (platform !== 'darwin') throw Error('Native responsiveness pages are macOS-only');
   const componentDirectory = plan.component_directory ?? plan.report_directory;
   validateHarnessPaths({ binary: plan.binary, manifest: page.manifest_path, reportDirectory: componentDirectory, appDataDirectory: plan.app_data_directory });
@@ -1532,17 +1618,21 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
       if (directoryBytes(componentDirectory) + directoryBytes(plan.app_data_directory) + logBytes > plan.limits.storage_budget_bytes) { budgetExceeded = true; signal('SIGTERM'); }
     } catch { budgetExceeded = true; signal('SIGTERM'); }
   }, 100);
+  const recorderMode = manifest.recorderMode ?? 'enabled';
   let pageComponent = null, observations = [], recoveryEvidence = null, quitRequested = false, cleanupComplete = false, runError = null, driver = null, preReadyFailedComponent = null, preReadyFailure = false;
   try {
-    driver = createAccessibilityDriver({ platform, appName: plan.app_name, expectedPid: child.pid });
+    driver = createDriver({ platform, appName: plan.app_name, expectedPid: child.pid });
+    await waitActivation(driver, { timeoutMs: Math.min(5000, page.timeout_ms), pollMs: 25, abortSignal });
     observations = await runAccessibilitySequence({
       driver,
       actions: page.actions,
+      recorderMode,
       reportDirectory: componentDirectory,
       identity: { session_id: manifest.descriptor.sessionId, sample_id: manifest.descriptor.sampleId, page_instance_id: manifest.descriptor.pageInstanceId, pid: child.pid },
       readinessTimeoutMs: Math.min(30_000, page.timeout_ms),
       abortSignal,
       waitRecorder: async (recorderPath, expected, options) => {
+        if (recorderMode === 'control') return waitForControlReady(recorderPath, expected, options);
         const startup = await waitForRecorderOrFailedPage({ recorderPath, reportDirectory: componentDirectory, identity: expected, descriptor: manifest.descriptor, ...options });
         if (startup.kind === 'failed_component') {
           preReadyFailedComponent = startup.page_component;
@@ -1552,7 +1642,13 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
       },
       afterRecorderReady: async () => {
         await waitForStartupReady(environment.GOOP_STARTUP_REPORT, child.pid, { timeoutMs: Math.min(30_000, page.timeout_ms), pollMs: 10, abortSignal });
+        await waitActivation(driver, { timeoutMs: Math.min(5000, page.timeout_ms), pollMs: 25, abortSignal });
         await waitForAxPreflight(driver, page.required_labels, { timeoutMs: Math.min(5000, page.timeout_ms), pollMs: 25, abortSignal });
+        const firstAction = page.actions[0];
+        if (firstAction && ['keystroke', 'key_chord', 'key_code'].includes(firstAction.dispatch.kind)) {
+          if (typeof driver.focus !== 'function') throw Error('Accessibility driver does not support keyboard focus setup');
+          await driver.focus({ role: firstAction.targetRole, label: firstAction.accessibleName, expected_value: firstAction.expectedPriorValue });
+        }
         if (page.recovery_target) recoveryEvidence = { ax_value: await driver.readValue(page.recovery_target) };
       },
       beforeFirstAction: async () => {
@@ -1560,8 +1656,10 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
         catch { processSamplingError = true; signal('SIGTERM'); throw Error('Initial process sampling failed'); }
       },
     });
-    const remaining = Math.max(1, page.timeout_ms - (performance.now() - started));
-    pageComponent = await waitForPageComponent(componentDirectory, manifest.descriptor, { timeoutMs: remaining, pollMs: 10, abortSignal, expectedPid: child.pid });
+    if (recorderMode === 'enabled') {
+      const remaining = Math.max(1, page.timeout_ms - (performance.now() - started));
+      pageComponent = await waitForPageComponent(componentDirectory, manifest.descriptor, { timeoutMs: remaining, pollMs: 10, abortSignal, expectedPid: child.pid });
+    }
     if (samplingStarted) sampler.finish(performance.now());
     await driver.quit();
     quitRequested = true;
@@ -1574,7 +1672,7 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
         sampler.start(); samplingStarted = true; sampler.finish(performance.now());
         preReadyFailure = true; signal('SIGTERM'); cleanupComplete = await waitForClose(closed, 5000); runError = null;
       } catch (samplingError) { runError = samplingError; }
-    } else if (!aborted && driver) {
+    } else if (!aborted && driver && recorderMode === 'enabled') {
       try {
         const failedComponent = await waitForPageComponent(componentDirectory, manifest.descriptor, { timeoutMs: 250, pollMs: 10, expectedPid: child.pid });
         if (failedComponent.frontend_trace.failure !== null) {
@@ -1606,7 +1704,14 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
   if (processSamplingError) throw Error('Native process sampling exceeded its fixed bounds');
   if (preReadyFailure ? !cleanupComplete : !quitRequested || !cleanupComplete || exitCode !== 0 || exitSignal !== null) throw Error('Native page did not terminate and reap as required');
   if (directoryBytes(componentDirectory) + directoryBytes(plan.app_data_directory) > plan.limits.storage_budget_bytes) throw Error('Native page exceeded storage budget');
-  return { page_component: pageComponent, driver_observations: observations, process_series: processSeries, recovery_evidence: recoveryEvidence, cleanup: { complete: true } };
+  return {
+    page_component: pageComponent,
+    driver_observations: observations,
+    external_ax_duration_us: observations.length > 0 ? externalAxWorkloadDurationUs(observations, page.actions.length) : null,
+    process_series: processSeries,
+    recovery_evidence: recoveryEvidence,
+    cleanup: { complete: true },
+  };
 }
 
 export async function runDataStoreCleanup({ plan, manifest, componentDirectory, abortSignal = null, runProcess = runBoundedProcess }) {
@@ -1660,13 +1765,23 @@ function validateRunPlan(plan) {
     return value.sessionId !== first.sessionId || value.sampleId !== first.sampleId || value.lane !== first.lane || canonicalizeJcs(value.scenario) !== canonicalizeJcs(first.scenario) || canonicalizeJcs(value.workload) !== canonicalizeJcs(first.workload) || value.phase !== first.phase || value.repetition !== first.repetition;
   })) throw Error('Native page manifest identity mismatch');
   if (pages.some(page => canonicalizeJcs(page.manifest.webviewDataStoreId) !== canonicalizeJcs(pages[0].manifest.webviewDataStoreId))) throw Error('Native pages must reuse one WebView data-store ID');
+  const recorderMode = pages[0].manifest.recorderMode;
+  if (pages.some(page => page.manifest.recorderMode !== recorderMode)) throw Error('Native pages must use one responsiveness recorder mode');
   const roles = pages.map(page => page.manifest.descriptor.componentRole);
-  if (first.lane === 'draft' ? canonicalizeJcs(roles) !== canonicalizeJcs(['pre_quit', 'recovery']) : canonicalizeJcs(roles) !== canonicalizeJcs(['primary'])) throw Error('Native page role/cardinality mismatch');
+  const expectedRoles = recorderMode === 'control' ? ['pre_quit'] : first.lane === 'draft' ? ['pre_quit', 'recovery'] : ['primary'];
+  if (canonicalizeJcs(roles) !== canonicalizeJcs(expectedRoles)) throw Error('Native page role/cardinality mismatch');
+  if (recorderMode === 'control' && first.lane !== 'draft') throw Error('Instrumentation control supports only the 500-entry draft workload');
   if (first.lane === 'draft') {
     const preQuit = pages[0];
-    const recovery = pages[1];
     if (preQuit.manifest.bootstrap.initialPath !== '/convert' || preQuit.manifest.bootstrap.draftStorage === null) throw Error('Lane 2 requires a seeded Convert-page draft bootstrap');
-    validateDraftActions(preQuit.actions, first.workload.facts, recovery.manifest.completion.expectedAxValue);
+    if (recorderMode === 'control') {
+      if (first.workload.facts.seeded_entries !== 500) throw Error('Instrumentation control requires the 500-entry draft workload');
+      if (countDraftSeedEntries(preQuit.manifest.bootstrap.draftStorage.raw) !== 500) throw Error('Instrumentation control seeded entry count must match the 500-entry draft workload');
+      validateDraftActions(preQuit.actions, first.workload.facts, 'https://x.test/a.mp4');
+    } else {
+      const recovery = pages[1];
+      validateDraftActions(preQuit.actions, first.workload.facts, recovery.manifest.completion.expectedAxValue);
+    }
   }
   return { ...plan, pages };
 }
@@ -1696,10 +1811,11 @@ function extractDraftRecoveryEvidence(plan, pageResults) {
   };
 }
 
-export async function runNativeResponsivenessPlan(planValue, { platform = process.platform, runPage = runNativePage, runCleanup = runDataStoreCleanup, abortSignal = null } = {}) {
+export async function runNativeResponsivenessPlan(planValue, { platform = process.platform, runPage = runNativePage, runCleanup = runDataStoreCleanup, syncDirectory = syncDirectoryPortable, abortSignal = null } = {}) {
   if (platform !== 'darwin') throw Error('Native responsiveness plan supports macOS only');
   const plan = validateRunPlan(planValue);
   const firstManifest = plan.pages[0].manifest;
+  const controlMode = firstManifest.recorderMode === 'control';
   validateHarnessPaths({ binary: plan.binary, manifest: plan.pages[0].manifest_path, reportDirectory: plan.report_directory, appDataDirectory: plan.app_data_directory });
   const incompleteDirectory = join(plan.report_directory, '.incomplete');
   if (existsSync(incompleteDirectory)) throw Error('Incomplete component directory must be new');
@@ -1712,6 +1828,14 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
     for (const page of plan.pages) pageResults.push(await runPage({ plan, page, manifest: page.manifest, platform, abortSignal }));
     pageResults.forEach((result, index) => {
       if (!plainObject(result) || !plainObject(result.cleanup) || typeof result.cleanup.complete !== 'boolean') throw Error('Invalid native page result');
+      if (controlMode) {
+        if (result.page_component !== null || result.recovery_evidence !== null) throw Error('Instrumentation control must not emit frontend or recovery evidence');
+        validateDriverObservations(result.driver_observations, plan.pages[index].actions);
+        const duration = externalAxWorkloadDurationUs(result.driver_observations, plan.pages[index].actions.length);
+        if (result.external_ax_duration_us !== duration) throw Error('Instrumentation control duration does not match complete driver evidence');
+        if (result.process_series !== null) validateProcessSeries(result.process_series);
+        return;
+      }
       const nativePage = validatePageComponent(result.page_component);
       const trace = nativePage.frontend_trace;
       const descriptor = plan.pages[index].manifest.descriptor;
@@ -1740,6 +1864,65 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
   const cleanupReceipt = cleanupRaw?.receipt ?? cleanupRaw;
   const cleanupHelperSuccess = cleanupRaw?.receipt ? cleanupRaw.helper_success === true : true;
   validateCleanupReceipt(cleanupReceipt, { sessionId: firstManifest.descriptor.sessionId, webviewDataStoreId: firstManifest.webviewDataStoreId });
+  if (controlMode) {
+    const pageResult = pageResults[0];
+    let cleanup = { complete: true, removed_paths: 0, error_code: null };
+    let outcome = { kind: 'success' };
+    if (pageResult.cleanup.complete !== true) {
+      cleanup = { ...cleanup, complete: false, error_code: 'process_cleanup_failed' };
+      outcome = { kind: 'failed', code: 'cleanup_failed' };
+    }
+    if (!cleanupHelperSuccess) {
+      cleanup = { ...cleanup, complete: false, error_code: 'artifact_remove_failed' };
+      outcome = { kind: 'failed', code: 'cleanup_failed' };
+    }
+    if (plan.cleanup_profile === true) {
+      const marker = join(plan.app_data_directory, '.goop-responsiveness-owned');
+      if (!existsSync(marker) || readFileSync(marker, 'utf8') !== `${firstManifest.descriptor.sessionId}\n`) throw Error('Refusing to remove an unowned app-data directory');
+      rmSync(plan.app_data_directory, { recursive: true });
+      cleanup = { ...cleanup, removed_paths: cleanup.removed_paths + 1 };
+    }
+    const identityAfter = captureResponsivenessIdentity(plan);
+    if (canonicalizeJcs(identityAfter) !== canonicalizeJcs(identityBefore)) outcome = { kind: 'failed', code: 'identity_mismatch' };
+    const sessionIdentity = { session_id: firstManifest.descriptor.sessionId, sample_id: firstManifest.descriptor.sampleId };
+    writeComponentExclusive(incompleteDirectory, 'identity.json', { schema_version: 2, component_kind: 'identity', ...sessionIdentity, before: identityBefore, after: identityAfter });
+    writeComponentExclusive(incompleteDirectory, 'driver.json', { schema_version: 2, component_kind: 'driver_observations', ...sessionIdentity, pages: [{ page_instance_id: firstManifest.descriptor.pageInstanceId, observations: pageResult.driver_observations }] });
+    writeComponentExclusive(incompleteDirectory, 'process-series.json', { schema_version: 2, component_kind: 'process_series', ...sessionIdentity, pages: [{ page_instance_id: firstManifest.descriptor.pageInstanceId, series: pageResult.process_series }] });
+    writeComponentExclusive(incompleteDirectory, 'cleanup.json', { schema_version: 2, component_kind: 'cleanup_evidence', ...sessionIdentity, receipt: cleanupReceipt });
+    if (directoryBytes(incompleteDirectory) > plan.limits.storage_budget_bytes) throw Error('Responsiveness control components exceeded the storage budget');
+    const control = {
+      schema_version: 1,
+      component_kind: 'responsiveness_instrumentation_control',
+      ...sessionIdentity,
+      page_instance_id: firstManifest.descriptor.pageInstanceId,
+      lane: firstManifest.descriptor.lane,
+      scenario: { id: firstManifest.descriptor.scenario.id, manifest_sha256: firstManifest.descriptor.scenario.manifestSha256 },
+      workload: firstManifest.descriptor.workload,
+      phase: firstManifest.descriptor.phase,
+      repetition: firstManifest.descriptor.repetition,
+      recorder_mode: 'control',
+      action_count: firstManifest.actions.length,
+      external_ax_duration_us: pageResult.external_ax_duration_us,
+      identity: { before: identityBefore, after: identityAfter },
+      cleanup,
+      data_store_cleanup: cleanupReceipt,
+      outcome,
+    };
+    const componentsDirectory = join(plan.report_directory, 'components');
+    if (existsSync(componentsDirectory)) throw Error('Completed component directory already exists');
+    let componentsRenamed = false, publication;
+    try {
+      renameSync(incompleteDirectory, componentsDirectory);
+      componentsRenamed = true;
+      syncDirectory(plan.report_directory, platform);
+      publication = publishControlExclusive(plan.report_directory, control, { syncDirectory: directory => syncDirectory(directory, platform) });
+    }
+    catch (error) {
+      if (componentsRenamed && existsSync(componentsDirectory) && !existsSync(incompleteDirectory)) renameSync(componentsDirectory, incompleteDirectory);
+      throw error;
+    }
+    return { control, publication, page_results: pageResults };
+  }
   let common = { ...plan.common, identity: identityBefore };
   const traceInvalid = pageResults.some(result => {
     const trace = result.page_component.frontend_trace;
@@ -1798,12 +1981,15 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
   const sample = assembleSample({ lane: firstManifest.descriptor.lane, frontendComponents, nativePageComponents: pageResults.map(result => result.page_component), common, payload });
   const componentsDirectory = join(plan.report_directory, 'components');
   if (existsSync(componentsDirectory)) throw Error('Completed component directory already exists');
-  renameSync(incompleteDirectory, componentsDirectory);
-  syncDirectoryPortable(plan.report_directory, platform);
-  let publication;
-  try { publication = publishSampleExclusive(plan.report_directory, sample); }
+  let componentsRenamed = false, publication;
+  try {
+    renameSync(incompleteDirectory, componentsDirectory);
+    componentsRenamed = true;
+    syncDirectory(plan.report_directory, platform);
+    publication = publishSampleExclusive(plan.report_directory, sample, { syncDirectory: directory => syncDirectory(directory, platform) });
+  }
   catch (error) {
-    renameSync(componentsDirectory, incompleteDirectory);
+    if (componentsRenamed && existsSync(componentsDirectory) && !existsSync(incompleteDirectory)) renameSync(componentsDirectory, incompleteDirectory);
     throw error;
   }
   return { sample, publication, page_results: pageResults };

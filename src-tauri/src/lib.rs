@@ -820,6 +820,7 @@ pub fn run() {
             performance::performance_ready,
             performance::responsiveness_status,
             performance::responsiveness_ready,
+            performance::responsiveness_control_ready,
             performance::responsiveness_action_ready,
             performance::responsiveness_write_component,
             commands::preview::begin_preview_session,
