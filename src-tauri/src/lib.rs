@@ -115,7 +115,19 @@ fn configure_responsiveness_windows(
     cleanup_mode: bool,
 ) -> Result<(), String> {
     if cleanup_mode {
-        windows.clear();
+        let mut cleanup_window = windows
+            .iter()
+            .find(|window| window.label == "main")
+            .cloned()
+            .ok_or_else(|| "responsiveness main window is missing".to_owned())?;
+        cleanup_window.visible = false;
+        cleanup_window.data_store_identifier = None;
+        cleanup_window.url = tauri::WebviewUrl::External(
+            "about:blank"
+                .parse()
+                .map_err(|_| "responsiveness cleanup URL is invalid".to_owned())?,
+        );
+        *windows = vec![cleanup_window];
         return Ok(());
     }
     let Some(identifier) = identifier else {
@@ -159,6 +171,27 @@ async fn remove_responsiveness_data_store(
     _identifier: [u8; 16],
 ) -> Result<bool, &'static str> {
     Err("unsupported_platform")
+}
+
+fn should_start_responsiveness_cleanup(cleanup_requested: bool, event: &tauri::RunEvent) -> bool {
+    cleanup_requested && matches!(event, tauri::RunEvent::Ready)
+}
+
+async fn finish_responsiveness_cleanup(
+    app_handle: tauri::AppHandle,
+    cleanup: performance::ResponsivenessCleanupRequest,
+) {
+    let result = if cleanup.already_complete {
+        Ok(false)
+    } else {
+        remove_responsiveness_data_store(&app_handle, cleanup.data_store_identifier).await
+    };
+    let state = app_handle.state::<performance::ResponsivenessState>();
+    let receipt_result = match result {
+        Ok(removed) => state.reconcile_cleanup_success(removed),
+        Err(_) => Err("responsiveness data-store removal failed".to_owned()),
+    };
+    app_handle.exit(if receipt_result.is_ok() { 0 } else { 1 });
 }
 
 pub fn run() {
@@ -210,28 +243,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            if let Some(cleanup) = app
+            if app
                 .state::<performance::ResponsivenessState>()
                 .cleanup_request()
+                .is_some()
             {
-                let app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let result = if cleanup.already_complete {
-                        Ok(false)
-                    } else {
-                        remove_responsiveness_data_store(
-                            &app_handle,
-                            cleanup.data_store_identifier,
-                        )
-                        .await
-                    };
-                    let state = app_handle.state::<performance::ResponsivenessState>();
-                    let receipt_result = match result {
-                        Ok(removed) => state.reconcile_cleanup_success(removed),
-                        Err(_) => Err("responsiveness data-store removal failed".to_owned()),
-                    };
-                    app_handle.exit(if receipt_result.is_ok() { 0 } else { 1 });
-                });
                 return Ok(());
             }
             // Tauri's externalBin bundler ships sidecars in the same directory as
@@ -879,7 +895,17 @@ pub fn run() {
         // `tracing-appender` documents never fires. The worker flushes after
         // each batch it drains, so this is about the tail rather than the
         // whole file, but the tail is the part that says what went wrong.
-        Ok(app) => app.run(|_app, event| {
+        Ok(app) => app.run(|app, event| {
+            let cleanup = app
+                .state::<performance::ResponsivenessState>()
+                .cleanup_request();
+            if should_start_responsiveness_cleanup(cleanup.is_some(), &event) {
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(finish_responsiveness_cleanup(
+                    app_handle,
+                    cleanup.expect("cleanup request disappeared after readiness check"),
+                ));
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 logging::flush();
             }
@@ -949,7 +975,33 @@ mod explicit_engine_path_tests {
         assert!(configure_responsiveness_windows(&mut windows, Some([8; 16]), false).is_err());
 
         configure_responsiveness_windows(&mut windows, None, true).unwrap();
-        assert!(windows.is_empty());
+        assert_eq!(windows.len(), 1);
+        assert!(!windows[0].visible);
+        assert_eq!(windows[0].data_store_identifier, None);
+        assert!(matches!(
+            &windows[0].url,
+            tauri::WebviewUrl::External(url) if url.as_str() == "about:blank"
+        ));
+    }
+
+    #[test]
+    fn responsiveness_cleanup_waits_for_the_running_event_loop() {
+        assert!(!should_start_responsiveness_cleanup(
+            false,
+            &tauri::RunEvent::Ready
+        ));
+        assert!(!should_start_responsiveness_cleanup(
+            true,
+            &tauri::RunEvent::Resumed
+        ));
+        assert!(!should_start_responsiveness_cleanup(
+            true,
+            &tauri::RunEvent::Exit
+        ));
+        assert!(should_start_responsiveness_cleanup(
+            true,
+            &tauri::RunEvent::Ready
+        ));
     }
 
     #[test]

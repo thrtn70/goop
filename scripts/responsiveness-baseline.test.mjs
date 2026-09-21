@@ -122,7 +122,7 @@ const makeSessionActions = () => {
       actionId: actionId++, targetId: `cycle-${cycle + 1}-action-${actions.length % 35 + 1}`, eventType, targetRole, accessibleName, expectedPriorValue, dispatch,
     });
     const selectPress = { kind: 'press', ax_prior: { kind: 'attribute_equals', attribute: 'AXSelected', value: false }, completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 };
-    add('link', 'Convert', { kind: 'press', ax_prior: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 }, 'click', '/convert');
+    add('link', 'Convert', { kind: 'press', ax_prior: { kind: 'element_present' }, completion: { kind: 'attribute_equals', role: 'AXGroup', label: 'Convert', attribute: 'AXEnabled', value: true }, timeout_ms: 2000 }, 'click', '/convert');
     add('button', 'Add files', { kind: 'open_dialog_select', ax_prior: { kind: 'attribute_equals', attribute: 'AXEnabled', value: true }, fixture_directory: '/tmp/goop-fixtures', fixture_names: fixtures, completion: { kind: 'attribute_equals', role: 'button', label: `Remove ${fixtures[7]}`, attribute: 'AXEnabled', value: true }, timeout_ms: 10_000 }, 'click', '0');
     add('button', `Select ${fixtures[0]}`, selectPress);
     const priorUrl = cycle === 0 ? '' : 'https://x.test/a.mp4';
@@ -134,8 +134,8 @@ const makeSessionActions = () => {
       add('textbox', 'Paste URL to download', { kind: 'keystroke', ax_prior: { kind: 'attribute_equals', attribute: 'AXValue', value: prior }, text: character, completion: { kind: 'attribute_equals', attribute: 'AXValue', value: cumulative }, timeout_ms: 2000 }, 'input', prior);
     }
     for (const fixture of fixtures) add('button', `Remove ${fixture}`, { kind: 'press', ax_prior: { kind: 'element_present' }, completion: { kind: 'element_absent', role: 'button', label: `Remove ${fixture}` }, timeout_ms: 2000 }, 'click', 'present');
-    add('link', 'Extract', { kind: 'press', ax_prior: { kind: 'attribute_equals', attribute: 'AXSelected', value: false }, completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 }, 'click', '/convert');
-    add('link', 'Convert', { kind: 'press', ax_prior: { kind: 'attribute_equals', attribute: 'AXSelected', value: false }, completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 }, 'click', '/extract');
+    add('link', 'Extract', { kind: 'press', ax_prior: { kind: 'element_present' }, completion: { kind: 'attribute_equals', role: 'AXGroup', label: 'Extract', attribute: 'AXEnabled', value: true }, timeout_ms: 2000 }, 'click', '/convert');
+    add('link', 'Convert', { kind: 'press', ax_prior: { kind: 'element_present' }, completion: { kind: 'attribute_equals', role: 'AXGroup', label: 'Convert', attribute: 'AXEnabled', value: true }, timeout_ms: 2000 }, 'click', '/extract');
   }
   return actions;
 };
@@ -378,12 +378,15 @@ test('AX driver preflights permission/frontmost process/labels and never uses co
     expectedPid: 42,
     runScript: async script => {
       scripts.push(script);
-      return JSON.stringify({ trusted: true, frontmost_pid: 42, modal_count: 0, labels: ['Primary navigation', 'Add files', 'Select fixture.jpg', 'Remove fixture.jpg', 'Paste URL to download'] });
+      return JSON.stringify({ trusted: true, enhanced_user_interface: true, frontmost_pid: 42, modal_count: 0, labels: ['Primary navigation', 'Add files', 'Select fixture.jpg', 'Remove fixture.jpg', 'Paste URL to download'] });
     },
   });
   const result = await driver.preflight(['Primary navigation', 'Add files', 'Select fixture.jpg', 'Remove fixture.jpg', 'Paste URL to download']);
   assert.equal(result.frontmost_pid, 42);
   assert.match(scripts.join('\n'), /unixId:42/);
+  assert.match(scripts.join('\n'), /AXEnhancedUserInterface/);
+  assert.match(scripts.join('\n'), /windows\[0\]\.entireContents\(\)/);
+  assert.doesNotMatch(scripts.join('\n'), /app\.entireContents\(\)/);
   assert.doesNotMatch(scripts.join('\n'), /processes\.byName/);
   assert.doesNotMatch(scripts.join('\n'), /position|click at|mouse/i);
   assert.throws(() => createAccessibilityDriver({ platform: 'linux', appName: 'Goop', expectedPid: 1, runScript: async () => '{}' }), /macOS/i);
@@ -391,10 +394,11 @@ test('AX driver preflights permission/frontmost process/labels and never uses co
 
 test('AX driver fails closed on permission, focus, modal, and missing labels', async () => {
   for (const [payload, pattern] of [
-    [{ trusted: false, frontmost_pid: 42, modal_count: 0, labels: [] }, /permission/i],
-    [{ trusted: true, frontmost_pid: 99, modal_count: 0, labels: [] }, /frontmost/i],
-    [{ trusted: true, frontmost_pid: 42, modal_count: 1, labels: [] }, /modal/i],
-    [{ trusted: true, frontmost_pid: 42, modal_count: 0, labels: [] }, /label/i],
+    [{ trusted: false, enhanced_user_interface: true, frontmost_pid: 42, modal_count: 0, labels: [] }, /permission/i],
+    [{ trusted: true, enhanced_user_interface: false, frontmost_pid: 42, modal_count: 0, labels: [] }, /enhanced user interface/i],
+    [{ trusted: true, enhanced_user_interface: true, frontmost_pid: 99, modal_count: 0, labels: [] }, /frontmost/i],
+    [{ trusted: true, enhanced_user_interface: true, frontmost_pid: 42, modal_count: 1, labels: [] }, /modal/i],
+    [{ trusted: true, enhanced_user_interface: true, frontmost_pid: 42, modal_count: 0, labels: [] }, /label/i],
   ]) {
     const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify(payload) });
     await assert.rejects(() => driver.preflight(['Primary navigation']), pattern);
@@ -403,14 +407,20 @@ test('AX driver fails closed on permission, focus, modal, and missing labels', a
 
 test('driver revalidates focus before every action and validates the focused target', async () => {
   const scripts = [];
+  const timeouts = [];
   const replies = [
     { trusted: true, frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download' },
     { trusted: true, frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: 'h', driver_duration_us: 100 },
   ];
-  const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async script => { scripts.push(script); return JSON.stringify(replies.shift()); } });
+  const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async (script, timeoutMs) => { scripts.push(script); timeouts.push(timeoutMs); return JSON.stringify(replies.shift()); } });
   const result = await driver.perform({ ordinal: 1, kind: 'keystroke', role: 'AXTextField', label: 'Paste URL to download', text: 'h', expected_prior_value: '', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'h' }, timeout_ms: 2000 });
   assert.equal(result.ordinal, 1);
   assert.equal(scripts.length, 2);
+  assert.match(scripts.join('\n'), /const processMatches=/);
+  assert.doesNotMatch(scripts.join('\n'), /const matches=se\.processes/);
+  assert.match(scripts.join('\n'), /windows\[0\]\.entireContents\(\)/);
+  assert.doesNotMatch(scripts.join('\n'), /app\.entireContents\(\)/);
+  assert.deepEqual(timeouts, [5_000, 7_000]);
 });
 
 test('AX press resolves one named button without requiring it to be pre-focused', async () => {
@@ -902,12 +912,14 @@ test('cleanup reads a valid receipt even when the helper exits nonzero', async (
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, '{}');
     const manifest = { ...activationFields(), descriptor: { sessionId: uuid('1') } };
     const receipt = { schema_version: 2, component_kind: 'data_store_cleanup', session_id: uuid('1'), webview_data_store_id: manifest.webviewDataStoreId, removed: false, error_code: null, pid: 43, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 20 } };
+    let invocation = null;
     const result = await runDataStoreCleanup({
       plan: { binary, app_data_directory: profile, pages: [{ manifest_path: manifestPath }], limits: { log_limit_bytes: 1024, storage_budget_bytes: 1024 * 1024 } },
       manifest, componentDirectory: report,
-      runProcess: async () => { writeFileSync(join(report, `data-store-cleanup-${uuid('1')}.json`), JSON.stringify(receipt)); return { success: false }; },
+      runProcess: async options => { invocation = options; writeFileSync(join(report, `data-store-cleanup-${uuid('1')}.json`), JSON.stringify(receipt)); return { success: false }; },
     });
     assert.deepEqual(result, { receipt, helper_success: false });
+    assert.deepEqual(invocation.args, ['-ApplePersistenceIgnoreState', 'YES']);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
