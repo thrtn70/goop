@@ -151,11 +151,21 @@ pub struct ResponsivenessCompletion {
     expected_ax_value: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsivenessRecorderMode {
+    #[default]
+    Enabled,
+    Control,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResponsivenessManifest {
     schema_version: u64,
     token: String,
+    #[serde(default, rename = "recorderMode")]
+    recorder_mode: ResponsivenessRecorderMode,
     descriptor: ResponsivenessDescriptor,
     actions: Vec<ResponsivenessAction>,
     #[serde(rename = "webviewDataStoreId")]
@@ -167,6 +177,7 @@ struct ResponsivenessManifest {
 #[derive(Clone, Debug)]
 struct ResponsivenessActivation {
     token: String,
+    recorder_mode: ResponsivenessRecorderMode,
     descriptor: ResponsivenessDescriptor,
     actions: Vec<ResponsivenessAction>,
     webview_data_store_id: [u8; 16],
@@ -178,6 +189,8 @@ struct ResponsivenessActivation {
 #[serde(rename_all = "camelCase")]
 pub struct ResponsivenessStatus {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorder_mode: Option<ResponsivenessRecorderMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<ResponsivenessDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,6 +294,7 @@ impl ResponsivenessState {
         match &self.activation {
             Some(activation) if !self.cleanup_mode => ResponsivenessStatus {
                 enabled: true,
+                recorder_mode: Some(activation.recorder_mode),
                 descriptor: Some(activation.descriptor.clone()),
                 token: Some(activation.token.clone()),
                 actions: Some(activation.actions.clone()),
@@ -290,6 +304,7 @@ impl ResponsivenessState {
             },
             _ => ResponsivenessStatus {
                 enabled: false,
+                recorder_mode: None,
                 descriptor: None,
                 token: None,
                 actions: None,
@@ -379,7 +394,7 @@ impl ResponsivenessState {
         token: String,
         action_id: Option<u64>,
     ) -> Result<NativeResponsivenessMarker, String> {
-        let activation = self.match_activation(&page_instance_id, &token)?;
+        let activation = self.match_recorded_activation(&page_instance_id, &token)?;
         if self.component_written.load(Ordering::Acquire) {
             return Err("responsiveness component is already final".to_owned());
         }
@@ -411,7 +426,7 @@ impl ResponsivenessState {
         token: String,
         action_id: u64,
     ) -> Result<NativeResponsivenessMarker, String> {
-        let activation = self.match_activation(&page_instance_id, &token)?;
+        let activation = self.match_recorded_activation(&page_instance_id, &token)?;
         if self.component_written.load(Ordering::Acquire) {
             return Err("responsiveness component is already final".to_owned());
         }
@@ -449,6 +464,9 @@ impl ResponsivenessState {
             .activation
             .as_ref()
             .ok_or_else(|| "responsiveness instrumentation is disabled".to_owned())?;
+        if activation.recorder_mode != ResponsivenessRecorderMode::Enabled {
+            return Err("responsiveness recorder is in control mode".to_owned());
+        }
         if !constant_time_eq(token.as_bytes(), activation.token.as_bytes()) {
             return Err("responsiveness token mismatch".to_owned());
         }
@@ -501,6 +519,46 @@ impl ResponsivenessState {
         write_atomic_create_new_bytes(&path, &report_bytes)?;
         self.component_written.store(true, Ordering::Release);
         Ok(marker)
+    }
+
+    fn control_ready(
+        &self,
+        page_instance_id: String,
+        token: String,
+    ) -> Result<NativeResponsivenessMarker, String> {
+        let activation = self.match_control_activation(&page_instance_id, &token)?;
+        if self.ready_written.load(Ordering::Acquire) {
+            return Err("responsiveness control readiness already recorded".to_owned());
+        }
+        let marker = self.marker("control_ready", None, activation);
+        let path = self.report_path(&format!("control-ready-{page_instance_id}.json"))?;
+        write_create_new_json(&path, &marker_file_value(&marker))?;
+        self.ready_written.store(true, Ordering::Release);
+        Ok(marker)
+    }
+
+    fn match_recorded_activation(
+        &self,
+        page_instance_id: &str,
+        token: &str,
+    ) -> Result<&ResponsivenessActivation, String> {
+        let activation = self.match_activation(page_instance_id, token)?;
+        if activation.recorder_mode != ResponsivenessRecorderMode::Enabled {
+            return Err("responsiveness recorder is in control mode".to_owned());
+        }
+        Ok(activation)
+    }
+
+    fn match_control_activation(
+        &self,
+        page_instance_id: &str,
+        token: &str,
+    ) -> Result<&ResponsivenessActivation, String> {
+        let activation = self.match_activation(page_instance_id, token)?;
+        if activation.recorder_mode != ResponsivenessRecorderMode::Control {
+            return Err("responsiveness recorder control mode is not enabled".to_owned());
+        }
+        Ok(activation)
     }
 
     fn match_activation(
@@ -565,6 +623,15 @@ pub fn responsiveness_ready(
 }
 
 #[tauri::command]
+pub fn responsiveness_control_ready(
+    state: tauri::State<'_, ResponsivenessState>,
+    page_instance_id: String,
+    token: String,
+) -> Result<NativeResponsivenessMarker, String> {
+    state.control_ready(page_instance_id, token)
+}
+
+#[tauri::command]
 pub fn responsiveness_action_ready(
     state: tauri::State<'_, ResponsivenessState>,
     page_instance_id: String,
@@ -612,6 +679,7 @@ fn load_responsiveness_activation(
     validate_manifest(&manifest)?;
     Ok(ResponsivenessActivation {
         token: manifest.token,
+        recorder_mode: manifest.recorder_mode,
         descriptor: manifest.descriptor,
         actions: manifest.actions,
         webview_data_store_id: manifest.webview_data_store_id,
@@ -1660,6 +1728,18 @@ mod tests {
         ResponsivenessState::from_paths(Some(manifest), Some(reports), Instant::now())
     }
 
+    fn control_state(dir: &Path) -> ResponsivenessState {
+        let root = fs::canonicalize(dir).unwrap();
+        let manifest = root.join("manifest.json");
+        let reports = root.join("reports");
+        fs::create_dir(&reports).unwrap();
+        write_manifest(&manifest);
+        let mut value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        value["recorderMode"] = json!("control");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        ResponsivenessState::from_paths(Some(manifest), Some(reports), Instant::now())
+    }
+
     #[test]
     fn performance_disabled_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1722,6 +1802,112 @@ mod tests {
             .write_component(TOKEN.to_owned(), component())
             .is_err());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn responsiveness_recorder_mode_defaults_enabled_and_rejects_control_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = enabled_state(dir.path());
+        let status = serde_json::to_value(state.status()).unwrap();
+        assert_eq!(status["recorderMode"], "enabled");
+        assert!(state
+            .control_ready(PAGE_ID.to_owned(), TOKEN.to_owned())
+            .is_err());
+        state
+            .ready(PAGE_ID.to_owned(), TOKEN.to_owned(), Some(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn responsiveness_control_mode_is_bootstrap_capable_and_recorder_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = control_state(dir.path());
+        let status = serde_json::to_value(state.status()).unwrap();
+        assert_eq!(status["recorderMode"], "control");
+        assert_eq!(status["bootstrap"]["initialPath"], "/convert");
+        assert_eq!(status["webviewDataStoreId"].as_array().unwrap().len(), 16);
+        assert!(state.data_store_identifier().is_some());
+
+        assert!(state
+            .ready(PAGE_ID.to_owned(), TOKEN.to_owned(), Some(1))
+            .is_err());
+        assert!(state
+            .action_ready(PAGE_ID.to_owned(), TOKEN.to_owned(), 1)
+            .is_err());
+        assert!(state
+            .write_component(TOKEN.to_owned(), component())
+            .is_err());
+
+        let marker = state
+            .control_ready(PAGE_ID.to_owned(), TOKEN.to_owned())
+            .unwrap();
+        assert_eq!(marker.component_kind, "control_ready");
+        assert_eq!(marker.action_id, None);
+        assert!(state
+            .control_ready(PAGE_ID.to_owned(), TOKEN.to_owned())
+            .is_err());
+
+        let reports = dir.path().join("reports");
+        assert!(reports
+            .join(format!("control-ready-{PAGE_ID}.json"))
+            .is_file());
+        assert!(!reports
+            .join(format!("recorder-ready-{PAGE_ID}.json"))
+            .exists());
+        assert_eq!(
+            fs::read_dir(&reports)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("frontend-"))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn responsiveness_rejects_unknown_recorder_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let manifest = root.join("manifest.json");
+        let reports = root.join("reports");
+        fs::create_dir(&reports).unwrap();
+        write_manifest(&manifest);
+        let mut value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        value["recorderMode"] = json!("disabled");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let state = ResponsivenessState::from_paths(Some(manifest), Some(reports), Instant::now());
+        assert!(!state.status().enabled);
+        assert!(state.data_store_identifier().is_none());
+    }
+
+    #[test]
+    fn responsiveness_control_mode_preserves_cleanup_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let manifest = root.join("manifest.json");
+        let reports = root.join("reports");
+        fs::create_dir(&reports).unwrap();
+        write_manifest(&manifest);
+        let mut value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        value["recorderMode"] = json!("control");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let active = ResponsivenessState::from_paths(
+            Some(manifest.clone()),
+            Some(reports.clone()),
+            Instant::now(),
+        );
+        assert!(active.status().enabled);
+        assert!(active.data_store_identifier().is_some());
+        let cleanup = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest),
+            Some(reports),
+            Instant::now(),
+            true,
+        );
+        assert!(cleanup.cleanup_mode());
+        assert!(cleanup.cleanup_request().is_some());
     }
 
     #[test]

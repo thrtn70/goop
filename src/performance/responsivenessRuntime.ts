@@ -22,7 +22,7 @@ export type ResponsivenessCompletion = {
   expectedAxValue: string | null;
 };
 export type ResponsivenessActivation = { enabled: false } | {
-  enabled: true; token: string; descriptor: ResponsivenessDescriptor;
+  enabled: true; recorderMode: "enabled" | "control"; token: string; descriptor: ResponsivenessDescriptor;
   actions: ArmAction[]; webviewDataStoreId: number[];
   bootstrap: ResponsivenessBootstrap; completion: ResponsivenessCompletion;
 };
@@ -43,6 +43,7 @@ type RuntimeDependencies = {
   installRecorder: (recorder: ResponsivenessRecorder, pageInstanceId: string) => string | null;
   markScenarioStarted: () => void;
   teardownRecorder: (token: string) => boolean;
+  controlReady: (args: Omit<ReadyArgs, "actionId">) => Promise<unknown>;
   ready: (args: ReadyArgs) => Promise<unknown>;
   actionReady: (args: ReadyArgs & { actionId: number }) => Promise<unknown>;
   writeComponent: (args: { token: string; component: FrontendTraceV2 }) => Promise<unknown>;
@@ -154,7 +155,8 @@ function validActivation(value: Extract<ResponsivenessActivation, { enabled: tru
   const bytes = environment.utf8ByteLength;
   const recovery = value.completion?.kind === "recovery";
   const stored = value.bootstrap?.draftStorage;
-  return typeof value.token === "string" && OPAQUE_ID.test(value.token) && bytes(value.token) <= 64
+  return (value.recorderMode === "enabled" || value.recorderMode === "control")
+    && typeof value.token === "string" && OPAQUE_ID.test(value.token) && bytes(value.token) <= 64
     && isValidResponsivenessDescriptor(value.descriptor, environment)
     && Array.isArray(value.webviewDataStoreId) && value.webviewDataStoreId.length === 16
     && value.webviewDataStoreId.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
@@ -173,6 +175,7 @@ const production: RuntimeDependencies = {
   status: () => invoke<ResponsivenessActivation>("responsiveness_status"), sealDisabled: sealResponsivenessRecorderDisabled,
   createRecorder: createResponsivenessRecorder, installRecorder: installResponsivenessRecorder,
   markScenarioStarted: markResponsivenessScenarioStarted, teardownRecorder: teardownResponsivenessRecorder,
+  controlReady: (args) => invoke("responsiveness_control_ready", args),
   ready: (args) => invoke("responsiveness_ready", args), actionReady: (args) => invoke("responsiveness_action_ready", args),
   writeComponent: (args) => invoke("responsiveness_write_component", args), environment: browserEnvironment(),
   applyBootstrap: applyBrowserBootstrap, readDraftRaw: () => localStorage.getItem(DRAFT_STORAGE_KEY), sha256,
@@ -360,6 +363,11 @@ export function createResponsivenessRuntime(overrides: Partial<RuntimeDependenci
       if (!validActivation(status, dep.environment)) { disable(); return; }
       if (status.bootstrap.draftStorage && await dep.sha256(status.bootstrap.draftStorage.raw) !== status.bootstrap.draftStorage.sha256) { disable(); return; }
       dep.applyBootstrap(status.bootstrap);
+      if (status.recorderMode === "control") {
+        dep.sealDisabled();
+        await dep.controlReady({ pageInstanceId: status.descriptor.pageInstanceId, token: status.token });
+        return;
+      }
       const candidate = dep.createRecorder(status.descriptor, dep.environment);
       if (!candidate.enabled) { disable(); return; }
       const token = dep.installRecorder(candidate, status.descriptor.pageInstanceId);
