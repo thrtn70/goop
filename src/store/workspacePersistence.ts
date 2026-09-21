@@ -2,6 +2,11 @@ import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoO
 import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { parsePresetBundle, PRESET_BUNDLE_VERSION } from "@/features/presets/io";
+import {
+  getResponsivenessRecorder,
+  type CausalOwner,
+  type ResponsivenessRecorder,
+} from "@/performance/responsiveness";
 import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 
 export type DraftEntries = Record<string, { value: unknown }>;
@@ -238,7 +243,7 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
   });
 }
 
-export function encodeDraftEntries(entries: DraftEntries): string {
+function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
   const raw = JSON.stringify({version:1, entries}, (_key, value: unknown) => {
     if (typeof value === "bigint") {
       const number = Number(value);
@@ -248,8 +253,13 @@ export function encodeDraftEntries(entries: DraftEntries): string {
     if (value instanceof Set) return {set:[...value]};
     return value;
   });
-  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES || Object.keys(entries).length > 500) throw new Error("Draft storage limit reached");
-  return raw;
+  const encodedBytes = new TextEncoder().encode(raw).length;
+  if (raw.length > MAX_BYTES || encodedBytes > MAX_BYTES || Object.keys(entries).length > 500) throw new Error("Draft storage limit reached");
+  return { raw, encodedBytes };
+}
+
+export function encodeDraftEntries(entries: DraftEntries): string {
+  return encodeDraftEntriesWithSize(entries).raw;
 }
 
 export function decodeDraftEntries(raw: string): DraftEntries {
@@ -279,6 +289,63 @@ export function loadBrowserDraftEntries(): DraftEntries {
 export function loadDraftEntries(storage: Storage): DraftEntries {
   try { return decodeDraftEntries(storage.getItem(DRAFT_STORAGE_KEY) ?? ""); } catch { return {}; }
 }
+
+export type DraftPersistenceResult =
+  | { ok: true; encoded_bytes: number }
+  | { ok: false; phase: "encode" | "write" };
+
+function closeFailedPersistence(
+  recorder: ResponsivenessRecorder,
+  owner: CausalOwner | null,
+  spanId: number | null,
+) {
+  if (spanId !== null) recorder.cancelSpan(spanId);
+  if (owner !== null) recorder.cancelSetup(owner);
+}
+
+/**
+ * One authoritative persistence attempt:
+ *
+ * encode -> write -> structured outcome -> boolean compatibility wrapper
+ *    |         |             |
+ *    +---------+-------------+-- recorder evidence never changes the result
+ */
+export function persistDraftEntries(
+  storage: Storage,
+  entries: DraftEntries,
+  recorder: ResponsivenessRecorder,
+): DraftPersistenceResult {
+  const owner = recorder.startSetup("workspace_drafts");
+  const encodeSpan = owner === null ? null : recorder.startSpan({
+    owner,
+    kind: "draft_encode",
+    subjectId: "workspace_drafts",
+  });
+  let encoded: { raw: string; encodedBytes: number };
+  try {
+    encoded = encodeDraftEntriesWithSize(entries);
+  } catch {
+    closeFailedPersistence(recorder, owner, encodeSpan);
+    return { ok: false, phase: "encode" };
+  }
+  if (encodeSpan !== null) recorder.endSpan(encodeSpan);
+
+  const writeSpan = owner === null ? null : recorder.startSpan({
+    owner,
+    kind: "storage_write",
+    subjectId: "workspace_drafts",
+  });
+  try {
+    storage.setItem(DRAFT_STORAGE_KEY, encoded.raw);
+  } catch {
+    closeFailedPersistence(recorder, owner, writeSpan);
+    return { ok: false, phase: "write" };
+  }
+  if (writeSpan !== null) recorder.endSpan(writeSpan);
+  if (owner !== null) recorder.settleSetup(owner);
+  return { ok: true, encoded_bytes: encoded.encodedBytes };
+}
+
 export function saveDraftEntries(storage: Storage, entries: DraftEntries): boolean {
-  try { storage.setItem(DRAFT_STORAGE_KEY, encodeDraftEntries(entries)); return true; } catch { return false; }
+  return persistDraftEntries(storage, entries, getResponsivenessRecorder()).ok;
 }
