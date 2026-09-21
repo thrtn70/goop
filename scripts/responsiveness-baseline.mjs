@@ -17,7 +17,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   captureProcessIdentitySnapshot,
@@ -210,6 +210,22 @@ const requireLaneAction = (action, expected, ordinal) => {
   if (!plainObject(completion) || completion.kind !== expected.completion.kind || (completion.role ?? action.targetRole) !== expected.completion.role || (completion.label ?? action.accessibleName) !== expected.completion.label || completion.attribute !== expected.completion.attribute || (expected.completion.value === undefined ? completion.value !== undefined : canonicalizeJcs(completion.value) !== canonicalizeJcs(expected.completion.value))) throw Error(`Invalid Lane 3 completion predicate at action ${ordinal}`);
 };
 
+/** Validate the fixed 20-character measured draft-edit workload before launch. */
+export function validateDraftActions(actions, facts, expectedValue) {
+  const typed = [...'https://x.test/a.mp4'];
+  if (!plainObject(facts) || ![1, 100, 500].includes(facts.seeded_entries) || facts.mutation_count !== typed.length) throw Error('Lane 2 workload facts must declare 1, 100, or 500 seeded entries and 20 mutations');
+  if (expectedValue !== typed.join('') || !Array.isArray(actions) || actions.length !== typed.length) throw Error('Lane 2 requires the exact 20-character draft workload');
+  let cumulative = '';
+  typed.forEach((character, index) => {
+    const action = actions[index];
+    const prior = cumulative;
+    cumulative += character;
+    requireLaneAction(action, { role: 'textbox', label: 'Paste URL to download', kind: 'keystroke', timeoutMs: 2000, eventType: 'input', prior, axPrior: { kind: 'attribute_equals', attribute: 'AXValue', value: prior }, completion: { kind: 'attribute_equals', role: 'textbox', label: 'Paste URL to download', attribute: 'AXValue', value: cumulative } }, index + 1);
+    if (action.dispatch.text !== character) throw Error(`Lane 2 typed URL differs at action ${index + 1}`);
+  });
+  return actions;
+}
+
 /** Validate the fixed 50 x 35 measured long-session workload before launch. */
 export function validateSessionMemoryActions(actions, facts) {
   if (!plainObject(facts) || facts.cycles !== SESSION_CYCLES || facts.fixture_count !== 8 || facts.actions_per_cycle !== SESSION_ACTIONS_PER_CYCLE || facts.cycle_timeout_ms !== 40_000) throw Error('Lane 3 workload facts must declare 50 cycles of 35 actions, eight fixtures, and a 40,000 ms cycle timeout');
@@ -361,6 +377,290 @@ function nullableInteger(value, label, minimum = 0) {
 
 function nullableOpaque(value, label) {
   if (value !== null) boundedString(value, label, { pattern: OPAQUE });
+}
+
+const median = values => {
+  if (!Array.isArray(values) || values.length === 0 || values.some(value => !Number.isFinite(value))) throw Error('Median requires finite observations');
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 0 ? (ordered[middle - 1] + ordered[middle]) / 2 : ordered[middle];
+};
+
+const inspectionOrder = (component, kind) => component.events
+  .filter(event => event.kind === kind)
+  .sort((left, right) => left.at_us - right.at_us || left.event_seq - right.event_seq)
+  .map(event => event.subject_id);
+
+function maximumConcurrentInspectionSpans(component) {
+  const boundaries = component.spans
+    .filter(span => span.kind === 'inspection_native')
+    .flatMap(span => [{ at: span.start_us, delta: 1 }, { at: span.end_us, delta: -1 }])
+    .sort((left, right) => left.at - right.at || left.delta - right.delta);
+  let active = 0, maximum = 0;
+  for (const boundary of boundaries) { active += boundary.delta; maximum = Math.max(maximum, active); }
+  return maximum;
+}
+
+function countDraftSeedEntries(raw) {
+  let decoded;
+  try { decoded = JSON.parse(raw); } catch { throw Error('Draft seed bootstrap is not valid JSON'); }
+  if (!plainObject(decoded)) throw Error('Draft seed bootstrap is not an object');
+  exactKeys(decoded, ['version', 'entries'], 'draft seed bootstrap');
+  if (decoded.version !== 1 || !plainObject(decoded.entries)) throw Error('Draft seed bootstrap must use the v1 entries envelope');
+  const entries = Object.entries(decoded.entries);
+  if (entries.length > 500) throw Error('Draft seed bootstrap exceeds 500 entries');
+  entries.forEach(([key, entry], index) => {
+    let route;
+    try { route = JSON.parse(key); } catch { throw Error(`Draft seed entry ${index} has an invalid route key`); }
+    if (!Array.isArray(route) || route.length !== 3 || route[0] !== 'convert' || typeof route[1] !== 'string' || !/^seed-[0-9]+$/.test(route[1]) || route[2] !== 'TopBar.url' || route.some(part => byteLength(part) > 4096) || !plainObject(entry)) throw Error(`Draft seed entry ${index} is invalid`);
+    exactKeys(entry, ['value'], `draft seed entry ${index}`);
+    if (typeof entry.value !== 'string' || entry.value.length > 65_536) throw Error(`Draft seed entry ${index} has an invalid value`);
+  });
+  return entries.length;
+}
+
+/** Replace declared dynamic summaries with facts derived from validated native evidence. */
+export function deriveMeasuredLanePayload({ lane, declared, manifests, fixtureSources = [], frontendComponents, plannedActions = [], driverObservations, processSeries }) {
+  if (!LANES.has(lane) || !plainObject(declared) || !Array.isArray(manifests) || !Array.isArray(fixtureSources) || !Array.isArray(frontendComponents) || !Array.isArray(plannedActions) || !Array.isArray(driverObservations) || !Array.isArray(processSeries)) throw Error('Invalid measured payload derivation input');
+  if (lane === 'inspection') {
+    if (frontendComponents.length !== 1 || manifests.length !== 1) throw Error('Inspection payload derivation requires one frontend component and manifest');
+    const component = frontendComponents[0];
+    const sourceCount = manifests[0]?.descriptor?.workload?.facts?.source_count;
+    if (!Number.isSafeInteger(sourceCount) || sourceCount < 1 || declared.fixture_ids.length !== sourceCount) throw Error('Inspection fixture count does not match the validated workload');
+    if (fixtureSources.some(source => !plainObject(source) || Object.keys(source).length !== 2 || typeof source.id !== 'string' || typeof source.basename !== 'string')
+      || canonicalizeJcs(declared.fixture_ids) !== canonicalizeJcs(fixtureSources.map(source => source.id))
+      || new Set(fixtureSources.map(source => source.basename)).size !== fixtureSources.length) throw Error('Inspection fixture IDs do not match the validated fixture identities');
+    const selectedPlans = plannedActions.filter(action => action.targetRole === 'button' && action.accessibleName.startsWith('Select '));
+    const retiredPlans = plannedActions.filter(action => action.targetRole === 'button' && action.accessibleName.startsWith('Remove '));
+    if (selectedPlans.length !== 1 || retiredPlans.length !== 1) throw Error('Inspection selection or retirement action is missing or ambiguous');
+    const selectedSource = fixtureSources.find(source => source.id === declared.selected_fixture_id);
+    const retiredSource = fixtureSources.find(source => source.id === declared.retired_fixture_id);
+    if (declared.selected_fixture_id !== fixtureSources[0]?.id || declared.selected_fixture_id === declared.retired_fixture_id
+      || selectedPlans[0].accessibleName !== `Select ${selectedSource?.basename}` || retiredPlans[0].accessibleName !== `Remove ${retiredSource?.basename}`) throw Error('Inspection selection/retirement actions do not match the frozen fixture manifest');
+    const selection = component.actions.find(action => action.action_id === selectedPlans[0].actionId);
+    const retirement = component.actions.find(action => action.action_id === retiredPlans[0].actionId);
+    if (!selection || !retirement) throw Error('Inspection selection or retirement trace is missing');
+    const driver = driverObservations.find(observation => observation.ordinal === selection.action_id);
+    const retirementDriver = driverObservations.find(observation => observation.ordinal === retirement.action_id);
+    const doubleRaf = component.events.filter(event => event.kind === 'double_raf' && event.owner?.kind === 'action' && event.owner.action_id === selection.action_id);
+    const selectionOverlapsInspection = selection.active_us !== null && selection.terminal_us !== null && component.spans.some(span => span.kind === 'inspection_native' && span.start_us < selection.terminal_us && span.end_us > selection.active_us);
+    if (!driver || !retirementDriver || selection.state !== 'settled' || retirement.state !== 'settled' || doubleRaf.length !== 1 || selection.active_us === null || selection.terminal_us === null || retirement.active_us === null || retirement.terminal_us === null || doubleRaf[0].at_us !== selection.terminal_us || !selectionOverlapsInspection) throw Error('Inspection selection/retirement timing or active-inspection overlap evidence is incomplete');
+    const delivered = component.events.filter(event => event.kind === 'inspection_delivered' && event.subject_id !== null);
+    const cancelled = component.events.filter(event => event.kind === 'inspection_cancelled' && event.subject_id !== null);
+    if (delivered.length === 0 || delivered.some(event => !declared.fixture_ids.includes(event.subject_id)) || cancelled.some(event => !declared.fixture_ids.includes(event.subject_id))) throw Error('Inspection terminal evidence is incomplete');
+    const nonretired = delivered.filter(event => event.subject_id !== declared.retired_fixture_id);
+    if (nonretired.length === 0) throw Error('Inspection nonretired readiness evidence is missing');
+    const queueOrder = inspectionOrder(component, 'inspection_queued');
+    const startEvents = component.events.filter(event => event.kind === 'inspection_started').sort((left, right) => left.at_us - right.at_us || left.event_seq - right.event_seq);
+    const startOrder = startEvents.map(event => event.subject_id);
+    const settleOrder = inspectionOrder(component, 'inspection_settled');
+    const deliverOrder = inspectionOrder(component, 'inspection_delivered');
+    const cancelOrder = inspectionOrder(component, 'inspection_cancelled');
+    const expectedReady = declared.fixture_ids.filter(id => id !== declared.retired_fixture_id);
+    const orderedSubsequence = values => values.every((value, index) => declared.fixture_ids.indexOf(value) >= 0 && (index === 0 || declared.fixture_ids.indexOf(value) > declared.fixture_ids.indexOf(values[index - 1])));
+    const setupById = new Map(component.setups.map(setup => [setup.setup_id, setup]));
+    const setupBySubject = new Map(component.setups.map(setup => [setup.target_id, setup]));
+    const inspectionSpans = component.spans.filter(span => ['inspection_queue', 'inspection_native', 'inspection_delivery'].includes(span.kind));
+    const startSetIsComplete = expectedReady.every(id => startOrder.filter(value => value === id).length === 1)
+      && startOrder.every(id => expectedReady.includes(id) || id === declared.retired_fixture_id)
+      && (declared.retired_fixture_id === null || startOrder.filter(id => id === declared.retired_fixture_id).length <= 1);
+    const inspectionEvents = component.events.filter(event => ['inspection_queued', 'inspection_started', 'inspection_settled', 'inspection_delivered', 'inspection_cancelled'].includes(event.kind));
+    const eventsAndSpansAreBound = inspectionEvents.every(event => event.owner?.kind === 'setup' && setupById.get(event.owner.setup_id)?.target_id === event.subject_id)
+      && inspectionSpans.every(span => span.owner?.kind === 'setup' && setupById.get(span.owner.setup_id)?.target_id === span.subject_id);
+    const eventsFor = (kind, subject) => inspectionEvents.filter(event => event.kind === kind && event.subject_id === subject);
+    const spansFor = (kind, subject) => inspectionSpans.filter(span => span.kind === kind && span.subject_id === subject);
+    const readyLifecyclesAreComplete = expectedReady.every(subject => {
+      const setup = setupBySubject.get(subject);
+      const queued = eventsFor('inspection_queued', subject), started = eventsFor('inspection_started', subject), settled = eventsFor('inspection_settled', subject), deliveredEvents = eventsFor('inspection_delivered', subject);
+      const queueSpans = spansFor('inspection_queue', subject), native = spansFor('inspection_native', subject), delivery = spansFor('inspection_delivery', subject);
+      if (setup?.state !== 'settled' || setup.terminal_us === null || queued.length !== 1 || started.length !== 1 || settled.length !== 1 || deliveredEvents.length !== 1 || eventsFor('inspection_cancelled', subject).length !== 0
+        || queueSpans.length !== 1 || native.length !== 1 || delivery.length !== 1 || [queueSpans[0], native[0], delivery[0]].some(span => span.terminal !== 'ended')) return false;
+      return queued[0].span_id === queueSpans[0].span_id && started[0].span_id === native[0].span_id && settled[0].span_id === native[0].span_id && deliveredEvents[0].span_id === delivery[0].span_id
+        && setup.start_us <= queueSpans[0].start_us && queueSpans[0].start_us <= queued[0].at_us && queued[0].at_us <= queueSpans[0].end_us
+        && queueSpans[0].end_us <= native[0].start_us && native[0].start_us <= started[0].at_us && started[0].at_us <= settled[0].at_us && settled[0].at_us <= native[0].end_us
+        && native[0].end_us <= delivery[0].start_us && delivery[0].start_us <= deliveredEvents[0].at_us && deliveredEvents[0].at_us <= delivery[0].end_us && delivery[0].end_us <= setup.terminal_us;
+    });
+    const retiredLifecycleIsComplete = (() => {
+      const subject = declared.retired_fixture_id;
+      if (typeof subject !== 'string') return false;
+      const setup = setupBySubject.get(subject);
+      const queued = eventsFor('inspection_queued', subject), started = eventsFor('inspection_started', subject), cancelledEvents = eventsFor('inspection_cancelled', subject);
+      const queueSpans = spansFor('inspection_queue', subject), native = spansFor('inspection_native', subject);
+      if (setup?.state !== 'cancelled' || setup.terminal_us === null || queued.length !== 1 || cancelledEvents.length !== 1 || started.length > 1
+        || eventsFor('inspection_settled', subject).length !== 0 || eventsFor('inspection_delivered', subject).length !== 0 || queueSpans.length !== 1 || spansFor('inspection_delivery', subject).length !== 0) return false;
+      if (cancelledEvents[0].at_us < retirement.active_us || cancelledEvents[0].at_us > retirement.terminal_us) return false;
+      if (started.length === 0) return native.length === 0 && queueSpans[0].terminal === 'cancelled' && queueSpans[0].terminal_cause_action_id === null && queued[0].span_id === queueSpans[0].span_id && cancelledEvents[0].span_id === queueSpans[0].span_id
+        && setup.start_us <= queueSpans[0].start_us && queueSpans[0].start_us <= queued[0].at_us && queued[0].at_us <= cancelledEvents[0].at_us && cancelledEvents[0].at_us <= queueSpans[0].end_us && queueSpans[0].end_us <= setup.terminal_us;
+      return native.length === 1 && queueSpans[0].terminal === 'ended' && native[0].terminal === 'cancelled' && native[0].terminal_cause_action_id === null && queued[0].span_id === queueSpans[0].span_id && started[0].span_id === native[0].span_id && cancelledEvents[0].span_id === native[0].span_id
+        && setup.start_us <= queueSpans[0].start_us && queueSpans[0].start_us <= queued[0].at_us && queued[0].at_us <= queueSpans[0].end_us && queueSpans[0].end_us <= native[0].start_us
+        && native[0].start_us <= started[0].at_us && started[0].at_us <= cancelledEvents[0].at_us && cancelledEvents[0].at_us <= native[0].end_us && native[0].end_us <= setup.terminal_us;
+    })();
+    const maximumConcurrency = maximumConcurrentInspectionSpans(component);
+    if (canonicalizeJcs(queueOrder) !== canonicalizeJcs(declared.fixture_ids)
+      || component.setups.length !== declared.fixture_ids.length || setupBySubject.size !== declared.fixture_ids.length
+      || !orderedSubsequence(startOrder) || !startSetIsComplete || !eventsAndSpansAreBound || !readyLifecyclesAreComplete || !retiredLifecycleIsComplete
+      || canonicalizeJcs(settleOrder) !== canonicalizeJcs(expectedReady)
+      || canonicalizeJcs(deliverOrder) !== canonicalizeJcs(expectedReady)
+      || canonicalizeJcs(cancelOrder) !== canonicalizeJcs([declared.retired_fixture_id])
+      || maximumConcurrency !== 1) throw Error('Inspection scheduler evidence violates the frozen order, retirement, or single-concurrency contract');
+    return {
+      ...declared,
+      queue_order: queueOrder,
+      start_order: startOrder,
+      settle_order: settleOrder,
+      deliver_order: deliverOrder,
+      cancel_order: cancelOrder,
+      maximum_concurrency: maximumConcurrency,
+      first_ready_us: Math.min(...delivered.map(event => event.at_us)),
+      last_nonretired_ready_us: Math.max(...nonretired.map(event => event.at_us)),
+      all_terminal_us: Math.max(...delivered.map(event => event.at_us), ...cancelled.map(event => event.at_us)),
+      external_selection_duration_us: driver.driver_duration_us,
+      interaction_to_double_raf_us: doubleRaf[0].at_us - selection.active_us,
+      driver_observations: driverObservations,
+      process_series: processSeries,
+    };
+  }
+  if (lane === 'draft') {
+    const preQuitManifest = manifests.find(manifest => manifest?.descriptor?.componentRole === 'pre_quit');
+    const recoveryManifest = manifests.find(manifest => manifest?.descriptor?.componentRole === 'recovery');
+    const seedEntryCount = preQuitManifest?.descriptor?.workload?.facts?.seeded_entries;
+    const seedRaw = preQuitManifest?.bootstrap?.draftStorage?.raw;
+    const expectedDraftSha256 = recoveryManifest?.completion?.expectedDraftSha256;
+    const expectedAxValue = recoveryManifest?.completion?.expectedAxValue;
+    if (manifests.length !== 2 || !Number.isSafeInteger(seedEntryCount) || seedEntryCount < 0 || typeof seedRaw !== 'string' || !SHA256.test(expectedDraftSha256 ?? '') || typeof expectedAxValue !== 'string') throw Error('Draft workload evidence is incomplete');
+    if (countDraftSeedEntries(seedRaw) !== seedEntryCount) throw Error('Draft seeded entry count does not match the validated bootstrap');
+    const preQuit = frontendComponents.filter(component => component.component_role === 'pre_quit');
+    if (preQuit.length !== 1 || preQuit[0].actions.length !== 20 || preQuit[0].actions.some((action, index) => action.action_id !== index + 1 || action.state !== 'settled')) throw Error('Draft action evidence must contain 20 settled actions');
+    const component = preQuit[0];
+    const encodeSpans = component.spans.filter(span => span.kind === 'draft_encode');
+    const storageSpans = component.spans.filter(span => span.kind === 'storage_write');
+    const ownerKey = span => canonicalizeJcs(span.owner);
+    const encodeOwners = encodeSpans.map(ownerKey);
+    const storageOwners = storageSpans.map(ownerKey);
+    const persistenceSetups = component.setups.filter(setup => setup.target_id === 'workspace_drafts');
+    const completionSetups = component.setups.filter(setup => setup.target_id === 'draft_completion');
+    const orderedPersistenceSetups = [...persistenceSetups].sort((left, right) => left.setup_id - right.setup_id);
+    const persistenceSetupsMatchActions = orderedPersistenceSetups.every((setup, index) => {
+      const action = component.actions[index];
+      return setup.setup_id === index + 1 && action?.action_id === index + 1 && action.state === 'settled'
+        && action.active_us !== null && action.terminal_us !== null
+        && action.active_us <= setup.start_us && setup.terminal_us <= action.terminal_us
+        && (index === 0 || orderedPersistenceSetups[index - 1].terminal_us <= setup.start_us);
+    });
+    const settledPersistenceOwners = new Set(persistenceSetups.filter(setup => setup.state === 'settled').map(setup => canonicalizeJcs({ kind: 'setup', setup_id: setup.setup_id })));
+    const validSpanPairs = persistenceSetups.every(setup => {
+      const owner = canonicalizeJcs({ kind: 'setup', setup_id: setup.setup_id });
+      const encodes = encodeSpans.filter(span => ownerKey(span) === owner);
+      const writes = storageSpans.filter(span => ownerKey(span) === owner);
+      if (setup.state !== 'settled' || setup.terminal_us === null || encodes.length !== 1 || writes.length !== 1) return false;
+      const [encode] = encodes, [write] = writes;
+      return encode.subject_id === 'workspace_drafts' && write.subject_id === 'workspace_drafts'
+        && setup.start_us <= encode.start_us && encode.start_us <= encode.end_us
+        && encode.end_us <= write.start_us && write.start_us <= write.end_us && write.end_us <= setup.terminal_us;
+    });
+    const acknowledgements = component.events.filter(event => event.kind === 'persistence_settled' && event.subject_id === 'draft_sha256');
+    if (component.setups.length !== 21 || persistenceSetups.length !== 20 || !persistenceSetupsMatchActions || completionSetups.length !== 1 || completionSetups[0].state !== 'settled'
+      || component.spans.length !== 40 || encodeSpans.length !== 20 || storageSpans.length !== 20
+      || encodeSpans.some(span => span.terminal !== 'ended') || storageSpans.some(span => span.terminal !== 'ended')
+      || new Set(encodeOwners).size !== 20
+      || new Set(storageOwners).size !== 20
+      || !validSpanPairs
+      || encodeOwners.some(owner => !settledPersistenceOwners.has(owner))
+      || acknowledgements.length !== 1
+      || acknowledgements[0].span_id !== null
+      || canonicalizeJcs(acknowledgements[0].owner) !== canonicalizeJcs({ kind: 'setup', setup_id: completionSetups[0].setup_id })
+      || acknowledgements[0].at_us < completionSetups[0].start_us || acknowledgements[0].at_us > completionSetups[0].terminal_us
+      || acknowledgements[0].at_us < Math.max(...storageSpans.map(span => span.end_us))
+      || acknowledgements[0].correlation_id !== expectedDraftSha256) throw Error('Draft persistence evidence requires 20 paired encode/write spans and one matching logical acknowledgement');
+    return {
+      ...declared,
+      seed_entry_count: seedEntryCount,
+      seed_byte_count: byteLength(seedRaw),
+      action_summaries: component.actions.map(action => ({ action_id: action.action_id })),
+      encode_span_ids: encodeSpans.map(span => span.span_id),
+      storage_span_ids: storageSpans.map(span => span.span_id),
+      logical_persistence_acknowledged: true,
+      expected_draft_sha256: expectedDraftSha256,
+      expected_ax_value: expectedAxValue,
+      driver_observations: driverObservations,
+      process_series: processSeries,
+    };
+  }
+  if (frontendComponents.length !== 1 || frontendComponents[0].actions.length !== SESSION_CYCLES * SESSION_ACTIONS_PER_CYCLE || frontendComponents[0].actions.some((action, index) => action.action_id !== index + 1 || action.state !== 'settled')) throw Error('Session-memory evidence requires 1,750 settled actions');
+  return {
+    cycle_summaries: Array.from({ length: SESSION_CYCLES }, (_, cycle_index) => ({ cycle_index })),
+    driver_observations: driverObservations,
+    process_series: processSeries,
+  };
+}
+
+/** Analyze the frozen ten-pair AB/BA instrumentation-control protocol. */
+export function analyzeInstrumentationOverhead(pairs) {
+  if (!Array.isArray(pairs) || pairs.length !== 10) throw Error('Instrumentation overhead requires exactly ten pairs');
+  pairs.forEach((pair, index) => {
+    exactKeys(pair, ['pair_index', 'order', 'enabled_duration_us', 'disabled_duration_us'], `instrumentation pair ${index}`);
+    if (pair.pair_index !== index || pair.order !== (index % 2 === 0 ? 'enabled_first' : 'disabled_first')) throw Error('Instrumentation pairs must use balanced alternating AB/BA order');
+    safeInteger(pair.enabled_duration_us, 'enabled instrumentation duration', 1);
+    safeInteger(pair.disabled_duration_us, 'disabled instrumentation duration', 1);
+  });
+  const delta = median(pairs.map(pair => pair.enabled_duration_us - pair.disabled_duration_us));
+  const percentMilli = median(pairs.map(pair => (pair.enabled_duration_us - pair.disabled_duration_us) * 100_000 / pair.disabled_duration_us));
+  const roundedDelta = Math.ceil(delta);
+  const roundedPercentMilli = Math.ceil(percentMilli);
+  return {
+    pair_count: 10,
+    paired_median_delta_us: roundedDelta,
+    paired_median_percent_milli: roundedPercentMilli,
+    absolute_threshold_us: 5_000,
+    relative_threshold_percent_milli: 5_000,
+    exceeded: roundedDelta > 5_000 && roundedPercentMilli > 5_000,
+  };
+}
+
+/** Apply the approved terminal decision policy after sample analysis is complete. */
+export function selectResponsivenessSuiteDecision({ overhead, interactionCandidates, memory, evidenceSampleIds }) {
+  if (!plainObject(overhead)) throw Error('Invalid instrumentation overhead result');
+  exactKeys(overhead, ['pair_count', 'paired_median_delta_us', 'paired_median_percent_milli', 'absolute_threshold_us', 'relative_threshold_percent_milli', 'exceeded'], 'instrumentation overhead result');
+  if (overhead.pair_count !== 10 || typeof overhead.exceeded !== 'boolean') throw Error('Invalid instrumentation overhead result');
+  for (const field of ['paired_median_delta_us', 'paired_median_percent_milli']) if (!Number.isSafeInteger(overhead[field])) throw Error(`Invalid instrumentation overhead ${field}`);
+  if (overhead.absolute_threshold_us !== 5_000 || overhead.relative_threshold_percent_milli !== 5_000) throw Error('Invalid instrumentation overhead thresholds');
+  if (overhead.exceeded !== (overhead.paired_median_delta_us > overhead.absolute_threshold_us && overhead.paired_median_percent_milli > overhead.relative_threshold_percent_milli)) throw Error('Inconsistent instrumentation overhead result');
+  if (overhead.exceeded) throw Error('Instrumentation overhead exceeded; reduce recorder overhead before emitting a terminal SuiteDecision');
+  const validEvidenceIds = values => Array.isArray(values) && values.length > 0 && new Set(values).size === values.length && values.every(value => typeof value === 'string' && OPAQUE.test(value));
+  if (!Array.isArray(interactionCandidates) || !plainObject(memory) || !validEvidenceIds(evidenceSampleIds) || evidenceSampleIds.length < 5) throw Error('Invalid responsiveness decision inputs');
+  const suiteEvidence = new Set(evidenceSampleIds);
+  const eligible = interactionCandidates.filter(candidate => {
+    if (!plainObject(candidate)) throw Error('Invalid interaction candidate');
+    exactKeys(candidate, ['target', 'impact_tier', 'risk_rank', 'qualifying_samples', 'sample_count', 'threshold_exceeded', 'attribution_share_milli', 'normalized_exceedance_milli', 'evidence_sample_ids', 'accepted_sample_ids'], 'interaction candidate');
+    if (typeof candidate.target !== 'string' || !OPAQUE.test(candidate.target) || !['discrete_interaction', 'main_thread_blocking'].includes(candidate.impact_tier) || !validEvidenceIds(candidate.evidence_sample_ids) || !validEvidenceIds(candidate.accepted_sample_ids)) throw Error('Invalid interaction candidate');
+    for (const field of ['risk_rank', 'qualifying_samples', 'sample_count', 'attribution_share_milli', 'normalized_exceedance_milli']) safeInteger(candidate[field], `interaction candidate ${field}`);
+    const accepted = new Set(candidate.accepted_sample_ids);
+    if (typeof candidate.threshold_exceeded !== 'boolean' || candidate.sample_count !== 5 || candidate.accepted_sample_ids.length !== 5
+      || candidate.qualifying_samples > candidate.sample_count || candidate.attribution_share_milli > 1000
+      || candidate.evidence_sample_ids.length !== candidate.qualifying_samples
+      || candidate.accepted_sample_ids.some(id => !suiteEvidence.has(id)) || candidate.evidence_sample_ids.some(id => !accepted.has(id))) throw Error('Invalid interaction candidate sample contract');
+    return candidate.qualifying_samples >= 4 && candidate.threshold_exceeded && candidate.attribution_share_milli >= 500;
+  }).sort((left, right) => Number(right.impact_tier === 'discrete_interaction') - Number(left.impact_tier === 'discrete_interaction') || right.normalized_exceedance_milli - left.normalized_exceedance_milli || left.risk_rank - right.risk_rank || left.target.localeCompare(right.target));
+  const uniqueEvidence = values => [...new Set(values)];
+  exactKeys(memory, ['sample_count', 'accepted_sample_ids', 'qualifying_sample_ids'], 'memory decision evidence');
+  safeInteger(memory.sample_count, 'memory sample count');
+  if (memory.sample_count !== 5 || !validEvidenceIds(memory.accepted_sample_ids) || memory.accepted_sample_ids.length !== 5 || !Array.isArray(memory.qualifying_sample_ids) || new Set(memory.qualifying_sample_ids).size !== memory.qualifying_sample_ids.length) throw Error('Invalid memory decision evidence');
+  const acceptedMemory = new Set(memory.accepted_sample_ids);
+  if (memory.accepted_sample_ids.some(id => !suiteEvidence.has(id)) || memory.qualifying_sample_ids.some(id => typeof id !== 'string' || !OPAQUE.test(id) || !acceptedMemory.has(id))) throw Error('Invalid memory decision evidence');
+  if (eligible.length > 0) return {
+    kind: 'interaction_optimization',
+    evidence_sample_ids: uniqueEvidence(eligible[0].evidence_sample_ids),
+    target: eligible[0].target,
+    rationale: `${eligible[0].target} crossed the approved interaction threshold in ${eligible[0].qualifying_samples}/5 samples with at least half of the affected duration attributed to a named span.`,
+  };
+  if (memory.qualifying_sample_ids.length >= 4) return {
+    kind: 'allocation_profiling_followup', evidence_sample_ids: uniqueEvidence(memory.accepted_sample_ids), target: 'session_memory',
+    rationale: 'Positive attributable RSS slope and greater-than-10-percent end-to-start growth both repeated in at least four of five measured samples; allocation evidence is required before calling this a leak.',
+  };
+  return {
+    kind: 'no_further_work', evidence_sample_ids: uniqueEvidence(evidenceSampleIds), target: null,
+    rationale: 'No interaction candidate met the recurrence, threshold, and attribution gates, and attributable RSS growth did not meet the repeatability gate.',
+  };
 }
 
 function validateOwner(owner, actionIds, setupIds, label) {
@@ -1362,6 +1662,12 @@ function validateRunPlan(plan) {
   if (pages.some(page => canonicalizeJcs(page.manifest.webviewDataStoreId) !== canonicalizeJcs(pages[0].manifest.webviewDataStoreId))) throw Error('Native pages must reuse one WebView data-store ID');
   const roles = pages.map(page => page.manifest.descriptor.componentRole);
   if (first.lane === 'draft' ? canonicalizeJcs(roles) !== canonicalizeJcs(['pre_quit', 'recovery']) : canonicalizeJcs(roles) !== canonicalizeJcs(['primary'])) throw Error('Native page role/cardinality mismatch');
+  if (first.lane === 'draft') {
+    const preQuit = pages[0];
+    const recovery = pages[1];
+    if (preQuit.manifest.bootstrap.initialPath !== '/convert' || preQuit.manifest.bootstrap.draftStorage === null) throw Error('Lane 2 requires a seeded Convert-page draft bootstrap');
+    validateDraftActions(preQuit.actions, first.workload.facts, recovery.manifest.completion.expectedAxValue);
+  }
   return { ...plan, pages };
 }
 
@@ -1445,11 +1751,14 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
   const frontendComponents = pageResults.map(result => result.page_component.frontend_trace);
   common = { ...common, data_store_cleanup: cleanupReceipt };
   if (!cleanupHelperSuccess) common = { ...common, cleanup: { ...common.cleanup, complete: false, error_code: 'artifact_remove_failed' }, outcome: { kind: 'failed', code: 'cleanup_failed' } };
-  const payload = {
-    ...plan.payload,
-    driver_observations: pageResults.flatMap(result => result.driver_observations),
-    process_series: pageResults.map(result => result.process_series).filter(value => value !== null),
-  };
+  const driverObservations = pageResults.flatMap(result => result.driver_observations);
+  const processSeries = pageResults.map(result => result.process_series).filter(value => value !== null);
+  const dryControl = firstManifest.descriptor.phase === 'warmup'
+    && firstManifest.descriptor.scenario.id === 'ax-dry'
+    && firstManifest.descriptor.workload.facts.dry_action_count === 10;
+  const payload = common.outcome?.kind === 'success' && !dryControl
+    ? deriveMeasuredLanePayload({ lane: firstManifest.descriptor.lane, declared: plan.payload, manifests: plan.pages.map(page => page.manifest), fixtureSources: identityBefore.fixtures.map(fixture => ({ id: fixture.id, basename: basename(plan.identity_inputs.fixtures[fixture.id]) })), frontendComponents, plannedActions: plan.pages.flatMap(page => page.actions), driverObservations, processSeries })
+    : { ...plan.payload, driver_observations: driverObservations, process_series: processSeries };
   if (firstManifest.descriptor.lane === 'draft') {
     const recoveryIndex = plan.pages.findIndex(page => page.manifest.descriptor.componentRole === 'recovery');
     const recoveryTrace = pageResults[recoveryIndex]?.page_component.frontend_trace;

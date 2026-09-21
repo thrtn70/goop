@@ -30,6 +30,8 @@ import {
   classifyProcessAttribution,
   createAccessibilityDriver,
   createScheduledProcessSampler,
+  deriveMeasuredLanePayload,
+  analyzeInstrumentationOverhead,
   loadPageComponent,
   publishSampleExclusive,
   runAccessibilitySequence,
@@ -37,7 +39,9 @@ import {
   runNativeResponsivenessPlan,
   runDataStoreCleanup,
   summarizeProcessSeries,
+  selectResponsivenessSuiteDecision,
   syncDirectoryPortable,
+  validateDraftActions,
   validateSessionMemoryActions,
   validateHarnessPaths,
   validateFrontendComponents,
@@ -53,6 +57,7 @@ import {
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = suffix => `00000000-0000-4000-8000-${suffix.padStart(12, '0')}`;
 const digest = value => value.repeat(64);
+const seededDraftRaw = count => JSON.stringify({ version: 1, entries: Object.fromEntries(Array.from({ length: count }, (_, index) => [JSON.stringify(['convert', `seed-${index}`, 'TopBar.url']), { value: `seed-value-${index}` }])) });
 const activationFields = (role = 'primary') => ({
   webviewDataStoreId: Array.from({ length: 16 }, (_, index) => index + 1),
   bootstrap: { initialPath: '/convert', draftStorage: null, failNextDraftWrite: false },
@@ -733,6 +738,31 @@ test('sample outcomes and cleanup failures use only the closed schema codes', ()
   assert.throws(() => assembleSample({ lane: 'inspection', frontendComponents: [component], common: { ...common, outcome: { kind: 'success', code: 'driver_interrupted' } }, payload }), /outcome/i);
 });
 
+test('Lane 2 validator requires the exact 20-character draft-edit workload', () => {
+  let cumulative = '';
+  const actions = [...'https://x.test/a.mp4'].map((character, index) => {
+    const prior = cumulative;
+    cumulative += character;
+    return {
+      actionId: index + 1, targetId: `draft-key-${index + 1}`, eventType: 'input', targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: prior,
+      dispatch: { kind: 'keystroke', text: character, ax_prior: { kind: 'attribute_equals', attribute: 'AXValue', value: prior }, completion: { kind: 'attribute_equals', attribute: 'AXValue', value: cumulative }, timeout_ms: 2000 },
+    };
+  });
+  const facts = { seeded_entries: 500, mutation_count: 20 };
+  assert.equal(validateDraftActions(actions, facts, 'https://x.test/a.mp4').length, 20);
+  for (const [mutate, pattern] of [
+    [action => { action.targetRole = 'button'; }, /Lane 3 action|Lane 2/i],
+    [action => { action.dispatch.text = 'z'; }, /typed URL/i],
+    [action => { action.expectedPriorValue = 'spoofed'; }, /prior value/i],
+    [action => { action.dispatch.completion.value = 'spoofed'; }, /completion predicate/i],
+    [action => { action.dispatch.timeout_ms = 1999; }, /Lane 3 action|Lane 2/i],
+  ]) {
+    const malformed = structuredClone(actions);
+    mutate(malformed[0]);
+    assert.throws(() => validateDraftActions(malformed, facts, 'https://x.test/a.mp4'), pattern);
+  }
+});
+
 test('Lane 3 validator requires the exact 50 by 35 action pattern', () => {
   const actions = makeSessionActions();
   assert.equal(actions.length, 1750);
@@ -744,6 +774,340 @@ test('Lane 3 validator requires the exact 50 by 35 action pattern', () => {
   assert.throws(() => validateSessionMemoryActions(spoofed, { cycles: 50, fixture_count: 8, actions_per_cycle: 35, cycle_timeout_ms: 40_000 }), /prior value/i);
   const wrongPredicate = structuredClone(actions); wrongPredicate[25].dispatch.completion.kind = 'attribute_equals';
   assert.throws(() => validateSessionMemoryActions(wrongPredicate, { cycles: 50, fixture_count: 8, actions_per_cycle: 35, cycle_timeout_ms: 40_000 }), /completion predicate/i);
+});
+
+test('measured payload derivation replaces caller-supplied inspection facts with trace and driver evidence', () => {
+  const component = frontend({ lane: 'inspection' });
+  component.actions = [
+    { action_id: 1, target_id: 'select-fixture-1', state: 'settled', armed_us: 90, active_us: 100, terminal_us: 240 },
+    { action_id: 2, target_id: 'remove-fixture-2', state: 'settled', armed_us: 251, active_us: 260, terminal_us: 330 },
+  ];
+  component.setups = [
+    { setup_id: 1, target_id: 'fixture-1', state: 'settled', start_us: 1, terminal_us: 220 },
+    { setup_id: 2, target_id: 'fixture-2', state: 'cancelled', start_us: 2, terminal_us: 320 },
+  ];
+  const event = (event_seq, owner, kind, at_us, subject_id = null, span_id = null) => ({ event_seq, owner, span_id, kind, at_us, subject_id, correlation_id: null });
+  component.events = [
+    event(1, { kind: 'setup', setup_id: 1 }, 'inspection_queued', 1, 'fixture-1', 1),
+    event(2, { kind: 'setup', setup_id: 2 }, 'inspection_queued', 2, 'fixture-2', 2),
+    event(3, { kind: 'setup', setup_id: 1 }, 'inspection_started', 10, 'fixture-1', 3),
+    event(4, { kind: 'setup', setup_id: 1 }, 'inspection_settled', 200, 'fixture-1', 3),
+    event(5, { kind: 'setup', setup_id: 1 }, 'inspection_delivered', 220, 'fixture-1', 4),
+    event(6, { kind: 'setup', setup_id: 2 }, 'inspection_started', 230, 'fixture-2', 5),
+    event(7, { kind: 'action', action_id: 1 }, 'double_raf', 240),
+    event(8, { kind: 'setup', setup_id: 2 }, 'inspection_cancelled', 320, 'fixture-2', 5),
+  ];
+  component.spans = [
+    { span_id: 1, owner: { kind: 'setup', setup_id: 1 }, parent_span_id: null, kind: 'inspection_queue', subject_id: 'fixture-1', start_us: 1, end_us: 10, terminal: 'ended', terminal_cause_action_id: null },
+    { span_id: 2, owner: { kind: 'setup', setup_id: 2 }, parent_span_id: null, kind: 'inspection_queue', subject_id: 'fixture-2', start_us: 2, end_us: 230, terminal: 'ended', terminal_cause_action_id: null },
+    { span_id: 3, owner: { kind: 'setup', setup_id: 1 }, parent_span_id: null, kind: 'inspection_native', subject_id: 'fixture-1', start_us: 10, end_us: 200, terminal: 'ended', terminal_cause_action_id: null },
+    { span_id: 4, owner: { kind: 'setup', setup_id: 1 }, parent_span_id: null, kind: 'inspection_delivery', subject_id: 'fixture-1', start_us: 200, end_us: 220, terminal: 'ended', terminal_cause_action_id: null },
+    { span_id: 5, owner: { kind: 'setup', setup_id: 2 }, parent_span_id: null, kind: 'inspection_native', subject_id: 'fixture-2', start_us: 230, end_us: 320, terminal: 'cancelled', terminal_cause_action_id: null },
+  ];
+  const declared = {
+    fixture_ids: ['fixture-1', 'fixture-2'], queue_order: [], start_order: [], settle_order: [], deliver_order: [], cancel_order: [],
+    maximum_concurrency: 99, first_ready_us: 0, last_nonretired_ready_us: 0, all_terminal_us: 0,
+    selected_fixture_id: 'fixture-1', retired_fixture_id: 'fixture-2', external_selection_duration_us: 0, interaction_to_double_raf_us: 0,
+  };
+  const fixtureSources = [{ id: 'fixture-1', basename: 'one.jpg' }, { id: 'fixture-2', basename: 'two.jpg' }];
+  const actual = deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [component],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  });
+  assert.deepEqual(actual.queue_order, ['fixture-1', 'fixture-2']);
+  assert.deepEqual(actual.deliver_order, ['fixture-1']);
+  assert.deepEqual(actual.cancel_order, ['fixture-2']);
+  assert.equal(actual.maximum_concurrency, 1);
+  assert.equal(actual.first_ready_us, 220);
+  assert.equal(actual.last_nonretired_ready_us, 220);
+  assert.equal(actual.all_terminal_us, 320);
+  assert.equal(actual.external_selection_duration_us, 75);
+  assert.equal(actual.interaction_to_double_raf_us, 140);
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources: [{ id: 'fixture-x', basename: 'one.jpg' }, { id: 'fixture-y', basename: 'two.jpg' }], frontendComponents: [component],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /fixture identities/i);
+  for (const plannedActions of [
+    [{ actionId: 1, targetRole: 'button', accessibleName: 'Select wrong.jpg' }, { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' }],
+    [{ actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' }, { actionId: 2, targetRole: 'button', accessibleName: 'Remove wrong.jpg' }],
+  ]) assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [component], plannedActions,
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /frozen fixture manifest/i);
+
+  for (const mutate of [
+    value => { value.events = value.events.filter(eventValue => eventValue.kind !== 'inspection_started'); },
+    value => { value.events.push(event(9, { kind: 'setup', setup_id: 1 }, 'inspection_started', 11, 'fixture-1')); },
+    value => { value.spans[0].subject_id = 'fixture-x'; },
+  ]) {
+    const invalidStart = structuredClone(component);
+    mutate(invalidStart);
+    assert.throws(() => deriveMeasuredLanePayload({
+      lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [invalidStart],
+      plannedActions: [
+        { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+        { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+      ],
+      driverObservations: [
+        { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+        { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+      ], processSeries: [],
+    }), /scheduler evidence|contract/i);
+  }
+
+  const overlapping = structuredClone(component);
+  overlapping.spans[4].start_us = 20;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [overlapping],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /single-concurrency/i);
+
+  const retiredDelivered = structuredClone(component);
+  retiredDelivered.events.splice(7, 0, event(8, { kind: 'setup', setup_id: 2 }, 'inspection_delivered', 319, 'fixture-2'));
+  retiredDelivered.events[8].event_seq = 9;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [retiredDelivered],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /retirement|contract/i);
+
+  const missedOverlap = structuredClone(component);
+  missedOverlap.actions[0].active_us = 221;
+  missedOverlap.spans[1].end_us = 250;
+  missedOverlap.spans[4].start_us = 250;
+  missedOverlap.events.find(eventValue => eventValue.kind === 'inspection_started' && eventValue.subject_id === 'fixture-2').at_us = 250;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [missedOverlap],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /overlap/i);
+
+  const wrongRaf = structuredClone(component);
+  wrongRaf.events.find(eventValue => eventValue.kind === 'double_raf').at_us = 239;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [wrongRaf],
+    plannedActions: [
+      { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+      { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+    ],
+    driverObservations: [
+      { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+      { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+    ], processSeries: [],
+  }), /timing/i);
+
+  for (const mutate of [
+    value => { value.events.find(eventValue => eventValue.kind === 'inspection_delivered').owner.setup_id = 2; },
+    value => { value.events.find(eventValue => eventValue.kind === 'inspection_delivered').at_us = 190; },
+    value => { value.spans.find(span => span.kind === 'inspection_native' && span.subject_id === 'fixture-2').terminal_cause_action_id = 1; },
+    value => { value.spans.find(span => span.kind === 'inspection_native' && span.subject_id === 'fixture-2').terminal_cause_action_id = 2; },
+  ]) {
+    const invalidLifecycle = structuredClone(component);
+    mutate(invalidLifecycle);
+    assert.throws(() => deriveMeasuredLanePayload({
+      lane: 'inspection', declared, manifests: [{ descriptor: { workload: { facts: { source_count: 2 } } } }], fixtureSources, frontendComponents: [invalidLifecycle],
+      plannedActions: [
+        { actionId: 1, targetRole: 'button', accessibleName: 'Select one.jpg' },
+        { actionId: 2, targetRole: 'button', accessibleName: 'Remove two.jpg' },
+      ],
+      driverObservations: [
+        { ordinal: 1, driver_duration_us: 75, observed_value: true, clock_domain: 'driver_monotonic' },
+        { ordinal: 2, driver_duration_us: 80, observed_value: false, clock_domain: 'driver_monotonic' },
+      ], processSeries: [],
+    }), /scheduler evidence|contract/i);
+  }
+});
+
+test('measured payload derivation derives draft spans and exact Lane 3 cycle summaries', () => {
+  const draft = frontend({ lane: 'draft', role: 'pre_quit' });
+  draft.actions = Array.from({ length: 20 }, (_, index) => ({ action_id: index + 1, target_id: `key-${index + 1}`, state: 'settled', armed_us: index * 10, active_us: index * 10 + 1, terminal_us: index * 10 + 9 }));
+  const persistenceSetups = Array.from({ length: 20 }, (_, index) => ({ setup_id: index + 1, target_id: 'workspace_drafts', state: 'settled', start_us: index * 10 + 2, terminal_us: index * 10 + 7 }));
+  draft.setups = [...persistenceSetups, { setup_id: 21, target_id: 'draft_completion', state: 'settled', start_us: 200, terminal_us: 201 }];
+  draft.spans = persistenceSetups.flatMap((setup, index) => [
+    { span_id: index * 2 + 1, owner: { kind: 'setup', setup_id: setup.setup_id }, parent_span_id: null, kind: 'draft_encode', subject_id: 'workspace_drafts', start_us: index * 10 + 2, end_us: index * 10 + 3, terminal: 'ended', terminal_cause_action_id: null },
+    { span_id: index * 2 + 2, owner: { kind: 'setup', setup_id: setup.setup_id }, parent_span_id: null, kind: 'storage_write', subject_id: 'workspace_drafts', start_us: index * 10 + 4, end_us: index * 10 + 5, terminal: 'ended', terminal_cause_action_id: null },
+  ]);
+  draft.events = [{ event_seq: 1, owner: { kind: 'setup', setup_id: 21 }, span_id: null, kind: 'persistence_settled', at_us: 200, subject_id: 'draft_sha256', correlation_id: digest('a') }];
+  const recovered = frontend({ lane: 'draft', role: 'recovery', page: uuid('3') });
+  const seedRaw = seededDraftRaw(500);
+  const draftManifests = [
+    { descriptor: { componentRole: 'pre_quit', workload: { facts: { seeded_entries: 500 } } }, bootstrap: { draftStorage: { raw: seedRaw } } },
+    { descriptor: { componentRole: 'recovery' }, completion: { expectedDraftSha256: digest('a'), expectedAxValue: 'https://x.test/a.mp4' } },
+  ];
+  const draftPayload = deriveMeasuredLanePayload({
+    lane: 'draft', declared: { seed_entry_count: 999, seed_byte_count: 999, action_summaries: [], encode_span_ids: [], storage_span_ids: [], logical_persistence_acknowledged: false, expected_draft_sha256: digest('c'), recovered_draft_sha256: digest('a'), expected_ax_value: 'spoofed', recovered_ax_value: 'https://x.test/a.mp4' }, manifests: draftManifests,
+    frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
+  });
+  assert.equal(draftPayload.seed_entry_count, 500);
+  assert.equal(draftPayload.seed_byte_count, Buffer.byteLength(seedRaw));
+  assert.equal(draftPayload.expected_draft_sha256, digest('a'));
+  assert.equal(draftPayload.expected_ax_value, 'https://x.test/a.mp4');
+  assert.deepEqual(draftPayload.action_summaries, Array.from({ length: 20 }, (_, index) => ({ action_id: index + 1 })));
+  assert.deepEqual(draftPayload.encode_span_ids, Array.from({ length: 20 }, (_, index) => index * 2 + 1));
+  assert.deepEqual(draftPayload.storage_span_ids, Array.from({ length: 20 }, (_, index) => index * 2 + 2));
+  assert.equal(draftPayload.logical_persistence_acknowledged, true);
+
+  const mismatchedSeed = structuredClone(draftManifests);
+  mismatchedSeed[0].descriptor.workload.facts.seeded_entries = 100;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: draftPayload, manifests: mismatchedSeed, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
+  }), /seeded entry count/i);
+  const invalidSeed = structuredClone(draftManifests);
+  invalidSeed[0].descriptor.workload.facts.seeded_entries = 1;
+  invalidSeed[0].bootstrap.draftStorage.raw = JSON.stringify({ version: 1, entries: { [JSON.stringify(['bogus', 'seed-0', 'bogus-slot'])]: { value: [] } } });
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: draftPayload, manifests: invalidSeed, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
+  }), /seed entry 0 is invalid/i);
+
+  const missingWrite = structuredClone(draft);
+  missingWrite.spans.pop();
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: { seed_entry_count: 500, seed_byte_count: 10, action_summaries: [], encode_span_ids: [], storage_span_ids: [], logical_persistence_acknowledged: false, expected_draft_sha256: digest('a'), recovered_draft_sha256: digest('a'), expected_ax_value: 'https://x.test/a.mp4', recovered_ax_value: 'https://x.test/a.mp4' }, manifests: draftManifests,
+    frontendComponents: [missingWrite, recovered], driverObservations: [], processSeries: [],
+  }), /20 paired/i);
+  const wrongAck = structuredClone(draft);
+  wrongAck.events[0].correlation_id = digest('b');
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: { seed_entry_count: 500, seed_byte_count: 10, action_summaries: [], encode_span_ids: [], storage_span_ids: [], logical_persistence_acknowledged: false, expected_draft_sha256: digest('a'), recovered_draft_sha256: digest('a'), expected_ax_value: 'https://x.test/a.mp4', recovered_ax_value: 'https://x.test/a.mp4' }, manifests: draftManifests,
+    frontendComponents: [wrongAck, recovered], driverObservations: [], processSeries: [],
+  }), /logical acknowledgement/i);
+  const wrongAckOwner = structuredClone(draft);
+  wrongAckOwner.events[0].owner.setup_id = 20;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: draftPayload, manifests: draftManifests, frontendComponents: [wrongAckOwner, recovered], driverObservations: [], processSeries: [],
+  }), /logical acknowledgement/i);
+  const earlyAck = structuredClone(draft);
+  earlyAck.events[0].at_us = 0;
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: draftPayload, manifests: draftManifests, frontendComponents: [earlyAck, recovered], driverObservations: [], processSeries: [],
+  }), /logical acknowledgement/i);
+  const extraCancelledSpan = structuredClone(draft);
+  extraCancelledSpan.spans.push({ ...extraCancelledSpan.spans[0], span_id: 41, terminal: 'cancelled' });
+  assert.throws(() => deriveMeasuredLanePayload({
+    lane: 'draft', declared: draftPayload, manifests: draftManifests, frontendComponents: [extraCancelledSpan, recovered], driverObservations: [], processSeries: [],
+  }), /20 paired/i);
+  for (const mutate of [
+    value => { value.spans[0].subject_id = 'wrong'; },
+    value => { value.spans[0].start_us = 0; },
+    value => { value.spans[1].start_us = value.spans[0].start_us; },
+  ]) {
+    const invalidPair = structuredClone(draft);
+    mutate(invalidPair);
+    assert.throws(() => deriveMeasuredLanePayload({
+      lane: 'draft', declared: draftPayload, manifests: draftManifests, frontendComponents: [invalidPair, recovered], driverObservations: [], processSeries: [],
+    }), /20 paired/i);
+  }
+  for (const mutate of [
+    value => { value.setups[0].start_us = 0; },
+    value => { value.setups[1].start_us = 3; value.setups[1].terminal_us = 6; },
+  ]) {
+    const invalidActionBinding = structuredClone(draft);
+    mutate(invalidActionBinding);
+    assert.throws(() => deriveMeasuredLanePayload({
+      lane: 'draft', declared: draftPayload, manifests: draftManifests, frontendComponents: [invalidActionBinding, recovered], driverObservations: [], processSeries: [],
+    }), /20 paired/i);
+  }
+
+  const session = frontend({ lane: 'session_memory' });
+  session.actions = Array.from({ length: 1750 }, (_, index) => ({ action_id: index + 1, target_id: `a-${index + 1}`, state: 'settled', armed_us: index, active_us: index, terminal_us: index + 1 }));
+  const sessionPayload = deriveMeasuredLanePayload({ lane: 'session_memory', declared: { cycle_summaries: [] }, manifests: [{}], frontendComponents: [session], driverObservations: [], processSeries: [{ schema_version: 1 }] });
+  assert.deepEqual(sessionPayload.cycle_summaries, Array.from({ length: 50 }, (_, cycle_index) => ({ cycle_index })));
+});
+
+test('instrumentation overhead analysis enforces ten balanced alternating pairs and the larger threshold', () => {
+  const pairs = Array.from({ length: 10 }, (_, index) => ({
+    pair_index: index,
+    order: index % 2 === 0 ? 'enabled_first' : 'disabled_first',
+    enabled_duration_us: 110_000,
+    disabled_duration_us: 100_000,
+  }));
+  const result = analyzeInstrumentationOverhead(pairs);
+  assert.equal(result.pair_count, 10);
+  assert.equal(result.paired_median_delta_us, 10_000);
+  assert.equal(result.absolute_threshold_us, 5_000);
+  assert.equal(result.relative_threshold_percent_milli, 5_000);
+  assert.equal(result.exceeded, true);
+  assert.throws(() => analyzeInstrumentationOverhead(pairs.slice(0, 9)), /ten/i);
+  assert.throws(() => analyzeInstrumentationOverhead(pairs.map(pair => ({ ...pair, order: 'enabled_first' }))), /balanced|alternating/i);
+  const heterogeneous = pairs.map((pair, index) => ({ ...pair, disabled_duration_us: index < 5 ? 50_000 : 1_000_000, enabled_duration_us: (index < 5 ? 50_000 : 1_000_000) + 6_000 }));
+  const heterogeneousResult = analyzeInstrumentationOverhead(heterogeneous);
+  assert.equal(heterogeneousResult.paired_median_delta_us, 6_000);
+  assert.equal(heterogeneousResult.exceeded, true);
+  const justAboveRelative = pairs.map(pair => ({ ...pair, disabled_duration_us: 250_000, enabled_duration_us: 262_501 }));
+  assert.equal(analyzeInstrumentationOverhead(justAboveRelative).exceeded, true);
+  const exactRelativeBoundary = pairs.map(pair => ({ ...pair, disabled_duration_us: 250_000, enabled_duration_us: 262_500 }));
+  assert.equal(analyzeInstrumentationOverhead(exactRelativeBoundary).exceeded, false);
+});
+
+test('suite decision policy blocks excessive overhead and selects exactly one approved terminal outcome', () => {
+  const overhead = { pair_count: 10, paired_median_delta_us: 1000, paired_median_percent_milli: 1000, absolute_threshold_us: 5000, relative_threshold_percent_milli: 5000, exceeded: false };
+  const suiteIds = ['i1', 'i2', 'i3', 'i4', 'i5', 'd1', 'd2', 'd3', 'd4', 'd5', 'm1', 'm2', 'm3', 'm4', 'm5'];
+  const interactionCandidates = [
+    { target: 'draft_storage_write', impact_tier: 'discrete_interaction', risk_rank: 2, qualifying_samples: 4, sample_count: 5, threshold_exceeded: true, attribution_share_milli: 700, normalized_exceedance_milli: 200, evidence_sample_ids: ['d1', 'd2', 'd3', 'd4'], accepted_sample_ids: ['d1', 'd2', 'd3', 'd4', 'd5'] },
+    { target: 'inspection_selection', impact_tier: 'main_thread_blocking', risk_rank: 1, qualifying_samples: 4, sample_count: 5, threshold_exceeded: true, attribution_share_milli: 600, normalized_exceedance_milli: 300, evidence_sample_ids: ['i1', 'i2', 'i3', 'i4'], accepted_sample_ids: ['i1', 'i2', 'i3', 'i4', 'i5'] },
+  ];
+  assert.throws(() => selectResponsivenessSuiteDecision({ overhead: { ...overhead, paired_median_delta_us: 6000, paired_median_percent_milli: 6000, exceeded: true }, interactionCandidates: [], memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: [] }, evidenceSampleIds: suiteIds }), /overhead/i);
+  assert.throws(() => selectResponsivenessSuiteDecision({ overhead: { ...overhead, paired_median_delta_us: 6000, paired_median_percent_milli: 6000 }, interactionCandidates: [], memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: [] }, evidenceSampleIds: suiteIds }), /inconsistent/i);
+  const interaction = selectResponsivenessSuiteDecision({
+    overhead,
+    interactionCandidates,
+    memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'] },
+    evidenceSampleIds: suiteIds,
+  });
+  assert.equal(interaction.kind, 'interaction_optimization');
+  assert.equal(interaction.target, 'draft_storage_write');
+  const tied = selectResponsivenessSuiteDecision({
+    overhead,
+    interactionCandidates: [
+      { ...interactionCandidates[0], target: 'a-wide-change', risk_rank: 9 },
+      { ...interactionCandidates[0], target: 'z-narrow-change', risk_rank: 1 },
+    ],
+    memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: [] },
+    evidenceSampleIds: suiteIds,
+  });
+  assert.equal(tied.target, 'z-narrow-change');
+  assert.throws(() => selectResponsivenessSuiteDecision({ overhead, interactionCandidates, memory: {}, evidenceSampleIds: suiteIds }), /memory decision evidence/i);
+  const memory = selectResponsivenessSuiteDecision({ overhead, interactionCandidates: [], memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: ['m1', 'm2', 'm3', 'm4'] }, evidenceSampleIds: suiteIds });
+  assert.equal(memory.kind, 'allocation_profiling_followup');
+  const none = selectResponsivenessSuiteDecision({ overhead, interactionCandidates: [], memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: ['m1', 'm2', 'm3'] }, evidenceSampleIds: suiteIds });
+  assert.deepEqual(none.kind, 'no_further_work');
+  assert.throws(() => selectResponsivenessSuiteDecision({ overhead, interactionCandidates: [{ target: 'bad', impact_tier: 'discrete_interaction', risk_rank: 1, qualifying_samples: 6, sample_count: 5, threshold_exceeded: true, attribution_share_milli: 1001, normalized_exceedance_milli: 1, evidence_sample_ids: ['outside'], accepted_sample_ids: ['d1', 'd2', 'd3', 'd4', 'd5'] }], memory: { sample_count: 5, accepted_sample_ids: ['m1', 'm2', 'm3', 'm4', 'm5'], qualifying_sample_ids: [] }, evidenceSampleIds: suiteIds }), /candidate/i);
 });
 
 test('native page component loader preserves and validates native clock identity', () => {
@@ -767,19 +1131,21 @@ test('native draft plan runs pre-quit then recovery before exclusive publication
     const binary = join(root, 'Goop'); writeFileSync(binary, 'release-binary');
     const reports = join(root, 'reports'); mkdirSync(reports);
     const profile = join(root, 'profile'); mkdirSync(profile);
-    const makeManifest = (role, page, actionName) => ({
+    const makeManifest = (role, page) => ({
       schema_version: 2,
       token: `token-${role}`,
       ...activationFields(role),
-      descriptor: { componentRole: role, sessionId: uuid('1'), sampleId: 'draft:500:measured:0', pageInstanceId: page, lane: 'draft', scenario: { id: 'draft-500', manifestSha256: digest('a') }, workload: { id: 'draft-500', facts: { seeded_entries: 500 } }, phase: 'measured', repetition: 0 },
-      actions: role === 'recovery' ? [] : [{ actionId: 1, targetId: actionName, eventType: 'input', targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: '' }],
+      descriptor: { componentRole: role, sessionId: uuid('1'), sampleId: 'draft:500:measured:0', pageInstanceId: page, lane: 'draft', scenario: { id: 'draft-500', manifestSha256: digest('a') }, workload: { id: 'draft-500', facts: { seeded_entries: 500, mutation_count: 20 } }, phase: 'measured', repetition: 0 },
+      actions: role === 'recovery' ? [] : [...'https://x.test/a.mp4'].map((character, index, characters) => ({ actionId: index + 1, targetId: `draft-key-${index + 1}`, eventType: 'input', targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: characters.slice(0, index).join('') })),
     });
-    const manifests = [makeManifest('pre_quit', uuid('2'), 'draft-key'), makeManifest('recovery', uuid('3'), 'recovery-check')];
+    const manifests = [makeManifest('pre_quit', uuid('2')), makeManifest('recovery', uuid('3'))];
+    const seededRaw = seededDraftRaw(500);
+    manifests[0].bootstrap.draftStorage = { raw: seededRaw, sha256: hash(seededRaw) };
     manifests[1].completion.expectedDraftSha256 = digest('b');
     manifests[1].completion.expectedAxValue = 'https://x.test/a.mp4';
     const pages = manifests.map((manifest, index) => {
       const manifestPath = join(root, `manifest-${index}.json`); writeFileSync(manifestPath, JSON.stringify(manifest));
-      return { manifest_path: manifestPath, required_labels: ['Paste URL to download'], ...(manifest.descriptor.componentRole === 'recovery' ? { recovery_target: { role: 'textbox', label: 'Paste URL to download' } } : {}), actions: manifest.actions.map(action => ({ ...action, dispatch: { kind: 'keystroke', text: 'h', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'h' }, timeout_ms: 2000 } })), timeout_ms: 10_000 };
+      return { manifest_path: manifestPath, required_labels: ['Paste URL to download'], ...(manifest.descriptor.componentRole === 'recovery' ? { recovery_target: { role: 'textbox', label: 'Paste URL to download' } } : {}), actions: manifest.actions.map((action, actionIndex) => ({ ...action, dispatch: { kind: 'keystroke', text: 'https://x.test/a.mp4'[actionIndex], ax_prior: { kind: 'attribute_equals', attribute: 'AXValue', value: action.expectedPriorValue }, completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'https://x.test/a.mp4'.slice(0, actionIndex + 1) }, timeout_ms: 2000 } })), timeout_ms: 10_000 };
     });
     const calls = [];
     const runPage = async ({ manifest }) => {
@@ -789,7 +1155,16 @@ test('native draft plan runs pre-quit then recovery before exclusive publication
       trace.scenario = { id: manifest.descriptor.scenario.id, manifest_sha256: manifest.descriptor.scenario.manifestSha256 };
       trace.workload = manifest.descriptor.workload;
       trace.actions = recordedActions(manifest.actions);
-      if (manifest.descriptor.componentRole === 'recovery') {
+      if (manifest.descriptor.componentRole === 'pre_quit') {
+        trace.actions = Array.from({ length: 20 }, (_, index) => ({ action_id: index + 1, target_id: manifest.actions[index].targetId, state: 'settled', armed_us: index * 10, active_us: index * 10 + 1, terminal_us: index * 10 + 9 }));
+        const persistenceSetups = Array.from({ length: 20 }, (_, index) => ({ setup_id: index + 1, target_id: 'workspace_drafts', state: 'settled', start_us: index * 10 + 2, terminal_us: index * 10 + 7 }));
+        trace.setups = [...persistenceSetups, { setup_id: 21, target_id: 'draft_completion', state: 'settled', start_us: 200, terminal_us: 201 }];
+        trace.spans = persistenceSetups.flatMap((setup, index) => [
+          { span_id: index * 2 + 1, owner: { kind: 'setup', setup_id: setup.setup_id }, parent_span_id: null, kind: 'draft_encode', subject_id: 'workspace_drafts', start_us: index * 10 + 2, end_us: index * 10 + 3, terminal: 'ended', terminal_cause_action_id: null },
+          { span_id: index * 2 + 2, owner: { kind: 'setup', setup_id: setup.setup_id }, parent_span_id: null, kind: 'storage_write', subject_id: 'workspace_drafts', start_us: index * 10 + 4, end_us: index * 10 + 5, terminal: 'ended', terminal_cause_action_id: null },
+        ]);
+        trace.events = [{ event_seq: 1, owner: { kind: 'setup', setup_id: 21 }, span_id: null, kind: 'persistence_settled', at_us: 200, subject_id: 'draft_sha256', correlation_id: digest('b') }];
+      } else {
         trace.setups = [{ setup_id: 1, target_id: 'recovery', state: 'settled', start_us: 0, terminal_us: 3 }];
         trace.events = [
           { event_seq: 1, owner: { kind: 'setup', setup_id: 1 }, span_id: 1, kind: 'persistence_settled', at_us: 1, subject_id: 'draft_sha256', correlation_id: digest('b') },
@@ -803,20 +1178,22 @@ test('native draft plan runs pre-quit then recovery before exclusive publication
       schema_version: 2, app_name: 'Goop', binary, report_directory: reports, app_data_directory: profile, pages,
       identity_inputs: identityInputs(binary, pages.map(page => page.manifest_path)),
       common: { identity: evidenceIdentity(), clock_origins: { driver_monotonic: { unit: 'us' }, native_monotonic: { unit: 'us' } }, limitations: [], cleanup: { complete: true, removed_paths: 0, error_code: null }, outcome: { kind: 'success' } },
-      payload: { seed_entry_count: 500, seed_byte_count: 1000, action_summaries: Array.from({ length: 20 }, (_, action_id) => ({ action_id: action_id + 1 })), encode_span_ids: [], storage_span_ids: [], logical_persistence_acknowledged: true, expected_draft_sha256: digest('c'), recovered_draft_sha256: digest('c'), expected_ax_value: 'spoofed', recovered_ax_value: 'spoofed' },
+      payload: { seed_entry_count: 999, seed_byte_count: 999, action_summaries: Array.from({ length: 20 }, (_, action_id) => ({ action_id: action_id + 1 })), encode_span_ids: [], storage_span_ids: [], logical_persistence_acknowledged: true, expected_draft_sha256: digest('c'), recovered_draft_sha256: digest('c'), expected_ax_value: 'spoofed', recovered_ax_value: 'spoofed' },
       limits: { log_limit_bytes: 65_536, storage_budget_bytes: 16_777_216 }, cleanup_profile: false,
     };
     const cleanupReceipt = manifest => ({ schema_version: 2, component_kind: 'data_store_cleanup', session_id: manifest.descriptor.sessionId, webview_data_store_id: manifest.webviewDataStoreId, removed: true, error_code: null, pid: 43, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 20 } });
     await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, unexpected: true }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /unknown fields: unexpected/);
     await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, pages: [{ ...basePlan.pages[0], unexpected: true }, basePlan.pages[1]] }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /unknown fields: unexpected/);
-    await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, pages: [{ ...basePlan.pages[0], actions: [{ ...basePlan.pages[0].actions[0], dispatch: { ...basePlan.pages[0].actions[0].dispatch, unexpected: true } }] }, basePlan.pages[1]] }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /unknown fields: unexpected/);
-    await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, pages: [{ ...basePlan.pages[0], actions: [{ ...basePlan.pages[0].actions[0], dispatch: { ...basePlan.pages[0].actions[0].dispatch, text: {} } }] }, basePlan.pages[1]] }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /keystroke text/);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, pages: [{ ...basePlan.pages[0], actions: basePlan.pages[0].actions.map((action, index) => index === 0 ? { ...action, dispatch: { ...action.dispatch, unexpected: true } } : action) }, basePlan.pages[1]] }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /unknown fields: unexpected/);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, pages: [{ ...basePlan.pages[0], actions: basePlan.pages[0].actions.map((action, index) => index === 0 ? { ...action, dispatch: { ...action.dispatch, text: {} } } : action) }, basePlan.pages[1]] }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /keystroke text/);
     await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, report_directory: join(process.cwd(), 'owned-responsiveness-output') }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) }), /outside the identity repository/);
     const result = await runNativeResponsivenessPlan(basePlan, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => cleanupReceipt(manifest) });
     assert.deepEqual(calls, ['pre_quit', 'recovery']);
     assert.equal(result.sample.frontend_components.length, 2);
     assert.equal(result.sample.payload.expected_draft_sha256, digest('b'));
     assert.equal(result.sample.payload.recovered_draft_sha256, digest('b'));
+    assert.equal(result.sample.payload.seed_entry_count, 500);
+    assert.equal(result.sample.payload.seed_byte_count, Buffer.byteLength(seededRaw));
     assert.equal(result.sample.payload.expected_ax_value, 'https://x.test/a.mp4');
     assert.equal(result.sample.payload.recovered_ax_value, 'https://x.test/a.mp4');
     assert.equal(existsSync(join(reports, 'sample.json')), true);
