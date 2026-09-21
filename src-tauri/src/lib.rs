@@ -49,6 +49,7 @@ fn configure_responsiveness_context<R: tauri::Runtime>(
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_macos_version_for_responsiveness<F>(
     enabled: bool,
     cleanup_requested: bool,
