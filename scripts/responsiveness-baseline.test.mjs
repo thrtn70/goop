@@ -957,6 +957,10 @@ test('directory sync helper is portable on Windows', () => {
   assert.equal(syncDirectoryPortable('C:\\not-opened-on-windows', 'win32'), false);
 });
 
+test('directory sync helper honors Windows host limits while simulating another target', () => {
+  assert.equal(syncDirectoryPortable('C:\\not-opened-on-windows', 'darwin', 'win32'), false);
+});
+
 test('publication rejects symlink directories and final samples above 8 MiB', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'goop-sample-bounds-')));
   try {

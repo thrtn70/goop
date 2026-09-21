@@ -74,8 +74,8 @@ const boundedString = (value, label, { pattern = null, maximum = 64, allowEmpty 
   return value;
 };
 
-export function syncDirectoryPortable(directory, platform = process.platform) {
-  if (platform === 'win32') return false;
+export function syncDirectoryPortable(directory, platform = process.platform, hostPlatform = process.platform) {
+  if (platform === 'win32' || hostPlatform === 'win32') return false;
   const descriptor = openSync(directory, 'r');
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
   return true;
