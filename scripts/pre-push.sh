@@ -46,6 +46,7 @@ run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
 run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs
 run_step "desktop preview"   node --test scripts/desktop-preview.test.mjs
+run_step "PERF-02 contracts" node --test scripts/responsiveness-baseline.test.mjs
 run_step "release workflow"  node --test scripts/release-workflow.test.mjs
 run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
 

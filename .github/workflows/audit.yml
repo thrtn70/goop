@@ -162,6 +162,9 @@ jobs:
       - name: PERF-01 portable harness tests
         shell: bash
         run: node --test scripts/performance-portable.test.mjs
+      - name: PERF-02 portable responsiveness contracts
+        shell: bash
+        run: node --test scripts/responsiveness-baseline.test.mjs
       - name: PERF-01 harness synthetic smoke
         shell: bash
         run: node scripts/performance-suite.mjs --synthetic-smoke --output "$RUNNER_TEMP/goop-perf-smoke"

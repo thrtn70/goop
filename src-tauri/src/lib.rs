@@ -23,6 +23,8 @@ use goop_sidecar::BinaryResolver;
 use startup_cleanup::{persist_job_payload_field, schedule_orphaned_download_cleanup};
 use state::AppState;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
@@ -33,12 +35,148 @@ fn uses_explicit_engine_path(request: &ConvertRequest) -> bool {
     request.video_options.is_some() || request.audio_options.is_some()
 }
 
+fn configure_responsiveness_context<R: tauri::Runtime>(
+    context: &mut tauri::Context<R>,
+    responsiveness: &performance::ResponsivenessState,
+) -> Result<(), String> {
+    if responsiveness.cleanup_requested() && !responsiveness.cleanup_mode() {
+        return Err("responsiveness cleanup configuration is invalid".to_owned());
+    }
+    configure_responsiveness_windows(
+        &mut context.config_mut().app.windows,
+        responsiveness.data_store_identifier(),
+        responsiveness.cleanup_mode(),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_version_for_responsiveness<F>(
+    enabled: bool,
+    cleanup_requested: bool,
+    query_version: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    if !enabled && !cleanup_requested {
+        return Ok(());
+    }
+    let raw = query_version()?;
+    let version = raw.trim();
+    if version.is_empty()
+        || version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("responsiveness requires a valid macOS version".to_owned());
+    }
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .ok_or_else(|| "responsiveness requires a valid macOS version".to_owned())?;
+    if major < 14 {
+        return Err("responsiveness data-store isolation requires macOS 14 or newer".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_responsiveness_platform(
+    responsiveness: &performance::ResponsivenessState,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        validate_macos_version_for_responsiveness(
+            responsiveness.data_store_identifier().is_some(),
+            responsiveness.cleanup_requested(),
+            || {
+                let output = Command::new("/usr/bin/sw_vers")
+                    .arg("-productVersion")
+                    .output()
+                    .map_err(|_| "macOS version query failed".to_owned())?;
+                if !output.status.success() || output.stdout.len() > 64 {
+                    return Err("macOS version query failed".to_owned());
+                }
+                String::from_utf8(output.stdout)
+                    .map_err(|_| "macOS version query returned invalid text".to_owned())
+            },
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = responsiveness;
+        Ok(())
+    }
+}
+
+fn configure_responsiveness_windows(
+    windows: &mut Vec<tauri::utils::config::WindowConfig>,
+    identifier: Option<[u8; 16]>,
+    cleanup_mode: bool,
+) -> Result<(), String> {
+    if cleanup_mode {
+        windows.clear();
+        return Ok(());
+    }
+    let Some(identifier) = identifier else {
+        return Ok(());
+    };
+    let main = windows
+        .iter_mut()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| "responsiveness main window is missing".to_owned())?;
+    if main
+        .data_store_identifier
+        .is_some_and(|existing| existing != identifier)
+    {
+        return Err("responsiveness data store identifier conflicts with app config".to_owned());
+    }
+    main.data_store_identifier = Some(identifier);
+    Ok(())
+}
+
+#[cfg(target_vendor = "apple")]
+async fn remove_responsiveness_data_store(
+    app: &tauri::AppHandle,
+    identifier: [u8; 16],
+) -> Result<bool, &'static str> {
+    let identifiers = app
+        .fetch_data_store_identifiers()
+        .await
+        .map_err(|_| "remove_failed")?;
+    if !identifiers.contains(&identifier) {
+        return Ok(false);
+    }
+    app.remove_data_store(identifier)
+        .await
+        .map_err(|_| "remove_failed")?;
+    Ok(true)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+async fn remove_responsiveness_data_store(
+    _app: &tauri::AppHandle,
+    _identifier: [u8; 16],
+) -> Result<bool, &'static str> {
+    Err("unsupported_platform")
+}
+
 pub fn run() {
     let started = std::time::Instant::now();
     let performance = performance::PerformanceState::new(
         std::env::var_os("GOOP_STARTUP_REPORT").map(PathBuf::from),
         started,
     );
+    let responsiveness = performance::ResponsivenessState::from_environment(started);
+    if let Err(error) = validate_responsiveness_platform(&responsiveness) {
+        eprintln!("error while configuring responsiveness run: {error}");
+        return;
+    }
+    let mut context = tauri::generate_context!();
+    if let Err(error) = configure_responsiveness_context(&mut context, &responsiveness) {
+        eprintln!("error while configuring responsiveness run: {error}");
+        return;
+    }
     // Installs stderr AND a daily rolling file under `data_dir()/logs`. The
     // writer thread is owned by the module for the whole process; see
     // `logging::flush`, which every exit path below has to call because
@@ -64,6 +202,7 @@ pub fn run() {
     }
     let result = builder
         .manage(performance)
+        .manage(responsiveness)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -71,6 +210,30 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            if let Some(cleanup) = app
+                .state::<performance::ResponsivenessState>()
+                .cleanup_request()
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = if cleanup.already_complete {
+                        Ok(false)
+                    } else {
+                        remove_responsiveness_data_store(
+                            &app_handle,
+                            cleanup.data_store_identifier,
+                        )
+                        .await
+                    };
+                    let state = app_handle.state::<performance::ResponsivenessState>();
+                    let receipt_result = match result {
+                        Ok(removed) => state.reconcile_cleanup_success(removed),
+                        Err(_) => Err("responsiveness data-store removal failed".to_owned()),
+                    };
+                    app_handle.exit(if receipt_result.is_ok() { 0 } else { 1 });
+                });
+                return Ok(());
+            }
             // Tauri's externalBin bundler ships sidecars in the same directory as
             // the app's main executable (Contents/MacOS on macOS; next to the .exe
             // on Windows). Resolve that dir via current_exe so both bundled and
@@ -639,6 +802,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             performance::performance_status,
             performance::performance_ready,
+            performance::responsiveness_status,
+            performance::responsiveness_ready,
+            performance::responsiveness_action_ready,
+            performance::responsiveness_write_component,
             commands::preview::begin_preview_session,
             commands::preview::release_preview_session,
             commands::preview::generate_preview,
@@ -703,7 +870,7 @@ pub fn run() {
             commands::file::job_forget,
             commands::file::job_forget_many,
         ])
-        .build(tauri::generate_context!());
+        .build(context);
     match result {
         // `build` + `run(callback)` rather than plain `run()`, solely to get
         // the `Exit` event. `tao`'s event loop ends in `process::exit` on
@@ -762,5 +929,61 @@ mod explicit_engine_path_tests {
             "target": "mp4",
             "video_options": {"kind": "copy"}
         }))));
+    }
+
+    #[test]
+    fn responsiveness_window_configuration_is_inert_isolated_and_cleanup_only() {
+        let main = tauri::utils::config::WindowConfig {
+            label: "main".to_owned(),
+            ..Default::default()
+        };
+        let mut windows = vec![main];
+        let original = windows.clone();
+
+        configure_responsiveness_windows(&mut windows, None, false).unwrap();
+        assert_eq!(windows, original);
+
+        let identifier = [7; 16];
+        configure_responsiveness_windows(&mut windows, Some(identifier), false).unwrap();
+        assert_eq!(windows[0].data_store_identifier, Some(identifier));
+        assert!(configure_responsiveness_windows(&mut windows, Some([8; 16]), false).is_err());
+
+        configure_responsiveness_windows(&mut windows, None, true).unwrap();
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn responsiveness_macos_version_gate_is_inert_when_disabled_and_requires_14() {
+        let mut queried = false;
+        assert!(validate_macos_version_for_responsiveness(false, false, || {
+            queried = true;
+            Err("must not run".to_owned())
+        })
+        .is_ok());
+        assert!(!queried);
+
+        assert!(
+            validate_macos_version_for_responsiveness(true, false, || Ok("13.6.9".to_owned()))
+                .is_err()
+        );
+        assert!(
+            validate_macos_version_for_responsiveness(true, false, || Ok("14.0".to_owned()))
+                .is_ok()
+        );
+        assert!(
+            validate_macos_version_for_responsiveness(true, false, || Ok("15".to_owned())).is_ok()
+        );
+        assert!(
+            validate_macos_version_for_responsiveness(true, false, || Ok("14beta".to_owned()))
+                .is_err()
+        );
+        assert!(
+            validate_macos_version_for_responsiveness(false, true, || Ok("13.7".to_owned()))
+                .is_err()
+        );
+        assert!(
+            validate_macos_version_for_responsiveness(false, true, || Ok("14.0".to_owned()))
+                .is_ok()
+        );
     }
 }

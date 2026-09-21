@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { decodeDraftEntries, encodeDraftEntries, loadDraftEntries, persistDraftEntries, saveDraftEntries } from "../workspacePersistence";
 import type { CausalOwner, ResponsivenessRecorder, SpanKind } from "@/performance/responsiveness";
+import { NOOP_RESPONSIVENESS_RECORDER } from "@/performance/responsiveness";
+import { armNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 const key = (slot: string) => JSON.stringify(["image", slot]);
 
 function recordingRecorder() {
@@ -49,6 +51,16 @@ describe("durable editable drafts", () => {
     const storage={getItem:()=>{throw Error("unavailable");},setItem:()=>{throw Error("quota");}};
     expect(loadDraftEntries(storage)).toEqual({});
     expect(saveDraftEntries(storage,{})).toBe(false);
+  });
+  it("injects exactly one performance-mode write failure before restoring normal storage", () => {
+    const writes: string[] = [];
+    const storage = { getItem: () => null, setItem: (_key: string, value: string) => { writes.push(value); } };
+    armNextDraftWriteFailure();
+
+    expect(persistDraftEntries(storage, {}, NOOP_RESPONSIVENESS_RECORDER)).toEqual({ ok: false, phase: "write" });
+    expect(writes).toHaveLength(0);
+    expect(persistDraftEntries(storage, {}, NOOP_RESPONSIVENESS_RECORDER).ok).toBe(true);
+    expect(writes).toHaveLength(1);
   });
 });
 

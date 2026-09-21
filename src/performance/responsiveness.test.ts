@@ -502,6 +502,57 @@ describe("PERF-02 responsiveness recorder", () => {
     }));
   });
 
+  it("notifies the runtime after double-frame settlement", () => {
+    const { env, runFrame } = fixture();
+    const recorder = createResponsivenessRecorder(descriptor, env);
+    const settled = vi.fn();
+    arm(recorder, 1, "source-1");
+    claim(recorder);
+    completeHandler(recorder, 1);
+
+    recorder.settleActionAfterDoubleFrame(1, settled);
+    expect(settled).not.toHaveBeenCalled();
+    runFrame();
+    expect(settled).not.toHaveBeenCalled();
+    runFrame();
+
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(recorder.snapshot()?.actions[0].state).toBe("settled");
+  });
+
+  it("reports setup and span work as open until both lifecycles are terminal", () => {
+    const { env } = fixture();
+    const recorder = createResponsivenessRecorder(descriptor, env);
+    expect(recorder.hasOpenWork()).toBe(false);
+    const owner = recorder.startSetup("initial_inspection")!;
+    const span = recorder.startSpan({ owner, kind: "inspection_queue", subjectId: "source-1" })!;
+    expect(recorder.hasOpenWork()).toBe(true);
+    recorder.endSpan(span);
+    expect(recorder.hasOpenWork()).toBe(true);
+    recorder.settleSetup(owner);
+    expect(recorder.hasOpenWork()).toBe(false);
+  });
+
+  it("notifies a runtime failure subscriber exactly once", () => {
+    const { env } = fixture();
+    const recorder = createResponsivenessRecorder(descriptor, env);
+    const failed = vi.fn();
+    const unsubscribe = recorder.onFailure(failed);
+
+    recorder.armAction({
+      actionId: 2,
+      targetId: "source-2",
+      eventType: "click",
+      targetRole: "button",
+      accessibleName: "Select second.mp4",
+      expectedPriorValue: "false",
+    });
+    recorder.invalidate("action");
+
+    expect(failed).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it("aggregates every Lane-3 action and retains first, last, and slow middle examples", () => {
     const { env, observers, tick } = fixture({ supported: ["event_timing"] });
     const recorder = createResponsivenessRecorder({

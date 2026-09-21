@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "rfc8785-primitives",
+      "input": {
+        "literals": [null, true, false],
+        "numbers": [333333333.33333329, 1e+30, 4.5, 0.002, 1e-27],
+        "string": "€$\u000f\nA'B\"\\\"/"
+      },
+      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\"/\"}",
+      "sha256": "6d77565c0fe51d7346bd5debb08f2eebbe9bde01eade30b34e2011f360f91b0e"
+    },
+    {
+      "id": "utf16-key-order",
+      "input": {
+        "€": "Euro Sign",
+        "\r": "Carriage Return",
+        "דּ": "Hebrew Letter Dalet With Dagesh",
+        "1": "One",
+        "😀": "Emoji: Grinning Face",
+        "": "Control",
+        "ö": "Latin Small Letter O With Diaeresis"
+      },
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}",
+      "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+    },
+    {
+      "id": "representative-frontend-page-component",
+      "input": {
+        "schema_version": 2,
+        "component_kind": "frontend_page_component",
+        "session_id": "00000000-0000-4000-8000-000000000001",
+        "sample_id": "inspection:fixed:measured:0",
+        "page_instance_id": "00000000-0000-4000-8000-000000000002",
+        "component_role": "primary",
+        "pid": 42,
+        "native_clock": { "domain": "native_monotonic", "unit": "us", "elapsed_us": 17 },
+        "frontend_trace": {
+          "schema_version": 2,
+          "component_kind": "frontend_trace",
+          "component_role": "primary",
+          "session_id": "00000000-0000-4000-8000-000000000001",
+          "sample_id": "inspection:fixed:measured:0",
+          "page_instance_id": "00000000-0000-4000-8000-000000000002",
+          "lane": "inspection",
+          "scenario": { "id": "fixed", "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+          "workload": { "id": "fixed", "facts": { "source_count": 1 } },
+          "phase": "measured",
+          "repetition": 0,
+          "clock_origin": { "domain": "webview_monotonic", "unit": "us" },
+          "setups": [], "actions": [], "events": [], "spans": [],
+          "browser_timing": {
+            "event_timing": { "supported": false, "raw": [], "aggregate": null, "by_action": [] },
+            "long_tasks": { "supported": false, "raw": [], "aggregate": null },
+            "raf_gaps": { "count": 0, "max_us": 0, "buckets": { "le_8_334_us": 0, "le_16_667_us": 0, "le_33_334_us": 0, "le_50_000_us": 0, "le_100_000_us": 0, "le_250_000_us": 0, "overflow": 0 } }
+          },
+          "dropped_events": 0,
+          "late_events": 0,
+          "observer_entries_aggregated": 0,
+          "limitations": ["event_timing_unsupported", "long_tasks_unsupported"],
+          "failure": null,
+          "settled": true
+        }
+      },
+      "canonical": "{\"component_kind\":\"frontend_page_component\",\"component_role\":\"primary\",\"frontend_trace\":{\"actions\":[],\"browser_timing\":{\"event_timing\":{\"aggregate\":null,\"by_action\":[],\"raw\":[],\"supported\":false},\"long_tasks\":{\"aggregate\":null,\"raw\":[],\"supported\":false},\"raf_gaps\":{\"buckets\":{\"le_100_000_us\":0,\"le_16_667_us\":0,\"le_250_000_us\":0,\"le_33_334_us\":0,\"le_50_000_us\":0,\"le_8_334_us\":0,\"overflow\":0},\"count\":0,\"max_us\":0}},\"clock_origin\":{\"domain\":\"webview_monotonic\",\"unit\":\"us\"},\"component_kind\":\"frontend_trace\",\"component_role\":\"primary\",\"dropped_events\":0,\"events\":[],\"failure\":null,\"lane\":\"inspection\",\"late_events\":0,\"limitations\":[\"event_timing_unsupported\",\"long_tasks_unsupported\"],\"observer_entries_aggregated\":0,\"page_instance_id\":\"00000000-0000-4000-8000-000000000002\",\"phase\":\"measured\",\"repetition\":0,\"sample_id\":\"inspection:fixed:measured:0\",\"scenario\":{\"id\":\"fixed\",\"manifest_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"schema_version\":2,\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"settled\":true,\"setups\":[],\"spans\":[],\"workload\":{\"facts\":{\"source_count\":1},\"id\":\"fixed\"}},\"native_clock\":{\"domain\":\"native_monotonic\",\"elapsed_us\":17,\"unit\":\"us\"},\"page_instance_id\":\"00000000-0000-4000-8000-000000000002\",\"pid\":42,\"sample_id\":\"inspection:fixed:measured:0\",\"schema_version\":2,\"session_id\":\"00000000-0000-4000-8000-000000000001\"}",
+      "sha256": "8af09017d4ad4779a3110d1359d492ccf4029cf6ec2a0c6b470f14c18021465a"
+    }
+  ]
+}

@@ -10,8 +10,10 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statfsSync,
   writeFileSync,
 } from 'node:fs';
+import { release as osRelease, version as osVersion } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -30,6 +32,200 @@ function processTreeRss(snapshot, rootPid) {
   const matched = rows.filter(([pid, , rss]) => ids.has(pid) && Number.isFinite(rss) && rss > 0);
   if (!matched.some(([pid]) => pid === rootPid)) return null;
   return { rssKiB: matched.reduce((sum, [, , rss]) => sum + rss, 0), children: Math.max(0, matched.length - 1) };
+}
+
+const processIdentityKey = row => [row.pid, row.ppid, row.process_start_time, row.canonical_executable].join('\u0000');
+
+function validProcessRow(row, label) {
+  if (!Number.isSafeInteger(row.pid) || row.pid < 1) throw Error(`${label} has an invalid PID`);
+  if (!Number.isSafeInteger(row.ppid) || row.ppid < 0) throw Error(`${label} has an invalid parent PID`);
+  if (typeof row.process_start_time !== 'string' || row.process_start_time.length === 0) throw Error(`${label} is missing process start time`);
+  if (typeof row.canonical_executable !== 'string' || row.canonical_executable.length === 0) throw Error(`${label} is missing canonical executable`);
+  if (!Number.isSafeInteger(row.rss_kib) || row.rss_kib < 0) throw Error(`${label} has invalid RSS`);
+  return row;
+}
+
+function canonicalExecutable(path) {
+  if (typeof path !== 'string' || path.length === 0) return path;
+  try { return existsSync(path) ? realpathSync(path) : path; } catch { return path; }
+}
+
+/**
+ * Parse one bounded process-table observation into stable process identities.
+ *
+ * Darwin accepts either tab-delimited normalized rows or the native
+ * `ps -axo pid=,ppid=,lstart=,rss=,comm=` representation. Windows accepts the
+ * compact JSON emitted by the PowerShell query in captureProcessIdentitySnapshot.
+ */
+export function parseProcessIdentitySnapshot(snapshot, platform = process.platform, { rootPid = null } = {}) {
+  if (typeof snapshot !== 'string' || Buffer.byteLength(snapshot) > 4 * 1024 * 1024) throw Error('Process snapshot must be bounded text');
+  if (platform === 'win32') {
+    let parsed;
+    try { parsed = JSON.parse(snapshot); } catch { throw Error('Invalid Windows process snapshot JSON'); }
+    const records = Array.isArray(parsed) ? parsed : parsed === null ? [] : [parsed];
+    if (records.length > 65_536) throw Error('Windows process snapshot row cap exceeded');
+    let selected = records;
+    if (rootPid !== null) {
+      const basic = records.map(record => ({ record, pid: Number(record.ProcessId), ppid: Number(record.ParentProcessId) }));
+      const included = new Set([rootPid]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const row of basic) if (Number.isSafeInteger(row.pid) && Number.isSafeInteger(row.ppid) && included.has(row.ppid) && !included.has(row.pid)) { included.add(row.pid); changed = true; }
+      }
+      selected = basic.filter(row => included.has(row.pid)).map(row => row.record);
+    }
+    return selected.map((record, index) => {
+      if (!Number.isSafeInteger(record.ProcessId) || !Number.isSafeInteger(record.ParentProcessId) || !Number.isFinite(record.WorkingSetSize)) throw Error(`Windows process row ${index} is incomplete`);
+      return validProcessRow({
+      pid: record.ProcessId,
+      ppid: record.ParentProcessId,
+      process_start_time: typeof record.CreationDate === 'string' ? record.CreationDate : '',
+      canonical_executable: canonicalExecutable(record.ExecutablePath),
+      rss_kib: Math.ceil(record.WorkingSetSize / 1024),
+    }, `Windows process row ${index}`);
+    });
+  }
+  if (platform !== 'darwin') throw Error(`Identity-aware process sampling does not support platform ${platform}`);
+  const lines = snapshot.split('\n').filter(line => line.trim() !== '');
+  if (lines.length > 65_536) throw Error('macOS process snapshot row cap exceeded');
+  return lines.map((line, index) => {
+    let pid, ppid, started, rss, executable;
+    if (line.includes('\t')) {
+      [pid, ppid, started, rss, ...executable] = line.split('\t');
+      executable = executable.join('\t');
+    } else {
+      const matched = line.match(/^\s*(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\d+)\s+(.+)$/);
+      if (!matched) throw Error(`Invalid macOS process row ${index}`);
+      [, pid, ppid, started, rss, executable] = matched;
+      const time = Date.parse(started);
+      if (!Number.isFinite(time)) throw Error(`macOS process row ${index} has invalid start time`);
+      started = new Date(time).toISOString();
+    }
+    return validProcessRow({
+      pid: Number(pid),
+      ppid: Number(ppid),
+      process_start_time: started,
+      canonical_executable: canonicalExecutable(executable),
+      rss_kib: Number(rss),
+    }, `macOS process row ${index}`);
+  });
+}
+
+export function processTreeRssFromIdentitySnapshot(rows, rootPid) {
+  const ids = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) if (ids.has(row.ppid) && !ids.has(row.pid)) { ids.add(row.pid); changed = true; }
+  }
+  const matched = rows.filter(row => ids.has(row.pid));
+  if (!matched.some(row => row.pid === rootPid)) return null;
+  return { rssKiB: matched.reduce((sum, row) => sum + row.rss_kib, 0), children: Math.max(0, matched.length - 1) };
+}
+
+export function captureProcessIdentitySnapshot(platform = process.platform) {
+  if (platform === 'darwin') {
+    return execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,rss=,comm='], { encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024 });
+  }
+  if (platform === 'win32') {
+    const query = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize | ConvertTo-Json -Compress';
+    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', timeout: 2000, maxBuffer: 4 * 1024 * 1024 });
+  }
+  throw Error(`Identity-aware process sampling does not support platform ${platform}`);
+}
+
+/** Preserve PID reuse and process churn instead of folding observations by PID. */
+export function createIdentityAwareProcessSeries({ rootPid, platform = process.platform, maxIdentities = 16, maxSnapshots = 2002 } = {}) {
+  if (!Number.isSafeInteger(rootPid) || rootPid < 1) throw Error('Process-series root PID must be positive');
+  if (!Number.isSafeInteger(maxIdentities) || maxIdentities < 1 || maxIdentities > 16) throw Error('Invalid process identity cap');
+  if (!Number.isSafeInteger(maxSnapshots) || maxSnapshots < 1 || maxSnapshots > 2002) throw Error('Invalid process snapshot cap');
+  const identities = [];
+  const identityIndexes = new Map();
+  const snapshots = [];
+  const pidKeys = new Map();
+  let previousKeys = new Set();
+  let missedReads = 0;
+  let scheduledReads = 0;
+  let processesExited = 0;
+  let pidReuseCount = 0;
+  let firstRootKey = null;
+  let rootIdentityDrift = false;
+  let lastElapsedUs = -1;
+  let finished = false;
+
+  const reserveObservation = elapsedUs => {
+    if (finished) throw Error('Process series is already finalized');
+    if (!Number.isSafeInteger(elapsedUs) || elapsedUs < 0 || elapsedUs <= lastElapsedUs) throw Error('Process snapshot time must be a strictly increasing nonnegative integer');
+    if (scheduledReads >= maxSnapshots) throw Error('Process snapshot cap exceeded');
+    scheduledReads += 1;
+    lastElapsedUs = elapsedUs;
+  };
+
+  const observe = (elapsedUs, snapshot) => {
+    reserveObservation(elapsedUs);
+    let rows;
+    try { rows = parseProcessIdentitySnapshot(snapshot, platform, { rootPid }); } catch {
+      missedReads += 1;
+      return false;
+    }
+    const byPid = new Map(rows.map(row => [row.pid, row]));
+    if (byPid.size !== rows.length || !byPid.has(rootPid)) { missedReads += 1; return false; }
+    const includedPids = new Set([rootPid]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) if (includedPids.has(row.ppid) && !includedPids.has(row.pid)) { includedPids.add(row.pid); changed = true; }
+    }
+    const selected = rows.filter(row => includedPids.has(row.pid)).sort((a, b) => a.pid - b.pid);
+    if (selected.some(row => row.rss_kib < 1)) { missedReads += 1; return false; }
+    const currentKeys = new Set();
+    const rssByProcess = [];
+    for (const row of selected) {
+      const key = processIdentityKey(row);
+      currentKeys.add(key);
+      const priorKey = pidKeys.get(row.pid);
+      if (priorKey !== undefined && priorKey !== key) pidReuseCount += 1;
+      pidKeys.set(row.pid, key);
+      let index = identityIndexes.get(key);
+      if (index === undefined) {
+        if (identities.length >= maxIdentities) throw Error('Process identity cap exceeded');
+        index = identities.length;
+        identityIndexes.set(key, index);
+        identities.push({ process_index: index, pid: row.pid, ppid: row.ppid, process_start_time: row.process_start_time, canonical_executable: row.canonical_executable });
+      }
+      rssByProcess.push([index, row.rss_kib]);
+      if (row.pid === rootPid) {
+        if (firstRootKey === null) firstRootKey = key;
+        else if (firstRootKey !== key) rootIdentityDrift = true;
+      }
+    }
+    for (const key of previousKeys) if (!currentKeys.has(key)) processesExited += 1;
+    previousKeys = currentKeys;
+    snapshots.push({ elapsed_us: elapsedUs, rss_by_process: rssByProcess });
+    return true;
+  };
+
+  const recordMiss = elapsedUs => {
+    reserveObservation(elapsedUs);
+    missedReads += 1;
+    return false;
+  };
+
+  const finish = () => {
+    finished = true;
+    return {
+      identities: identities.map(value => ({ ...value })),
+      snapshots: snapshots.map(value => ({ elapsed_us: value.elapsed_us, rss_by_process: value.rss_by_process.map(pair => [...pair]) })),
+      scheduled_reads: scheduledReads,
+      missed_reads: missedReads,
+      pid_reuse_count: pidReuseCount,
+      churn: { processes_started: identities.length, processes_exited: processesExited },
+      attribution_complete: snapshots.length > 0 && !rootIdentityDrift,
+      root_identity_drift: rootIdentityDrift,
+    };
+  };
+  return Object.freeze({ observe, recordMiss, finish });
 }
 
 export function stableStringify(value) {
@@ -58,7 +254,8 @@ export function validateCapturedIdentity(identity, label = 'identity') {
     if (field === 'sidecars' && (!available(descriptor.version) || descriptor.version === 'unavailable')) throw Error(`Invalid ${label} sidecar version`);
   }
   for (const field of ['node', 'rustc', 'cargo']) if (!available(identity.toolchain[field])) throw Error(`Invalid ${label} toolchain.${field}`);
-  for (const field of ['platform', 'arch', 'os', 'hardware_model', 'disk_available_bytes']) if (!available(identity.machine[field])) throw Error(`Invalid ${label} machine.${field}`);
+  for (const field of ['platform', 'arch', 'os', 'disk_available_bytes']) if (!available(identity.machine[field])) throw Error(`Invalid ${label} machine.${field}`);
+  if (identity.machine.platform === 'darwin' ? !available(identity.machine.hardware_model) : identity.machine.hardware_model !== null) throw Error(`Invalid ${label} machine.hardware_model`);
   for (const field of ['power_source', 'low_power_mode', 'thermal']) if (typeof identity.machine[field] !== 'string' || identity.machine[field] === '') throw Error(`Invalid ${label} machine.${field}`);
   return identity;
 }
@@ -180,6 +377,14 @@ function commandBuffer(command, args, options = {}) {
   }
 }
 
+function diskAvailableBytes(directory) {
+  try {
+    const facts = statfsSync(directory);
+    const bytes = facts.bavail * facts.bsize;
+    return Number.isSafeInteger(bytes) && bytes >= 0 ? String(bytes) : 'unavailable';
+  } catch { return 'unavailable'; }
+}
+
 export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsText, executables = {}, sidecars = {}, parameters = {}, environment = process.env }) {
   const gitOptions = { env: withoutGitRepositoryEnvironment(environment) };
   const head = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD'], gitOptions);
@@ -227,12 +432,12 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
     machine: {
       platform: process.platform,
       arch: process.arch,
-      os: commandValue('uname', ['-srv']),
-      hardware_model: process.platform === 'darwin' ? commandValue('/usr/sbin/sysctl', ['-n', 'hw.model']) : 'unavailable',
+      os: `${osVersion()} (${osRelease()})`,
+      hardware_model: process.platform === 'darwin' ? commandValue('/usr/sbin/sysctl', ['-n', 'hw.model']) : null,
       power_source: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'batt']) : 'unavailable',
       low_power_mode: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'custom']) : 'unavailable',
       thermal: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'therm']) : 'unavailable',
-      disk_available_bytes: commandValue('/bin/df', ['-k', cwd]),
+      disk_available_bytes: diskAvailableBytes(cwd),
     },
   };
 }

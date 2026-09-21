@@ -8,6 +8,7 @@ import {
   type ResponsivenessRecorder,
 } from "@/performance/responsiveness";
 import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
+import { consumeNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
@@ -336,6 +337,7 @@ export function persistDraftEntries(
     subjectId: "workspace_drafts",
   });
   try {
+    if (consumeNextDraftWriteFailure()) throw new Error("injected draft write failure");
     storage.setItem(DRAFT_STORAGE_KEY, encoded.raw);
   } catch {
     closeFailedPersistence(recorder, owner, writeSpan);
