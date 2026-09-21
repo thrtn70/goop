@@ -10,8 +10,10 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statfsSync,
   writeFileSync,
 } from 'node:fs';
+import { release as osRelease, version as osVersion } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -252,7 +254,8 @@ export function validateCapturedIdentity(identity, label = 'identity') {
     if (field === 'sidecars' && (!available(descriptor.version) || descriptor.version === 'unavailable')) throw Error(`Invalid ${label} sidecar version`);
   }
   for (const field of ['node', 'rustc', 'cargo']) if (!available(identity.toolchain[field])) throw Error(`Invalid ${label} toolchain.${field}`);
-  for (const field of ['platform', 'arch', 'os', 'hardware_model', 'disk_available_bytes']) if (!available(identity.machine[field])) throw Error(`Invalid ${label} machine.${field}`);
+  for (const field of ['platform', 'arch', 'os', 'disk_available_bytes']) if (!available(identity.machine[field])) throw Error(`Invalid ${label} machine.${field}`);
+  if (identity.machine.platform === 'darwin' ? !available(identity.machine.hardware_model) : identity.machine.hardware_model !== null) throw Error(`Invalid ${label} machine.hardware_model`);
   for (const field of ['power_source', 'low_power_mode', 'thermal']) if (typeof identity.machine[field] !== 'string' || identity.machine[field] === '') throw Error(`Invalid ${label} machine.${field}`);
   return identity;
 }
@@ -374,6 +377,14 @@ function commandBuffer(command, args, options = {}) {
   }
 }
 
+function diskAvailableBytes(directory) {
+  try {
+    const facts = statfsSync(directory);
+    const bytes = facts.bavail * facts.bsize;
+    return Number.isSafeInteger(bytes) && bytes >= 0 ? String(bytes) : 'unavailable';
+  } catch { return 'unavailable'; }
+}
+
 export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsText, executables = {}, sidecars = {}, parameters = {}, environment = process.env }) {
   const gitOptions = { env: withoutGitRepositoryEnvironment(environment) };
   const head = commandValue('git', ['-C', cwd, 'rev-parse', 'HEAD'], gitOptions);
@@ -421,12 +432,12 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
     machine: {
       platform: process.platform,
       arch: process.arch,
-      os: commandValue('uname', ['-srv']),
-      hardware_model: process.platform === 'darwin' ? commandValue('/usr/sbin/sysctl', ['-n', 'hw.model']) : 'unavailable',
+      os: `${osVersion()} (${osRelease()})`,
+      hardware_model: process.platform === 'darwin' ? commandValue('/usr/sbin/sysctl', ['-n', 'hw.model']) : null,
       power_source: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'batt']) : 'unavailable',
       low_power_mode: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'custom']) : 'unavailable',
       thermal: process.platform === 'darwin' ? commandValue('/usr/bin/pmset', ['-g', 'therm']) : 'unavailable',
-      disk_available_bytes: commandValue('/bin/df', ['-k', cwd]),
+      disk_available_bytes: diskAvailableBytes(cwd),
     },
   };
 }

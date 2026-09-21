@@ -1211,13 +1211,19 @@ export async function runNativePage({ plan, page, manifest, platform = process.p
     child.once('error', error => { spawnError = error.code ?? 'spawn_failed'; resolveClose(); });
     child.once('close', (code, signal) => { exitCode = code; exitSignal = signal; resolveClose(); });
   });
-  const signal = name => { try { process.kill(-child.pid, name); return true; } catch { return false; } };
+  const signal = name => {
+    try {
+      process.kill(process.platform === 'win32' ? child.pid : -child.pid, name);
+      return true;
+    } catch { return false; }
+  };
   const abort = () => { aborted = true; signal('SIGTERM'); };
   abortSignal?.addEventListener('abort', abort, { once: true });
   if (abortSignal?.aborted) abort();
-  const series = createIdentityAwareProcessSeries({ rootPid: child.pid, platform: 'darwin' });
+  const samplingPlatform = process.platform === 'win32' ? 'win32' : 'darwin';
+  const series = createIdentityAwareProcessSeries({ rootPid: child.pid, platform: samplingPlatform });
   const started = performance.now();
-  const sampler = createScheduledProcessSampler({ series, capture: () => captureProcessIdentitySnapshot('darwin') });
+  const sampler = createScheduledProcessSampler({ series, capture: () => captureProcessIdentitySnapshot(samplingPlatform) });
   let sampling = null, samplingStarted = false;
   const deadlineTimer = setTimeout(() => { timedOut = true; signal('SIGTERM'); }, page.timeout_ms);
   const budgetMonitor = setInterval(() => {

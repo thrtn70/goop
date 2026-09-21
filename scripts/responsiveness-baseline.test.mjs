@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -21,6 +20,7 @@ import {
   createIdentityAwareProcessSeries,
   parseProcessIdentitySnapshot,
   processTreeRssFromIdentitySnapshot,
+  validateCapturedIdentity,
 } from './performance-shared.mjs';
 import {
   MAX_SAMPLE_BYTES,
@@ -196,6 +196,18 @@ test('Windows sampling ignores incomplete unrelated rows but rejects incomplete 
 test('process parser rejects missing identity fields instead of inventing ownership', () => {
   assert.throws(() => parseProcessIdentitySnapshot('10\t1\t\t100\t/goop', 'darwin'), /start time/i);
   assert.throws(() => parseProcessIdentitySnapshot(JSON.stringify([{ ProcessId: 10, ParentProcessId: 1, CreationDate: null, ExecutablePath: 'C:\\goop.exe', WorkingSetSize: 1 }]), 'win32'), /start time/i);
+});
+
+test('captured machine identity permits honest Windows hardware unavailability', () => {
+  const identity = {
+    source: { head: 'a'.repeat(40), tree: 'b'.repeat(40), dirty_digest: digest('c'), dirty: false }, manifest_sha256: digest('d'), bindings_sha256: digest('e'),
+    executables: { app: { path: 'C:\\Goop\\goop.exe', sha256: digest('f') } }, sidecars: { runtime: { path: 'C:\\Goop\\ffmpeg.exe', sha256: digest('a'), bytes: 1, version: 'test' } }, parameters: { test: true },
+    toolchain: { node: 'test', rustc: 'test', cargo: 'test' }, machine: { platform: 'win32', arch: 'x64', os: 'Windows test', hardware_model: null, power_source: 'unavailable', low_power_mode: 'unavailable', thermal: 'unavailable', disk_available_bytes: '1024' },
+  };
+  assert.equal(validateCapturedIdentity(identity), identity);
+  assert.throws(() => validateCapturedIdentity({ ...identity, machine: { ...identity.machine, hardware_model: 'invented-model' } }), /hardware_model/i);
+  assert.throws(() => validateCapturedIdentity({ ...identity, machine: { ...identity.machine, platform: 'darwin' } }), /hardware_model/i);
+  assert.throws(() => validateCapturedIdentity({ ...identity, machine: { ...identity.machine, disk_available_bytes: 'unavailable' } }), /disk_available_bytes/i);
 });
 
 test('identity-aware series preserves churn and treats PID reuse as a new process', () => {
@@ -569,9 +581,9 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     component.frontend_trace.failure = { code: 'observer_init', phase: 'observer', count: 1 };
     component.frontend_trace.settled = false;
     const template = join(root, 'component.json'); writeFileSync(template, JSON.stringify(component));
-    const binary = join(root, 'fake-app');
-    writeFileSync(binary, `#!/usr/bin/env node\nconst fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;fs.writeFileSync(path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,'frontend-'+value.component_role+'-'+value.page_instance_id+'.json'),JSON.stringify(value),{flag:'wx'});setInterval(()=>{},1000);\n`);
-    chmodSync(binary, 0o700);
+    const binary = process.execPath;
+    const fakeApp = join(root, 'fake-app.cjs');
+    writeFileSync(fakeApp, `const fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;fs.writeFileSync(path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,'frontend-'+value.component_role+'-'+value.page_instance_id+'.json'),JSON.stringify(value),{flag:'wx'});setInterval(()=>{},1000);\n`);
     const manifest = {
       schema_version: 2, token: 'pre-ready-token', ...activationFields(),
       descriptor: { componentRole: 'primary', sessionId: component.session_id, sampleId: component.sample_id, pageInstanceId: component.page_instance_id, lane: 'inspection', scenario: { id: component.scenario?.id ?? component.frontend_trace.scenario.id, manifestSha256: component.frontend_trace.scenario.manifest_sha256 }, workload: component.frontend_trace.workload, phase: 'measured', repetition: 0 },
@@ -581,7 +593,7 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
     const result = await runNativePage({
       plan: { binary, app_name: 'Goop', app_data_directory: profile, component_directory: report, limits: { log_limit_bytes: 4096, storage_budget_bytes: 1024 * 1024 } },
-      page: { manifest_path: manifestPath, argv: [template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 3000 },
+      page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 3000 },
       manifest, platform: 'darwin',
     });
     assert.equal(result.page_component.frontend_trace.failure.code, 'observer_init');
