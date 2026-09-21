@@ -9,7 +9,7 @@ import type { PreviewRequest, PreviewResult, ProbeResult, Settings, Preset } fro
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease, responsiveness } = vi.hoisted(() => ({
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
@@ -33,6 +33,25 @@ const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPla
   })),
   mockPreviewCancel: vi.fn().mockResolvedValue(undefined),
   mockPreviewRelease: vi.fn().mockResolvedValue(undefined),
+  responsiveness: {
+    expects: vi.fn<(_candidate: { targetRole: string; accessibleName: string; eventType: string }) => boolean>(() => false),
+    claim: vi.fn<(_candidate: { targetRole: string; accessibleName: string; eventType: string; trusted: boolean; priorValue: string }) => number | null>(() => null),
+    start: vi.fn(),
+    end: vi.fn(),
+    visible: vi.fn(),
+    cancel: vi.fn(),
+    workloadCount: vi.fn<(_name: string) => number | null>(() => null),
+  },
+}));
+
+vi.mock("@/performance/responsivenessRuntime", () => ({
+  expectsResponsivenessAction: responsiveness.expects,
+  claimResponsivenessAction: responsiveness.claim,
+  recordResponsivenessHandlerStart: responsiveness.start,
+  recordResponsivenessHandlerEnd: responsiveness.end,
+  acknowledgeResponsivenessVisible: responsiveness.visible,
+  cancelResponsivenessAction: responsiveness.cancel,
+  responsivenessWorkloadCount: responsiveness.workloadCount,
 }));
 
 vi.mock("@/ipc/commands", () => ({
@@ -371,6 +390,9 @@ describe("ConvertPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    responsiveness.expects.mockReturnValue(false);
+    responsiveness.claim.mockReturnValue(null);
+    responsiveness.workloadCount.mockReturnValue(null);
     mockPreviewEligibility.mockResolvedValue({available:true,reason:null});
     mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]);
     mockSave.mockResolvedValue("/tmp/out.mp4");
@@ -395,6 +417,83 @@ describe("ConvertPage", () => {
     });
 
     expect(mockProbe).toHaveBeenCalledWith("/tmp/test-video.mp4");
+  });
+
+  it("acknowledges selected and removed source state only after the committed render", async () => {
+    mockOpen.mockResolvedValue(["/tmp/first.mp4", "/tmp/second.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    responsiveness.expects.mockImplementation(({ accessibleName }) => /^(Select|Remove) /.test(accessibleName));
+    responsiveness.claim.mockReturnValueOnce(11).mockReturnValueOnce(12);
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    const selectSecond = await screen.findByRole("button", { name: "Select second.mp4" });
+    expect(selectSecond.getAttribute("data-responsiveness-target")).toBeNull();
+    expect(selectSecond.getAttribute("data-responsiveness-role")).toBe("button");
+    expect(selectSecond.getAttribute("data-responsiveness-name")).toBe("Select second.mp4");
+    await userEvent.click(selectSecond);
+    await waitFor(() => expect(responsiveness.visible).toHaveBeenCalledWith(11));
+    expect(screen.getByRole("button", { name: "Select second.mp4" }).getAttribute("aria-pressed")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove second.mp4" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Select second.mp4" })).toBeNull());
+    expect(responsiveness.visible).toHaveBeenCalledWith(12);
+    expect(responsiveness.start).toHaveBeenCalledTimes(2);
+    expect(responsiveness.end).toHaveBeenCalledTimes(2);
+    expect(responsiveness.claim.mock.calls).toEqual([
+      [expect.objectContaining({ accessibleName: "Select second.mp4", targetRole: "button", eventType: "click" })],
+      [expect.objectContaining({ accessibleName: "Remove second.mp4", targetRole: "button", eventType: "click" })],
+    ]);
+    expect(responsiveness.claim.mock.calls.every(([claim]) => !("targetId" in claim))).toBe(true);
+  });
+
+  it("acknowledges an already-selected first source without an instrumentation render", async () => {
+    mockOpen.mockResolvedValue(["/tmp/first.mp4", "/tmp/second.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    const first = await screen.findByRole("button", { name: "Select first.mp4" });
+    expect(first.getAttribute("aria-pressed")).toBe("true");
+
+    responsiveness.expects.mockReturnValue(true);
+    responsiveness.claim.mockReturnValueOnce(13).mockReturnValueOnce(14);
+    await userEvent.click(first);
+    await userEvent.click(first);
+
+    expect(responsiveness.start.mock.calls).toEqual([[13], [14]]);
+    expect(responsiveness.end.mock.calls).toEqual([[13], [14]]);
+    expect(responsiveness.visible.mock.calls).toEqual([[13], [14]]);
+    expect(first.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("acknowledges Add files only after the manifest source count is committed", async () => {
+    mockOpen.mockResolvedValue(["/tmp/first.mp4", "/tmp/second.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    responsiveness.expects.mockReturnValue(true);
+    responsiveness.claim.mockReturnValue(14);
+    responsiveness.workloadCount.mockImplementation((name) => name === "fixture_count" ? 2 : null);
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+
+    await screen.findByRole("button", { name: "Select second.mp4" });
+    expect(responsiveness.workloadCount).toHaveBeenCalledExactlyOnceWith("fixture_count");
+    expect(responsiveness.start).toHaveBeenCalledExactlyOnceWith(14);
+    expect(responsiveness.end).toHaveBeenCalledExactlyOnceWith(14);
+    await waitFor(() => expect(responsiveness.visible).toHaveBeenCalledExactlyOnceWith(14));
+  });
+
+  it("cancels a measured Add files action if the page unmounts before file-count visibility", async () => {
+    mockOpen.mockReturnValue(new Promise(() => {}));
+    responsiveness.expects.mockReturnValue(true);
+    responsiveness.claim.mockReturnValue(15);
+    responsiveness.workloadCount.mockImplementation((name) => name === "fixture_count" ? 2 : null);
+    const page = renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    page.unmount();
+
+    expect(responsiveness.cancel).toHaveBeenCalledExactlyOnceWith(15);
   });
 
   it("shows probe metadata after resolution", async () => {

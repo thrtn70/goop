@@ -1,10 +1,23 @@
 import { File, X } from "lucide-react";
 import type { ProbeState } from "@/hooks/useProbe";
+import {
+  claimResponsivenessAction,
+  expectsResponsivenessAction,
+  recordResponsivenessHandlerEnd,
+  recordResponsivenessHandlerStart,
+} from "@/performance/responsivenessRuntime";
+
+export type SourceRowResponsivenessAction = {
+  actionId: number;
+  kind: "select" | "remove";
+  sourceId: string;
+};
 export function sourceName(path: string) {
   return path.replace(/\\/g, "/").split("/").pop() || path;
 }
 export default function SourceRow({
   path,
+  sourceId,
   selected,
   state,
   problem,
@@ -12,8 +25,10 @@ export default function SourceRow({
   onSelect,
   onRemove,
   onRetry,
+  onResponsivenessAction,
 }: {
   path: string;
+  sourceId?: string;
   selected: boolean;
   state: ProbeState;
   problem: string | null;
@@ -21,6 +36,7 @@ export default function SourceRow({
   onSelect: () => void;
   onRemove: () => void;
   onRetry: () => void;
+  onResponsivenessAction?: (action: SourceRowResponsivenessAction) => void;
 }) {
   const p = state.phase === "ready" ? state.probe : null;
   const metadata = p
@@ -34,6 +50,32 @@ export default function SourceRow({
         .filter(Boolean)
         .join(" · ")
     : null;
+  const runAction = (
+    kind: SourceRowResponsivenessAction["kind"],
+    trusted: boolean,
+    handler: () => void,
+  ) => {
+    const name = sourceName(path);
+    const accessibleName = `${kind === "select" ? "Select" : "Remove"} ${name}`;
+    const actionId = sourceId && expectsResponsivenessAction({ eventType: "click", targetRole: "button", accessibleName })
+      ? claimResponsivenessAction({
+          eventType: "click",
+          targetRole: "button",
+          accessibleName,
+          trusted,
+          priorValue: kind === "select" ? String(selected) : "present",
+        })
+      : null;
+    if (actionId !== null) recordResponsivenessHandlerStart(actionId);
+    try {
+      handler();
+    } finally {
+      if (actionId !== null) {
+        recordResponsivenessHandlerEnd(actionId);
+        onResponsivenessAction?.({ actionId, kind, sourceId: sourceId! });
+      }
+    }
+  };
   return (
     <li
       className={`border-b border-subtle px-3 py-3 ${selected ? "bg-accent-subtle" : "hover:bg-surface-1"}`}
@@ -43,7 +85,9 @@ export default function SourceRow({
           type="button"
           aria-label={`Select ${sourceName(path)}`}
           aria-pressed={selected}
-          onClick={onSelect}
+          data-responsiveness-role={sourceId ? "button" : undefined}
+          data-responsiveness-name={sourceId ? `Select ${sourceName(path)}` : undefined}
+          onClick={(event) => runAction("select", event.nativeEvent.isTrusted, onSelect)}
           className="flex min-w-0 flex-1 items-center gap-3 rounded text-left focus-visible:outline-accent"
         >
           <File
@@ -69,7 +113,9 @@ export default function SourceRow({
         <button
           type="button"
           aria-label={`Remove ${sourceName(path)}`}
-          onClick={onRemove}
+          data-responsiveness-role={sourceId ? "button" : undefined}
+          data-responsiveness-name={sourceId ? `Remove ${sourceName(path)}` : undefined}
+          onClick={(event) => runAction("remove", event.nativeEvent.isTrusted, onRemove)}
           className="rounded p-2 text-fg-secondary hover:text-error"
         >
           <X size={16} aria-hidden="true" />

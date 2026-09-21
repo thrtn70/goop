@@ -84,6 +84,14 @@ test("audit runs the PERF-01 synthetic harness smoke on both supported platforms
   );
 });
 
+test("audit runs portable PERF-02 contract tests on both supported platforms", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const step = namedStep(smoke, "PERF-02 portable responsiveness contracts");
+  assert.doesNotMatch(step, /^\s*if:/m);
+  assert.match(step, /shell: bash/);
+  assert.match(step, /node --test scripts\/responsiveness-baseline\.test\.mjs/);
+});
+
 test("Linux audit compiles and tests PERF-01 drivers without executing unavailable sidecars", () => {
   const rust = auditJob("rust");
   assert.match(rust, /cargo test -p goop-converter --example performance_workload --all-features/);

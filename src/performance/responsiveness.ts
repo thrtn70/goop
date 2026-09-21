@@ -194,11 +194,14 @@ export type ResponsivenessRecorder = {
   markStateVisible: (actionId: number) => void;
   settleAction: (actionId: number) => void;
   cancelAction: (actionId: number) => void;
-  settleActionAfterDoubleFrame: (actionId: number) => void;
+  settleActionAfterDoubleFrame: (actionId: number, onSettled?: () => void) => void;
   startSpan: (span: StartSpan) => number | null;
   endSpan: (spanId: number) => void;
   cancelSpan: (spanId: number, terminalCauseActionId?: number) => void;
   recordEvent: (event: RecordEvent) => void;
+  invalidate: (phase: RecorderFailurePhase) => void;
+  onFailure: (callback: () => void) => () => void;
+  hasOpenWork: () => boolean;
   snapshot: () => FrontendTraceV2 | null;
   finalize: () => FrontendTraceV2 | null;
   teardown: () => void;
@@ -311,6 +314,9 @@ export const NOOP_RESPONSIVENESS_RECORDER: ResponsivenessRecorder = Object.freez
   endSpan: noop,
   cancelSpan: noop,
   recordEvent: noop,
+  invalidate: noop,
+  onFailure: () => noop,
+  hasOpenWork: () => false,
   snapshot: () => null,
   finalize: () => null,
   teardown: noop,
@@ -344,6 +350,7 @@ export function createResponsivenessRecorder(
   const handlerEndedActions = new Set<number>();
   const doubleRafActions = new Set<number>();
   const observers: { disconnect: () => void }[] = [];
+  const failureListeners = new Set<() => void>();
   const pendingFrames = new Set<number>();
   const actionFrames = new Map<number, Set<number>>();
   const limitations: BrowserLimitationCode[] = [];
@@ -402,9 +409,15 @@ export function createResponsivenessRecorder(
   }
 
   function fail(code: RecorderFailureCode, phase: RecorderFailurePhase): void {
-    if (failure === null) failure = { code, phase, count: 1 };
+    const firstFailure = failure === null;
+    if (firstFailure) failure = { code, phase, count: 1 };
     inert = true;
     disconnect();
+    if (firstFailure) {
+      for (const callback of failureListeners) {
+        try { callback(); } catch { /* diagnostic callbacks cannot escape */ }
+      }
+    }
   }
 
   function boundary<T>(
@@ -842,7 +855,7 @@ export function createResponsivenessRecorder(
       }
       actionFrames.delete(actionId);
     }),
-    settleActionAfterDoubleFrame: (actionId) => boundary(undefined, "frame_schedule", "frame", () => {
+    settleActionAfterDoubleFrame: (actionId, onSettled) => boundary(undefined, "frame_schedule", "frame", () => {
       const action = findAction(actionId);
       if (action.state !== "active") throw new Error("action cannot await frame");
       if (!visibleActions.has(actionId)) throw new Error("action state not visible");
@@ -869,6 +882,7 @@ export function createResponsivenessRecorder(
           actionExpectations.delete(actionId);
           lastSampleFrameUs = timestamp;
           scheduleRafSample();
+          onSettled?.();
         }, actionId);
       }, actionId);
     }),
@@ -931,6 +945,13 @@ export function createResponsivenessRecorder(
       }
       appendEvent(event);
     }),
+    invalidate: (phase) => fail("state_transition", phase),
+    onFailure: (callback) => {
+      failureListeners.add(callback);
+      return () => { failureListeners.delete(callback); };
+    },
+    hasOpenWork: () => actions.some((action) => action.state === "armed" || action.state === "active")
+      || setups.some((setup) => setup.state === "active") || openSpans.size > 0,
     snapshot: () => makeTrace(scenarioSettled && failure === null),
     finalize: () => {
       if (finalized !== null) return finalized;
@@ -1168,6 +1189,13 @@ function sanitizeDescriptor(
   } catch {
     return { valid: false, value: fallback };
   }
+}
+
+export function isValidResponsivenessDescriptor(
+  descriptor: unknown,
+  environment: RecorderEnvironment,
+): descriptor is ResponsivenessDescriptor {
+  return sanitizeDescriptor(descriptor as ResponsivenessDescriptor, environment).valid;
 }
 
 export type PageRecorderRegistry = {

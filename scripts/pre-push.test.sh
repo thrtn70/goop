@@ -69,6 +69,11 @@ if ! grep -Fqx "node --test scripts/desktop-preview.test.mjs" "$stub_log"; then
   cat "$stub_log"
   exit 1
 fi
+if ! grep -Fqx "node --test scripts/responsiveness-baseline.test.mjs" "$stub_log"; then
+  echo "FAIL: pre-push.sh did not run the portable PERF-02 contract checks"
+  cat "$stub_log"
+  exit 1
+fi
 if ! grep -Fqx "cargo clippy -p goop-converter --all-targets --no-default-features -- -D warnings" "$stub_log"; then
   echo "FAIL: pre-push.sh did not lint the feature-off converter"
   cat "$stub_log"

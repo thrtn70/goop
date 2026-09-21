@@ -15,7 +15,7 @@ import RecognizeChip from "@/features/recognize/RecognizeChip";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import WorkspaceList from "@/components/workspace/WorkspaceList";
-import SourceRow, { sourceName } from "@/features/workspace/SourceRow";
+import SourceRow, { sourceName, type SourceRowResponsivenessAction } from "@/features/workspace/SourceRow";
 import {
   newIdentity,
   reconcileSubmitted,
@@ -27,7 +27,7 @@ import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -69,6 +69,15 @@ import { useAppStore } from "@/store/appStore";
 import type { ImageColorPolicy, MetadataPolicy, Preset, TargetFormat } from "@/types";
 import { metadataPolicyProblem } from "@/features/metadata/MetadataPolicyControl";
 import { imageColorPolicyProblem } from "@/features/metadata/ImageColorPolicyControl";
+import {
+  acknowledgeResponsivenessVisible,
+  cancelResponsivenessAction,
+  claimResponsivenessAction,
+  expectsResponsivenessAction,
+  recordResponsivenessHandlerEnd,
+  recordResponsivenessHandlerStart,
+  responsivenessWorkloadCount,
+} from "@/performance/responsivenessRuntime";
 
 function dirname(p: string): string {
   const normalized = p.replace(/\\/g, "/");
@@ -95,6 +104,8 @@ function ConvertPage() {
     "ConvertPage.selectedId",
     null,
   );
+  const pendingResponsivenessAction = useRef<SourceRowResponsivenessAction | null>(null);
+  const pendingBrowseAction = useRef<{ actionId: number; expectedCount: number } | null>(null);
   const { byId, retry } = useSourceInspections(files);
   const draftEntries = useWorkspaceDraftEntries();
   const [applicationError, setApplicationError] = useState<string | null>(null);
@@ -220,6 +231,28 @@ function ConvertPage() {
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
   const selectedVideo = videoFiles.find(file => file.id === selected?.id);
+  useEffect(() => {
+    const pending = pendingResponsivenessAction.current;
+    if (!pending) return;
+    const visible = pending.kind === "select"
+      ? selected?.id === pending.sourceId
+      : !files.some((file) => file.id === pending.sourceId);
+    if (!visible) return;
+    pendingResponsivenessAction.current = null;
+    acknowledgeResponsivenessVisible(pending.actionId);
+  }, [files, selected?.id]);
+  useEffect(() => () => {
+    const pending = pendingResponsivenessAction.current;
+    if (pending) cancelResponsivenessAction(pending.actionId);
+    const browse = pendingBrowseAction.current;
+    if (browse) cancelResponsivenessAction(browse.actionId);
+  }, []);
+  useEffect(() => {
+    const pending = pendingBrowseAction.current;
+    if (!pending || files.length + pdfs.length !== pending.expectedCount) return;
+    pendingBrowseAction.current = null;
+    acknowledgeResponsivenessVisible(pending.actionId);
+  }, [files.length, pdfs.length]);
   const planEntries = videoFiles.flatMap(file => {
     const videoTrackEnabled = file.videoTrackOptionsEnabled === true || file.trackOptions?.kind === "video" || file.pendingTrackPolicy?.kind === "video";
     if (!file.id || !file.videoOptions || !file.optionsReady || videoOptionsError(file) || (videoTrackEnabled && videoTrackOptionsProblem({ options: file.trackOptions, settings: file.videoTrackSettings, mode: file.videoOptions.kind === "copy" ? "copy" : "custom", unavailableReason: file.trackSourceUnavailableReason, pendingPolicy: file.pendingTrackPolicy }))) return [];
@@ -592,6 +625,31 @@ function ConvertPage() {
     }
   }, [addPaths]);
 
+  const handleMeasuredBrowse = useCallback(async (trusted: boolean) => {
+    const actionId = expectsResponsivenessAction({ eventType: "click", targetRole: "button", accessibleName: "Add files" })
+      ? claimResponsivenessAction({
+          eventType: "click", targetRole: "button", accessibleName: "Add files",
+          trusted, priorValue: String(files.length + pdfs.length),
+        })
+      : null;
+    if (actionId === null) { await handleBrowse(); return; }
+    const expectedCount = responsivenessWorkloadCount("fixture_count");
+    if (expectedCount === null) {
+      cancelResponsivenessAction(actionId);
+      await handleBrowse();
+      return;
+    }
+    pendingBrowseAction.current = { actionId, expectedCount };
+    recordResponsivenessHandlerStart(actionId);
+    let browse: Promise<void>;
+    try {
+      browse = handleBrowse();
+    } finally {
+      recordResponsivenessHandlerEnd(actionId);
+    }
+    await browse;
+  }, [files.length, handleBrowse, pdfs.length]);
+
   // Phase H: Cmd+O increments `pendingFilePicker`. Only fire when this
   // page is the active route — the location guard prevents both Convert
   // and Compress from triggering simultaneously if a future animated
@@ -641,7 +699,9 @@ function ConvertPage() {
       toolbar={
         <button
           type="button"
-          onClick={() => void handleBrowse()}
+          data-responsiveness-role="button"
+          data-responsiveness-name="Add files"
+          onClick={(event) => void handleMeasuredBrowse(event.nativeEvent.isTrusted)}
           className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg"
         >
           Add files
@@ -750,6 +810,7 @@ function ConvertPage() {
             <SourceRow
               key={f.id ?? f.path}
               path={f.path}
+              sourceId={f.id ?? "missing-source-id"}
               selected={f.id === selected?.id}
               state={byId[f.id ?? ""] ?? PROBING}
               problem={problems[i] ?? planProblem(plannedFiles[i])}
@@ -757,6 +818,13 @@ function ConvertPage() {
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}
               onRetry={() => f.id && retry(f.id)}
+              onResponsivenessAction={(action) => {
+                pendingResponsivenessAction.current = action;
+                if (action.kind === "select" && selected?.id === action.sourceId) {
+                  pendingResponsivenessAction.current = null;
+                  acknowledgeResponsivenessVisible(action.actionId);
+                }
+              }}
             />
           ))}
         </ul>
