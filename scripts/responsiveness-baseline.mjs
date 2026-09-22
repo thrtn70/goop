@@ -411,14 +411,36 @@ function countDraftSeedEntries(raw) {
   if (decoded.version !== 1 || !plainObject(decoded.entries)) throw Error('Draft seed bootstrap must use the v1 entries envelope');
   const entries = Object.entries(decoded.entries);
   if (entries.length > 500) throw Error('Draft seed bootstrap exceeds 500 entries');
+  if (entries.length < 500) {
+    entries.forEach(([key, entry], index) => {
+      let route;
+      try { route = JSON.parse(key); } catch { throw Error(`Draft seed entry ${index} has an invalid route key`); }
+      if (!Array.isArray(route) || route.length !== 3 || route[0] !== 'convert' || typeof route[1] !== 'string' || !/^seed-[0-9]+$/.test(route[1]) || route[2] !== 'TopBar.url' || route.some(part => byteLength(part) > 4096) || !plainObject(entry)) throw Error(`Draft seed entry ${index} is invalid`);
+      exactKeys(entry, ['value'], `draft seed entry ${index}`);
+      if (typeof entry.value !== 'string' || entry.value.length > 65_536) throw Error(`Draft seed entry ${index} has an invalid value`);
+    });
+    return entries.length;
+  }
+  const expected = Object.fromEntries([
+    ...Array.from({ length: 495 }, (_, index) => [JSON.stringify(['convert', `seed-${index}`, 'TopBar.url']), `seed-value-${index}`]),
+    [JSON.stringify(['extract', 'TopBar.url']), ''],
+    [JSON.stringify(['convert', 'ConvertPage.files']), []],
+    [JSON.stringify(['convert', 'ConvertPage.pdfs']), []],
+    [JSON.stringify(['convert', 'ConvertPage.selectedId']), null],
+    [JSON.stringify(['convert', 'ConvertActionBar.overrideDir']), null],
+  ]);
   entries.forEach(([key, entry], index) => {
-    let route;
-    try { route = JSON.parse(key); } catch { throw Error(`Draft seed entry ${index} has an invalid route key`); }
-    if (!Array.isArray(route) || route.length !== 3 || route[0] !== 'convert' || typeof route[1] !== 'string' || !/^seed-[0-9]+$/.test(route[1]) || route[2] !== 'TopBar.url' || route.some(part => byteLength(part) > 4096) || !plainObject(entry)) throw Error(`Draft seed entry ${index} is invalid`);
+    if (!Object.hasOwn(expected, key) || !plainObject(entry)) throw Error(`Draft seed entry ${index} is invalid`);
     exactKeys(entry, ['value'], `draft seed entry ${index}`);
-    if (typeof entry.value !== 'string' || entry.value.length > 65_536) throw Error(`Draft seed entry ${index} has an invalid value`);
+    if (canonicalizeJcs(entry.value) !== canonicalizeJcs(expected[key])) throw Error(`Draft seed entry ${index} has an invalid value`);
   });
   return entries.length;
+}
+
+function expectedFinalDraftRaw(seedRaw, value) {
+  const seed = JSON.parse(seedRaw);
+  seed.entries[JSON.stringify(['extract', 'TopBar.url'])] = { value };
+  return JSON.stringify(seed);
 }
 
 /** Replace declared dynamic summaries with facts derived from validated native evidence. */
@@ -1768,7 +1790,7 @@ function validateRunPlan(plan) {
   const recorderMode = pages[0].manifest.recorderMode;
   if (pages.some(page => page.manifest.recorderMode !== recorderMode)) throw Error('Native pages must use one responsiveness recorder mode');
   const roles = pages.map(page => page.manifest.descriptor.componentRole);
-  const expectedRoles = recorderMode === 'control' ? ['pre_quit'] : first.lane === 'draft' ? ['pre_quit', 'recovery'] : ['primary'];
+  const expectedRoles = first.lane === 'draft' ? ['pre_quit', 'recovery'] : ['primary'];
   if (canonicalizeJcs(roles) !== canonicalizeJcs(expectedRoles)) throw Error('Native page role/cardinality mismatch');
   if (recorderMode === 'control' && first.lane !== 'draft') throw Error('Instrumentation control supports only the 500-entry draft workload');
   if (first.lane === 'draft') {
@@ -1778,6 +1800,11 @@ function validateRunPlan(plan) {
       if (first.workload.facts.seeded_entries !== 500) throw Error('Instrumentation control requires the 500-entry draft workload');
       if (countDraftSeedEntries(preQuit.manifest.bootstrap.draftStorage.raw) !== 500) throw Error('Instrumentation control seeded entry count must match the 500-entry draft workload');
       validateDraftActions(preQuit.actions, first.workload.facts, 'https://x.test/a.mp4');
+      const recovery = pages[1];
+      const completion = recovery.manifest.completion;
+      if (recovery.recovery_target.role !== 'textbox' || recovery.recovery_target.label !== 'Paste URL to download'
+        || recovery.manifest.bootstrap.draftStorage !== null || completion.expectedAxValue !== 'https://x.test/a.mp4'
+        || completion.expectedDraftSha256 !== createHash('sha256').update(expectedFinalDraftRaw(preQuit.manifest.bootstrap.draftStorage.raw, completion.expectedAxValue)).digest('hex')) throw Error('Instrumentation control recovery does not match the canonical persisted draft');
     } else {
       const recovery = pages[1];
       validateDraftActions(preQuit.actions, first.workload.facts, recovery.manifest.completion.expectedAxValue);
@@ -1829,10 +1856,12 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
     pageResults.forEach((result, index) => {
       if (!plainObject(result) || !plainObject(result.cleanup) || typeof result.cleanup.complete !== 'boolean') throw Error('Invalid native page result');
       if (controlMode) {
-        if (result.page_component !== null || result.recovery_evidence !== null) throw Error('Instrumentation control must not emit frontend or recovery evidence');
+        const recovery = plan.pages[index].manifest.descriptor.componentRole === 'recovery';
+        if (result.page_component !== null || (!recovery && result.recovery_evidence !== null)) throw Error('Instrumentation control must not emit frontend or unexpected recovery evidence');
         validateDriverObservations(result.driver_observations, plan.pages[index].actions);
-        const duration = externalAxWorkloadDurationUs(result.driver_observations, plan.pages[index].actions.length);
+        const duration = recovery ? null : externalAxWorkloadDurationUs(result.driver_observations, plan.pages[index].actions.length);
         if (result.external_ax_duration_us !== duration) throw Error('Instrumentation control duration does not match complete driver evidence');
+        if (recovery && result.recovery_evidence?.ax_value !== plan.pages[index].manifest.completion.expectedAxValue) throw Error('Instrumentation control persisted URL recovery failed');
         if (result.process_series !== null) validateProcessSeries(result.process_series);
         return;
       }
@@ -1866,9 +1895,10 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
   validateCleanupReceipt(cleanupReceipt, { sessionId: firstManifest.descriptor.sessionId, webviewDataStoreId: firstManifest.webviewDataStoreId });
   if (controlMode) {
     const pageResult = pageResults[0];
+    const recoveryResult = pageResults[1];
     let cleanup = { complete: true, removed_paths: 0, error_code: null };
     let outcome = { kind: 'success' };
-    if (pageResult.cleanup.complete !== true) {
+    if (pageResults.some(result => result.cleanup.complete !== true)) {
       cleanup = { ...cleanup, complete: false, error_code: 'process_cleanup_failed' };
       outcome = { kind: 'failed', code: 'cleanup_failed' };
     }
@@ -1886,8 +1916,10 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
     if (canonicalizeJcs(identityAfter) !== canonicalizeJcs(identityBefore)) outcome = { kind: 'failed', code: 'identity_mismatch' };
     const sessionIdentity = { session_id: firstManifest.descriptor.sessionId, sample_id: firstManifest.descriptor.sampleId };
     writeComponentExclusive(incompleteDirectory, 'identity.json', { schema_version: 2, component_kind: 'identity', ...sessionIdentity, before: identityBefore, after: identityAfter });
-    writeComponentExclusive(incompleteDirectory, 'driver.json', { schema_version: 2, component_kind: 'driver_observations', ...sessionIdentity, pages: [{ page_instance_id: firstManifest.descriptor.pageInstanceId, observations: pageResult.driver_observations }] });
-    writeComponentExclusive(incompleteDirectory, 'process-series.json', { schema_version: 2, component_kind: 'process_series', ...sessionIdentity, pages: [{ page_instance_id: firstManifest.descriptor.pageInstanceId, series: pageResult.process_series }] });
+    writeComponentExclusive(incompleteDirectory, 'driver.json', { schema_version: 2, component_kind: 'driver_observations', ...sessionIdentity, pages: pageResults.map((result, index) => ({ page_instance_id: plan.pages[index].manifest.descriptor.pageInstanceId, observations: result.driver_observations })) });
+    writeComponentExclusive(incompleteDirectory, 'process-series.json', { schema_version: 2, component_kind: 'process_series', ...sessionIdentity, pages: pageResults.map((result, index) => ({ page_instance_id: plan.pages[index].manifest.descriptor.pageInstanceId, series: result.process_series })) });
+    const recoveredAxValueSha256 = createHash('sha256').update(recoveryResult.recovery_evidence.ax_value).digest('hex');
+    writeComponentExclusive(incompleteDirectory, 'recovery.json', { schema_version: 2, component_kind: 'control_recovery_evidence', ...sessionIdentity, page_instance_id: plan.pages[1].manifest.descriptor.pageInstanceId, expected_draft_sha256: plan.pages[1].manifest.completion.expectedDraftSha256, expected_ax_value_sha256: createHash('sha256').update(plan.pages[1].manifest.completion.expectedAxValue).digest('hex'), recovered_ax_value_sha256: recoveredAxValueSha256, ax_value_matches: true });
     writeComponentExclusive(incompleteDirectory, 'cleanup.json', { schema_version: 2, component_kind: 'cleanup_evidence', ...sessionIdentity, receipt: cleanupReceipt });
     if (directoryBytes(incompleteDirectory) > plan.limits.storage_budget_bytes) throw Error('Responsiveness control components exceeded the storage budget');
     const control = {
@@ -1903,6 +1935,8 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
       recorder_mode: 'control',
       action_count: firstManifest.actions.length,
       external_ax_duration_us: pageResult.external_ax_duration_us,
+      recovery_ax_verified: true,
+      recovered_ax_value_sha256: recoveredAxValueSha256,
       identity: { before: identityBefore, after: identityAfter },
       cleanup,
       data_store_cleanup: cleanupReceipt,
