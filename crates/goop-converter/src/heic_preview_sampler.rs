@@ -1463,8 +1463,18 @@ mod tests {
     }
 
     #[test]
+    fn baseline_memory_probe_outlives_sampler_poll() {
+        let started = std::time::Instant::now();
+        memory_probe_baseline_without_decode();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+    }
+
+    #[test]
     #[ignore = "fresh-process memory evidence probe"]
-    fn memory_probe_baseline_without_decode() {}
+    fn memory_probe_baseline_without_decode() {
+        // Keep the empty process observable across the Windows 5 ms memory polls.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
 
     #[test]
     #[ignore = "fresh-process memory evidence probe"]

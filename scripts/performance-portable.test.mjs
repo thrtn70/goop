@@ -35,6 +35,7 @@ test('portable bounded runner terminates its descendant tree', async () => {
     const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
     descendantPid = Number(readFileSync(pidPath, 'utf8'));
     assert.equal(result.timed_out, true);
+    assert.equal(result.aborted, false);
     if (process.platform === 'win32') {
       assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' });
     } else {
@@ -62,6 +63,42 @@ test('portable bounded runner aborts and reaps its descendant tree', async () =>
     if(process.platform==='win32')assert.throws(()=>process.kill(descendantPid,0),{code:'ESRCH'});
     else {let state='';try{state=execFileSync('ps',['-o','stat=','-p',String(descendantPid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}
   } finally {if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true});}
+});
+
+test('an abort remains the stop cause when the deadline passes during descendant cleanup', { skip: process.platform === 'win32', timeout: 6000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-abort-deadline-'));
+  const output = join(root, 'output'); mkdirSync(output);
+  const runner = join(root, 'runner.cjs');
+  const pidPath = join(root, 'descendant.pid');
+  const descendant = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10);`;
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'});setInterval(()=>{},10);`);
+  const controller = new AbortController();
+  let descendantPid = null, run;
+  try {
+    const launched = new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => { clearInterval(poll); reject(Error('descendant did not start')); }, 1000);
+      const poll = setInterval(() => {
+        if (!existsSync(pidPath)) return;
+        clearInterval(poll); clearTimeout(deadline); resolve();
+      }, 10);
+    });
+    run = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 2000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal });
+    await launched;
+    descendantPid = Number(readFileSync(pidPath, 'utf8'));
+    controller.abort();
+    const result = await run;
+    assert.equal(result.aborted, true);
+    assert.equal(result.timed_out, false);
+    assert.equal(result.success, false);
+    let state = '';
+    try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
+    assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  } finally {
+    controller.abort();
+    if (run) await run.catch(() => {});
+    if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Gone. */ } }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('termination signal wrapper waits for owned process cleanup', { skip: process.platform === 'win32', timeout: 5000 }, async () => {

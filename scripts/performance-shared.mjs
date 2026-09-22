@@ -491,9 +491,11 @@ export async function runBoundedProcess({
       return true;
     } catch { return false; }
   };
-  const stop = () => {
+  const stop = reason => {
     if (stopRequested) return;
     stopRequested = true;
+    aborted = reason === 'abort';
+    timedOut = reason === 'timeout';
     const softSignalSent = signal('SIGTERM');
     const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
     if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
@@ -501,7 +503,7 @@ export async function runBoundedProcess({
       killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
     });
   };
-  const abort = () => { aborted = true; stop(); };
+  const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
     try {
@@ -514,11 +516,11 @@ export async function runBoundedProcess({
       }
       if (directoryBytes(outputDirectory) + stdout.length + stderr.length > storageBudgetBytes) {
         budgetExceeded = true;
-        stop();
+        stop('budget');
       }
     } catch { /* A just-exited child can race a directory snapshot. */ }
   }, 100);
-  const timeout = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+  const timeout = setTimeout(() => stop('timeout'), timeoutMs);
   const start = performance.now();
   const code = await new Promise(resolve => {
     child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
