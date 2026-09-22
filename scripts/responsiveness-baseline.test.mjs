@@ -59,7 +59,25 @@ import {
 const hash = value => createHash('sha256').update(value).digest('hex');
 const uuid = suffix => `00000000-0000-4000-8000-${suffix.padStart(12, '0')}`;
 const digest = value => value.repeat(64);
-const seededDraftRaw = count => JSON.stringify({ version: 1, entries: Object.fromEntries(Array.from({ length: count }, (_, index) => [JSON.stringify(['convert', `seed-${index}`, 'TopBar.url']), { value: `seed-value-${index}` }])) });
+const mountedDraftEntries = () => ({
+  [JSON.stringify(['extract', 'TopBar.url'])]: { value: '' },
+  [JSON.stringify(['convert', 'ConvertPage.files'])]: { value: [] },
+  [JSON.stringify(['convert', 'ConvertPage.pdfs'])]: { value: [] },
+  [JSON.stringify(['convert', 'ConvertPage.selectedId'])]: { value: null },
+  [JSON.stringify(['convert', 'ConvertActionBar.overrideDir'])]: { value: null },
+});
+const seededDraftRaw = count => JSON.stringify({
+  version: 1,
+  entries: {
+    ...Object.fromEntries(Array.from({ length: count === 500 ? 495 : count }, (_, index) => [JSON.stringify(['convert', `seed-${index}`, 'TopBar.url']), { value: `seed-value-${index}` }])),
+    ...(count === 500 ? mountedDraftEntries() : {}),
+  },
+});
+const finalDraftRaw = raw => {
+  const seed = JSON.parse(raw);
+  seed.entries[JSON.stringify(['extract', 'TopBar.url'])] = { value: 'https://x.test/a.mp4' };
+  return JSON.stringify(seed);
+};
 const activationFields = (role = 'primary') => ({
   webviewDataStoreId: Array.from({ length: 16 }, (_, index) => index + 1),
   bootstrap: { initialPath: '/convert', draftStorage: null, failNextDraftWrite: false },
@@ -1105,6 +1123,15 @@ test('measured payload derivation derives draft spans and exact Lane 3 cycle sum
   assert.deepEqual(draftPayload.encode_span_ids, Array.from({ length: 20 }, (_, index) => index * 2 + 1));
   assert.deepEqual(draftPayload.storage_span_ids, Array.from({ length: 20 }, (_, index) => index * 2 + 2));
   assert.equal(draftPayload.logical_persistence_acknowledged, true);
+  for (const count of [1, 100]) {
+    const smaller = structuredClone(draftManifests);
+    smaller[0].descriptor.workload.facts.seeded_entries = count;
+    smaller[0].bootstrap.draftStorage.raw = seededDraftRaw(count);
+    const result = deriveMeasuredLanePayload({
+      lane: 'draft', declared: draftPayload, manifests: smaller, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
+    });
+    assert.equal(result.seed_entry_count, count);
+  }
 
   const mismatchedSeed = structuredClone(draftManifests);
   mismatchedSeed[0].descriptor.workload.facts.seeded_entries = 100;
@@ -1112,11 +1139,29 @@ test('measured payload derivation derives draft spans and exact Lane 3 cycle sum
     lane: 'draft', declared: draftPayload, manifests: mismatchedSeed, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
   }), /seeded entry count/i);
   const invalidSeed = structuredClone(draftManifests);
-  invalidSeed[0].descriptor.workload.facts.seeded_entries = 1;
-  invalidSeed[0].bootstrap.draftStorage.raw = JSON.stringify({ version: 1, entries: { [JSON.stringify(['bogus', 'seed-0', 'bogus-slot'])]: { value: [] } } });
+  const invalidEntries = JSON.parse(seedRaw);
+  delete invalidEntries.entries[JSON.stringify(['convert', 'seed-0', 'TopBar.url'])];
+  invalidEntries.entries[JSON.stringify(['bogus', 'seed-0', 'bogus-slot'])] = { value: [] };
+  invalidSeed[0].bootstrap.draftStorage.raw = JSON.stringify(invalidEntries);
   assert.throws(() => deriveMeasuredLanePayload({
     lane: 'draft', declared: draftPayload, manifests: invalidSeed, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
-  }), /seed entry 0 is invalid/i);
+  }), /seed entry .* is invalid/i);
+  for (const [description, mutate, error] of [
+    ['old 500-filler seed', entries => {
+      delete entries[JSON.stringify(['extract', 'TopBar.url'])];
+      entries[JSON.stringify(['convert', 'seed-495', 'TopBar.url'])] = { value: 'seed-value-495' };
+    }, /seed entry .* is invalid/i],
+    ['extra mounted draft', entries => { entries[JSON.stringify(['convert', 'Extra.slot'])] = { value: '' }; }, /exceeds 500 entries/i],
+    ['wrong mounted value', entries => { entries[JSON.stringify(['convert', 'ConvertPage.files'])] = { value: 'invalid' }; }, /invalid value/i],
+  ]) {
+    const changed = structuredClone(draftManifests);
+    const seed = JSON.parse(seedRaw);
+    mutate(seed.entries);
+    changed[0].bootstrap.draftStorage.raw = JSON.stringify(seed);
+    assert.throws(() => deriveMeasuredLanePayload({
+      lane: 'draft', declared: draftPayload, manifests: changed, frontendComponents: [draft, recovered], driverObservations: [], processSeries: [],
+    }), error, description);
+  }
 
   const missingWrite = structuredClone(draft);
   missingWrite.spans.pop();
@@ -1263,14 +1308,24 @@ test('native draft control publishes only complete external AX evidence without 
       actions: typed.map((character, index) => ({ actionId: index + 1, targetId: `draft-key-${index + 1}`, eventType: 'input', targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: typed.slice(0, index).join('') })),
     };
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
+    const recoveryManifest = {
+      ...manifest,
+      token: 'control-recovery-token',
+      bootstrap: { initialPath: '/convert', draftStorage: null, failNextDraftWrite: false },
+      completion: { kind: 'recovery', timeoutMs: 40_000, expectedDraftSha256: hash(finalDraftRaw(seededRaw)), expectedAxValue: typed.join('') },
+      descriptor: { ...manifest.descriptor, componentRole: 'recovery', pageInstanceId: uuid('3') },
+      actions: [],
+    };
+    const recoveryManifestPath = join(root, 'recovery-manifest.json'); writeFileSync(recoveryManifestPath, JSON.stringify(recoveryManifest));
     const page = {
       manifest_path: manifestPath, required_labels: ['Paste URL to download'],
       actions: manifest.actions.map((action, index) => ({ ...action, dispatch: { kind: 'keystroke', text: typed[index], ax_prior: { kind: 'attribute_equals', attribute: 'AXValue', value: action.expectedPriorValue }, completion: { kind: 'attribute_equals', attribute: 'AXValue', value: typed.slice(0, index + 1).join('') }, timeout_ms: 2000 } })),
       timeout_ms: 10_000,
     };
+    const recoveryPage = { manifest_path: recoveryManifestPath, required_labels: ['Paste URL to download'], recovery_target: { role: 'textbox', label: 'Paste URL to download' }, actions: [], timeout_ms: 10_000 };
     const plan = {
-      schema_version: 2, app_name: 'Goop', binary, report_directory: reports, app_data_directory: profile, pages: [page],
-      identity_inputs: identityInputs(binary, [manifestPath]),
+      schema_version: 2, app_name: 'Goop', binary, report_directory: reports, app_data_directory: profile, pages: [page, recoveryPage],
+      identity_inputs: identityInputs(binary, [manifestPath, recoveryManifestPath]),
       common: { identity: evidenceIdentity(), clock_origins: { driver_monotonic: { unit: 'us' }, native_monotonic: { unit: 'us' } }, limitations: [], cleanup: { complete: true, removed_paths: 0, error_code: null }, outcome: { kind: 'success' } },
       payload: {}, limits: { log_limit_bytes: 65_536, storage_budget_bytes: 16_777_216 }, cleanup_profile: false,
     };
@@ -1278,24 +1333,30 @@ test('native draft control publishes only complete external AX evidence without 
     const cleanupReceipt = { schema_version: 2, component_kind: 'data_store_cleanup', session_id: manifest.descriptor.sessionId, webview_data_store_id: manifest.webviewDataStoreId, removed: true, error_code: null, pid: 43, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 20 } };
     const result = await runNativeResponsivenessPlan(plan, {
       platform: 'darwin',
-      runPage: async () => ({ page_component: null, driver_observations: observations, external_ax_duration_us: 210, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runPage: async ({ manifest: activeManifest }) => ({ page_component: null, driver_observations: activeManifest.descriptor.componentRole === 'recovery' ? [] : observations, external_ax_duration_us: activeManifest.descriptor.componentRole === 'recovery' ? null : 210, process_series: null, recovery_evidence: activeManifest.descriptor.componentRole === 'recovery' ? { ax_value: typed.join('') } : null, cleanup: { complete: true } }),
       runCleanup: async () => cleanupReceipt,
     });
     assert.equal(result.control.component_kind, 'responsiveness_instrumentation_control');
     assert.equal(result.control.recorder_mode, 'control');
     assert.equal(result.control.action_count, 20);
     assert.equal(result.control.external_ax_duration_us, 210);
+    assert.equal(result.control.recovery_ax_verified, true);
+    assert.equal(result.control.recovered_ax_value_sha256, hash(typed.join('')));
     assert.deepEqual(result.control.outcome, { kind: 'success' });
     assert.equal(existsSync(join(reports, 'control.json')), true);
     assert.equal(existsSync(join(reports, 'sample.json')), false);
     assert.equal(existsSync(join(reports, 'components', 'driver.json')), true);
+    const recoveryEvidence = JSON.parse(readFileSync(join(reports, 'components', 'recovery.json'), 'utf8'));
+    assert.equal(recoveryEvidence.page_instance_id, recoveryManifest.descriptor.pageInstanceId);
+    assert.equal(recoveryEvidence.recovered_ax_value_sha256, hash(typed.join('')));
+    assert.equal(recoveryEvidence.ax_value_matches, true);
     assert.equal(readdirSync(join(reports, 'components')).some(name => name.startsWith('frontend-')), false);
 
     const incompleteReports = join(root, 'incomplete-reports'); mkdirSync(incompleteReports);
     const incompleteProfile = join(root, 'incomplete-profile'); mkdirSync(incompleteProfile);
     await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: incompleteReports, app_data_directory: incompleteProfile }, {
       platform: 'darwin',
-      runPage: async () => ({ page_component: null, driver_observations: observations.slice(0, -1), external_ax_duration_us: 190, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runPage: async ({ manifest: activeManifest }) => ({ page_component: null, driver_observations: activeManifest.descriptor.componentRole === 'recovery' ? [] : observations.slice(0, -1), external_ax_duration_us: activeManifest.descriptor.componentRole === 'recovery' ? null : 190, process_series: null, recovery_evidence: activeManifest.descriptor.componentRole === 'recovery' ? { ax_value: typed.join('') } : null, cleanup: { complete: true } }),
       runCleanup: async () => cleanupReceipt,
     }), /cardinality/i);
     assert.equal(existsSync(join(incompleteReports, 'control.json')), false);
@@ -1304,7 +1365,7 @@ test('native draft control publishes only complete external AX evidence without 
     const rollbackProfile = join(root, 'rollback-profile'); mkdirSync(rollbackProfile);
     await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: rollbackReports, app_data_directory: rollbackProfile }, {
       platform: 'darwin',
-      runPage: async () => ({ page_component: null, driver_observations: observations, external_ax_duration_us: 210, process_series: null, recovery_evidence: null, cleanup: { complete: true } }),
+      runPage: async ({ manifest: activeManifest }) => ({ page_component: null, driver_observations: activeManifest.descriptor.componentRole === 'recovery' ? [] : observations, external_ax_duration_us: activeManifest.descriptor.componentRole === 'recovery' ? null : 210, process_series: null, recovery_evidence: activeManifest.descriptor.componentRole === 'recovery' ? { ax_value: typed.join('') } : null, cleanup: { complete: true } }),
       runCleanup: async () => cleanupReceipt,
       syncDirectory: () => { throw Error('injected directory sync failure'); },
     }), /directory sync failure/i);
@@ -1313,11 +1374,14 @@ test('native draft control publishes only complete external AX evidence without 
     assert.equal(existsSync(join(rollbackReports, '.incomplete')), true);
 
     const invalidManifestPath = join(root, 'invalid-manifest.json');
-    writeFileSync(invalidManifestPath, JSON.stringify({ ...manifest, descriptor: { ...manifest.descriptor, workload: { ...manifest.descriptor.workload, facts: { seeded_entries: 100, mutation_count: 20 } } } }));
+    const invalidWorkload = { ...manifest.descriptor.workload, facts: { seeded_entries: 100, mutation_count: 20 } };
+    writeFileSync(invalidManifestPath, JSON.stringify({ ...manifest, descriptor: { ...manifest.descriptor, workload: invalidWorkload } }));
+    const invalidRecoveryManifestPath = join(root, 'invalid-recovery-manifest.json');
+    writeFileSync(invalidRecoveryManifestPath, JSON.stringify({ ...recoveryManifest, descriptor: { ...recoveryManifest.descriptor, workload: invalidWorkload } }));
     const invalidReports = join(root, 'invalid-reports'); mkdirSync(invalidReports);
     const invalidProfile = join(root, 'invalid-profile'); mkdirSync(invalidProfile);
     const invalidPage = { ...page, manifest_path: invalidManifestPath };
-    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: invalidReports, app_data_directory: invalidProfile, pages: [invalidPage], identity_inputs: identityInputs(binary, [invalidManifestPath]) }, { platform: 'darwin' }), /control.*500|500.*control/i);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: invalidReports, app_data_directory: invalidProfile, pages: [invalidPage, { ...recoveryPage, manifest_path: invalidRecoveryManifestPath }], identity_inputs: identityInputs(binary, [invalidManifestPath, invalidRecoveryManifestPath]) }, { platform: 'darwin' }), /control.*500|500.*control/i);
 
     const falseCountRaw = seededDraftRaw(1);
     const falseCountManifestPath = join(root, 'false-count-manifest.json');
@@ -1325,7 +1389,21 @@ test('native draft control publishes only complete external AX evidence without 
     const falseCountReports = join(root, 'false-count-reports'); mkdirSync(falseCountReports);
     const falseCountProfile = join(root, 'false-count-profile'); mkdirSync(falseCountProfile);
     const falseCountPage = { ...page, manifest_path: falseCountManifestPath };
-    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: falseCountReports, app_data_directory: falseCountProfile, pages: [falseCountPage], identity_inputs: identityInputs(binary, [falseCountManifestPath]) }, { platform: 'darwin' }), /seeded entry count|500-entry/i);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: falseCountReports, app_data_directory: falseCountProfile, pages: [falseCountPage, recoveryPage], identity_inputs: identityInputs(binary, [falseCountManifestPath, recoveryManifestPath]) }, { platform: 'darwin' }), /seeded entry count|500 entries|500-entry/i);
+
+    const wrongTargetReports = join(root, 'wrong-target-reports'); mkdirSync(wrongTargetReports);
+    const wrongTargetProfile = join(root, 'wrong-target-profile'); mkdirSync(wrongTargetProfile);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: wrongTargetReports, app_data_directory: wrongTargetProfile, pages: [page, { ...recoveryPage, recovery_target: { role: 'textbox', label: 'Other URL' } }] }, { platform: 'darwin' }), /control recovery/i);
+    assert.equal(existsSync(join(wrongTargetReports, 'control.json')), false);
+
+    const wrongRecoveryReports = join(root, 'wrong-recovery-reports'); mkdirSync(wrongRecoveryReports);
+    const wrongRecoveryProfile = join(root, 'wrong-recovery-profile'); mkdirSync(wrongRecoveryProfile);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: wrongRecoveryReports, app_data_directory: wrongRecoveryProfile }, {
+      platform: 'darwin',
+      runPage: async ({ manifest: activeManifest }) => ({ page_component: null, driver_observations: activeManifest.descriptor.componentRole === 'recovery' ? [] : observations, external_ax_duration_us: activeManifest.descriptor.componentRole === 'recovery' ? null : 210, process_series: null, recovery_evidence: activeManifest.descriptor.componentRole === 'recovery' ? { ax_value: 'wrong' } : null, cleanup: { complete: true } }),
+      runCleanup: async () => cleanupReceipt,
+    }), /recovery|persisted/i);
+    assert.equal(existsSync(join(wrongRecoveryReports, 'control.json')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
