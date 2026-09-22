@@ -477,8 +477,7 @@ test('AX driver focuses one exact launched-process text field and verifies its p
   const result = await driver.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' });
   assert.equal(result.focused_label, 'Paste URL to download');
   assert.match(scripts[0], /unixId:42/);
-  assert.match(scripts[0], /AXPress/);
-  assert.match(scripts[0], /target\.click\(\)/);
+  assert.doesNotMatch(scripts[0], /target\.click\(\)|AXPress/);
   assert.match(scripts[0], /frontmost=true/);
   assert.match(scripts[0], /AXRaise/);
   assert.match(scripts[0], /NSRunningApplication/);
@@ -487,10 +486,19 @@ test('AX driver focuses one exact launched-process text field and verifies its p
   assert.match(scripts[0], /focusDeadline=Date\.now\(\)\+500/);
   assert.doesNotMatch(scripts[0], /position|click at|mouse/i);
 
-  const duplicate = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ frontmost_pid: 42, modal_count: 0, target_count: 2, target_role: null, target_label: null, focused_role: null, focused_label: null, value: null }) });
-  await assert.rejects(() => duplicate.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' }), /exactly one/i);
-  const unreadable = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: null, value_read: false }) });
-  await assert.rejects(() => unreadable.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' }), /value.*unreadable|read.*value/i);
+  const valid = { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: '', value_read: true };
+  for (const [override, pattern] of [
+    [{ frontmost_pid: 99 }, /focus was lost/i],
+    [{ modal_count: 1 }, /modal dialog/i],
+    [{ target_count: 0, target_role: null, target_label: null }, /exactly one/i],
+    [{ target_count: 2 }, /exactly one/i],
+    [{ focused_role: null, focused_label: null }, /did not focus/i],
+    [{ value_read: false }, /could not read/i],
+    [{ value: 'unexpected' }, /unexpected prior value/i],
+  ]) {
+    const invalid = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify({ ...valid, ...override }) });
+    await assert.rejects(() => invalid.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' }), pattern);
+  }
 });
 
 test('AX activation retries only while the exact process or main window is still mounting', async () => {
@@ -728,7 +736,7 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
     const result = await runNativePage({
       plan: { binary, app_name: 'Goop', app_data_directory: profile, component_directory: report, limits: { log_limit_bytes: 4096, storage_budget_bytes: 1024 * 1024 } },
-      page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 3000 },
+      page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 10_000 },
       manifest, platform: 'darwin',
     }, {
       createDriver: () => ({ activate: async () => ({ frontmost_pid: 42, window_count: 1 }), perform: async () => { throw Error('must not dispatch'); } }),
@@ -790,6 +798,19 @@ test('action sequence waits for initial readiness before setup and each next-act
   });
   assert.deepEqual(order, ['recorder-ready-1', 'setup', 'dispatch-1', 'action-ready-2', 'dispatch-2']);
   assert.deepEqual(observations.map(value => value.ordinal), [1, 2]);
+});
+
+test('failed focus setup prevents keyboard dispatch and process sampling', async () => {
+  const order = [];
+  const actions = [{ actionId: 1, targetRole: 'textbox', accessibleName: 'Paste URL to download', expectedPriorValue: '', dispatch: { kind: 'keystroke', text: 'h', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'h' }, timeout_ms: 2000 } }];
+  await assert.rejects(() => runAccessibilitySequence({
+    driver: { perform: async () => { order.push('dispatch'); } }, actions, reportDirectory: '/tmp/reports',
+    identity: { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), pid: 42 },
+    waitRecorder: async () => { order.push('ready'); },
+    afterRecorderReady: async () => { order.push('focus'); throw Error('Accessibility focus setup did not focus the manifest target'); },
+    beforeFirstAction: async () => { order.push('sampling'); },
+  }), /did not focus/i);
+  assert.deepEqual(order, ['ready', 'focus']);
 });
 
 test('recorder-disabled control sequence waits for control readiness and never consumes action-ready markers', async () => {

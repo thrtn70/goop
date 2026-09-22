@@ -47,7 +47,9 @@ const actions: ArmAction[] = [
   },
 ];
 
-function observed(action: ArmAction, eventType = action.eventType, extra: Record<string, unknown> = {}) {
+type TrustedEvent = Parameters<ReturnType<typeof createResponsivenessRuntime>["observeTrustedEvent"]>[0];
+
+function observed(action: ArmAction, eventType: TrustedEvent["eventType"] = action.eventType, extra: Record<string, unknown> = {}) {
   return {
     targetRole: action.targetRole,
     accessibleName: action.accessibleName,
@@ -55,7 +57,7 @@ function observed(action: ArmAction, eventType = action.eventType, extra: Record
     controlKey: action.accessibleName,
     eventType,
     ...extra,
-  } as Parameters<ReturnType<typeof createResponsivenessRuntime>["observeTrustedEvent"]>[0];
+  } as TrustedEvent;
 }
 
 function candidate(action: ArmAction, priorValue = action.expectedPriorValue) {
@@ -500,16 +502,23 @@ describe("PERF-02 responsiveness runtime", () => {
       actionId: 1, targetId: "url_input", eventType: "input", targetRole: "textbox",
       accessibleName: "Paste URL to download", expectedPriorValue: "",
     };
-    const invalidLog: string[] = [];
-    const invalid = createResponsivenessRuntime({
-      status: vi.fn().mockResolvedValue(enabledActivation({ actions: [inputAction] })),
-      createRecorder: vi.fn(() => fakeRecorder(invalidLog)), installRecorder: vi.fn(() => "invalid-registry"),
-      markScenarioStarted: vi.fn(), ready: vi.fn(), actionReady: vi.fn(), writeComponent: vi.fn(),
-      applyBootstrap: vi.fn(), installTrustedEventGuard: vi.fn(() => vi.fn()),
-    });
-    await invalid.initialize();
-    invalid.observeTrustedEvent({ targetRole: "link", accessibleName: "Convert", unique: true, controlKey: "convert", eventType: "click" });
-    expect(invalidLog).toContain("invalidate:action");
+    const invalidEvents: TrustedEvent[] = [
+      { targetRole: "link", accessibleName: "Convert", unique: true, controlKey: "convert", eventType: "click" },
+      observed(inputAction, "click"),
+      observed(inputAction, "select"),
+    ];
+    for (const event of invalidEvents) {
+      const invalidLog: string[] = [];
+      const invalid = createResponsivenessRuntime({
+        status: vi.fn().mockResolvedValue(enabledActivation({ actions: [inputAction] })),
+        createRecorder: vi.fn(() => fakeRecorder(invalidLog)), installRecorder: vi.fn(() => "invalid-registry"),
+        markScenarioStarted: vi.fn(), ready: vi.fn(), actionReady: vi.fn(), writeComponent: vi.fn(),
+        applyBootstrap: vi.fn(), installTrustedEventGuard: vi.fn(() => vi.fn()),
+      });
+      await invalid.initialize();
+      invalid.observeTrustedEvent(event);
+      expect(invalidLog).toContain("invalidate:action");
+    }
 
     const companionLog: string[] = [];
     const companion = createResponsivenessRuntime({
