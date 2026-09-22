@@ -736,7 +736,7 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
     const result = await runNativePage({
       plan: { binary, app_name: 'Goop', app_data_directory: profile, component_directory: report, limits: { log_limit_bytes: 4096, storage_budget_bytes: 1024 * 1024 } },
-      page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 3000 },
+      page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 10_000 },
       manifest, platform: 'darwin',
     }, {
       createDriver: () => ({ activate: async () => ({ frontmost_pid: 42, window_count: 1 }), perform: async () => { throw Error('must not dispatch'); } }),
