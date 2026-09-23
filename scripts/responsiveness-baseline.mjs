@@ -1132,8 +1132,29 @@ const normalizeAxValue = (attribute, value) => {
   return value;
 };
 
-function defaultRunScript(script, timeoutMs) {
-  return new Promise((resolveRun, rejectRun) => execFile('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], { timeout: timeoutMs, maxBuffer: 64 * 1024, encoding: 'utf8' }, (error, stdout) => error ? rejectRun(Error(`Accessibility command failed: ${error.code ?? 'unknown'}`)) : resolveRun(stdout.trim())));
+export function formatAccessibilityCommandFailure(error, stderr, phase) {
+  if (!/^(?:activate|preflight|focus|read_value|quit|action_[1-9]\d*_(?:check|dispatch))$/.test(phase)) throw Error('Invalid accessibility command phase');
+  const rawCode = String(error?.code ?? error?.signal ?? 'unknown');
+  const code = /^(?:\d{1,3}|[A-Z_]{2,20})$/.test(rawCode) ? rawCode : 'unknown';
+  const status = error?.killed === true ? 'timed out'
+    : typeof error?.code === 'number' ? `exit ${code}`
+      : typeof error?.code === 'string' ? `error ${code}`
+        : error?.signal ? `signal ${code}` : 'unknown status';
+  const signal = error?.killed === true && /^[A-Z_]{2,20}$/.test(String(error.signal ?? ''))
+    ? `; signal ${error.signal}` : '';
+  const output = String(stderr ?? '').slice(0, 64 * 1024);
+  const osascriptCode = /\((-?\d{1,6})\)\s*(?:\r?\n|$)/.exec(output)?.[1];
+  const knownReasons = [
+    'interrupted before keyboard dispatch', 'process missing', 'open dialog missing',
+    'fixture identity', 'open action identity', 'focus lost',
+  ];
+  const reason = knownReasons.find(value => output.includes(value))?.replaceAll(' ', '_')
+    ?? (output ? 'stderr_unclassified' : null);
+  return Error(`Accessibility ${phase} failed (${status}${signal})${reason ? `: ${reason}` : ''}${osascriptCode ? ` (osascript ${osascriptCode})` : ''}`);
+}
+
+function defaultRunScript(script, timeoutMs, phase) {
+  return new Promise((resolveRun, rejectRun) => execFile('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], { timeout: timeoutMs, maxBuffer: 64 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => error ? rejectRun(formatAccessibilityCommandFailure(error, stderr, phase)) : resolveRun(stdout.trim())));
 }
 
 const jxaLiteral = value => JSON.stringify(value);
@@ -1147,7 +1168,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
 
   const activate = async () => {
     const script = `ObjC.import('ApplicationServices');\nconst se=Application('System Events');\nconst trusted=$.AXIsProcessTrusted();\nconst processMatches=se.processes.whose({unixId:${expectedPid}})();const app=processMatches.length===1?processMatches[0]:null;\nlet enhanced=false;let windowCount=0;let mainWindow=false;let minimized=null;let raiseSupported=false;\nif(app){try{const attr=app.attributes.byName('AXEnhancedUserInterface');attr.value=true;enhanced=attr.value()===true}catch{};try{app.frontmost=true}catch{};const windows=app.windows();windowCount=windows.length;if(windows.length===1){const window=windows[0];try{const attr=window.attributes.byName('AXMinimized');if(attr.value()===true)attr.value=false;minimized=attr.value()===true}catch{};try{mainWindow=window.attributes.byName('AXMain').value()===true}catch{};try{const raise=window.actions.byName('AXRaise');raise.perform();raiseSupported=true}catch{}}}\ndelay(0.05);\nconst front=se.processes.whose({frontmost:true})();\nconst frontPid=front.length===1?front[0].unixId():null;\nJSON.stringify({trusted:Boolean(trusted),enhanced_user_interface:enhanced,process_count:processMatches.length,frontmost_pid:frontPid,window_count:windowCount,main_window:mainWindow,minimized,raise_supported:raiseSupported});`;
-    const value = parseDriverReply(await runScript(script, 5000));
+    const value = parseDriverReply(await runScript(script, 5000, 'activate'));
     if (value.trusted !== true) throw Error('Accessibility permission is not granted');
     if (value.process_count !== 1) throw Error('Accessibility process is not ready');
     if (value.enhanced_user_interface !== true) throw Error('Accessibility enhanced user interface could not be enabled');
@@ -1162,7 +1183,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     if (!Array.isArray(requiredLabels) || requiredLabels.length > 128) throw Error('Invalid AX preflight labels');
     requiredLabels.forEach(label => boundedString(label, 'AX label'));
     const script = `ObjC.import('ApplicationServices');\nconst se=Application('System Events');\nconst trusted=$.AXIsProcessTrusted();\n${jxaPidProcess(expectedPid)}\n${reactivateExactProcess}\nlet enhanced=false;\nif(app){try{const attr=app.attributes.byName('AXEnhancedUserInterface');attr.value=true;enhanced=attr.value()===true}catch{}}\ndelay(0.05);\nconst front=se.processes.whose({frontmost:true})();\nconst frontPid=front.length?front[0].unixId():null;\nconst windows=app?app.windows():[];\nconst labels=[];\nif(windows.length===1){for(const item of windows[0].entireContents()){try{const n=item.name();if(typeof n==='string'&&n.length)labels.push(n)}catch{}}}\nJSON.stringify({trusted:Boolean(trusted),enhanced_user_interface:enhanced,frontmost_pid:frontPid,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,labels});`;
-    const value = parseDriverReply(await runScript(script, 5000));
+    const value = parseDriverReply(await runScript(script, 5000, 'preflight'));
     if (value.trusted !== true) throw Error('Accessibility permission is not granted');
     if (value.enhanced_user_interface !== true) throw Error('Accessibility enhanced user interface could not be enabled');
     if (value.frontmost_pid !== expectedPid) throw Error('Goop is not the expected frontmost process');
@@ -1177,7 +1198,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     boundedString(expectedValue, 'AX focus expected value', { maximum: 4096, allowEmpty: true });
     const axRole = normalizeAxRole(role);
     const script = `ObjC.import('AppKit');const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');const nativeApp=$.NSRunningApplication.runningApplicationWithProcessIdentifier(${expectedPid});try{nativeApp.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)}catch{};try{app.frontmost=true}catch{};const windows=app.windows();if(windows.length===1){try{windows[0].actions.byName('AXRaise').perform()}catch{}}delay(0.05);const all=windows.length===1?windows[0].entireContents():[];const matches=all.filter(x=>{try{return x.role()===${jxaLiteral(axRole)}&&x.name()===${jxaLiteral(label)}}catch{return false}});const target=matches.length===1?matches[0]:null;let focused=null;if(target){const focusDeadline=Date.now()+500;while(Date.now()<focusDeadline){try{nativeApp.activateWithOptions($.NSApplicationActivateIgnoringOtherApps)}catch{};try{app.frontmost=true}catch{};try{target.attributes.byName('AXFocused').value=true}catch{};delay(0.01);try{focused=app.attributes.byName('AXFocusedUIElement').value()}catch{};try{const currentFront=se.processes.whose({frontmost:true})();if(currentFront.length===1&&currentFront[0].unixId()===${expectedPid}&&focused&&focused.role()===${jxaLiteral(axRole)}&&focused.name()===${jxaLiteral(label)})break}catch{}}}const front=se.processes.whose({frontmost:true})();let value=null;let valueRead=false;if(target){try{value=target.attributes.byName('AXValue').value();valueRead=true}catch{}}JSON.stringify({frontmost_pid:front.length===1?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:target?target.role():null,target_label:target?target.name():null,focused_role:focused?focused.role():null,focused_label:focused?focused.name():null,value,value_read:valueRead});`;
-    const result = parseDriverReply(await runScript(script, 5000));
+    const result = parseDriverReply(await runScript(script, 5000, 'focus'));
     if (result.frontmost_pid !== expectedPid) throw Error(`Accessibility focus was lost during setup (${String(result.frontmost_pid)})`);
     if (result.modal_count !== 0) throw Error('A modal dialog prevents accessibility focus setup');
     if (result.target_count !== 1 || result.target_role !== axRole || result.target_label !== label) throw Error('Accessibility focus setup must resolve exactly one manifest target');
@@ -1216,7 +1237,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     const focusTarget = keyboardAction ? `if(target){const focusDeadline=Date.now()+500;while(Date.now()<focusDeadline){try{target.attributes.byName('AXFocused').value=true}catch{};delay(0.01);let focusCandidate=null;try{focusCandidate=app.attributes.byName('AXFocusedUIElement').value()}catch{};try{if(focusCandidate&&focusCandidate.role()===${jxaLiteral(axRole)}&&focusCandidate.name()===${jxaLiteral(action.label)})break}catch{}}}` : '';
     const postFocusGuard = keyboardAction ? `const dispatchFront=se.processes.whose({frontmost:true})();const dispatchWindows=app.windows();const dispatchModal=dispatchWindows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;let dispatchFocused=null;try{dispatchFocused=app.attributes.byName('AXFocusedUIElement').value()}catch{};if(dispatchFront.length!==1||dispatchFront[0].unixId()!==${expectedPid}||dispatchModal!==${expectedModalBefore}||!dispatchFocused||dispatchFocused.role()!==${jxaLiteral(axRole)}||dispatchFocused.name()!==${jxaLiteral(action.label)})throw new Error('interrupted before keyboard dispatch');` : '';
     const checkScript = `const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');${reactivateExactProcess}const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}${focusTarget}const f=app.attributes.byName('AXFocusedUIElement').value();let current=null;if(target){try{current=target.attributes.byName(${jxaLiteral(priorAttribute)}).value()}catch{}}JSON.stringify({trusted:true,frontmost_pid:front.length?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:target?target.role():null,target_label:target?target.name():null,focused_role:f?f.role():null,focused_label:f?f.name():null,value:current});`;
-    const before = parseDriverReply(await runScript(checkScript, 5000));
+    const before = parseDriverReply(await runScript(checkScript, 5000, `action_${action.ordinal}_check`));
     if (before.frontmost_pid !== expectedPid) throw Error('Accessibility focus was lost before action dispatch');
     if (before.modal_count !== expectedModalBefore) throw Error('Unexpected modal state before accessibility dispatch');
     if (before.target_count !== 1 || before.target_role !== axRole || before.target_label !== action.label) throw Error('Accessibility action must resolve exactly one manifest target');
@@ -1247,7 +1268,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
       ? `const current=allNow.filter(x=>{try{return x.role()===${jxaLiteral(completionRole)}&&x.name()===${jxaLiteral(completionLabel)}}catch{return false}});if(current.length===1){try{value=current[0].attributes.byName(${jxaLiteral(completion.attribute)}).value()}catch{}const normalized=(${jxaLiteral(completion.attribute)}==='AXSelected'||${jxaLiteral(completion.attribute)}==='AXEnabled')?(value===true||value===1||value==='1'||value==='true'):(${jxaLiteral(completion.attribute)}==='AXValue'?(value==null?'':String(value)):value);if(JSON.stringify(normalized)===${jxaLiteral(JSON.stringify(normalizedExpected))}){done=true;break}}`
       : `const current=allNow.filter(x=>{try{return x.role()===${jxaLiteral(completionRole)}&&x.name()===${jxaLiteral(completionLabel)}}catch{return false}});value=current.length;if(current.length===0){done=true;break}`;
     const dispatchScript = `ObjC.import('QuartzCore');const se=Application('System Events');${jxaPidProcess(expectedPid)}if(!app)throw new Error('process missing');${reactivateExactProcess}const front=se.processes.whose({frontmost:true})();const windows=app.windows();${targetLookup}const modalBefore=windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;if(front.length!==1||front[0].unixId()!==${expectedPid}||modalBefore!==${expectedModalBefore}||matches.length!==1)throw new Error('interrupted');${focusTarget}${postFocusGuard}const targetRole=target.role();const targetLabel=target.name();const dispatchStart=$.CACurrentMediaTime();${operation}const deadline=Date.now()+${action.timeout_ms};let value=null;let done=false;while(Date.now()<deadline){const activeWindows=app.windows();const allNow=activeWindows.length===1?activeWindows[0].entireContents():[];${completionLoop}delay(0.01)}const observedAt=$.CACurrentMediaTime();const frontAfter=se.processes.whose({frontmost:true})();const windowsAfter=app.windows();const modalAfter=windowsAfter.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length;const f=app.attributes.byName('AXFocusedUIElement').value();JSON.stringify({trusted:true,frontmost_pid:frontAfter.length?frontAfter[0].unixId():null,modal_count:modalAfter,target_count:matches.length,target_role:targetRole,target_label:targetLabel,focused_role:f?f.role():null,focused_label:f?f.name():null,value,done,driver_duration_us:Math.round((observedAt-dispatchStart)*1000000)});`;
-    const after = parseDriverReply(await runScript(dispatchScript, action.timeout_ms + 5000));
+    const after = parseDriverReply(await runScript(dispatchScript, action.timeout_ms + 5000, `action_${action.ordinal}_dispatch`));
     if (after.frontmost_pid !== expectedPid || after.modal_count !== expectedModalAfter || after.target_count !== 1 || after.target_role !== axRole || after.target_label !== action.label) throw Error(`Accessibility interruption invalidated action ${action.ordinal} (${String(after.frontmost_pid)} / ${String(after.modal_count)} / ${String(after.target_count)} / ${String(after.target_role)} / ${String(after.target_label)})`);
     if (['keystroke', 'key_chord', 'key_code'].includes(action.kind) && (after.focused_role !== axRole || after.focused_label !== action.label)) throw Error('Accessibility focus changed during the action');
     if (!Number.isSafeInteger(after.driver_duration_us) || after.driver_duration_us < 0) throw Error('Accessibility driver duration is invalid');
@@ -1259,13 +1280,13 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     boundedString(role, 'AX read role'); boundedString(label, 'AX read label'); safeInteger(expectedModalCount, 'expected modal count');
     const axRole = normalizeAxRole(role);
     const script = `const se=Application('System Events');${jxaPidProcess(expectedPid)}const front=se.processes.whose({frontmost:true})();const windows=app?app.windows():[];const all=windows.length===1?windows[0].entireContents():[];const matches=all.filter(x=>{try{return x.role()===${jxaLiteral(axRole)}&&x.name()===${jxaLiteral(label)}}catch{return false}});let value=null;if(matches.length===1){try{value=matches[0].attributes.byName('AXValue').value()}catch{}}JSON.stringify({frontmost_pid:front.length?front[0].unixId():null,modal_count:windows.filter(w=>{try{return w.attributes.byName('AXModal').value()===true}catch{return false}}).length,target_count:matches.length,target_role:matches.length===1?matches[0].role():null,target_label:matches.length===1?matches[0].name():null,value});`;
-    const result = parseDriverReply(await runScript(script, 5000));
+    const result = parseDriverReply(await runScript(script, 5000, 'read_value'));
     if (result.frontmost_pid !== expectedPid || result.modal_count !== expectedModalCount || result.target_count !== 1 || result.target_role !== axRole || result.target_label !== label) throw Error('Accessibility interruption invalidated the value read');
     return String(normalizeAxValue('AXValue', result.value));
   };
   const quit = async () => {
     const script = `const se=Application('System Events');const front=se.processes.whose({frontmost:true})();if(front.length!==1||front[0].unixId()!==${expectedPid})throw new Error('focus lost');se.keystroke('q',{using:['command down']});JSON.stringify({frontmost_pid:${expectedPid},quit_requested:true});`;
-    const value = parseDriverReply(await runScript(script, 5000));
+    const value = parseDriverReply(await runScript(script, 5000, 'quit'));
     if (value.frontmost_pid !== expectedPid || value.quit_requested !== true) throw Error('Normal Command-Q request failed');
     return value;
   };

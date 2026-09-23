@@ -33,6 +33,7 @@ import {
   deriveMeasuredLanePayload,
   analyzeInstrumentationOverhead,
   externalAxWorkloadDurationUs,
+  formatAccessibilityCommandFailure,
   loadPageComponent,
   publishSampleExclusive,
   runAccessibilitySequence,
@@ -422,6 +423,50 @@ test('AX driver preflights permission/frontmost process/labels and never uses co
   assert.doesNotMatch(scripts.join('\n'), /processes\.byName/);
   assert.doesNotMatch(scripts.join('\n'), /position|click at|mouse/i);
   assert.throws(() => createAccessibilityDriver({ platform: 'linux', appName: 'Goop', expectedPid: 1, runScript: async () => '{}' }), /macOS/i);
+});
+
+test('AX command failure reports a fixed phase and bounded redacted stderr', () => {
+  const failure = formatAccessibilityCommandFailure(
+    { code: 1 },
+    '/Users/person/private.js: execution error: Error: interrupted before keyboard dispatch for "secret" at https://private.test/item (-2700)\n',
+    'action_14_dispatch',
+  );
+  assert.match(failure.message, /Accessibility action_14_dispatch failed \(exit 1\)/);
+  assert.match(failure.message, /interrupted_before_keyboard_dispatch/);
+  assert.match(failure.message, /-2700/);
+  assert.doesNotMatch(failure.message, /person|private|secret|https:/);
+  assert.ok(failure.message.length <= 320);
+  assert.equal(formatAccessibilityCommandFailure({ code: 'ETIMEDOUT' }, '', 'preflight').message,
+    'Accessibility preflight failed (error ETIMEDOUT)');
+  assert.equal(formatAccessibilityCommandFailure({ code: null, signal: 'SIGTERM', killed: true }, '', 'activate').message,
+    'Accessibility activate failed (timed out; signal SIGTERM)');
+  const unclassified = formatAccessibilityCommandFailure({ code: 1 },
+    'execution error: Error: AXValue token abc123 (-2700)', 'read_value');
+  assert.match(unclassified.message, /stderr_unclassified/);
+  assert.doesNotMatch(unclassified.message, /AXValue|token|abc123/);
+  assert.throws(() => formatAccessibilityCommandFailure({ code: 1 }, 'error', 'user supplied phase'), /phase/i);
+});
+
+test('AX driver passes fixed phases through every command without changing dispatch', async () => {
+  const phases = [];
+  const replies = [
+    { trusted: true, enhanced_user_interface: true, process_count: 1, frontmost_pid: 42, window_count: 1, main_window: true, minimized: false, raise_supported: true },
+    { trusted: true, enhanced_user_interface: true, frontmost_pid: 42, modal_count: 0, labels: [] },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: '', value_read: true },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: '' },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: 'h', done: true, driver_duration_us: 100 },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', value: 'h' },
+    { frontmost_pid: 42, quit_requested: true },
+  ];
+  const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42,
+    runScript: async (_script, _timeout, phase) => { phases.push(phase); return JSON.stringify(replies.shift()); } });
+  await driver.activate();
+  await driver.preflight([]);
+  await driver.focus({ role: 'textbox', label: 'Paste URL to download', expected_value: '' });
+  await driver.perform({ ordinal: 14, kind: 'keystroke', role: 'textbox', label: 'Paste URL to download', text: 'h', expected_prior_value: '', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: 'h' }, timeout_ms: 2000 });
+  await driver.readValue({ role: 'textbox', label: 'Paste URL to download' });
+  await driver.quit();
+  assert.deepEqual(phases, ['activate', 'preflight', 'focus', 'action_14_check', 'action_14_dispatch', 'read_value', 'quit']);
 });
 
 test('AX driver activates, raises, and verifies the exact launched main window without coordinates', async () => {
