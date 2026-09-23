@@ -1132,6 +1132,20 @@ const normalizeAxValue = (attribute, value) => {
   return value;
 };
 
+const completionTimeoutError = (ordinal, completion, observed, expected, observedCount) => {
+  if (completion.kind === 'element_absent') {
+    const count = Number.isSafeInteger(observedCount) && observedCount >= 0 ? String(observedCount) : 'invalid';
+    return Error(`Accessibility completion predicate timed out (action ${ordinal}; element_absent; observed_count=${count})`);
+  }
+  const fingerprint = value => {
+    const json = String(JSON.stringify(value));
+    return { bytes: byteLength(json), sha256: createHash('sha256').update(json).digest('hex') };
+  };
+  const actual = fingerprint(observed);
+  const target = fingerprint(expected);
+  return Error(`Accessibility completion predicate timed out (action ${ordinal}; attribute_equals; observed_json_bytes=${actual.bytes}; observed_sha256=${actual.sha256}; expected_json_bytes=${target.bytes}; expected_sha256=${target.sha256})`);
+};
+
 export function formatAccessibilityCommandFailure(error, stderr, phase) {
   if (!/^(?:activate|preflight|focus|read_value|quit|action_[1-9]\d*_(?:check|dispatch))$/.test(phase)) throw Error('Invalid accessibility command phase');
   const rawCode = String(error?.code ?? error?.signal ?? 'unknown');
@@ -1273,7 +1287,7 @@ export function createAccessibilityDriver({ platform = process.platform, appName
     if (['keystroke', 'key_chord', 'key_code'].includes(action.kind) && (after.focused_role !== axRole || after.focused_label !== action.label)) throw Error('Accessibility focus changed during the action');
     if (!Number.isSafeInteger(after.driver_duration_us) || after.driver_duration_us < 0) throw Error('Accessibility driver duration is invalid');
     const observed = normalizeAxValue(completion.attribute, after.value);
-    if (after.done === false || (completion.kind === 'attribute_equals' && JSON.stringify(observed) !== JSON.stringify(normalizedExpected)) || (completion.kind === 'element_absent' && after.value !== 0)) throw Error('Accessibility completion predicate timed out');
+    if (after.done === false || (completion.kind === 'attribute_equals' && JSON.stringify(observed) !== JSON.stringify(normalizedExpected)) || (completion.kind === 'element_absent' && after.value !== 0)) throw completionTimeoutError(action.ordinal, completion, observed, normalizedExpected, after.value);
     return { ordinal: action.ordinal, driver_duration_us: after.driver_duration_us, observed_value: observed, clock_domain: 'driver_monotonic' };
   };
   const readValue = async ({ role, label, expectedModalCount = 0 }) => {

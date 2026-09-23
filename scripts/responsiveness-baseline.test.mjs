@@ -469,6 +469,43 @@ test('AX driver passes fixed phases through every command without changing dispa
   assert.deepEqual(phases, ['activate', 'preflight', 'focus', 'action_14_check', 'action_14_dispatch', 'read_value', 'quit']);
 });
 
+test('AX completion timeout reports the action and redacted observed value without changing dispatch', async () => {
+  const observed = 'https://private.test/item';
+  const expected = 'https://private.test/item-next';
+  const scripts = [];
+  const replies = [
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: '' },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXTextField', target_label: 'Paste URL to download', focused_role: 'AXTextField', focused_label: 'Paste URL to download', value: observed, done: false, driver_duration_us: 2000 },
+  ];
+  const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42,
+    runScript: async (script, _timeout, phase) => { scripts.push({ script, phase }); return JSON.stringify(replies.shift()); } });
+  const action = { ordinal: 14, kind: 'keystroke', role: 'textbox', label: 'Paste URL to download', text: 'x', expected_prior_value: '', completion: { kind: 'attribute_equals', attribute: 'AXValue', value: expected }, timeout_ms: 2000 };
+  await assert.rejects(() => driver.perform(action), error => {
+    assert.match(error.message, /Accessibility completion predicate timed out \(action 14; attribute_equals/);
+    assert.match(error.message, new RegExp(`observed_json_bytes=${Buffer.byteLength(JSON.stringify(observed))}`));
+    assert.match(error.message, new RegExp(`observed_sha256=${hash(JSON.stringify(observed))}`));
+    assert.match(error.message, new RegExp(`expected_json_bytes=${Buffer.byteLength(JSON.stringify(expected))}`));
+    assert.match(error.message, new RegExp(`expected_sha256=${hash(JSON.stringify(expected))}`));
+    assert.doesNotMatch(error.message, /private|https:|item-next/);
+    assert.ok(error.message.length <= 320);
+    return true;
+  });
+  assert.deepEqual(scripts.map(({ phase }) => phase), ['action_14_check', 'action_14_dispatch']);
+  assert.match(scripts[1].script, /se\.keystroke\("x"\)/);
+});
+
+test('AX element-absence timeout reports only its action and observed count', async () => {
+  const replies = [
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXButton', target_label: 'Remove fixture.jpg', focused_role: null, focused_label: null, value: true },
+    { frontmost_pid: 42, modal_count: 0, target_count: 1, target_role: 'AXButton', target_label: 'Remove fixture.jpg', focused_role: null, focused_label: null, value: 2, done: false, driver_duration_us: 2000 },
+  ];
+  const driver = createAccessibilityDriver({ platform: 'darwin', appName: 'Goop', expectedPid: 42, runScript: async () => JSON.stringify(replies.shift()) });
+  await assert.rejects(() => driver.perform({ ordinal: 17, kind: 'press', role: 'button', label: 'Remove fixture.jpg', completion: { kind: 'element_absent', role: 'button', label: 'Remove fixture.jpg' }, timeout_ms: 2000 }), error => {
+    assert.equal(error.message, 'Accessibility completion predicate timed out (action 17; element_absent; observed_count=2)');
+    return true;
+  });
+});
+
 test('AX driver activates, raises, and verifies the exact launched main window without coordinates', async () => {
   const scripts = [];
   const driver = createAccessibilityDriver({
