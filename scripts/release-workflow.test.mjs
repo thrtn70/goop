@@ -11,6 +11,10 @@ const auditWorkflow = readFileSync(new URL("../.github/workflows/audit.yml", imp
 const lines = workflow.split("\n");
 const auditLines = auditWorkflow.split("\n");
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+const packageLock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+const tauriVersion = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8")).version;
+const cargoManifest = readFileSync(new URL("../Cargo.toml", import.meta.url), "utf8");
+const cargoVersion = cargoManifest.split("[workspace.package]", 2)[1]?.match(/^version = "([^"]+)"$/m)?.[1];
 const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
 const windowsHeifInstaller = readFileSync(
@@ -218,7 +222,8 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
   assert.match(step[0], /if \(\$primaryDelta -gt 16MB\)/);
 });
 
-const version = "0.3.3";
+const version = "0.3.4";
+const publishedVersion = "0.3.3";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
   "Goop_aarch64.app.tar.gz",
@@ -229,12 +234,19 @@ const expectedAssets = [...installers, ...installers.map((name) => `${name}.sha2
 const require = createRequire(import.meta.url);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
-test("static website release fallbacks match the packaged version", () => {
+test("candidate manifests agree on the release version", () => {
   assert.equal(packageVersion, version);
-  assert.match(siteScript, new RegExp(`version: ['"]v${version}['"]`));
+  assert.equal(packageLock.version, version);
+  assert.equal(packageLock.packages[""].version, version);
+  assert.equal(tauriVersion, version);
+  assert.equal(cargoVersion, version);
+});
+
+test("static website fallbacks retain the published version until publication", () => {
+  assert.match(siteScript, new RegExp(`version: ['"]v${publishedVersion}['"]`));
   assert.deepEqual(
     [...siteHtml.matchAll(/data-latest-version>v([^<]+)</g)].map((match) => match[1]),
-    [version, version],
+    [publishedVersion, publishedVersion],
   );
 });
 
