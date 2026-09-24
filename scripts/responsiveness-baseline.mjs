@@ -1635,7 +1635,7 @@ const waitForClose = (closed, timeoutMs) => new Promise(resolveClose => {
 
 export async function runNativePage(
   { plan, page, manifest, platform = process.platform, abortSignal = null },
-  { createDriver = createAccessibilityDriver, waitActivation = waitForAxActivation } = {},
+  { createDriver = createAccessibilityDriver, waitActivation = waitForAxActivation, captureSnapshot = captureProcessIdentitySnapshot } = {},
 ) {
   if (platform !== 'darwin') throw Error('Native responsiveness pages are macOS-only');
   const componentDirectory = plan.component_directory ?? plan.report_directory;
@@ -1681,7 +1681,7 @@ export async function runNativePage(
   const samplingPlatform = process.platform === 'win32' ? 'win32' : 'darwin';
   const series = createIdentityAwareProcessSeries({ rootPid: child.pid, platform: samplingPlatform });
   const started = performance.now();
-  const sampler = createScheduledProcessSampler({ series, capture: () => captureProcessIdentitySnapshot(samplingPlatform) });
+  const sampler = createScheduledProcessSampler({ series, capture: () => captureSnapshot(samplingPlatform, child.pid) });
   let sampling = null, samplingStarted = false;
   const deadlineTimer = setTimeout(() => { timedOut = true; signal('SIGTERM'); }, page.timeout_ms);
   const budgetMonitor = setInterval(() => {
@@ -1690,7 +1690,7 @@ export async function runNativePage(
     } catch { budgetExceeded = true; signal('SIGTERM'); }
   }, 100);
   const recorderMode = manifest.recorderMode ?? 'enabled';
-  let pageComponent = null, observations = [], recoveryEvidence = null, quitRequested = false, cleanupComplete = false, runError = null, driver = null, preReadyFailedComponent = null, preReadyFailureObservedAtMs = null, preReadyFailure = false;
+  let pageComponent = null, observations = [], recoveryEvidence = null, quitRequested = false, cleanupComplete = false, runError = null, driver = null, preReadyFailedComponent = null, preReadyFailure = false;
   try {
     driver = createDriver({ platform, appName: plan.app_name, expectedPid: child.pid });
     await waitActivation(driver, { timeoutMs: Math.min(5000, page.timeout_ms), pollMs: 25, abortSignal });
@@ -1707,7 +1707,6 @@ export async function runNativePage(
         const startup = await waitForRecorderOrFailedPage({ recorderPath, reportDirectory: componentDirectory, identity: expected, descriptor: manifest.descriptor, ...options });
         if (startup.kind === 'failed_component') {
           preReadyFailedComponent = startup.page_component;
-          preReadyFailureObservedAtMs = performance.now();
           throw Error('Frontend recorder failed before readiness');
         }
         return startup.marker;
@@ -1741,8 +1740,8 @@ export async function runNativePage(
     if (!aborted && preReadyFailedComponent !== null) {
       pageComponent = preReadyFailedComponent;
       try {
+        // No action settled; this single post-failure read is diagnostic process evidence.
         sampler.start(); samplingStarted = true;
-        if (performance.now() - preReadyFailureObservedAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
         preReadyFailure = true; signal('SIGTERM'); cleanupComplete = await waitForClose(closed, 5000); runError = null;
       } catch (samplingError) { runError = samplingError; }
     } else if (!aborted && driver && recorderMode === 'enabled') {

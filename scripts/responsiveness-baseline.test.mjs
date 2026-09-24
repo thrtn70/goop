@@ -861,18 +861,27 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     };
     component.sample_id = manifest.descriptor.sampleId; component.session_id = manifest.descriptor.sessionId; component.page_instance_id = manifest.descriptor.pageInstanceId;
     const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
+    let captureCalls = 0;
     const result = await runNativePage({
       plan: { binary, app_name: 'Goop', app_data_directory: profile, component_directory: report, limits: { log_limit_bytes: 4096, storage_budget_bytes: 1024 * 1024 } },
       page: { manifest_path: manifestPath, argv: [fakeApp, template], required_labels: ['Never dispatch'], actions: [{ ...manifest.actions[0], dispatch: { kind: 'press', completion: { kind: 'attribute_equals', attribute: 'AXSelected', value: true }, timeout_ms: 2000 } }], timeout_ms: 10_000 },
       manifest, platform: 'darwin',
     }, {
       createDriver: () => ({ activate: async () => ({ frontmost_pid: 42, window_count: 1 }), perform: async () => { throw Error('must not dispatch'); } }),
+      captureSnapshot: (snapshotPlatform, rootPid) => {
+        captureCalls += 1;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+        return snapshotPlatform === 'win32'
+          ? JSON.stringify([{ ProcessId: rootPid, ParentProcessId: 4, CreationDate: '2026-09-20T10:00:00.000Z', ExecutablePath: 'C:\\Goop\\goop.exe', WorkingSetSize: 102400 }])
+          : `${rootPid}\t1\t2026-09-20T10:00:00.000Z\t100\t/goop`;
+      },
     });
     assert.equal(result.page_component.frontend_trace.failure.code, 'observer_init');
     assert.deepEqual(result.driver_observations, []);
     assert.ok(result.process_series.identities.length >= 1);
     assert.equal(result.process_series.scheduled_reads, 1);
     assert.equal(result.process_series.snapshots.length, 1);
+    assert.equal(captureCalls, 1);
     assert.equal(result.cleanup.complete, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
