@@ -674,7 +674,14 @@ fn metadata_policy_name(policy: MetadataPolicy) -> &'static str {
 /// outputs run through `jpegxl-rs::encoder_builder` (the `image` crate
 /// has no JXL codec). Everything else uses `image::save_with_format`.
 fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<(), GoopError> {
-    let img = if target == TargetFormat::Jpeg {
+    let jpeg_source = if target == TargetFormat::Png {
+        crate::jpeg_controls::prepare(input, crate::jpeg_controls::MAX_INPUT_BYTES)?
+    } else {
+        None
+    };
+    let img = if let Some(source) = jpeg_source.as_ref() {
+        source.decode_upright()?
+    } else if target == TargetFormat::Jpeg {
         decode_for_jpeg_output(input)?
     } else {
         decode_any(input)?
@@ -710,7 +717,11 @@ fn convert_image(input: &Path, output: &Path, target: TargetFormat) -> Result<()
         .map_err(|e| GoopError::SubprocessFailed {
             binary: "image".into(),
             stderr: format!("failed to save image: {e}"),
-        })
+        })?;
+    if let Some(source) = jpeg_source.as_ref() {
+        source.verify_unchanged(input, crate::jpeg_controls::MAX_INPUT_BYTES)?;
+    }
+    Ok(())
 }
 
 /// Decode an image at any supported input format into an in-memory
@@ -1781,6 +1792,82 @@ mod tests {
         let mut jpeg = Jpeg::from_bytes(std::fs::read(path).unwrap().into()).unwrap();
         jpeg.set_exif(Some(orientation_exif(6).into()));
         std::fs::write(path, jpeg.encoder().bytes()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_jpeg_to_png_normalizes_orientation_before_dropping_exif() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("orientation-6.jpg");
+        let output = dir.path().join("upright.png");
+        write_oriented_untagged_jpeg(&input);
+        let original = std::fs::read(&input).unwrap();
+        let mut expected = image::open(&input).unwrap();
+        expected.apply_orientation(image::metadata::Orientation::Rotate90);
+
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Png,
+        }))
+        .unwrap();
+        let result = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(image::image_dimensions(&output).unwrap(), (120, 160));
+        assert_eq!(image::open(&output).unwrap().to_rgb8(), expected.to_rgb8());
+        assert_eq!(metadata::read(&output).unwrap().0, None);
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(result.output_path, output.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn generic_jpeg_to_png_refuses_invalid_orientation_without_output() {
+        struct Sink;
+        impl EventSink for Sink {
+            fn emit_progress(&self, _: ProgressEvent) {}
+            fn emit_queue(&self, _: goop_core::QueueEvent) {}
+            fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("invalid-orientation.jpg");
+        let output = dir.path().join("output.png");
+        write_oriented_untagged_jpeg(&input);
+        let mut jpeg =
+            img_parts::jpeg::Jpeg::from_bytes(std::fs::read(&input).unwrap().into()).unwrap();
+        use img_parts::ImageEXIF;
+        jpeg.set_exif(Some(orientation_exif(9).into()));
+        std::fs::write(&input, jpeg.encoder().bytes()).unwrap();
+        let original = std::fs::read(&input).unwrap();
+
+        let resolver = BinaryResolver::new(dir.path().to_owned());
+        let backend = ImageMagickBackend::new(&resolver, Arc::new(Sink));
+        let req: ConvertRequest = serde_json::from_value(serde_json::json!({
+            "input_path": input,
+            "output_path": output,
+            "target": TargetFormat::Png,
+            "metadata_policy": MetadataPolicy::StripAll,
+        }))
+        .unwrap();
+        let error = backend
+            .convert(JobId::new(), &req, CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert!(error.user_message().contains("EXIF"));
+        assert!(!output.exists());
+        assert_eq!(std::fs::read(&input).unwrap(), original);
     }
 
     fn tmp_dir(label: &str) -> PathBuf {

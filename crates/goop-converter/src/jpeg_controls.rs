@@ -89,6 +89,15 @@ impl JpegSource {
             .map(|value| value.unwrap_or(image::metadata::Orientation::NoTransforms))
     }
 
+    pub(crate) fn decode_upright(&self) -> Result<DynamicImage, GoopError> {
+        let mut decoder = self.decoder()?;
+        let orientation = Self::orientation(&mut decoder)?;
+        let mut pixels =
+            DynamicImage::from_decoder(decoder).map_err(|e| error(format!("JPEG pixels: {e}")))?;
+        pixels.apply_orientation(orientation);
+        Ok(pixels)
+    }
+
     fn probe(&self) -> Result<goop_core::ProbeResult, GoopError> {
         let mut decoder = self.decoder()?;
         let (mut width, mut height) = decoder.dimensions();

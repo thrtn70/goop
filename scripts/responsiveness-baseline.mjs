@@ -1094,11 +1094,25 @@ export function createScheduledProcessSampler({ series, capture, nowMs = () => p
   };
   const finish = settledAtMs => {
     if (anchor === null || stopped) throw Error('Process sampler is not active');
-    pump();
+    stopped = true;
     const now = nowMs();
     if (!Number.isFinite(settledAtMs) || now < settledAtMs || now - settledAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
-    record(Math.round((now - anchor) * 1000), false);
-    stopped = true;
+    let snapshot, captured = false;
+    try { snapshot = capture(); captured = true; } catch { /* Retain a missed terminal read. */ }
+    const completedAt = nowMs();
+    if (!Number.isFinite(completedAt) || completedAt < settledAtMs || completedAt - settledAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
+    const elapsed = completedAt - anchor;
+    if (!Number.isFinite(elapsed) || elapsed < 0) throw Error('Process sampler clock is invalid');
+    const currentSlot = Math.floor(elapsed / 1000);
+    // A due cadence read is missed when the terminal read takes its place.
+    while (nextSlot <= currentSlot) {
+      record(nextSlot * 1_000_000, true);
+      nextSlot += 1;
+    }
+    const elapsedUs = Math.max(lastElapsedUs + 1, Math.round(elapsed * 1000));
+    lastElapsedUs = elapsedUs;
+    if (captured) series.observe(elapsedUs, snapshot);
+    else series.recordMiss(elapsedUs);
   };
   return Object.freeze({ start, pump, finish });
 }
@@ -1621,7 +1635,7 @@ const waitForClose = (closed, timeoutMs) => new Promise(resolveClose => {
 
 export async function runNativePage(
   { plan, page, manifest, platform = process.platform, abortSignal = null },
-  { createDriver = createAccessibilityDriver, waitActivation = waitForAxActivation } = {},
+  { createDriver = createAccessibilityDriver, waitActivation = waitForAxActivation, captureSnapshot = captureProcessIdentitySnapshot } = {},
 ) {
   if (platform !== 'darwin') throw Error('Native responsiveness pages are macOS-only');
   const componentDirectory = plan.component_directory ?? plan.report_directory;
@@ -1667,7 +1681,7 @@ export async function runNativePage(
   const samplingPlatform = process.platform === 'win32' ? 'win32' : 'darwin';
   const series = createIdentityAwareProcessSeries({ rootPid: child.pid, platform: samplingPlatform });
   const started = performance.now();
-  const sampler = createScheduledProcessSampler({ series, capture: () => captureProcessIdentitySnapshot(samplingPlatform) });
+  const sampler = createScheduledProcessSampler({ series, capture: () => captureSnapshot(samplingPlatform, child.pid) });
   let sampling = null, samplingStarted = false;
   const deadlineTimer = setTimeout(() => { timedOut = true; signal('SIGTERM'); }, page.timeout_ms);
   const budgetMonitor = setInterval(() => {
@@ -1726,7 +1740,8 @@ export async function runNativePage(
     if (!aborted && preReadyFailedComponent !== null) {
       pageComponent = preReadyFailedComponent;
       try {
-        sampler.start(); samplingStarted = true; sampler.finish(performance.now());
+        // No action settled; this single post-failure read is diagnostic process evidence.
+        sampler.start(); samplingStarted = true;
         preReadyFailure = true; signal('SIGTERM'); cleanupComplete = await waitForClose(closed, 5000); runError = null;
       } catch (samplingError) { runError = samplingError; }
     } else if (!aborted && driver && recorderMode === 'enabled') {
