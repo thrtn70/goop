@@ -300,6 +300,51 @@ test('scheduled RSS sampler anchors at action one and turns delayed 1 Hz slots i
   assert.throws(() => validateProcessSeries({ ...result, scheduled_reads: 99 }), /accounting/i);
 });
 
+test('terminal RSS sampling skips a due cadence read before the settlement deadline', () => {
+  let now = 0;
+  let captures = 0;
+  const series = createIdentityAwareProcessSeries({ rootPid: 10, platform: 'darwin' });
+  const sampler = createScheduledProcessSampler({
+    series,
+    nowMs: () => now,
+    capture: () => {
+      captures += 1;
+      if (captures === 2) now += 100;
+      return '10\t1\t2026-09-20T10:00:00.000Z\t100\t/goop';
+    },
+  });
+  sampler.start();
+  now = 1000;
+  sampler.finish(1000);
+
+  const result = series.finish();
+  assert.equal(captures, 2);
+  assert.equal(result.scheduled_reads, 3);
+  assert.equal(result.missed_reads, 1);
+  assert.deepEqual(result.snapshots.map(value => value.elapsed_us), [0, 1_100_000]);
+});
+
+test('terminal RSS sampling rejects a snapshot completed after the settlement deadline', () => {
+  let now = 0;
+  let captures = 0;
+  const series = createIdentityAwareProcessSeries({ rootPid: 10, platform: 'darwin' });
+  const sampler = createScheduledProcessSampler({
+    series,
+    nowMs: () => now,
+    capture: () => {
+      captures += 1;
+      if (captures === 2) now += 1100;
+      return '10\t1\t2026-09-20T10:00:00.000Z\t100\t/goop';
+    },
+  });
+  sampler.start();
+  now = 1000;
+  assert.throws(() => sampler.finish(1000), /one-second settlement window/i);
+  assert.equal(captures, 2);
+  assert.throws(() => sampler.finish(now), /not active/i);
+  assert.equal(captures, 2);
+});
+
 test('attribution classification never claims ambiguous WebKit ownership', () => {
   assert.equal(classifyProcessAttribution({ rootStable: true, ownedDescendantsStable: true, relatedStable: false, relatedAmbiguous: true }), 'attributable_native_only');
   assert.equal(classifyProcessAttribution({ rootStable: true, ownedDescendantsStable: true, relatedStable: true, relatedAmbiguous: true }), 'partial_related_processes');
@@ -826,6 +871,8 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     assert.equal(result.page_component.frontend_trace.failure.code, 'observer_init');
     assert.deepEqual(result.driver_observations, []);
     assert.ok(result.process_series.identities.length >= 1);
+    assert.equal(result.process_series.scheduled_reads, 1);
+    assert.equal(result.process_series.snapshots.length, 1);
     assert.equal(result.cleanup.complete, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

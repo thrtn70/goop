@@ -1094,11 +1094,25 @@ export function createScheduledProcessSampler({ series, capture, nowMs = () => p
   };
   const finish = settledAtMs => {
     if (anchor === null || stopped) throw Error('Process sampler is not active');
-    pump();
+    stopped = true;
     const now = nowMs();
     if (!Number.isFinite(settledAtMs) || now < settledAtMs || now - settledAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
-    record(Math.round((now - anchor) * 1000), false);
-    stopped = true;
+    let snapshot, captured = false;
+    try { snapshot = capture(); captured = true; } catch { /* Retain a missed terminal read. */ }
+    const completedAt = nowMs();
+    if (!Number.isFinite(completedAt) || completedAt < settledAtMs || completedAt - settledAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
+    const elapsed = completedAt - anchor;
+    if (!Number.isFinite(elapsed) || elapsed < 0) throw Error('Process sampler clock is invalid');
+    const currentSlot = Math.floor(elapsed / 1000);
+    // A due cadence read is missed when the terminal read takes its place.
+    while (nextSlot <= currentSlot) {
+      record(nextSlot * 1_000_000, true);
+      nextSlot += 1;
+    }
+    const elapsedUs = Math.max(lastElapsedUs + 1, Math.round(elapsed * 1000));
+    lastElapsedUs = elapsedUs;
+    if (captured) series.observe(elapsedUs, snapshot);
+    else series.recordMiss(elapsedUs);
   };
   return Object.freeze({ start, pump, finish });
 }
@@ -1676,7 +1690,7 @@ export async function runNativePage(
     } catch { budgetExceeded = true; signal('SIGTERM'); }
   }, 100);
   const recorderMode = manifest.recorderMode ?? 'enabled';
-  let pageComponent = null, observations = [], recoveryEvidence = null, quitRequested = false, cleanupComplete = false, runError = null, driver = null, preReadyFailedComponent = null, preReadyFailure = false;
+  let pageComponent = null, observations = [], recoveryEvidence = null, quitRequested = false, cleanupComplete = false, runError = null, driver = null, preReadyFailedComponent = null, preReadyFailureObservedAtMs = null, preReadyFailure = false;
   try {
     driver = createDriver({ platform, appName: plan.app_name, expectedPid: child.pid });
     await waitActivation(driver, { timeoutMs: Math.min(5000, page.timeout_ms), pollMs: 25, abortSignal });
@@ -1693,6 +1707,7 @@ export async function runNativePage(
         const startup = await waitForRecorderOrFailedPage({ recorderPath, reportDirectory: componentDirectory, identity: expected, descriptor: manifest.descriptor, ...options });
         if (startup.kind === 'failed_component') {
           preReadyFailedComponent = startup.page_component;
+          preReadyFailureObservedAtMs = performance.now();
           throw Error('Frontend recorder failed before readiness');
         }
         return startup.marker;
@@ -1726,7 +1741,8 @@ export async function runNativePage(
     if (!aborted && preReadyFailedComponent !== null) {
       pageComponent = preReadyFailedComponent;
       try {
-        sampler.start(); samplingStarted = true; sampler.finish(performance.now());
+        sampler.start(); samplingStarted = true;
+        if (performance.now() - preReadyFailureObservedAtMs > 1000) throw Error('Terminal RSS sample missed the one-second settlement window');
         preReadyFailure = true; signal('SIGTERM'); cleanupComplete = await waitForClose(closed, 5000); runError = null;
       } catch (samplingError) { runError = samplingError; }
     } else if (!aborted && driver && recorderMode === 'enabled') {
