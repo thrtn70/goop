@@ -166,7 +166,7 @@ code, kbd, pre {
 kbd {
   font-size: 0.85em;
   font-weight: 500;
-  padding: 0.05em 0.4em;
+  padding: 0.2em 0.45em;
   border: 1px solid var(--paper-3);
   border-radius: 3px;
   letter-spacing: 0.04em;
@@ -215,18 +215,6 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
 }
 
 .skip-link:focus-visible { transform: translateY(0); }
-
-/* Subtle warm noise overlay grounds the page as physical. */
-.grain {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.06;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.95  0 0 0 0 0.97  0 0 0 0 0.95  0 0 0 0.5 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
-  background-size: 180px 180px;
-}
 
 /* ============================================================
    Page container
@@ -556,7 +544,7 @@ main {
   font-family: 'Bricolage Grotesque', system-ui;
   font-weight: 500;
   font-size: clamp(1.25rem, 0.9rem + 1.4vw, 1.625rem);
-  line-height: 1.2;
+  line-height: 1.45;
   letter-spacing: var(--tracking-snug);
   color: var(--paper);
 }
@@ -863,138 +851,41 @@ main {
   align-items: baseline;
 }
 
-.ticker__aside {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s-3) var(--s-6);
-}
-
 .ticker__sub {
   font-size: var(--type-body-s);
+  line-height: var(--line-normal);
   color: var(--paper-3);
   font-style: italic;
   letter-spacing: var(--tracking-snug);
 }
 
-/* The marquee starts on its own and runs for a minute, so it needs a stop.
-   Hover and :focus-within already handled a mouse, but the track holds nothing
-   focusable, so keyboard and touch had no route to it at all. Set in the label
-   register rather than as an icon button, because an icon here would be the
-   only one on the page. `button` is reset by `all: unset`, so this rebuilds
-   what it needs. `all: unset` would make it inline, but .ticker__aside is a
-   flex container, so it is blockified to a flex item and the padding does
-   enter layout — which is fine here, because the row is new and there is no
-   prior height for it to disturb. */
-.ticker__toggle {
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-size: var(--type-body-xs);
-  font-weight: 500;
-  letter-spacing: var(--tracking-wider);
-  text-transform: uppercase;
-  color: var(--paper-3);
-  border-bottom: 1px solid var(--ink-3);
-  padding-block: 14px;
-  white-space: nowrap;
-  transition: color var(--dur-fast) var(--ease-quart),
-              border-color var(--dur-fast) var(--ease-quart);
-}
-
-.ticker__toggle:hover {
-  color: var(--paper);
-  border-color: var(--paper-3);
-}
-
-/* Under reduced motion the clone is never created and the animation never
-   runs, so the control would be a button that does nothing. */
-@media (prefers-reduced-motion: reduce) {
-  .ticker__toggle { display: none; }
-}
-
-.ticker__track[data-ticker-paused='true'] .ticker__list {
-  animation-play-state: paused;
-}
-
 .ticker__track {
-  --ticker-duration: 60s;
-  display: flex;
-  width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  position: relative;
-  mask-image: linear-gradient(to right, transparent, black 6%, black 94%, transparent);
-  -webkit-mask-image: linear-gradient(to right, transparent, black 6%, black 94%, transparent);
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
 }
 
 .ticker__list {
-  display: inline-flex;
-  align-items: center;
-  gap: clamp(var(--s-6), 2.5vw, var(--s-12));
-  padding-inline: clamp(var(--s-6), 3vw, var(--s-16));
-  animation: ticker-scroll var(--ticker-duration) linear infinite;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3) var(--s-6);
   font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 600;
-  font-size: clamp(1.75rem, 1rem + 3vw, 3.25rem);
-  letter-spacing: var(--tracking-tight);
+  font-weight: 500;
+  font-size: clamp(1rem, 0.85rem + 0.5vw, 1.25rem);
+  line-height: var(--line-normal);
   color: var(--paper);
-  font-variation-settings: 'opsz' 96;
+  list-style: none;
 }
 
-/* The marquee is only correct when the clone exists — one list travelling its
-   own full width leaves the band empty for the tail of every cycle. Under
-   prefers-reduced-motion the JS never creates the clone (deliberate: the house
-   pattern is to not create an effect rather than animate it to zero), which
-   leaves a lone list here. Tying the animation to :only-child means re-enabling
-   motion mid-session cannot start a broken loop, instead of relying on the
-   media query that was evaluated once at load. */
-.ticker__list:only-child {
-  animation: none;
-}
-
-.ticker__list li:not(.ticker__sep):not(.ticker__more) {
-  transition: color var(--dur-fast) var(--ease-quart);
-}
-
-.ticker__list li:not(.ticker__sep):not(.ticker__more):hover {
-  color: var(--teal);
-}
-
-.ticker__sep {
-  color: var(--teal);
-  font-weight: 400;
-  font-size: 0.85em;
-  opacity: 0.6;
-  user-select: none;
+.ticker__list li {
+  border-bottom: 1px solid var(--ink-3);
+  padding-bottom: var(--s-1);
 }
 
 .ticker__more {
   font-style: italic;
   font-weight: 400;
   color: var(--paper-3);
-}
-
-.ticker__track:hover .ticker__list,
-.ticker__track:focus-within .ticker__list {
-  animation-play-state: paused;
-}
-
-/* The animation sits on .ticker__list, so the percentage resolves against one
-   list's own width — not the two-list track. A seamless hand-off needs each
-   list to travel its full width so the clone lands exactly where the original
-   started; -50% travelled half that and snapped ~1005px into view once a
-   minute. (-50% would only be right if the animated element wrapped both
-   copies, and .ticker__track is width:100%, so it cannot.)
-
-   INVARIANT, and it is tighter than it looks: with two copies travelling a
-   full width each, the band stays covered only while one list is at least as
-   wide as the track. Measured at the type cap the list is 3859px, so a 3840px
-   4K viewport clears it by 19px — 0.5%. Trimming names from the roll-call, or
-   tightening its gap/padding, spends that margin and opens a blank band at the
-   tail of every cycle. Shortening the list means adding a copy. */
-@keyframes ticker-scroll {
-  from { transform: translateX(0); }
-  to { transform: translateX(-100%); }
 }
 
 @media (max-width: 720px) {
@@ -1116,7 +1007,7 @@ main {
 .entry__body p code {
   font-size: 0.92em;
   background: var(--ink-2);
-  padding: 0.05em 0.35em;
+  padding: 0.2em 0.45em;
   border: 1px solid var(--ink-3);
   border-radius: 2px;
   color: var(--paper);
@@ -1210,7 +1101,7 @@ main {
 .glossary__row dd kbd {
   font-size: 0.85em;
   font-weight: 500;
-  padding: 0.05em 0.45em;
+  padding: 0.2em 0.45em;
   border: 1px solid var(--paper-4);
   border-radius: 3px;
   letter-spacing: 0.04em;
@@ -1369,7 +1260,7 @@ main {
   font-style: italic;
   font-weight: 400;
   font-size: clamp(1.5rem, 1rem + 1.6vw, 2.25rem);
-  line-height: 1.25;
+  line-height: 1.45;
   letter-spacing: var(--tracking-snug);
   color: var(--paper);
   text-wrap: balance;
@@ -1961,11 +1852,6 @@ main {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
-  }
-
-  .ticker__list {
-    animation: none;
-    transform: none;
   }
 
   .hero__eyebrow,
