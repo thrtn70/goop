@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.6.3", features = [] }
+tauri-codegen = { version = "=2.6.3", default-features = false }
+tauri-plugin = { version = "=2.6.3", default-features = false }
 
 [dependencies]
 goop-core = { path = "../crates/goop-core" }
@@ -16,8 +18,13 @@ goop-queue = { path = "../crates/goop-queue" }
 goop-config = { path = "../crates/goop-config" }
 goop-pdf = { path = "../crates/goop-pdf" }
 goop-metadata = { path = "../crates/goop-metadata" }
-# Keep the runtime minor aligned with the committed JavaScript API lockfile.
-tauri = { version = "~2.11.0", features = ["protocol-asset"] }
+# Keep the tested runtime/support family aligned with the locked JavaScript API.
+# Newer support minors are incompatible with this runtime despite caret ranges.
+tauri = { version = "=2.11.6", features = ["protocol-asset"] }
+tauri-runtime = { version = "=2.11.3", default-features = false }
+tauri-runtime-wry = { version = "=2.11.4", default-features = false }
+tauri-macros = { version = "=2.6.3", default-features = false }
+tauri-utils = { version = "=2.9.3", default-features = false }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
