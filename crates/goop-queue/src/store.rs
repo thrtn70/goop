@@ -10,7 +10,7 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 
 #[derive(Clone)]
 pub struct QueueStore {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl QueueStore {
@@ -21,6 +21,8 @@ impl QueueStore {
             }
         }
         let conn = Connection::open(path).map_err(|e| GoopError::Queue(e.to_string()))?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
         conn.execute_batch(MIGRATION_0001)
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         // Migration 0002 (v0.1.9): add `hidden_from_queue` to support
@@ -39,6 +41,8 @@ impl QueueStore {
         // exactly as it was, so every `LIKE 'error:%'` predicate and every
         // pre-existing row keeps working with no backfill.
         ensure_error_detail_column(&conn)?;
+        conn.execute_batch(include_str!("../migrations/0005_publication_journal.sql"))
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -103,17 +107,22 @@ impl QueueStore {
             JobState::Error { detail, .. } => detail.as_ref(),
             _ => None,
         };
+        let serialized_result = result
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
         let updated = c
             .execute(
                 "UPDATE jobs SET state = ?2, result = ?3,
                 started_at = COALESCE(?4, started_at),
                 finished_at = COALESCE(?5, finished_at),
                 error_detail = ?6
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![
                     id.0.to_string(),
                     state_to_str(state),
-                    result.and_then(|r| serde_json::to_string(r).ok()),
+                    serialized_result,
                     started_at,
                     finished_at,
                     error_detail,
@@ -214,6 +223,7 @@ impl QueueStore {
             .prepare(
                 "SELECT id, kind, state, payload, result, priority, attempts, created_at, started_at, finished_at, error_detail
                  FROM jobs WHERE state = 'queued' AND kind = ?1
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)
                    AND (not_before IS NULL OR not_before <= ?2)
                  ORDER BY priority DESC, created_at ASC LIMIT 1",
             )
@@ -236,7 +246,8 @@ impl QueueStore {
         let c = self.conn.lock();
         let updated = c
             .execute(
-                "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1
+                 AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![
                     id.0.to_string(),
                     serde_json::to_string(payload).map_err(|e| GoopError::Queue(e.to_string()))?,
@@ -277,7 +288,8 @@ impl QueueStore {
             .insert(key.into(), value);
         let updated = tx
             .execute(
-                "UPDATE jobs SET payload = ?2 WHERE id = ?1",
+                "UPDATE jobs SET payload = ?2 WHERE id = ?1
+                 AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![id.0.to_string(), payload.to_string()],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -298,7 +310,8 @@ impl QueueStore {
         let n = c
             .execute(
                 "UPDATE jobs SET state = 'queued', started_at = NULL, not_before = ?2
-                 WHERE id = ?1 AND state = 'running'",
+                 WHERE id = ?1 AND state = 'running'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![id.0.to_string(), not_before_ms],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -315,7 +328,9 @@ impl QueueStore {
         let interrupted = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT id, kind FROM jobs WHERE state = 'running' ORDER BY created_at ASC",
+                    "SELECT id, kind FROM jobs WHERE state = 'running'
+                     AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)
+                     ORDER BY created_at ASC",
                 )
                 .map_err(|e| GoopError::Queue(e.to_string()))?;
             let rows = stmt
@@ -342,7 +357,8 @@ impl QueueStore {
         let updated = tx
             .execute(
                 "UPDATE jobs SET state = ?1, finished_at = ?2, error_detail = NULL
-                 WHERE state = 'running'",
+                 WHERE state = 'running'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![
                     state_to_str(&JobState::Error {
                         message: "interrupted".into(),
@@ -375,7 +391,8 @@ impl QueueStore {
         let n = c
             .execute(
                 "UPDATE jobs SET state = ?1, started_at = NULL
-                 WHERE state = 'paused' AND kind != 'extract'",
+                 WHERE state = 'paused' AND kind != 'extract'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![state_to_str(&JobState::Queued)],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -397,7 +414,8 @@ impl QueueStore {
                 "UPDATE jobs SET state = ?2, started_at = NULL,
                     priority = (SELECT COALESCE(MAX(priority), 0) + 10
                                 FROM jobs WHERE state = 'queued')
-                 WHERE id = ?1 AND state = 'paused'",
+                 WHERE id = ?1 AND state = 'paused'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![id.0.to_string(), state_to_str(&JobState::Queued)],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -417,7 +435,8 @@ impl QueueStore {
         let n = c
             .execute(
                 "UPDATE jobs SET state = ?2, started_at = ?3, not_before = NULL
-                 WHERE id = ?1 AND state = 'queued'",
+                 WHERE id = ?1 AND state = 'queued'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![id.0.to_string(), state_to_str(&JobState::Running), now_ms],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -437,7 +456,8 @@ impl QueueStore {
         let n = c
             .execute(
                 "UPDATE jobs SET state = ?2, finished_at = ?3
-                 WHERE id = ?1 AND state IN ('queued', 'paused')",
+                 WHERE id = ?1 AND state IN ('queued', 'paused')
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![
                     id.0.to_string(),
                     state_to_str(&JobState::Cancelled),
@@ -458,6 +478,19 @@ impl QueueStore {
     /// job isn't in an error state.
     pub fn retry_errored(&self, id: JobId) -> Result<usize, GoopError> {
         let c = self.conn.lock();
+        let unresolved: i64 = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM publication_journal WHERE job_id = ?1)",
+                params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| GoopError::Queue(e.to_string()))?;
+        if unresolved != 0 {
+            return Err(GoopError::Queue(
+                "retry refused because output publication is unresolved; the output may already exist"
+                    .into(),
+            ));
+        }
         let n = c
             .execute(
                 // `error_detail` is cleared here for the same reason `result`
@@ -472,7 +505,8 @@ impl QueueStore {
                     error_detail = NULL,
                     priority = (SELECT COALESCE(MAX(priority), 0) + 10
                                 FROM jobs WHERE state = 'queued')
-                 WHERE id = ?1 AND state LIKE 'error:%'",
+                 WHERE id = ?1 AND state LIKE 'error:%'
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 params![id.0.to_string(), state_to_str(&JobState::Queued)],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -490,7 +524,8 @@ impl QueueStore {
         let n = c
             .execute(
                 "UPDATE jobs SET hidden_from_queue = 1
-                 WHERE state = 'done' OR state = 'cancelled' OR state LIKE 'error:%'",
+                 WHERE (state = 'done' OR state = 'cancelled' OR state LIKE 'error:%')
+                   AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
                 [],
             )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
@@ -622,7 +657,11 @@ impl QueueStore {
     pub fn forget(&self, id: JobId) -> Result<usize, GoopError> {
         let c = self.conn.lock();
         let n = c
-            .execute("DELETE FROM jobs WHERE id = ?1", params![id.0.to_string()])
+            .execute(
+                "DELETE FROM jobs WHERE id = ?1
+                 AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
+                params![id.0.to_string()],
+            )
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         Ok(n)
     }
@@ -640,7 +679,11 @@ impl QueueStore {
         let mut total = 0;
         for id in ids {
             total += tx
-                .execute("DELETE FROM jobs WHERE id = ?1", params![id.0.to_string()])
+                .execute(
+                    "DELETE FROM jobs WHERE id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM publication_journal WHERE job_id = jobs.id)",
+                    params![id.0.to_string()],
+                )
                 .map_err(|e| GoopError::Queue(e.to_string()))?;
         }
         tx.commit().map_err(|e| GoopError::Queue(e.to_string()))?;

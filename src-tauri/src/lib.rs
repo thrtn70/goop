@@ -379,6 +379,17 @@ pub fn run() {
                 }
             };
 
+            // Publication receipts are reconciled before ordinary interruption
+            // and paused recovery can make a row eligible for another worker.
+            if let Err(error) = store.reconcile_publications() {
+                tracing::error!(%error, "failed to reconcile publication receipts; exiting");
+                app.dialog()
+                    .message("Goop couldn't verify output recovery records. Existing files were not changed. Check the application data folder's permissions and available disk space, then try again.")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                logging::flush();
+                std::process::exit(1);
+            }
             let interrupted = match store.reconcile() {
                 Ok(interrupted) => interrupted,
                 Err(e) => {
@@ -573,17 +584,19 @@ pub fn run() {
             let encoders_for_convert = encoders.clone();
             let hw_enabled_for_convert = hw_enabled.clone();
             let pids_for_convert = pid_registry.clone();
+            let store_for_convert = store.clone();
             let convert_worker: WorkerFn = Arc::new(move |id, payload, signals| {
                 let r = r_for_convert.clone();
                 let s = sink_for_convert.clone();
                 let enc = encoders_for_convert.clone();
                 let hw_preference = hw_enabled_for_convert.clone();
                 let pids = pids_for_convert.clone();
+                let store = store_for_convert.clone();
                 Box::pin(async move {
                     // Conversions pause via the PID registry (SIGSTOP on the
                     // ffmpeg child), so only the cancel token threads down.
                     let cancel = signals.cancel;
-                    let req: ConvertRequest = serde_json::from_value(payload)
+                    let req: ConvertRequest = serde_json::from_value(payload.clone())
                         .map_err(|e| GoopError::Queue(format!("bad payload: {e}")))?;
                     let hw = if req.video_options.is_some() { false } else { hw_preference.load(Ordering::Relaxed) };
                     // Explicit requests are freshly admitted by the FFmpeg worker
@@ -593,34 +606,21 @@ pub fn run() {
                     }
                     goop_core::validate_audio_request(&req)?;
                     goop_core::validate_video_request(&req)?;
+                    let publication = store.begin_publication(id, &payload)?;
                     let res = if req.target.is_image() {
                         // ImageMagick runs in-process — no child PID, no
                         // pause/resume support (out of scope for Phase G).
-                        let im = ImageMagickBackend::new(&r, s);
+                        let im = ImageMagickBackend::new(&r, s)
+                            .with_publication_observer(publication);
                         im.convert(id, &req, cancel).await?
                     } else {
                         let ffmpeg = FfmpegBackend::new(&r, s)
                             .with_encoders(enc, hw)
-                            .with_pid_registry(pids);
+                            .with_pid_registry(pids)
+                            .with_publication_observer(publication);
                         ffmpeg.convert(id, &req, cancel).await?
                     };
-                    Ok(JobResult {
-                        track_execution: res.track_execution,
-                        audio_execution: res.audio_execution,
-                        video_execution: res.video_execution,
-                        video_track_execution: res.video_track_execution,
-                        image_metadata_execution: res.image_metadata_execution,
-                        compression_execution: res.compression_execution,
-                        image_alpha_execution: res.image_alpha_execution,
-                        source_bytes: res.source_bytes,
-                        target_bytes: res.target_bytes,
-                        reencoded: Some(res.reencoded),
-                        output_path: Some(res.output_path),
-                        bytes: Some(res.bytes),
-                        duration_ms: res.duration_ms,
-                        result_kind: ResultKind::File,
-                        file_count: 1,
-                    })
+                    Ok(goop_converter::backend::conversion_job_result(&res))
                 })
             });
 

@@ -1,5 +1,6 @@
 //! Private staging and no-replace publication for completed outputs.
-use crate::{GoopError, ResultKind};
+use crate::publication::PublicationObserver;
+use crate::{GoopError, JobResult, ResultKind};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,7 @@ pub struct PublishedOutput {
 pub struct StagedOutput {
     directory: PathBuf,
     path: PathBuf,
+    preserve_directory: bool,
 }
 impl StagedOutput {
     pub fn new(destination: &Path) -> Result<Self, GoopError> {
@@ -63,6 +65,7 @@ impl StagedOutput {
                     return Ok(Self {
                         path: directory.join(filename),
                         directory,
+                        preserve_directory: false,
                     })
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -183,11 +186,99 @@ impl StagedOutput {
             "cannot allocate an unused output name after 10000 publication attempts".into(),
         ))
     }
+
+    /// Publish a single-file result while durably reporting both sides of the
+    /// filesystem move. Once an intent callback is attempted, failures retain
+    /// the private workspace so recovery can resolve the durable journal.
+    pub fn publish_observed(
+        mut self,
+        destination: &OutputDestination,
+        target: Option<u64>,
+        allow_empty: bool,
+        cancel: &CancellationToken,
+        observer: &dyn PublicationObserver,
+        result: &JobResult,
+    ) -> Result<PublishedOutput, GoopError> {
+        publication_path(&self.path)?;
+        let mut published = self.validate(target, allow_empty)?;
+        if published.result_kind != ResultKind::File {
+            return Err(GoopError::InvalidRequest(
+                "durable publication recovery currently supports single-file outputs only".into(),
+            ));
+        }
+        let mut path = destination.path.clone();
+        for suffix in 1..=10_000 {
+            if cancel.is_cancelled() {
+                return Err(GoopError::Cancelled);
+            }
+            let observed_result = observed_result(result, &path, &published)?;
+            // The callback may have committed an intent before returning either
+            // success or failure. Preserve staging conservatively in both cases.
+            self.preserve_directory = true;
+            observer.before_publish(&self.path, &path, &observed_result)?;
+            if cancel.is_cancelled() {
+                return Err(GoopError::Cancelled);
+            }
+            match publish_no_replace(&self.path, &path) {
+                Ok(()) => {
+                    published.path = path.clone();
+                    observer.published(&path, &observed_result)?;
+                    return Ok(published);
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && destination.automatic_name.is_some() =>
+                {
+                    let (stem, extension) = destination.automatic_name.as_ref().unwrap();
+                    let name = if extension.is_empty() {
+                        format!("{stem} ({suffix})")
+                    } else {
+                        format!("{stem} ({suffix}).{extension}")
+                    };
+                    path = destination.path.with_file_name(name);
+                }
+                Err(error) => {
+                    return Err(GoopError::InvalidRequest(format!(
+                        "cannot publish output without replacing an existing file: {error}"
+                    )))
+                }
+            }
+        }
+        Err(GoopError::InvalidRequest(
+            "cannot allocate an unused output name after 10000 publication attempts".into(),
+        ))
+    }
 }
 impl Drop for StagedOutput {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
+        if !self.preserve_directory {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
     }
+}
+
+fn observed_result(
+    template: &JobResult,
+    path: &Path,
+    published: &PublishedOutput,
+) -> Result<JobResult, GoopError> {
+    let output_path = publication_path(path)?;
+    let mut result = template.clone();
+    result.output_path = Some(output_path.to_owned());
+    result.bytes = Some(published.bytes);
+    result.result_kind = published.result_kind;
+    result.file_count = published.file_count;
+    Ok(result)
+}
+
+fn publication_path(path: &Path) -> Result<&str, GoopError> {
+    if !path.is_absolute() {
+        return Err(GoopError::InvalidRequest(
+            "publication recovery requires absolute paths".into(),
+        ));
+    }
+    path.to_str()
+        .ok_or_else(|| GoopError::InvalidRequest("publication path is not valid UTF-8".into()))
 }
 fn inspect_directory(path: &Path) -> Result<(u64, u32), GoopError> {
     let mut bytes = 0u64;
@@ -309,7 +400,222 @@ pub fn publish_no_replace(source: &Path, destination: &Path) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use tokio_util::sync::CancellationToken;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        before: Mutex<Vec<(PathBuf, JobResult)>>,
+        published: Mutex<Vec<(PathBuf, JobResult)>>,
+        fail_before: bool,
+        fail_published: bool,
+        cancel_before_move: Option<CancellationToken>,
+        cancel_after_move: Option<CancellationToken>,
+    }
+
+    impl PublicationObserver for RecordingObserver {
+        fn before_publish(
+            &self,
+            _staged: &Path,
+            destination: &Path,
+            result: &JobResult,
+        ) -> Result<(), GoopError> {
+            self.before
+                .lock()
+                .push((destination.to_path_buf(), result.clone()));
+            if let Some(cancel) = &self.cancel_before_move {
+                cancel.cancel();
+            }
+            if self.fail_before {
+                Err(GoopError::InvalidRequest("intent write failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn published(&self, destination: &Path, result: &JobResult) -> Result<(), GoopError> {
+            self.published
+                .lock()
+                .push((destination.to_path_buf(), result.clone()));
+            if let Some(cancel) = &self.cancel_after_move {
+                cancel.cancel();
+            }
+            if self.fail_published {
+                Err(GoopError::InvalidRequest("receipt write failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn job_result() -> JobResult {
+        serde_json::from_value(serde_json::json!({"duration_ms": 42})).unwrap()
+    }
+
+    fn private_workspaces(parent: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".goop-output-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn observed_intent_failure_withholds_output_and_preserves_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        let staged = StagedOutput::new(&dest).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        let observer = RecordingObserver {
+            fail_before: true,
+            ..Default::default()
+        };
+
+        assert!(staged
+            .publish_observed(
+                &OutputDestination::explicit(dest.clone()),
+                None,
+                false,
+                &CancellationToken::new(),
+                &observer,
+                &job_result(),
+            )
+            .is_err());
+
+        assert!(!dest.exists());
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn observed_automatic_collision_records_each_exact_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        std::fs::write(&dest, b"existing").unwrap();
+        let staged = StagedOutput::new(&dest).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        let observer = RecordingObserver::default();
+
+        let published = staged
+            .publish_observed(
+                &OutputDestination::automatic(dest.clone(), "out".into(), "mp4".into()),
+                None,
+                false,
+                &CancellationToken::new(),
+                &observer,
+                &job_result(),
+            )
+            .unwrap();
+
+        assert_eq!(published.path, dir.path().join("out (1).mp4"));
+        let before = observer.before.lock();
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].0, dest);
+        assert_eq!(before[0].1.output_path.as_deref(), dest.to_str());
+        assert_eq!(before[0].1.bytes, Some(3));
+        assert_eq!(before[1].0, dir.path().join("out (1).mp4"));
+        assert_eq!(before[1].1.output_path.as_deref(), before[1].0.to_str());
+        assert_eq!(observer.published.lock().len(), 1);
+    }
+
+    #[test]
+    fn observed_receipt_failure_preserves_published_file_and_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        let staged = StagedOutput::new(&dest).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        let observer = RecordingObserver {
+            fail_published: true,
+            ..Default::default()
+        };
+
+        assert!(staged
+            .publish_observed(
+                &OutputDestination::explicit(dest.clone()),
+                None,
+                false,
+                &CancellationToken::new(),
+                &observer,
+                &job_result(),
+            )
+            .is_err());
+
+        assert_eq!(std::fs::read(dest).unwrap(), b"new");
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn cancellation_after_intent_withholds_output_and_preserves_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        let staged = StagedOutput::new(&dest).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        let cancel = CancellationToken::new();
+        let observer = RecordingObserver {
+            cancel_before_move: Some(cancel.clone()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            staged.publish_observed(
+                &OutputDestination::explicit(dest.clone()),
+                None,
+                false,
+                &cancel,
+                &observer,
+                &job_result(),
+            ),
+            Err(GoopError::Cancelled)
+        ));
+        assert!(!dest.exists());
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+        assert!(observer.published.lock().is_empty());
+    }
+
+    #[test]
+    fn cancellation_after_the_move_cannot_downgrade_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        let staged = StagedOutput::new(&dest).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        let cancel = CancellationToken::new();
+        let observer = RecordingObserver {
+            cancel_after_move: Some(cancel.clone()),
+            ..Default::default()
+        };
+
+        let published = staged
+            .publish_observed(
+                &OutputDestination::explicit(dest.clone()),
+                None,
+                false,
+                &cancel,
+                &observer,
+                &job_result(),
+            )
+            .unwrap();
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(published.path, dest);
+        assert_eq!(std::fs::read(&published.path).unwrap(), b"new");
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn observed_publication_rejects_relative_paths_before_journaling() {
+        let published = PublishedOutput {
+            path: PathBuf::from("staged"),
+            bytes: 3,
+            file_count: 1,
+            result_kind: ResultKind::File,
+        };
+
+        assert!(observed_result(&job_result(), Path::new("out.mp4"), &published).is_err());
+    }
 
     #[test]
     fn folder_publication_is_complete_and_automatically_renamed() {

@@ -26,6 +26,7 @@ pub mod path;
 pub mod pdf;
 pub mod preset;
 pub mod process_registry;
+pub mod publication;
 pub mod signals;
 pub mod tracks;
 pub mod update;

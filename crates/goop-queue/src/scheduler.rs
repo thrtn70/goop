@@ -398,8 +398,29 @@ impl Scheduler {
                         )
                     }
                 };
-                match store.update_state(job.id, &state, result.as_ref(), now_ms()) {
-                    Ok(()) => {
+                let finalization_store = store.clone();
+                let finalization_payload = job.payload.clone();
+                let finalization_state = state.clone();
+                let finalization_result = result.clone();
+                let persisted = tokio::task::spawn_blocking(move || {
+                    finalization_store.finalize_worker(
+                        job.id,
+                        &finalization_payload,
+                        &finalization_state,
+                        finalization_result.as_ref(),
+                        now_ms(),
+                    )
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(GoopError::Queue(format!(
+                        "job finalization task failed: {error}"
+                    )))
+                });
+                match persisted {
+                    Ok(finalized) => {
+                        state = finalized.state;
+                        result = finalized.result;
                         log_terminal_outcome(job.id, Some(&job.kind), &state);
                         if state == JobState::Done {
                             if let Some(hook) = completion_hook {
@@ -423,7 +444,19 @@ impl Scheduler {
                             detail: Some(error.to_string()),
                         };
                         result = None;
-                        if let Err(error) = store.update_state(job.id, &state, None, now_ms()) {
+                        let journal_retained =
+                            store.has_publication_journal(job.id).unwrap_or(true);
+                        let recorded = if journal_retained {
+                            store.retain_finalization_failure(
+                                job.id,
+                                &job.payload,
+                                &state,
+                                now_ms(),
+                            )
+                        } else {
+                            store.update_state(job.id, &state, None, now_ms())
+                        };
+                        if let Err(error) = recorded {
                             tracing::warn!(?job.id, %error, "could not persist status failure; restart reconciliation required");
                         }
                     }
@@ -487,7 +520,7 @@ impl Scheduler {
             process_control::pause(pid)?;
             if let Err(e) = self
                 .store
-                .update_state(id, &JobState::Paused, None, now_ms())
+                .update_live_process_state(id, &JobState::Paused, now_ms())
             {
                 // Roll the child back so OS state and DB/UI state don't
                 // diverge on a store failure.
@@ -533,7 +566,7 @@ impl Scheduler {
             process_control::resume(pid)?;
             if let Err(e) = self
                 .store
-                .update_state(id, &JobState::Running, None, now_ms())
+                .update_live_process_state(id, &JobState::Running, now_ms())
             {
                 // Re-suspend so OS state and DB/UI state don't diverge on
                 // a store failure.

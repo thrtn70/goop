@@ -59,6 +59,7 @@ pub struct FfmpegBackend<'a> {
     /// `cmd.spawn()` and unregistered via RAII guard on every exit path.
     /// `None` disables pause/resume — pause IPC will return JobNotRunning.
     pids: Option<Arc<dyn PidRegistry>>,
+    publication: Option<Arc<dyn goop_core::publication::PublicationObserver>>,
     #[cfg(debug_assertions)]
     before_run_test_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(debug_assertions)]
@@ -73,6 +74,7 @@ impl<'a> FfmpegBackend<'a> {
             encoders: None,
             hw_enabled: false,
             pids: None,
+            publication: None,
             #[cfg(debug_assertions)]
             before_run_test_hook: None,
             #[cfg(debug_assertions)]
@@ -120,6 +122,14 @@ impl<'a> FfmpegBackend<'a> {
     /// `Scheduler::pid_registry()` for this.
     pub fn with_pid_registry(mut self, pids: Arc<dyn PidRegistry>) -> Self {
         self.pids = Some(pids);
+        self
+    }
+
+    pub fn with_publication_observer(
+        mut self,
+        observer: Arc<dyn goop_core::publication::PublicationObserver>,
+    ) -> Self {
+        self.publication = Some(observer);
         self
     }
 
@@ -428,8 +438,8 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         if let Some(identity) = &explicit_audio_identity {
             verify_source_identity(&input, identity)?;
         }
-        let published = staged.publish(&destination, target_bytes, false, &cancel)?;
-        Ok(ConvertResult {
+        let prepared = staged.validate(target_bytes, false)?;
+        let mut result = ConvertResult {
             image_alpha_execution: None,
             compression_execution: None,
             image_metadata_execution: None,
@@ -439,11 +449,22 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             video_track_execution,
             source_bytes: Some(source_bytes),
             target_bytes,
-            output_path: published.path.to_string_lossy().into_owned(),
-            bytes: published.bytes,
+            output_path: destination.path.to_string_lossy().into_owned(),
+            bytes: prepared.bytes,
             duration_ms: started.elapsed().as_millis() as u64,
             reencoded,
-        })
+        };
+        let published = crate::backend::publish_conversion(
+            staged,
+            destination,
+            target_bytes,
+            cancel,
+            self.publication.clone(),
+            crate::backend::conversion_job_result(&result),
+        )
+        .await?;
+        result.output_path = published.path.to_string_lossy().into_owned();
+        Ok(result)
     }
 }
 
