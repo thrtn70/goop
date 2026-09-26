@@ -787,6 +787,7 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use super::{parse_record, serialize_record};
     use crate::store::QueueStore;
     use goop_core::{Job, JobKind, JobResult, JobState};
