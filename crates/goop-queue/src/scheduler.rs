@@ -57,6 +57,29 @@ fn log_terminal_outcome(id: JobId, kind: Option<&JobKind>, state: &JobState) {
     }
 }
 
+async fn finalize_worker_state(
+    kind: JobKind,
+    store: QueueStore,
+    id: JobId,
+    payload: serde_json::Value,
+    state: JobState,
+    result: Option<JobResult>,
+) -> Result<crate::PublicationFinalization, GoopError> {
+    if kind == JobKind::Convert {
+        tokio::task::spawn_blocking(move || {
+            store.finalize_worker(id, &payload, &state, result.as_ref(), now_ms())
+        })
+        .await
+        .unwrap_or_else(|error| {
+            Err(GoopError::Queue(format!(
+                "job finalization task failed: {error}"
+            )))
+        })
+    } else {
+        store.finalize_worker(id, &payload, &state, result.as_ref(), now_ms())
+    }
+}
+
 pub struct Scheduler {
     completion_hook: Option<CompletionHook>,
     store: QueueStore,
@@ -398,25 +421,15 @@ impl Scheduler {
                         )
                     }
                 };
-                let finalization_store = store.clone();
-                let finalization_payload = job.payload.clone();
-                let finalization_state = state.clone();
-                let finalization_result = result.clone();
-                let persisted = tokio::task::spawn_blocking(move || {
-                    finalization_store.finalize_worker(
-                        job.id,
-                        &finalization_payload,
-                        &finalization_state,
-                        finalization_result.as_ref(),
-                        now_ms(),
-                    )
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    Err(GoopError::Queue(format!(
-                        "job finalization task failed: {error}"
-                    )))
-                });
+                let persisted = finalize_worker_state(
+                    job.kind.clone(),
+                    store.clone(),
+                    job.id,
+                    job.payload.clone(),
+                    state.clone(),
+                    result.clone(),
+                )
+                .await;
                 match persisted {
                     Ok(finalized) => {
                         state = finalized.state;
@@ -903,6 +916,65 @@ mod tests {
         store.get_by_id(id).unwrap().unwrap().state
     }
 
+    #[test]
+    fn non_convert_finalization_does_not_yield_to_the_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("q.db")).unwrap();
+            let mut job = Job::new(JobKind::Extract, serde_json::Value::Null);
+            job.state = JobState::Running;
+            store.insert(&job).unwrap();
+            let expected_result = done_result();
+
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+            entered_rx.recv().unwrap();
+
+            let mut finalization = Box::pin(finalize_worker_state(
+                JobKind::Extract,
+                store.clone(),
+                job.id,
+                job.payload.clone(),
+                JobState::Done,
+                Some(expected_result.clone()),
+            ));
+            let first_poll = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(finalization.as_mut().poll(context))
+            })
+            .await;
+            let completed_without_yield = first_poll.is_ready();
+            let ready_result = match first_poll {
+                std::task::Poll::Ready(result) => Some(result),
+                std::task::Poll::Pending => None,
+            };
+
+            let _ = release_tx.send(());
+            blocker.await.unwrap();
+            let finalized = match ready_result {
+                Some(result) => result.expect("ready finalization must succeed"),
+                None => finalization.await.unwrap(),
+            };
+            assert!(
+                completed_without_yield,
+                "non-Convert finalization must not wait on the blocking pool"
+            );
+            assert_eq!(finalized.state, JobState::Done);
+            assert_eq!(finalized.result, Some(expected_result.clone()));
+            let persisted = store.get_by_id(job.id).unwrap().unwrap();
+            assert_eq!(persisted.state, JobState::Done);
+            assert_eq!(persisted.result, Some(expected_result));
+        });
+    }
+
     #[tokio::test]
     async fn waiting_external_yields_permit_and_eventually_completes() {
         let calls = Arc::new(AtomicU32::new(0));
@@ -1021,10 +1093,22 @@ mod tests {
         let j = Job::new(JobKind::Extract, serde_json::Value::Null);
         store.insert(&j).unwrap();
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            wait_until(
+                || sink
+                    .queue
+                    .lock()
+                    .iter()
+                    .any(|event| { event.job_id == j.id && matches!(event.state, JobState::Done) }),
+                2000,
+            )
+            .await,
+            "job must emit Done"
+        );
         let events = sink.queue.lock().clone();
-        assert!(events.iter().any(|e| matches!(e.state, JobState::Running)));
-        assert!(events.iter().any(|e| matches!(e.state, JobState::Done)));
+        assert!(events
+            .iter()
+            .any(|event| event.job_id == j.id && matches!(event.state, JobState::Running)));
     }
 
     #[cfg(unix)]
@@ -1159,10 +1243,26 @@ mod tests {
             wait_until(|| state_of(&store, job.id) == JobState::Paused, 2000).await,
             "worker must yield Paused"
         );
+        assert!(
+            wait_until(
+                || sink.queue.lock().iter().any(|event| {
+                    event.job_id == job.id && matches!(event.state, JobState::Paused)
+                }),
+                2000,
+            )
+            .await,
+            "worker must emit Paused"
+        );
 
         let after = store.get_by_id(job.id).unwrap().unwrap();
         assert!(after.finished_at.is_none(), "Paused is not terminal");
-        let states: Vec<_> = sink.queue.lock().iter().map(|e| e.state.clone()).collect();
+        let states: Vec<_> = sink
+            .queue
+            .lock()
+            .iter()
+            .filter(|event| event.job_id == job.id)
+            .map(|event| event.state.clone())
+            .collect();
         assert!(states.contains(&JobState::Running));
         assert!(states.contains(&JobState::Paused));
     }

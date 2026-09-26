@@ -16,7 +16,8 @@ goop-queue = { path = "../crates/goop-queue" }
 goop-config = { path = "../crates/goop-config" }
 goop-pdf = { path = "../crates/goop-pdf" }
 goop-metadata = { path = "../crates/goop-metadata" }
-tauri = { version = "2", features = ["protocol-asset"] }
+# Keep the runtime minor aligned with the committed JavaScript API lockfile.
+tauri = { version = "~2.11.0", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
