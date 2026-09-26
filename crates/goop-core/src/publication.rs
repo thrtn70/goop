@@ -1,7 +1,10 @@
 use crate::{GoopError, JobResult};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::fs::File;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::io::Read;
 use std::path::Path;
 
@@ -61,6 +64,7 @@ impl FileIdentity {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn digest(mut file: &File) -> Result<[u8; 32], GoopError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -269,7 +273,7 @@ fn capture(_path: &Path) -> Result<FileIdentity, GoopError> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 mod tests {
     use super::*;
 
