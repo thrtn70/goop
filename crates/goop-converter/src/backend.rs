@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 pub fn conversion_job_result(result: &ConvertResult) -> JobResult {
     JobResult {
+        video_attempt: result.video_attempt.clone(),
         track_execution: result.track_execution.clone(),
         audio_execution: result.audio_execution.clone(),
         video_execution: result.video_execution.clone(),

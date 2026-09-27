@@ -146,6 +146,7 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
         let staged = await_image_worker(worker, &cancel).await?;
         let outcome = staged.outcome;
         let mut result = ConvertResult {
+            video_attempt: None,
             image_alpha_execution: outcome.image_alpha,
             compression_execution: outcome.compression,
             image_metadata_execution: outcome.image_metadata,

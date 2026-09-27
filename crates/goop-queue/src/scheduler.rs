@@ -732,6 +732,7 @@ mod tests {
 
     fn done_result() -> JobResult {
         JobResult {
+            video_attempt: None,
             track_execution: None,
             audio_execution: None,
             video_execution: None,
@@ -748,6 +749,77 @@ mod tests {
             result_kind: ResultKind::File,
             file_count: 1,
         }
+    }
+
+    fn completed_video_attempt() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "encode",
+            "encoder": "libx264",
+            "encode_attempt_ordinal": 2,
+            "selection_context": {
+                "kind": "legacy_global_at_execution",
+                "hw_acceleration_enabled": true
+            },
+            "fallback": {
+                "from_encoder": "h264_videotoolbox",
+                "reason": "hardware_attempt_subprocess_failed"
+            }
+        })
+    }
+
+    fn completed_video_result() -> JobResult {
+        serde_json::from_value(serde_json::json!({
+            "output_path": "converted.mp4",
+            "bytes": 4242,
+            "duration_ms": 2000,
+            "result_kind": "file",
+            "file_count": 1,
+            "video_attempt": completed_video_attempt()
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn completion_event_and_durable_row_keep_the_exact_video_attempt() {
+        let (mut scheduler, sink, store, _dir) = make_scheduler();
+        let expected = completed_video_result();
+        let worker_result = expected.clone();
+        Arc::get_mut(&mut scheduler).unwrap().convert_worker = Arc::new(move |_, _, _| {
+            let result = worker_result.clone();
+            Box::pin(async move { Ok(result) })
+        });
+        let job = Job::new(JobKind::Convert, serde_json::json!({}));
+        store.insert(&job).unwrap();
+        let task = tokio::spawn(scheduler.run_kind(JobKind::Convert));
+        assert!(
+            wait_until(
+                || sink
+                    .queue
+                    .lock()
+                    .iter()
+                    .any(|event| event.job_id == job.id && event.state == JobState::Done),
+                2000
+            )
+            .await
+        );
+        task.abort();
+
+        let events = sink.queue.lock();
+        let completed = events
+            .iter()
+            .find(|event| event.job_id == job.id && event.state == JobState::Done)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(completed.result.as_ref().unwrap()).unwrap()["video_attempt"],
+            completed_video_attempt()
+        );
+        let durable = store.get_by_id(job.id).unwrap().unwrap();
+        let durable_result = durable.result.unwrap();
+        assert_eq!(durable_result, expected);
+        assert_eq!(
+            serde_json::to_value(durable_result).unwrap()["video_attempt"],
+            completed_video_attempt()
+        );
     }
 
     #[tokio::test]
@@ -1068,7 +1140,7 @@ mod tests {
             Box::pin(async move {
                 tokio::select! {
                     _ = signals.cancel.cancelled() => Err(GoopError::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ track_execution: None, audio_execution: None, video_execution: None, video_track_execution: None, image_metadata_execution: None, compression_execution: None, image_alpha_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(JobResult{ video_attempt: None, track_execution: None, audio_execution: None, video_execution: None, video_track_execution: None, image_metadata_execution: None, compression_execution: None, image_alpha_execution: None, source_bytes: None, target_bytes: None, reencoded: None, output_path: None, bytes: None, duration_ms: 20, result_kind: ResultKind::File, file_count: 1 }),
                 }
             })
         });

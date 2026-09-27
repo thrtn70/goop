@@ -795,6 +795,22 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    fn video_attempt() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "encode",
+            "encoder": "libx264",
+            "encode_attempt_ordinal": 2,
+            "selection_context": {
+                "kind": "legacy_global_at_execution",
+                "hw_acceleration_enabled": true
+            },
+            "fallback": {
+                "from_encoder": "h264_videotoolbox",
+                "reason": "hardware_attempt_subprocess_failed"
+            }
+        })
+    }
+
     fn result(path: &std::path::Path) -> JobResult {
         serde_json::from_value(serde_json::json!({
             "output_path": path,
@@ -805,6 +821,7 @@ mod tests {
             "source_bytes": 13,
             "target_bytes": 7,
             "reencoded": true,
+            "video_attempt": video_attempt(),
             "image_metadata_execution": {
                 "requested_policy": "preserve",
                 "requested_color_policy": "convert_to_srgb",
@@ -997,7 +1014,12 @@ mod tests {
         store.reconcile_publications().unwrap();
         let recovered = store.get_by_id(job.id).unwrap().unwrap();
         assert_eq!(recovered.state, JobState::Done);
-        assert_eq!(recovered.result, Some(expected));
+        let recovered_result = recovered.result.unwrap();
+        assert_eq!(recovered_result, expected);
+        assert_eq!(
+            serde_json::to_value(recovered_result).unwrap()["video_attempt"],
+            video_attempt()
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1027,6 +1049,10 @@ mod tests {
         assert_eq!(recovered[0].state, JobState::Done);
         assert_eq!(recovered[0].result.as_ref(), Some(&expected));
         assert_eq!(
+            serde_json::to_value(recovered[0].result.as_ref().unwrap()).unwrap()["video_attempt"],
+            video_attempt()
+        );
+        assert_eq!(
             store.get_by_id(job.id).unwrap().unwrap().result,
             Some(expected)
         );
@@ -1055,6 +1081,9 @@ mod tests {
         observer
             .before_publish(&staged, &destination, &expected)
             .unwrap();
+        let intent: serde_json::Value =
+            serde_json::from_str(&store.load_journal(job.id).unwrap().unwrap()).unwrap();
+        assert_eq!(intent["phase"]["result"]["video_attempt"], video_attempt());
         fs::rename(&staged, &destination).unwrap();
         drop(observer);
         drop(store);
@@ -1180,6 +1209,41 @@ mod tests {
         assert!(matches!(finalized.state, JobState::Error { .. }));
         assert!(store.has_publication_journal(job.id).unwrap());
         assert!(store.retry_errored(job.id).is_err());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn worker_video_attempt_must_match_published_receipt_exactly() {
+        let dir = tempdir().unwrap();
+        let staged = dir.path().join("staged.mp4");
+        let destination = dir.path().join("output.mp4");
+        fs::write(&staged, b"payload").unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let job = running_convert(&store);
+        let expected = result(&destination);
+        let observer = store.begin_publication(job.id, &job.payload).unwrap();
+        observer
+            .before_publish(&staged, &destination, &expected)
+            .unwrap();
+        fs::rename(&staged, &destination).unwrap();
+        observer.published(&destination, &expected).unwrap();
+
+        let mut mismatched_json = serde_json::to_value(&expected).unwrap();
+        mismatched_json["video_attempt"] = serde_json::json!({"kind": "copy"});
+        let mismatched: JobResult = serde_json::from_value(mismatched_json).unwrap();
+        let finalized = store
+            .finalize_worker(
+                job.id,
+                &job.payload,
+                &JobState::Done,
+                Some(&mismatched),
+                123,
+            )
+            .unwrap();
+
+        assert!(matches!(finalized.state, JobState::Error { .. }));
+        assert!(finalized.result.is_none());
+        assert!(store.has_publication_journal(job.id).unwrap());
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -2,6 +2,169 @@ use crate::{ConvertRequest, GoopError, ResolutionCap, TargetFormat};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Encoder names admitted by the current video planners, not proof of device utilization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+pub enum VideoEncoder {
+    #[serde(rename = "libx264")]
+    Libx264,
+    #[serde(rename = "libx265")]
+    Libx265,
+    #[serde(rename = "libvpx-vp9")]
+    LibvpxVp9,
+    #[serde(rename = "mpeg4")]
+    Mpeg4,
+    #[serde(rename = "h264_videotoolbox")]
+    H264Videotoolbox,
+    #[serde(rename = "h264_nvenc")]
+    H264Nvenc,
+    #[serde(rename = "h264_qsv")]
+    H264Qsv,
+    #[serde(rename = "h264_amf")]
+    H264Amf,
+}
+
+impl VideoEncoder {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Libx264 => "libx264",
+            Self::Libx265 => "libx265",
+            Self::LibvpxVp9 => "libvpx-vp9",
+            Self::Mpeg4 => "mpeg4",
+            Self::H264Videotoolbox => "h264_videotoolbox",
+            Self::H264Nvenc => "h264_nvenc",
+            Self::H264Qsv => "h264_qsv",
+            Self::H264Amf => "h264_amf",
+        }
+    }
+
+    pub fn is_hardware(self) -> bool {
+        matches!(
+            self,
+            Self::H264Videotoolbox | Self::H264Nvenc | Self::H264Qsv | Self::H264Amf
+        )
+    }
+}
+
+/// Execution-time legacy preference is distinct from explicit per-job Software intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoSelectionContext {
+    ExplicitSoftware,
+    LegacyGlobalAtExecution { hw_acceleration_enabled: bool },
+}
+
+impl<'de> Deserialize<'de> for VideoSelectionContext {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictContext {
+            ExplicitSoftware {},
+            LegacyGlobalAtExecution { hw_acceleration_enabled: bool },
+        }
+        Ok(match StrictContext::deserialize(deserializer)? {
+            StrictContext::ExplicitSoftware {} => Self::ExplicitSoftware,
+            StrictContext::LegacyGlobalAtExecution {
+                hw_acceleration_enabled,
+            } => Self::LegacyGlobalAtExecution {
+                hw_acceleration_enabled,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum VideoFallbackReason {
+    HardwareAttemptSubprocessFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct VideoFallback {
+    pub from_encoder: VideoEncoder,
+    pub reason: VideoFallbackReason,
+}
+
+/// Facts about completed processing, frozen before publication. Ordinal is internal
+/// to this conversion, not the queue attempt count. Absent receipts remain unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoAttempt {
+    Copy,
+    Encode {
+        encoder: VideoEncoder,
+        encode_attempt_ordinal: u8,
+        selection_context: VideoSelectionContext,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
+        fallback: Option<VideoFallback>,
+    },
+}
+
+impl<'de> Deserialize<'de> for VideoAttempt {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictAttempt {
+            Copy {},
+            Encode {
+                encoder: VideoEncoder,
+                encode_attempt_ordinal: u8,
+                selection_context: VideoSelectionContext,
+                #[serde(default)]
+                fallback: Option<VideoFallback>,
+            },
+        }
+        match StrictAttempt::deserialize(deserializer)? {
+            StrictAttempt::Copy {} => Ok(Self::Copy),
+            StrictAttempt::Encode {
+                encoder,
+                encode_attempt_ordinal,
+                selection_context,
+                fallback,
+            } => {
+                let hw_enabled = matches!(
+                    selection_context,
+                    VideoSelectionContext::LegacyGlobalAtExecution {
+                        hw_acceleration_enabled: true
+                    }
+                );
+                let valid =
+                    match &fallback {
+                        Some(previous) => {
+                            hw_enabled
+                                && encode_attempt_ordinal == 2
+                                && encoder == VideoEncoder::Libx264
+                                && previous.from_encoder.is_hardware()
+                        }
+                        None => {
+                            encode_attempt_ordinal == 1 && (!encoder.is_hardware() || hw_enabled)
+                        }
+                    } && (!matches!(selection_context, VideoSelectionContext::ExplicitSoftware)
+                        || matches!(encoder, VideoEncoder::Libx264 | VideoEncoder::Libx265));
+                if !valid {
+                    return Err(serde::de::Error::custom(
+                        "inconsistent completed video attempt",
+                    ));
+                }
+                Ok(Self::Encode {
+                    encoder,
+                    encode_attempt_ordinal,
+                    selection_context,
+                    fallback,
+                })
+            }
+        }
+    }
+}
+
 /// Video codecs admitted by explicit Copy and software Encode modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]

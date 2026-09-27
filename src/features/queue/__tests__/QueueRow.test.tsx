@@ -832,6 +832,18 @@ describe("Extract finishing stages", () => {
 });
 
 describe("QueueRow completed output actions", () => {
+  it("uses completed fallback facts and ignores stale hardware progress on Done", () => {
+    const job = makeJob({state:"done",result:{output_path:"/tmp/movie.mp4",bytes:1n,duration_ms:1n,
+      result_kind:"file",file_count:1,video_attempt:{kind:"encode",encoder:"libx264",encode_attempt_ordinal:2,
+        selection_context:{kind:"legacy_global_at_execution",hw_acceleration_enabled:true},
+        fallback:{from_encoder:"h264_videotoolbox",reason:"hardware_attempt_subprocess_failed"}}}});
+    useAppStore.setState({progressById:{[String(job.id)]:{percent:100,stage:"converting",speed_hr:null,
+      eta_secs:null,encoder:"h264_videotoolbox"}}});
+    render(<QueueRow job={job} index={0} />);
+    expect(screen.getByText(/Video: libx264/)).toBeTruthy();
+    expect(screen.getByText(/Software fallback after hardware attempt failed/)).toBeTruthy();
+    expect(screen.queryByTitle(/Hardware-accelerated encoder/)).toBeNull();
+  });
   const result = {
     output_path: "/tmp/movie.mp4",
     bytes: 1n,

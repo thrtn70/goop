@@ -582,6 +582,14 @@ jobs:
       - name: Video conversions (real ffmpeg)
         shell: bash
         run: cargo test -p goop-converter --test video_ffmpeg -- --ignored
+      - name: Video completion receipts (real ffmpeg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --test video_attempt
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_attempts -- --list | tee video-attempt-tests.txt
+          grep -q '^bundled_ffmpeg_reports_completed_software_encode_and_video_copy: test$' video-attempt-tests.txt
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test video_attempts -- --ignored --test-threads=1
       - name: Video controls (real ffmpeg)
         shell: bash
         run: |

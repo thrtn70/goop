@@ -1,12 +1,13 @@
 use crate::backend::ConversionBackend;
-use crate::compat::{decide, maybe_apply_hw_h264, Plan};
+use crate::compat::{decide, maybe_apply_hw_h264, Plan, VideoAction};
 use crate::encoders::DetectedEncoders;
 use crate::naming::{allocate_output_path, stem_of};
 use crate::probe_json::parse_probe_json;
 use crate::progress::ProgressTracker;
 use goop_core::{
     ConvertRequest, ConvertResult, EventSink, GoopError, JobId, PidGuard, PidRegistry, ProbeResult,
-    ProgressEvent, TargetFormat,
+    ProgressEvent, TargetFormat, VideoAttempt, VideoFallback, VideoFallbackReason,
+    VideoSelectionContext,
 };
 use goop_sidecar::BinaryResolver;
 use std::path::{Path, PathBuf};
@@ -316,8 +317,18 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         } else {
             self.maybe_apply_hw(&mut plan, quality)
         };
+        let selection_context = if video_execution.is_some() {
+            VideoSelectionContext::ExplicitSoftware
+        } else {
+            VideoSelectionContext::LegacyGlobalAtExecution {
+                hw_acceleration_enabled: self.hw_enabled,
+            }
+        };
         let started = std::time::Instant::now();
         let mut current_encoder = hw_encoder;
+        let mut completed_video_action = plan.video_action;
+        let mut encode_attempt_ordinal = 1;
+        let mut fallback = None;
 
         #[cfg(debug_assertions)]
         if let Some(hook) = &self.before_run_test_hook {
@@ -369,19 +380,33 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
                     // us here rather than that red herring.
                     return Err(GoopError::SubprocessFailed { binary, stderr });
                 };
+                let failed_encoder = match completed_video_action {
+                    Some(VideoAction::Encode { encoder }) if encoder.is_hardware() => Some(encoder),
+                    _ => None,
+                };
                 current_encoder = None;
-                self.run_ffmpeg(
-                    &bin.path,
-                    &input,
-                    &output_path,
-                    &plan_sw,
-                    &subtitle_sw,
-                    &probe,
-                    job_id,
-                    current_encoder,
-                    cancel.clone(),
-                )
-                .await
+                let software_result = self
+                    .run_ffmpeg(
+                        &bin.path,
+                        &input,
+                        &output_path,
+                        &plan_sw,
+                        &subtitle_sw,
+                        &probe,
+                        job_id,
+                        current_encoder,
+                        cancel.clone(),
+                    )
+                    .await;
+                if software_result.is_ok() {
+                    completed_video_action = plan_sw.video_action;
+                    encode_attempt_ordinal = 2;
+                    fallback = failed_encoder.map(|from_encoder| VideoFallback {
+                        from_encoder,
+                        reason: VideoFallbackReason::HardwareAttemptSubprocessFailed,
+                    });
+                }
+                software_result
             }
             other => other,
         };
@@ -439,7 +464,17 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             verify_source_identity(&input, identity)?;
         }
         let prepared = staged.validate(target_bytes, false)?;
+        let video_attempt = completed_video_action.map(|action| match action {
+            VideoAction::Copy => VideoAttempt::Copy,
+            VideoAction::Encode { encoder } => VideoAttempt::Encode {
+                encoder,
+                encode_attempt_ordinal,
+                selection_context,
+                fallback,
+            },
+        });
         let mut result = ConvertResult {
+            video_attempt,
             image_alpha_execution: None,
             compression_execution: None,
             image_metadata_execution: None,

@@ -557,6 +557,9 @@ pub struct ProbeResult {
 pub struct ConvertResult {
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub video_attempt: Option<crate::video::VideoAttempt>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub audio_execution: Option<crate::audio::AudioExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]

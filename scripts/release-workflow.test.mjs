@@ -49,6 +49,15 @@ function namedStep(body, name) {
   return match[0];
 }
 
+test("both native platforms execute completed video receipt fixtures", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const receipt = namedStep(smoke, "Video completion receipts (real ffmpeg)");
+  assert.match(receipt, /cargo test -p goop-core --test video_attempt/);
+  assert.match(receipt, /cargo test -p goop-converter --test video_attempts -- --list/);
+  assert.match(receipt, /bundled_ffmpeg_reports_completed_software_encode_and_video_copy/);
+  assert.match(receipt, /cargo test -p goop-converter --test video_attempts -- --ignored --test-threads=1/);
+});
+
 test("all workflows pin the current Node 24 checkout and setup-node actions", () => {
   let checkoutCount = 0;
   let setupNodeCount = 0;

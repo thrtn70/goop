@@ -81,9 +81,10 @@ pub use preview::{
 
 pub mod video;
 pub use video::{
-    validate_video_options, validate_video_request, VideoCodec, VideoCodecCapability,
-    VideoConvertOptions, VideoExecutionSummary, VideoFrameRate, VideoFrameRateCapabilities,
-    VideoFrameRateChoice, VideoModeAvailability, VideoProbeDetails, VideoProcessor,
-    VideoRateControl, VideoRationalFact, VideoResize, VideoResizeCapabilities,
-    VideoSettingsCapabilities, VideoSpeed, VideoStreamInfo,
+    validate_video_options, validate_video_request, VideoAttempt, VideoCodec, VideoCodecCapability,
+    VideoConvertOptions, VideoEncoder, VideoExecutionSummary, VideoFallback, VideoFallbackReason,
+    VideoFrameRate, VideoFrameRateCapabilities, VideoFrameRateChoice, VideoModeAvailability,
+    VideoProbeDetails, VideoProcessor, VideoRateControl, VideoRationalFact, VideoResize,
+    VideoResizeCapabilities, VideoSelectionContext, VideoSettingsCapabilities, VideoSpeed,
+    VideoStreamInfo,
 };
