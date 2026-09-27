@@ -222,7 +222,7 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
   assert.match(step[0], /if \(\$primaryDelta -gt 16MB\)/);
 });
 
-const version = "0.3.4";
+const version = "0.3.5";
 const publishedVersion = "0.3.4";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
