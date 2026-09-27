@@ -10,6 +10,7 @@ fs4 = { version = "1", features = ["sync"] }
 parking_lot = "0.12"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 # CancellationToken only (JobSignals). Deliberately NOT a full tokio
 # dependency — signals.rs polls the token futures by hand so this crate
@@ -29,4 +30,4 @@ test-util = []
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

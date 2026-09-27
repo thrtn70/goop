@@ -89,6 +89,7 @@ crc32fast = "=1.5.2"
 sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
+goop-queue = { path = "../goop-queue" }
 # Scratch dirs for the `#[ignore]`d real-ffmpeg tests.
 tempfile = "3"
 

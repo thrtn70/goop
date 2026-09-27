@@ -1,7 +1,57 @@
-use goop_core::{ConvertRequest, ConvertResult, GoopError, JobId, ProbeResult};
+use goop_core::{
+    ConvertRequest, ConvertResult, GoopError, JobId, JobResult, ProbeResult, ResultKind,
+};
 use goop_sidecar::BinaryResolver;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+
+pub fn conversion_job_result(result: &ConvertResult) -> JobResult {
+    JobResult {
+        track_execution: result.track_execution.clone(),
+        audio_execution: result.audio_execution.clone(),
+        video_execution: result.video_execution.clone(),
+        video_track_execution: result.video_track_execution.clone(),
+        image_metadata_execution: result.image_metadata_execution.clone(),
+        compression_execution: result.compression_execution.clone(),
+        image_alpha_execution: result.image_alpha_execution,
+        source_bytes: result.source_bytes,
+        target_bytes: result.target_bytes,
+        reencoded: Some(result.reencoded),
+        output_path: Some(result.output_path.clone()),
+        bytes: Some(result.bytes),
+        duration_ms: result.duration_ms,
+        result_kind: ResultKind::File,
+        file_count: 1,
+    }
+}
+
+pub(crate) async fn publish_conversion(
+    staged: goop_core::output::StagedOutput,
+    destination: goop_core::output::OutputDestination,
+    target_bytes: Option<u64>,
+    cancel: CancellationToken,
+    observer: Option<std::sync::Arc<dyn goop_core::publication::PublicationObserver>>,
+    result: JobResult,
+) -> Result<goop_core::output::PublishedOutput, GoopError> {
+    // Identity verification reads the full output. Own and await this task:
+    // cancellation cannot detach a publisher that may already have moved it.
+    tokio::task::spawn_blocking(move || {
+        if let Some(observer) = observer {
+            staged.publish_observed(
+                &destination,
+                target_bytes,
+                false,
+                &cancel,
+                observer.as_ref(),
+                &result,
+            )
+        } else {
+            staged.publish(&destination, target_bytes, false, &cancel)
+        }
+    })
+    .await
+    .map_err(|error| GoopError::Queue(format!("output publication task failed: {error}")))?
+}
 
 /// Abstraction over conversion backends (ffmpeg, ImageMagick, etc.).
 ///

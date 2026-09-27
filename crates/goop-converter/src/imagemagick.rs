@@ -16,11 +16,24 @@ pub struct ImageMagickBackend<'a> {
     #[allow(dead_code)]
     resolver: &'a BinaryResolver,
     sink: Arc<dyn EventSink>,
+    publication: Option<Arc<dyn goop_core::publication::PublicationObserver>>,
 }
 
 impl<'a> ImageMagickBackend<'a> {
     pub fn new(resolver: &'a BinaryResolver, sink: Arc<dyn EventSink>) -> Self {
-        Self { resolver, sink }
+        Self {
+            resolver,
+            sink,
+            publication: None,
+        }
+    }
+
+    pub fn with_publication_observer(
+        mut self,
+        observer: Arc<dyn goop_core::publication::PublicationObserver>,
+    ) -> Self {
+        self.publication = Some(observer);
+        self
     }
 }
 
@@ -81,70 +94,58 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             || req.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve
             || req.image_alpha_policy.is_some())
         .then(|| req.clone());
-        let outcome_slot = Arc::new(std::sync::Mutex::new(None));
-        let worker_outcome = Arc::clone(&outcome_slot);
         let worker_cancel = cancel.clone();
-        let published = staged_image_output(output_path, target_bytes, cancel, move |out| {
-            let outcome = if let Some(request) = &explicit_request {
-                if request.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve {
-                    process_color_managed(&input, out, request, &worker_cancel)?
-                } else {
-                    let source = crate::jpeg_controls::prepare(
-                        &input,
-                        crate::jpeg_controls::MAX_INPUT_BYTES,
-                    )?;
-                    let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
-                    crate::capabilities::validate_request(request, &probe)?;
-                    if let Some(options) = &request.image_options {
-                        crate::jpeg_controls::render_prepared(
+        let worker_path = output_path.path.clone();
+        let worker_token = cancel.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            prepare_image_output(&worker_path, target_bytes, &worker_token, move |out| {
+                let outcome = if let Some(request) = &explicit_request {
+                    if request.image_color_policy.unwrap_or_default() != ImageColorPolicy::Preserve
+                    {
+                        process_color_managed(&input, out, request, &worker_cancel)?
+                    } else {
+                        let source = crate::jpeg_controls::prepare(
                             &input,
-                            out,
-                            options,
-                            metadata_policy,
-                            source.as_ref(),
+                            crate::jpeg_controls::MAX_INPUT_BYTES,
                         )?;
+                        let probe = crate::jpeg_controls::probe_prepared(&input, source.as_ref())?;
+                        crate::capabilities::validate_request(request, &probe)?;
+                        if let Some(options) = &request.image_options {
+                            crate::jpeg_controls::render_prepared(
+                                &input,
+                                out,
+                                options,
+                                metadata_policy,
+                                source.as_ref(),
+                            )?;
+                        }
+                        ImageProcessingOutcome {
+                            image_alpha: None,
+                            image_metadata: source
+                                .as_ref()
+                                .map(|source| {
+                                    jpeg_metadata_execution(source, metadata_policy, true)
+                                })
+                                .transpose()?,
+                            compression: None,
+                        }
                     }
-                    ImageProcessingOutcome {
-                        image_alpha: None,
-                        image_metadata: source
-                            .as_ref()
-                            .map(|source| jpeg_metadata_execution(source, metadata_policy, true))
-                            .transpose()?,
-                        compression: None,
-                    }
-                }
-            } else {
-                process_image_with_metadata(
-                    &input,
-                    out,
-                    target,
-                    compress_mode,
-                    metadata_policy,
-                    &worker_cancel,
-                )?
-            };
-            *worker_outcome
-                .lock()
-                .map_err(|_| image_error("image outcome lock is unavailable"))? = Some(outcome);
-            Ok(())
-        })
-        .await?;
-        let outcome = outcome_slot
-            .lock()
-            .map_err(|_| image_error("image outcome lock is unavailable"))?
-            .take()
-            .ok_or_else(|| image_error("image processing completed without an outcome"))?;
-
-        self.sink.emit_progress(ProgressEvent {
-            job_id,
-            percent: 100.0,
-            eta_secs: Some(0),
-            speed_hr: None,
-            stage: "converting".into(),
-            encoder: None,
+                } else {
+                    process_image_with_metadata(
+                        &input,
+                        out,
+                        target,
+                        compress_mode,
+                        metadata_policy,
+                        &worker_cancel,
+                    )?
+                };
+                Ok(outcome)
+            })
         });
-
-        Ok(ConvertResult {
+        let staged = await_image_worker(worker, &cancel).await?;
+        let outcome = staged.outcome;
+        let mut result = ConvertResult {
             image_alpha_execution: outcome.image_alpha,
             compression_execution: outcome.compression,
             image_metadata_execution: outcome.image_metadata,
@@ -154,11 +155,36 @@ impl<'a> ConversionBackend for ImageMagickBackend<'a> {
             track_execution: None,
             source_bytes: Some(source_bytes),
             target_bytes,
-            output_path: published.path.to_string_lossy().into_owned(),
-            bytes: published.bytes,
+            output_path: output_path.path.to_string_lossy().into_owned(),
+            bytes: staged.bytes,
             duration_ms: started.elapsed().as_millis() as u64,
             reencoded: true,
-        })
+        };
+        let destination = goop_core::output::OutputDestination {
+            path: output_path.path,
+            automatic_name: output_path
+                .automatic_name
+                .map(|(stem, ext)| (stem, ext.into())),
+        };
+        let published = crate::backend::publish_conversion(
+            staged._staging,
+            destination,
+            target_bytes,
+            cancel,
+            self.publication.clone(),
+            crate::backend::conversion_job_result(&result),
+        )
+        .await?;
+        result.output_path = published.path.to_string_lossy().into_owned();
+        self.sink.emit_progress(ProgressEvent {
+            job_id,
+            percent: 100.0,
+            eta_secs: Some(0),
+            speed_hr: None,
+            stage: "converting".into(),
+            encoder: None,
+        });
+        Ok(result)
     }
 }
 
@@ -362,44 +388,33 @@ impl From<PathBuf> for ImageDestination {
     }
 }
 
-#[derive(Debug)]
-struct PublishedImage {
-    path: PathBuf,
-    bytes: u64,
-}
-
 /// Private same-filesystem workspace. Dropping a cancelled worker's result
 /// removes staging; the blocking worker never publishes the destination.
-struct StagedImage {
+struct StagedImage<T = ()> {
     _staging: goop_core::output::StagedOutput,
-    path: PathBuf,
     bytes: u64,
-}
-impl StagedImage {
-    fn new(destination: &Path) -> Result<Self, GoopError> {
-        let staging = goop_core::output::StagedOutput::new(destination)?;
-        Ok(Self {
-            path: staging.path().to_path_buf(),
-            _staging: staging,
-            bytes: 0,
-        })
-    }
+    outcome: T,
 }
 
-fn prepare_image_output<F>(
+fn prepare_image_output<F, T>(
     destination: &Path,
     target_bytes: Option<u64>,
     cancel: &CancellationToken,
     work: F,
-) -> Result<StagedImage, GoopError>
+) -> Result<StagedImage<T>, GoopError>
 where
-    F: FnOnce(&Path) -> Result<(), GoopError>,
+    F: FnOnce(&Path) -> Result<T, GoopError>,
 {
     if cancel.is_cancelled() {
         return Err(GoopError::Cancelled);
     }
-    let mut staged = StagedImage::new(destination)?;
-    work(&staged.path)?;
+    let staging = goop_core::output::StagedOutput::new(destination)?;
+    let outcome = work(staging.path())?;
+    let mut staged = StagedImage {
+        _staging: staging,
+        bytes: 0,
+        outcome,
+    };
     if cancel.is_cancelled() {
         return Err(GoopError::Cancelled);
     }
@@ -415,63 +430,40 @@ where
     Ok(staged)
 }
 
-use goop_core::output::publish_no_replace as publish_image;
-
-async fn finish_image_output(
-    mut worker: tokio::task::JoinHandle<Result<StagedImage, GoopError>>,
-    destination: ImageDestination,
-    cancel: CancellationToken,
-) -> Result<PublishedImage, GoopError> {
-    let staged = tokio::select! {
+async fn await_image_worker<T: Send + 'static>(
+    mut worker: tokio::task::JoinHandle<Result<StagedImage<T>, GoopError>>,
+    cancel: &CancellationToken,
+) -> Result<StagedImage<T>, GoopError> {
+    tokio::select! {
         biased;
-        _ = cancel.cancelled() => return Err(GoopError::Cancelled),
-        result = &mut worker => result.map_err(|e| image_error(format!("convert task panicked: {e}")))??,
-    };
-    // This synchronous no-clobber commit is the completion boundary. A late
-    // cancellation after it succeeds belongs to an already completed operation.
-    let mut path = destination.path.clone();
-    for suffix in 1..=10_000 {
-        if cancel.is_cancelled() {
-            return Err(GoopError::Cancelled);
-        }
-        match publish_image(&staged.path, &path) {
-            Ok(()) => {
-                return Ok(PublishedImage {
-                    path,
-                    bytes: staged.bytes,
-                })
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::AlreadyExists
-                    && destination.automatic_name.is_some() =>
-            {
-                if let Some((stem, ext)) = &destination.automatic_name {
-                    path = destination
-                        .path
-                        .with_file_name(format!("{stem} ({suffix}).{ext}"));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                return Err(image_error(format!("destination filesystem does not support atomic publishing; choose another destination: {e}")));
-            }
-            Err(e) => {
-                return Err(image_error(format!(
-                    "cannot publish image output without replacing an existing file: {e}"
-                )))
-            }
-        }
+        _ = cancel.cancelled() => Err(GoopError::Cancelled),
+        result = &mut worker => result.map_err(|e| image_error(format!("convert task panicked: {e}")))?,
     }
-    Err(image_error(
-        "cannot allocate an unused image output name after 10000 publication attempts",
-    ))
 }
 
+#[cfg(test)]
+async fn finish_image_output(
+    worker: tokio::task::JoinHandle<Result<StagedImage, GoopError>>,
+    destination: ImageDestination,
+    cancel: CancellationToken,
+) -> Result<goop_core::output::PublishedOutput, GoopError> {
+    let staged = await_image_worker(worker, &cancel).await?;
+    let destination = goop_core::output::OutputDestination {
+        path: destination.path,
+        automatic_name: destination
+            .automatic_name
+            .map(|(stem, ext)| (stem, ext.into())),
+    };
+    staged._staging.publish(&destination, None, false, &cancel)
+}
+
+#[cfg(test)]
 async fn staged_image_output<F>(
     destination: ImageDestination,
     target_bytes: Option<u64>,
     cancel: CancellationToken,
     work: F,
-) -> Result<PublishedImage, GoopError>
+) -> Result<goop_core::output::PublishedOutput, GoopError>
 where
     F: FnOnce(&Path) -> Result<(), GoopError> + Send + 'static,
 {
@@ -1273,6 +1265,7 @@ fn resolve_output_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goop_core::output::publish_no_replace as publish_image;
     use image::{ImageBuffer, Rgba};
 
     fn write_test_png(path: &Path, w: u32, h: u32) {
@@ -2333,7 +2326,7 @@ mod tests {
     #[test]
     fn invalid_destination_leaves_no_staging_directory() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(StagedImage::new(&dir.path().join("..")).is_err());
+        assert!(goop_core::output::StagedOutput::new(&dir.path().join("..")).is_err());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 

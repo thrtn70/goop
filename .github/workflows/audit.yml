@@ -538,6 +538,13 @@ jobs:
           done
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --example image_read_baseline
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test capabilities --test image_probe --test jpeg_controls --test preview
+      - name: Publication recovery (process termination)
+        shell: bash
+        run: |
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --lib publication::tests
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --lib output::tests
+          CARGO_INCREMENTAL=0 cargo test -p goop-queue
+          CARGO_INCREMENTAL=0 cargo test -p goop-converter --test publication_receipts --test publication_restart -- --include-ignored --test-threads=1
       - name: Image settings persistence contracts
         shell: bash
         run: |
