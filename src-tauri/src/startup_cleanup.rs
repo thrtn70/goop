@@ -303,6 +303,7 @@ mod tests {
             }
             job.payload[RECOVERY_PAYLOAD_KEY] = serde_json::to_value(cp).unwrap();
             job.result = Some(goop_core::JobResult {
+                video_attempt: None,
                 track_execution: None,
                 audio_execution: None,
                 video_execution: None,

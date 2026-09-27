@@ -552,6 +552,7 @@ pub fn run() {
                     )
                     .await?;
                     Ok(JobResult {
+                        video_attempt: None,
                         track_execution: None,
                         audio_execution: None,
                         video_execution: None,
@@ -705,6 +706,7 @@ pub fn run() {
                         (folder, ResultKind::Folder, items.len() as u32)
                     };
                     Ok(JobResult {
+                        video_attempt: None,
                         track_execution: None,
                         audio_execution: None,
                         video_execution: None,

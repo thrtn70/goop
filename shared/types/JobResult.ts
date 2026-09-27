@@ -5,10 +5,11 @@ import type { ImageAlphaExecution } from "./ImageAlphaExecution";
 import type { ImageMetadataExecution } from "./ImageMetadataExecution";
 import type { ResultKind } from "./ResultKind";
 import type { TrackExecutionSummary } from "./TrackExecutionSummary";
+import type { VideoAttempt } from "./VideoAttempt";
 import type { VideoExecutionSummary } from "./VideoExecutionSummary";
 import type { VideoTrackExecutionSummary } from "./VideoTrackExecutionSummary";
 
-export type JobResult = { video_execution?: VideoExecutionSummary | null, source_bytes?: bigint | null, target_bytes?: bigint | null, reencoded?: boolean | null, output_path: string | null, bytes: bigint | null, duration_ms: bigint,
+export type JobResult = { video_attempt?: VideoAttempt | null, video_execution?: VideoExecutionSummary | null, source_bytes?: bigint | null, target_bytes?: bigint | null, reencoded?: boolean | null, output_path: string | null, bytes: bigint | null, duration_ms: bigint,
 /**
  * Defaults to `File` for backward compatibility with existing rows
  * that pre-date the gallery-dl folder-result variant.

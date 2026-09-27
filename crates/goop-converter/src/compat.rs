@@ -1,12 +1,20 @@
 use crate::encoders::DetectedEncoders;
 use goop_core::{
     CompressMode, GifOptions, GifSizePreset, QualityPreset, ResolutionCap, TargetFormat,
+    VideoEncoder,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoAction {
+    Copy,
+    Encode { encoder: VideoEncoder },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub args: Vec<String>,
     pub video_filters: Vec<String>,
+    pub video_action: Option<VideoAction>,
     pub reencoded: bool,
     pub ext: &'static str,
 }
@@ -78,6 +86,7 @@ pub fn decide(
         | TargetFormat::JpegXl => Plan {
             args: vec![],
             video_filters: vec![],
+            video_action: None,
             reencoded: false,
             ext: target.extension(),
         },
@@ -129,6 +138,10 @@ pub fn decide(
         }
     }
 
+    if vcodec.is_none() {
+        plan.video_action = None;
+    }
+
     plan
 }
 
@@ -171,6 +184,7 @@ fn force_video_encode(plan: &mut Plan, target: TargetFormat, quality: Option<Qua
     };
     new_args.extend(audio);
     plan.args = new_args;
+    plan.video_action = encode.video_action;
 
     debug_assert!(
         !copies_video(&plan.args),
@@ -246,6 +260,7 @@ fn remux(ext: &'static str) -> Plan {
     Plan {
         args: args(&["-c", "copy"]),
         video_filters: vec![],
+        video_action: Some(VideoAction::Copy),
         reencoded: false,
         ext,
     }
@@ -260,12 +275,14 @@ fn plan_mp4(vcodec: Option<&str>, acodec: Option<&str>) -> Plan {
         (Some("h264"), Some("aac")) => Plan {
             args: args(&["-c", "copy"]),
             video_filters: vec![],
+            video_action: Some(VideoAction::Copy),
             reencoded: false,
             ext: "mp4",
         },
         (Some("h264"), Some("mp3")) => Plan {
             args: args(&["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]),
             video_filters: vec![],
+            video_action: Some(VideoAction::Copy),
             reencoded: true,
             ext: "mp4",
         },
@@ -281,6 +298,9 @@ fn plan_mp4_encode(q: QualityPreset) -> Plan {
             "-c:v", "libx264", "-preset", preset, "-crf", crf, "-c:a", "aac", "-b:a", ab,
         ]),
         video_filters: vec![],
+        video_action: Some(VideoAction::Encode {
+            encoder: VideoEncoder::Libx264,
+        }),
         reencoded: true,
         ext: "mp4",
     }
@@ -298,6 +318,9 @@ fn plan_mkv_encode(q: QualityPreset) -> Plan {
             "-c:v", "libx264", "-preset", preset, "-crf", crf, "-c:a", "aac", "-b:a", ab,
         ]),
         video_filters: vec![],
+        video_action: Some(VideoAction::Encode {
+            encoder: VideoEncoder::Libx264,
+        }),
         reencoded: true,
         ext: "mkv",
     }
@@ -314,6 +337,7 @@ fn plan_webm(vcodec: Option<&str>, acodec: Option<&str>) -> Plan {
         Plan {
             args: args(&["-c", "copy"]),
             video_filters: vec![],
+            video_action: Some(VideoAction::Copy),
             reencoded: false,
             ext: "webm",
         }
@@ -338,6 +362,9 @@ fn plan_webm_encode(q: QualityPreset) -> Plan {
             "libopus",
         ]),
         video_filters: vec![],
+        video_action: Some(VideoAction::Encode {
+            encoder: VideoEncoder::LibvpxVp9,
+        }),
         reencoded: true,
         ext: "webm",
     }
@@ -380,6 +407,7 @@ fn plan_gif(opts: Option<&GifOptions>) -> Plan {
     Plan {
         args: all_args,
         video_filters: vec![filter],
+        video_action: None,
         reencoded: true,
         ext: "gif",
     }
@@ -394,6 +422,7 @@ fn plan_avi(vcodec: Option<&str>, acodec: Option<&str>) -> Plan {
         (Some("mpeg4"), Some("mp3")) => Plan {
             args: args(&["-c", "copy"]),
             video_filters: vec![],
+            video_action: Some(VideoAction::Copy),
             reencoded: false,
             ext: "avi",
         },
@@ -436,6 +465,9 @@ fn plan_avi_encode() -> Plan {
             "2",
         ]),
         video_filters: vec![],
+        video_action: Some(VideoAction::Encode {
+            encoder: VideoEncoder::Mpeg4,
+        }),
         reencoded: true,
         ext: "avi",
     }
@@ -455,6 +487,7 @@ fn audio_mp3(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "libmp3lame", "-q:a", "2"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "mp3",
         },
@@ -467,6 +500,7 @@ fn audio_m4a(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "aac", "-b:a", "192k"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "m4a",
         },
@@ -479,6 +513,7 @@ fn audio_opus(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "libopus", "-b:a", "128k"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "opus",
         },
@@ -491,6 +526,7 @@ fn audio_wav(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "pcm_s16le"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "wav",
         },
@@ -503,6 +539,7 @@ fn audio_flac(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "flac"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "flac",
         },
@@ -515,6 +552,7 @@ fn audio_ogg(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "libvorbis", "-q:a", "5"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "ogg",
         },
@@ -527,6 +565,7 @@ fn audio_aac_raw(acodec: Option<&str>) -> Plan {
         _ => Plan {
             args: args(&["-vn", "-c:a", "aac", "-b:a", "192k"]),
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: "aac",
         },
@@ -537,6 +576,7 @@ fn audio_copy(ext: &'static str) -> Plan {
     Plan {
         args: args(&["-vn", "-c:a", "copy"]),
         video_filters: vec![],
+        video_action: None,
         reencoded: false,
         ext,
     }
@@ -631,7 +671,22 @@ pub fn maybe_apply_hw_h264(
 ) -> Option<&'static str> {
     let hw = encoders.preferred_h264()?;
     let new_args = substitute_h264_hw(&plan.args, hw, quality)?;
+    let encoder = match hw {
+        "h264_videotoolbox" => VideoEncoder::H264Videotoolbox,
+        "h264_nvenc" => VideoEncoder::H264Nvenc,
+        "h264_qsv" => VideoEncoder::H264Qsv,
+        "h264_amf" => VideoEncoder::H264Amf,
+        _ => return None,
+    };
     plan.args = new_args;
+    if matches!(
+        plan.video_action,
+        Some(VideoAction::Encode {
+            encoder: VideoEncoder::Libx264
+        })
+    ) {
+        plan.video_action = Some(VideoAction::Encode { encoder });
+    }
     Some(hw)
 }
 
@@ -692,12 +747,13 @@ pub fn decide_compression(
         return Plan {
             args: vec![],
             video_filters: vec![],
+            video_action: None,
             reencoded: true,
             ext: target.extension(),
         };
     }
 
-    match target {
+    let mut plan = match target {
         TargetFormat::Mp4 | TargetFormat::Mkv | TargetFormat::Mov | TargetFormat::Avi => {
             let mut p = compress_video_h264(mode, duration_ms, vcodec, acodec);
             p.ext = target.extension();
@@ -740,7 +796,11 @@ pub fn decide_compression(
         | TargetFormat::JpegXl => {
             unreachable!("image targets short-circuit at the top of decide_compression")
         }
+    };
+    if vcodec.is_none() {
+        plan.video_action = None;
     }
+    plan
 }
 
 /// Linear slider-to-CRF mapping: 100 -> crf 18, 50 -> crf 28, 1 -> crf 40.
@@ -804,6 +864,9 @@ fn compress_video_h264(
                     "192k",
                 ]),
                 video_filters: vec![],
+                video_action: Some(VideoAction::Encode {
+                    encoder: VideoEncoder::Libx264,
+                }),
                 reencoded: true,
                 ext: "mp4",
             }
@@ -834,6 +897,9 @@ fn compress_video_h264(
                     b_a,
                 ],
                 video_filters: vec![],
+                video_action: Some(VideoAction::Encode {
+                    encoder: VideoEncoder::Libx264,
+                }),
                 reencoded: true,
                 ext: "mp4",
             }
@@ -864,6 +930,9 @@ fn compress_video_vp9(mode: CompressMode, duration_ms: u64) -> Plan {
                     "libopus",
                 ]),
                 video_filters: vec![],
+                video_action: Some(VideoAction::Encode {
+                    encoder: VideoEncoder::LibvpxVp9,
+                }),
                 reencoded: true,
                 ext: "webm",
             }
@@ -892,6 +961,9 @@ fn compress_video_vp9(mode: CompressMode, duration_ms: u64) -> Plan {
                     b_a,
                 ],
                 video_filters: vec![],
+                video_action: Some(VideoAction::Encode {
+                    encoder: VideoEncoder::LibvpxVp9,
+                }),
                 reencoded: true,
                 ext: "webm",
             }
@@ -927,6 +999,7 @@ fn compress_audio(
             b_a,
         ],
         video_filters: vec![],
+        video_action: None,
         reencoded: true,
         ext,
     }
@@ -939,9 +1012,116 @@ fn compress_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use goop_core::VideoEncoder;
 
     fn d(target: TargetFormat, vc: Option<&str>, ac: Option<&str>) -> Plan {
         decide(target, vc, ac, None, None, None)
+    }
+
+    #[test]
+    fn video_action_matches_copy_and_encode_arguments() {
+        let cases = [
+            (
+                d(TargetFormat::Mp4, Some("h264"), Some("aac")),
+                Some(VideoAction::Copy),
+            ),
+            (
+                d(TargetFormat::Mp4, Some("hevc"), Some("aac")),
+                Some(VideoAction::Encode {
+                    encoder: VideoEncoder::Libx264,
+                }),
+            ),
+            (
+                d(TargetFormat::Webm, Some("h264"), Some("aac")),
+                Some(VideoAction::Encode {
+                    encoder: VideoEncoder::LibvpxVp9,
+                }),
+            ),
+            (
+                d(TargetFormat::Avi, Some("h264"), Some("aac")),
+                Some(VideoAction::Encode {
+                    encoder: VideoEncoder::Mpeg4,
+                }),
+            ),
+        ];
+
+        for (plan, expected) in cases {
+            assert_eq!(plan.video_action, expected, "args: {:?}", plan.args);
+        }
+    }
+
+    #[test]
+    fn video_action_is_unknown_for_audio_image_subtitle_and_gif_plans() {
+        for plan in [
+            d(TargetFormat::Mp3, None, Some("aac")),
+            d(TargetFormat::Mkv, None, Some("aac")),
+            d(TargetFormat::Png, None, None),
+            d(TargetFormat::Srt, None, None),
+            d(TargetFormat::Gif, Some("h264"), Some("aac")),
+        ] {
+            assert_eq!(plan.video_action, None, "args: {:?}", plan.args);
+        }
+    }
+
+    #[test]
+    fn resolution_cap_replaces_copy_action_with_software_encoder() {
+        let plan = decide(
+            TargetFormat::Mp4,
+            Some("h264"),
+            Some("aac"),
+            None,
+            Some(ResolutionCap::R720p),
+            None,
+        );
+        assert_eq!(
+            plan.video_action,
+            Some(VideoAction::Encode {
+                encoder: VideoEncoder::Libx264,
+            })
+        );
+        assert!(plan.args.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn hardware_substitution_updates_action_and_preserves_argument_parity() {
+        let mut plan = d(TargetFormat::Mp4, Some("hevc"), Some("aac"));
+        let detected = DetectedEncoders::from_names(["h264_videotoolbox"]);
+
+        assert_eq!(
+            maybe_apply_hw_h264(&mut plan, &detected, Some(QualityPreset::Balanced)),
+            Some("h264_videotoolbox")
+        );
+        assert_eq!(
+            plan.video_action,
+            Some(VideoAction::Encode {
+                encoder: VideoEncoder::H264Videotoolbox,
+            })
+        );
+        assert!(
+            plan.args
+                .windows(2)
+                .any(|w| w == ["-c:v", "h264_videotoolbox"]),
+            "descriptor and arguments diverged: {:?}",
+            plan.args
+        );
+        assert!(!plan.args.iter().any(|arg| arg == "libx264"));
+    }
+
+    #[test]
+    fn hardware_substitution_preserves_unknown_action_without_video_source_facts() {
+        let mut plan = d(TargetFormat::Mp4, None, Some("aac"));
+        let detected = DetectedEncoders::from_names(["h264_videotoolbox"]);
+        assert_eq!(plan.video_action, None);
+
+        assert_eq!(
+            maybe_apply_hw_h264(&mut plan, &detected, Some(QualityPreset::Balanced)),
+            Some("h264_videotoolbox")
+        );
+        assert_eq!(plan.video_action, None);
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|w| w == ["-c:v", "h264_videotoolbox"]));
     }
 
     // --- Subtitle targets + burn-in prerequisites ---

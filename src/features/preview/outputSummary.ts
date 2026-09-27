@@ -194,7 +194,13 @@ export function outputSummary(result: JobResult | null | undefined, job?: Pick<J
   if (result.compression_execution) facts.push(compressionExecutionText(result.compression_execution));
   if (result.audio_execution) facts.push(audioExecutionText(result.audio_execution));
   else if (result.video_execution) facts.push(videoExecutionText(result.video_execution, !result.video_track_execution));
-  else if (!result.track_execution && !result.video_track_execution) {
+  else if (result.video_attempt) {
+    const attempt = result.video_attempt;
+    facts.push(attempt.kind === "copy" ? "Video: copied" : `Video: ${attempt.encoder}`);
+    if (attempt.kind === "encode" && attempt.fallback) {
+      facts.push("Software fallback after hardware attempt failed");
+    }
+  } else if (!result.track_execution && !result.video_track_execution) {
     if (result.reencoded === false) facts.push("No re-encode reported");
     const payload = job?.payload;
     const target = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.target : null;

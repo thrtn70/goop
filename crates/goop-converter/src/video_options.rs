@@ -448,6 +448,20 @@ fn resolve_inner(
         plan: Plan {
             args,
             video_filters: filters,
+            video_action: Some(match encoder.as_deref() {
+                None => crate::compat::VideoAction::Copy,
+                Some("libx264") => crate::compat::VideoAction::Encode {
+                    encoder: VideoEncoder::Libx264,
+                },
+                Some("libx265") => crate::compat::VideoAction::Encode {
+                    encoder: VideoEncoder::Libx265,
+                },
+                Some(name) => {
+                    return Err(invalid(format!(
+                        "Resolved video encoder {name} has no completion-reporting contract"
+                    )))
+                }
+            }),
             reencoded: encoder.is_some(),
             ext: req.target.extension(),
         },

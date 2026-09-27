@@ -2,6 +2,38 @@ import { expect, it } from "vitest";
 import { outputSummary } from "./outputSummary";
 import type { JobResult } from "@/types";
 const result = (fields: object) => ({bytes:100n,source_bytes:200n,...fields}) as JobResult;
+it("reports completed video Copy independently of whole-file reencoding", () => {
+  const summary = outputSummary(result({video_attempt:{kind:"copy"},reencoded:true}), {kind:"convert",payload:{target:"mp4"}});
+  expect(summary).toContain("Video: copied");
+  expect(summary).not.toContain("Detailed video configuration unavailable");
+});
+it.each(["libx264", "libx265", "libvpx-vp9", "mpeg4", "h264_videotoolbox"])("reports completed %s without a hardware claim", encoder => {
+  const summary = outputSummary(result({video_attempt:{kind:"encode",encoder,encode_attempt_ordinal:1,
+    selection_context:{kind:"legacy_global_at_execution",hw_acceleration_enabled:true}}}));
+  expect(summary).toContain(`Video: ${encoder}`);
+  expect(summary).not.toMatch(/accelerat|GPU|faster|fallback|equivalent/i);
+});
+it("reports successful software fallback without diagnosing a GPU fault", () => {
+  const summary = outputSummary(result({video_attempt:{kind:"encode",encoder:"libx264",encode_attempt_ordinal:2,
+    selection_context:{kind:"legacy_global_at_execution",hw_acceleration_enabled:true},
+    fallback:{from_encoder:"h264_videotoolbox",reason:"hardware_attempt_subprocess_failed"}}}));
+  expect(summary).toContain("Video: libx264");
+  expect(summary).toContain("Software fallback after hardware attempt failed");
+  expect(summary).not.toMatch(/GPU|accelerated|faster/i);
+});
+it.each([undefined, null])("does not invent completion for old absent/null receipts", video_attempt => {
+  const summary = outputSummary(result({video_attempt}), {kind:"convert",payload:{target:"mp4"}});
+  expect(summary).toContain("Detailed video configuration unavailable");
+  expect(summary).not.toMatch(/Video:|fallback/);
+});
+it("preserves explicit Software detail without repeating the receipt encoder", () => {
+  const video_execution = {requested:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},
+    speed:"medium",processor:"software"},encoder:"libx264",video_codec:"h264",video_stream_index:0,
+    audio_copied:false,width:1920,height:1080,notices:[]};
+  const original = outputSummary(result({video_execution}));
+  expect(outputSummary(result({video_execution,video_attempt:{kind:"encode",encoder:"libx264",encode_attempt_ordinal:1,
+    selection_context:{kind:"explicit_software"}}}))).toBe(original);
+});
 it("reports actual savings, growth, and missing facts without invented savings", () => {
   expect(outputSummary(result({}))).toContain("50% smaller");
   expect(outputSummary(result({bytes:300n}))).toContain("50% larger");

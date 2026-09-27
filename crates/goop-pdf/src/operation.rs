@@ -135,6 +135,7 @@ pub async fn run(
     };
     let output = staged.publish(&destination, None, allow_empty, &cancel)?;
     Ok(JobResult {
+        video_attempt: None,
         track_execution: None,
         audio_execution: None,
         video_execution: None,

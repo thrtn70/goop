@@ -86,6 +86,9 @@ pub enum ResultKind {
 pub struct JobResult {
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub video_attempt: Option<crate::video::VideoAttempt>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub video_execution: Option<crate::video::VideoExecutionSummary>,
     #[serde(default)]
     #[ts(optional = nullable)]

@@ -70,6 +70,7 @@ pub(crate) fn plan_extract(target: TargetFormat) -> Plan {
             codec.to_string(),
         ],
         video_filters: vec![],
+        video_action: None,
         reencoded: true,
         ext: target.extension(),
     }

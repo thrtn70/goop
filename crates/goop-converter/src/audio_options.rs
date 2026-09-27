@@ -204,6 +204,7 @@ pub fn resolve(
         plan: Plan {
             args,
             video_filters: vec![],
+            video_action: None,
             reencoded: !validated.copied,
             ext: request.target.extension(),
         },

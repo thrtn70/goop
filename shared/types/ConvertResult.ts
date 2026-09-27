@@ -4,6 +4,7 @@ import type { CompressionExecution } from "./CompressionExecution";
 import type { ImageAlphaExecution } from "./ImageAlphaExecution";
 import type { ImageMetadataExecution } from "./ImageMetadataExecution";
 import type { TrackExecutionSummary } from "./TrackExecutionSummary";
+import type { VideoAttempt } from "./VideoAttempt";
 import type { VideoExecutionSummary } from "./VideoExecutionSummary";
 import type { VideoTrackExecutionSummary } from "./VideoTrackExecutionSummary";
 
@@ -11,4 +12,4 @@ import type { VideoTrackExecutionSummary } from "./VideoTrackExecutionSummary";
  * Completed conversion measurements and optional explicit processing disclosures.
  * Track execution remains absent for Automatic and legacy conversions.
  */
-export type ConvertResult = { audio_execution?: AudioExecutionSummary | null, video_execution?: VideoExecutionSummary | null, track_execution?: TrackExecutionSummary | null, video_track_execution?: VideoTrackExecutionSummary | null, image_metadata_execution?: ImageMetadataExecution | null, compression_execution?: CompressionExecution | null, image_alpha_execution?: ImageAlphaExecution | null, source_bytes?: bigint | null, target_bytes?: bigint | null, output_path: string, bytes: bigint, duration_ms: bigint, reencoded: boolean, };
+export type ConvertResult = { video_attempt?: VideoAttempt | null, audio_execution?: AudioExecutionSummary | null, video_execution?: VideoExecutionSummary | null, track_execution?: TrackExecutionSummary | null, video_track_execution?: VideoTrackExecutionSummary | null, image_metadata_execution?: ImageMetadataExecution | null, compression_execution?: CompressionExecution | null, image_alpha_execution?: ImageAlphaExecution | null, source_bytes?: bigint | null, target_bytes?: bigint | null, output_path: string, bytes: bigint, duration_ms: bigint, reencoded: boolean, };
