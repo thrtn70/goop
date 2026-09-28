@@ -83,7 +83,8 @@ pub mod video;
 pub use video::{
     validate_video_options, validate_video_request, VideoAttempt, VideoCodec, VideoCodecCapability,
     VideoConvertOptions, VideoEncoder, VideoExecutionSummary, VideoFallback, VideoFallbackReason,
-    VideoFrameRate, VideoFrameRateCapabilities, VideoFrameRateChoice, VideoModeAvailability,
+    VideoFrameRate, VideoFrameRateCapabilities, VideoFrameRateChoice, VideoHardwareCapabilities,
+    VideoHardwareCodec, VideoHardwarePolicy, VideoHardwareRateControl, VideoModeAvailability,
     VideoProbeDetails, VideoProcessor, VideoRateControl, VideoRationalFact, VideoResize,
     VideoResizeCapabilities, VideoSelectionContext, VideoSettingsCapabilities, VideoSpeed,
     VideoStreamInfo,

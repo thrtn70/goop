@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { WorkspaceDraftProvider, clearWorkspaceDrafts, resetWorkspaceDrafts, useWorkspaceDraftState, withWorkspaceDrafts } from "../workspaceDrafts";
-afterEach(() => { cleanup(); resetWorkspaceDrafts(); });
+afterEach(() => { cleanup(); resetWorkspaceDrafts(); vi.unstubAllGlobals(); });
 const scope = (tool: "convert" | "compress", source = "pdf") => ({ children }: { children: ReactNode }) => createElement(WorkspaceDraftProvider, { tool, scope: [source] }, children);
 it("retains editable values across route unmount without running work", () => {
  const run = vi.fn();
@@ -109,4 +109,191 @@ it("owns selected track identity independently of caller objects", () => {
   const owned = saved.result.current[0][0].trackOptions;
   expect(owned.source.inventory.streams[0].title.value).toBe("Commentary");
   expect(owned.source.inventory.streams[0].disposition.other).toEqual({});
+});
+
+it("blocks autosave, Retry writes and ordinary reset after an unreadable v2 initialization", async () => {
+  const reads: string[] = [];
+  const writes: string[] = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => {
+      reads.push(storageKey);
+      if (storageKey === "goop.workspace-drafts.v2") throw new Error("private read detail");
+      return null;
+    },
+    setItem: (_storageKey: string, value: string) => { writes.push(value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "cw90"), { wrapper });
+
+  expect(failed.result.current).toBe(true);
+  act(() => edit.result.current[1]("ccw90"));
+  expect(edit.result.current[0]).toBe("ccw90");
+  act(() => drafts.retryDraftPersistence());
+  expect(edit.result.current[0]).toBe("ccw90");
+  act(() => drafts.resetWorkspaceDrafts());
+  expect(writes).toEqual([]);
+  expect(failed.result.current).toBe(true);
+  expect(reads).toEqual(["goop.workspace-drafts.v2", "goop.workspace-drafts.v2"]);
+});
+
+it.each([
+  ["malformed", "{"],
+  ["future", JSON.stringify({ version: 99, entries: {} })],
+] as const)("keeps %s v2 protected through edits, Retry and ordinary reset", async (_reason, raw) => {
+  const writes: string[] = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => storageKey === "goop.workspace-drafts.v2" ? raw : null,
+    setItem: (_storageKey: string, value: string) => { writes.push(value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "cw90"), { wrapper });
+
+  expect(failed.result.current).toBe(true);
+  act(() => edit.result.current[1]("ccw90"));
+  act(() => drafts.retryDraftPersistence());
+  act(() => drafts.resetWorkspaceDrafts());
+  expect(failed.result.current).toBe(true);
+  expect(writes).toEqual([]);
+});
+
+it("retains immediate edits after a failed migration and retries only after re-reading exact v1", async () => {
+  const legacyKey = "goop.workspace-drafts.v1";
+  const v2Key = "goop.workspace-drafts.v2";
+  const entryKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+  const legacyRaw = JSON.stringify({ version: 1, entries: { [entryKey]: { value: "cw90" } } });
+  const values = new Map([[legacyKey, legacyRaw]]);
+  let failWrites = true;
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => {
+      if (failWrites) throw new Error("quota");
+      values.set(storageKey, value);
+    },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const persistence = await import("../workspacePersistence");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "none"), { wrapper });
+
+  expect(edit.result.current[0]).toBe("cw90");
+  expect(failed.result.current).toBe(true);
+  act(() => edit.result.current[1]("ccw90"));
+  expect(values.get(legacyKey)).toBe(legacyRaw);
+  expect(values.has(v2Key)).toBe(false);
+
+  failWrites = false;
+  act(() => drafts.retryDraftPersistence());
+  expect(failed.result.current).toBe(false);
+  expect(edit.result.current[0]).toBe("ccw90");
+  expect(persistence.decodeDraftEntries(values.get(v2Key) ?? "")).toEqual({
+    [entryKey]: { value: "ccw90" },
+  });
+  expect(values.get(legacyKey)).toBe(legacyRaw);
+});
+
+it("re-hydrates repaired protected v2 data before allowing persistence", async () => {
+  const v2Key = "goop.workspace-drafts.v2";
+  const entryKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+  const values = new Map([[v2Key, "{"]]);
+  const writes: string[] = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => { writes.push(value); values.set(storageKey, value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const persistence = await import("../workspacePersistence");
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  expect(failed.result.current).toBe(true);
+
+  const repaired = persistence.encodeDraftEntries({ [entryKey]: { value: "ccw90" } });
+  values.set(v2Key, repaired);
+  act(() => drafts.retryDraftPersistence());
+
+  expect(failed.result.current).toBe(false);
+  expect(writes).toEqual([]);
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const restored = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "none"), { wrapper });
+  expect(restored.result.current[0]).toBe("ccw90");
+});
+
+it.each([
+  ["malformed", "{", false],
+  ["future", JSON.stringify({ version: 99, entries: {} }), false],
+  ["read error", JSON.stringify({ version: 2, entries: {} }), true],
+] as const)("enters protected mode when Retry discovers %s v2 after an ordinary write failure", async (_reason, protectedRaw, readError) => {
+  const v2Key = "goop.workspace-drafts.v2";
+  const entryKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+  const values = new Map([[v2Key, JSON.stringify({ version: 2, entries: { [entryKey]: { value: "cw90" } } })]]);
+  const writes: string[] = [];
+  let failWrites = true;
+  let failReads = false;
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => {
+      if (failReads && storageKey === v2Key) throw new Error("unavailable");
+      return values.get(storageKey) ?? null;
+    },
+    setItem: (storageKey: string, value: string) => {
+      writes.push(value);
+      if (failWrites) throw new Error("quota");
+      values.set(storageKey, value);
+    },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "none"), { wrapper });
+
+  act(() => edit.result.current[1]("ccw90"));
+  expect(failed.result.current).toBe(true);
+  expect(writes).toHaveLength(1);
+  values.set(v2Key, protectedRaw);
+  failReads = readError;
+  failWrites = false;
+  act(() => drafts.retryDraftPersistence());
+  act(() => edit.result.current[1]("rotate180"));
+  act(() => drafts.resetWorkspaceDrafts());
+  expect(failed.result.current).toBe(true);
+  expect(writes).toHaveLength(1);
+  expect(values.get(v2Key)).toBe(protectedRaw);
+});
+
+it("keeps a failed migration pending when its retained v1 disappears before Retry", async () => {
+  const legacyKey = "goop.workspace-drafts.v1";
+  const v2Key = "goop.workspace-drafts.v2";
+  const entryKey = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+  const values = new Map([[legacyKey, JSON.stringify({ version: 1, entries: { [entryKey]: { value: "cw90" } } })]]);
+  const writes: string[] = [];
+  let failWrites = true;
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => {
+      writes.push(value);
+      if (failWrites) throw new Error("quota");
+      values.set(storageKey, value);
+    },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "none"), { wrapper });
+  expect(failed.result.current).toBe(true);
+
+  values.delete(legacyKey);
+  failWrites = false;
+  act(() => drafts.retryDraftPersistence());
+  act(() => edit.result.current[1]("ccw90"));
+  expect(failed.result.current).toBe(true);
+  expect(values.has(v2Key)).toBe(false);
+  expect(writes).toHaveLength(1);
 });

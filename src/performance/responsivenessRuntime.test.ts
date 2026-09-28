@@ -13,6 +13,7 @@ import {
   createResponsivenessRuntime,
   type ResponsivenessActivation,
 } from "./responsivenessRuntime";
+import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "@/store/draftStorageKeys";
 
 const descriptor: ResponsivenessDescriptor = {
   componentRole: "primary",
@@ -183,6 +184,78 @@ function enabledActivation(overrides: Partial<Extract<ResponsivenessActivation, 
 }
 
 describe("PERF-02 responsiveness runtime", () => {
+  it.each([
+    [1, LEGACY_DRAFT_STORAGE_KEY],
+    [2, DRAFT_STORAGE_KEY],
+  ] as const)("routes a version-%s bootstrap to its owned draft namespace", async (version, expectedKey) => {
+    const raw = JSON.stringify({ version, entries: {} });
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (storageKey: string) => values.get(storageKey) ?? null,
+      setItem: (storageKey: string, value: string) => { values.set(storageKey, value); },
+    });
+    vi.stubGlobal("history", { state: null, replaceState: vi.fn() });
+    const runtime = createResponsivenessRuntime({
+      status: vi.fn().mockResolvedValue(enabledActivation({
+        recorderMode: "control",
+        bootstrap: { initialPath: "/convert", draftStorage: { raw, sha256: "b".repeat(64) }, failNextDraftWrite: false },
+      })),
+      sha256: vi.fn().mockResolvedValue("b".repeat(64)),
+      sealDisabled: vi.fn(), controlReady: vi.fn(), createRecorder: vi.fn(), installRecorder: vi.fn(),
+      markScenarioStarted: vi.fn(), ready: vi.fn(), actionReady: vi.fn(), writeComponent: vi.fn(),
+      installTrustedEventGuard: vi.fn(() => vi.fn()), setTimer: vi.fn(() => 1), clearTimer: vi.fn(),
+    });
+
+    await runtime.initialize();
+
+    expect(values.get(expectedKey)).toBe(raw);
+    expect(values.has(version === 1 ? DRAFT_STORAGE_KEY : LEGACY_DRAFT_STORAGE_KEY)).toBe(false);
+  });
+
+  it("routes a malformed bootstrap to protected v2 and reads only active v2 for completion", async () => {
+    const malformed = "{";
+    const activeRaw = JSON.stringify({ version: 2, entries: {} });
+    const legacyRaw = JSON.stringify({ version: 1, entries: {} });
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (storageKey: string) => values.get(storageKey) ?? null,
+      setItem: (storageKey: string, value: string) => { values.set(storageKey, value); },
+    });
+    vi.stubGlobal("history", { state: null, replaceState: vi.fn() });
+    const control = createResponsivenessRuntime({
+      status: vi.fn().mockResolvedValue(enabledActivation({
+        recorderMode: "control",
+        bootstrap: { initialPath: "/convert", draftStorage: { raw: malformed, sha256: "b".repeat(64) }, failNextDraftWrite: false },
+      })),
+      sha256: vi.fn().mockResolvedValue("b".repeat(64)), sealDisabled: vi.fn(), controlReady: vi.fn(),
+      createRecorder: vi.fn(), installRecorder: vi.fn(), markScenarioStarted: vi.fn(), ready: vi.fn(),
+      actionReady: vi.fn(), writeComponent: vi.fn(), installTrustedEventGuard: vi.fn(() => vi.fn()),
+      setTimer: vi.fn(() => 1), clearTimer: vi.fn(),
+    });
+    await control.initialize();
+    expect(values.get(DRAFT_STORAGE_KEY)).toBe(malformed);
+    expect(values.has(LEGACY_DRAFT_STORAGE_KEY)).toBe(false);
+
+    values.set(DRAFT_STORAGE_KEY, activeRaw);
+    values.set(LEGACY_DRAFT_STORAGE_KEY, legacyRaw);
+    const hashed: string[] = [];
+    const writeComponent = vi.fn().mockResolvedValue(undefined);
+    const recovery = createResponsivenessRuntime({
+      status: vi.fn().mockResolvedValue(enabledActivation({
+        descriptor: { ...descriptor, componentRole: "recovery", lane: "draft" }, actions: [],
+        completion: { kind: "recovery", timeoutMs: 2_000, expectedDraftSha256: null, expectedAxValue: "restored" },
+      })),
+      sha256: vi.fn(async value => { hashed.push(value); return "c".repeat(64); }),
+      createRecorder: vi.fn(() => fakeRecorder([])), installRecorder: vi.fn(() => "registry"),
+      markScenarioStarted: vi.fn(), ready: vi.fn(), actionReady: vi.fn(), writeComponent,
+      installTrustedEventGuard: vi.fn(() => vi.fn()), setTimer: vi.fn(() => 1), clearTimer: vi.fn(),
+    });
+    await recovery.initialize();
+    recovery.acknowledgeTopBarValue("restored");
+    await vi.waitFor(() => expect(writeComponent).toHaveBeenCalledTimes(1));
+    expect(hashed).toContain(activeRaw);
+    expect(hashed).not.toContain(legacyRaw);
+  });
   it("performs one disabled activation query and seals without creating instrumentation or further IPC", async () => {
     const status = vi.fn<() => Promise<ResponsivenessActivation>>().mockResolvedValue({ enabled: false });
     const sealDisabled = vi.fn();
@@ -466,7 +539,7 @@ describe("PERF-02 responsiveness runtime", () => {
   });
 
   it("preserves pre-quit draft bytes when recovery bootstrap supplies null storage", async () => {
-    const storageKey = "goop.workspace-drafts.v1";
+    const storageKey = LEGACY_DRAFT_STORAGE_KEY;
     const slot = JSON.stringify(["extract", "TopBar.url"]);
     const raw = JSON.stringify({ version: 1, entries: { [slot]: { value: "https://x.test/a.mp4" } } });
     const values = new Map([[storageKey, raw]]);
@@ -492,9 +565,10 @@ describe("PERF-02 responsiveness runtime", () => {
     await runtime.initialize();
     const { DRAFT_STORAGE_KEY, loadDraftEntries } = await import("@/store/workspacePersistence");
 
-    expect(DRAFT_STORAGE_KEY).toBe(storageKey);
     expect(values.get(storageKey)).toBe(raw);
     expect(loadDraftEntries(storage)).toEqual({ [slot]: { value: "https://x.test/a.mp4" } });
+    expect(values.get(storageKey)).toBe(raw);
+    expect(values.has(DRAFT_STORAGE_KEY)).toBe(true);
   });
 
   it("invalidates unexpected trusted events but permits the explicit input companion", async () => {

@@ -567,8 +567,14 @@ function ConvertPage() {
             pendingPolicy: file.pendingTrackPolicy,
           })
         : null;
+      // A portable Hardware required preset stays selected even when this
+      // source or platform cannot admit it. The row owns the visible reason
+      // and remains blocked until the user changes the intent.
+      const videoProblem = file.videoOptions?.kind === "hardware_encode"
+        ? null
+        : videoOptionsError({...file, videoCapability:capability});
       const problem = audioOptionsProblem(file)
-        ?? videoOptionsError({...file, videoCapability:capability})
+        ?? videoProblem
         ?? videoTrackProblem
         ?? conversionProblem({...file,qualityPreset:file.videoOptions || file.audioOptions ? null : file.qualityPreset}, state)
         ?? metadataProblem
@@ -585,7 +591,8 @@ function ConvertPage() {
       return;
     }
     setApplicationError(null);
-    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...videoDraftSlots, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
+    const replaceableVideoDrafts = videoDraftSlots.filter(slot => slot !== "VideoOptionsPanel.savedSoftware");
+    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
     setFiles(next);
   };
 

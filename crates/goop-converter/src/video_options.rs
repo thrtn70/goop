@@ -225,6 +225,92 @@ fn encode_source(video: &VideoStreamInfo, w: u32, h: u32) -> Result<Vec<String>,
         vec![]
     })
 }
+
+struct EncodePlanParts<'a> {
+    width: &'a mut u32,
+    height: &'a mut u32,
+    args: &'a mut Vec<String>,
+    filters: &'a mut Vec<String>,
+}
+
+fn apply_encode_controls(
+    req: &ConvertRequest,
+    video: &VideoStreamInfo,
+    audio: Option<&VideoStreamInfo>,
+    resize: Option<&VideoResize>,
+    frame_rate: Option<&VideoFrameRate>,
+    plan: EncodePlanParts<'_>,
+) -> Result<(), GoopError> {
+    let EncodePlanParts {
+        width,
+        height,
+        args,
+        filters,
+    } = plan;
+    if let Some(resize) = resize {
+        match resize {
+            VideoResize::Original => {}
+            VideoResize::FitWithin {
+                width: box_width,
+                height: box_height,
+            } => {
+                (*width, *height) = fit_within(*width, *height, *box_width, *box_height)?;
+                filters.push(format!("scale={width}:{height}"));
+                filters.push("setsar=1".into());
+            }
+        }
+    } else {
+        let cap = match req.resolution_cap {
+            Some(ResolutionCap::R1080p) => Some(1920),
+            Some(ResolutionCap::R720p) => Some(1280),
+            Some(ResolutionCap::R480p) => Some(854),
+            _ => None,
+        };
+        if let Some(cap) = cap {
+            let out_w = (*width).min(cap);
+            let out_h = ((u64::from(*height) * u64::from(out_w) + u64::from(*width))
+                / (2 * u64::from(*width)))
+                * 2;
+            if out_h == 0 || out_h > u64::from(*height) {
+                return Err(invalid(
+                    "Resolution cap cannot produce valid video geometry without enlargement",
+                ));
+            }
+            *width = out_w;
+            *height = out_h as u32;
+            filters.push(format!("scale='trunc(min({cap},iw)/2)*2':-2"));
+            filters.push("setsar=1".into());
+        }
+    }
+    if let Some(frame_rate) = frame_rate {
+        if let Some(reason) = source_timing_unavailable_reason(video, audio) {
+            return Err(invalid(reason));
+        }
+        match frame_rate {
+            VideoFrameRate::Preserve => {
+                args.extend([
+                    "-fps_mode:v".into(),
+                    "passthrough".into(),
+                    "-enc_time_base:v".into(),
+                    "demux".into(),
+                ]);
+            }
+            VideoFrameRate::Constant {
+                numerator,
+                denominator,
+            } => {
+                filters.push(format!("fps=fps={numerator}/{denominator}:round=near"));
+                args.extend([
+                    "-fps_mode:v".into(),
+                    "passthrough".into(),
+                    "-enc_time_base:v".into(),
+                    "filter".into(),
+                ]);
+            }
+        }
+    }
+    Ok(())
+}
 fn audio_copyable(target: TargetFormat, codec: &str) -> bool {
     if target == TargetFormat::Mkv {
         // Matroska's legacy path accepts arbitrary codecs. Explicit mode admits
@@ -346,71 +432,70 @@ fn resolve_inner(
                     args.extend(["-b:v".into(), format!("{kbps}k")])
                 }
             };
-            if let Some(resize) = resize {
-                match resize {
-                    VideoResize::Original => {}
-                    VideoResize::FitWithin {
-                        width: box_width,
-                        height: box_height,
-                    } => {
-                        (width, height) = fit_within(width, height, *box_width, *box_height)?;
-                        filters.push(format!("scale={width}:{height}"));
-                        filters.push("setsar=1".into());
-                    }
-                }
-            } else {
-                let cap = match req.resolution_cap {
-                    Some(ResolutionCap::R1080p) => Some(1920),
-                    Some(ResolutionCap::R720p) => Some(1280),
-                    Some(ResolutionCap::R480p) => Some(854),
-                    _ => None,
-                };
-                if let Some(cap) = cap {
-                    let out_w = width.min(cap);
-                    // Match FFmpeg scale's nearest even height for a square-pixel source.
-                    let out_h = ((u64::from(height) * u64::from(out_w) + u64::from(width))
-                        / (2 * u64::from(width)))
-                        * 2;
-                    if out_h == 0 || out_h > u64::from(height) {
-                        return Err(invalid(
-                            "Resolution cap cannot produce valid video geometry without enlargement",
-                        ));
-                    }
-                    width = out_w;
-                    height = out_h as u32;
-                    filters.push(format!("scale='trunc(min({cap},iw)/2)*2':-2"));
-                    // Even-height rounding must not change the admitted square pixels.
-                    filters.push("setsar=1".into());
-                }
-            }
-            if let Some(frame_rate) = frame_rate {
-                if let Some(reason) = source_timing_unavailable_reason(video, audio) {
-                    return Err(invalid(reason));
-                }
-                match frame_rate {
-                    VideoFrameRate::Preserve => {
-                        args.extend([
-                            "-fps_mode:v".into(),
-                            "passthrough".into(),
-                            "-enc_time_base:v".into(),
-                            "demux".into(),
-                        ]);
-                    }
-                    VideoFrameRate::Constant {
-                        numerator,
-                        denominator,
-                    } => {
-                        filters.push(format!("fps=fps={numerator}/{denominator}:round=near"));
-                        args.extend([
-                            "-fps_mode:v".into(),
-                            "passthrough".into(),
-                            "-enc_time_base:v".into(),
-                            "filter".into(),
-                        ]);
-                    }
-                }
-            }
+            apply_encode_controls(
+                req,
+                video,
+                audio,
+                resize.as_ref(),
+                frame_rate.as_ref(),
+                EncodePlanParts {
+                    width: &mut width,
+                    height: &mut height,
+                    args: &mut args,
+                    filters: &mut filters,
+                },
+            )?;
             (*codec, Some(name.into()), notices)
+        }
+        VideoConvertOptions::HardwareEncode {
+            codec: VideoHardwareCodec::H264,
+            hardware_policy: VideoHardwarePolicy::Required,
+            rate_control: VideoHardwareRateControl::AverageBitrate { kbps },
+            resize,
+            frame_rate,
+        } => {
+            let notices = encode_source(video, width, height)?;
+            if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                return Err(invalid(
+                    "Hardware required H.264 is currently available on macOS arm64 only",
+                ));
+            }
+            if !encoders.is_available("h264_videotoolbox") {
+                return Err(invalid(
+                    "Required hardware encoder h264_videotoolbox is unavailable in the bundled FFmpeg",
+                ));
+            }
+            if !encoders.supports_h264_videotoolbox_required() {
+                return Err(invalid(
+                    "Bundled h264_videotoolbox does not expose the required allow_sw and require_sw option contract",
+                ));
+            }
+            args.extend([
+                "-c:v".into(),
+                "h264_videotoolbox".into(),
+                "-b:v".into(),
+                format!("{kbps}k"),
+                "-allow_sw".into(),
+                "0".into(),
+                "-require_sw".into(),
+                "0".into(),
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+            ]);
+            apply_encode_controls(
+                req,
+                video,
+                audio,
+                resize.as_ref(),
+                frame_rate.as_ref(),
+                EncodePlanParts {
+                    width: &mut width,
+                    height: &mut height,
+                    args: &mut args,
+                    filters: &mut filters,
+                },
+            )?;
+            (VideoCodec::H264, Some("h264_videotoolbox".into()), notices)
         }
     };
     if codec == VideoCodec::Hevc && matches!(req.target, TargetFormat::Mp4 | TargetFormat::Mov) {
@@ -456,6 +541,9 @@ fn resolve_inner(
                 Some("libx265") => crate::compat::VideoAction::Encode {
                     encoder: VideoEncoder::Libx265,
                 },
+                Some("h264_videotoolbox") => crate::compat::VideoAction::Encode {
+                    encoder: VideoEncoder::H264Videotoolbox,
+                },
                 Some(name) => {
                     return Err(invalid(format!(
                         "Resolved video encoder {name} has no completion-reporting contract"
@@ -476,11 +564,13 @@ fn resolve_inner(
             width,
             height,
             requested_resize: match options {
-                VideoConvertOptions::Encode { resize, .. } => resize.clone(),
+                VideoConvertOptions::Encode { resize, .. }
+                | VideoConvertOptions::HardwareEncode { resize, .. } => resize.clone(),
                 VideoConvertOptions::Copy => None,
             },
             requested_frame_rate: match options {
-                VideoConvertOptions::Encode { frame_rate, .. } => frame_rate.clone(),
+                VideoConvertOptions::Encode { frame_rate, .. }
+                | VideoConvertOptions::HardwareEncode { frame_rate, .. } => frame_rate.clone(),
                 VideoConvertOptions::Copy => None,
             },
             source_average_frame_rate: video.average_frame_rate.clone(),
@@ -488,6 +578,14 @@ fn resolve_inner(
             source_time_base: video.time_base.clone(),
             resolved_constant_frame_rate: match options {
                 VideoConvertOptions::Encode {
+                    frame_rate:
+                        Some(VideoFrameRate::Constant {
+                            numerator,
+                            denominator,
+                        }),
+                    ..
+                }
+                | VideoConvertOptions::HardwareEncode {
                     frame_rate:
                         Some(VideoFrameRate::Constant {
                             numerator,
@@ -527,7 +625,10 @@ pub fn validate_output(
             "Completed video geometry does not match the requested output",
         ));
     }
-    if matches!(expected.requested, VideoConvertOptions::Encode { .. }) {
+    if matches!(
+        expected.requested,
+        VideoConvertOptions::Encode { .. } | VideoConvertOptions::HardwareEncode { .. }
+    ) {
         if video.rotation_degrees.unwrap_or(0).rem_euclid(360) != 0 {
             return Err(invalid(
                 "Encoded video retained unexpected display rotation",
@@ -750,6 +851,23 @@ fn capabilities_inner(
         timing_reason
     };
     let frame_rate_available = frame_rate_reason.is_none();
+    let hardware_state = mode(resolve_mode(VideoConvertOptions::HardwareEncode {
+        codec: VideoHardwareCodec::H264,
+        hardware_policy: VideoHardwarePolicy::Required,
+        rate_control: VideoHardwareRateControl::AverageBitrate { kbps: 5000 },
+        resize: None,
+        frame_rate: None,
+    }));
+    let hardware_available = hardware_state.available;
+    let hardware_reason = hardware_state.reason.clone();
+    let hardware_frame_rate_reason = if hardware_available {
+        stream_facts()
+            .ok()
+            .and_then(|(video, audio)| source_timing_unavailable_reason(video, audio))
+    } else {
+        hardware_reason.clone()
+    };
+    let hardware_frame_rate_available = hardware_frame_rate_reason.is_none();
     VideoSettingsCapabilities {
         copy,
         encode: VideoModeAvailability {
@@ -770,6 +888,37 @@ fn capabilities_inner(
         speeds: vec![VideoSpeed::Fast, VideoSpeed::Medium, VideoSpeed::Slow],
         default_speed: VideoSpeed::Medium,
         processor: VideoProcessor::Software,
+        hardware: Some(VideoHardwareCapabilities {
+            available: hardware_available,
+            reason: hardware_reason.clone(),
+            codec: VideoHardwareCodec::H264,
+            bitrate_min_kbps: 100,
+            bitrate_max_kbps: 200_000,
+            default_bitrate_kbps: 5000,
+            resize: Some(VideoResizeCapabilities {
+                available: hardware_available,
+                reason: hardware_reason,
+                min_dimension: 2,
+                max_dimension: 32_768,
+                no_enlargement: true,
+                default: VideoResize::Original,
+            }),
+            frame_rate: Some(VideoFrameRateCapabilities {
+                available: hardware_frame_rate_available,
+                reason: hardware_frame_rate_reason,
+                default: hardware_frame_rate_available.then_some(VideoFrameRate::Preserve),
+                constant_choices: constant_frame_rates(),
+                average_frame_rate: stream_facts()
+                    .ok()
+                    .and_then(|(video, _)| video.average_frame_rate.clone()),
+                base_frame_rate: stream_facts()
+                    .ok()
+                    .and_then(|(video, _)| video.base_frame_rate.clone()),
+                time_base: stream_facts()
+                    .ok()
+                    .and_then(|(video, _)| video.time_base.clone()),
+            }),
+        }),
         resize: Some(VideoResizeCapabilities {
             available,
             reason: resize_reason,

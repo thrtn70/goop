@@ -4,24 +4,91 @@ import type { TrackConvertOptions, TrackPresetPolicy, VideoConvertOptions } from
 import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, type ComponentType, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { create } from "zustand";
-import { cloneTrackOptions, loadBrowserDraftEntries, saveDraftEntries } from "./workspacePersistence";
+import {
+  cloneTrackOptions,
+  loadBrowserDraftEntriesOutcome,
+  readDraftEntriesOutcome,
+  saveDraftEntries,
+} from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
 
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean };
-const useDraftStore = create<DraftState>(() => ({ entries: loadBrowserDraftEntries(), epochs: {}, scopeEpochs: {}, completionEpochs: {}, resetEpoch: 0, revisions: {}, persistenceFailed: false }));
+type DraftProtection = { kind: "load" } | { kind: "migration"; legacyRaw: string } | null;
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean; protection: DraftProtection };
+const initialDraftLoad = loadBrowserDraftEntriesOutcome();
+const useDraftStore = create<DraftState>(() => ({
+  entries: initialDraftLoad.kind === "protected" ? {} : initialDraftLoad.entries,
+  epochs: {}, scopeEpochs: {}, completionEpochs: {}, resetEpoch: 0, revisions: {},
+  persistenceFailed: initialDraftLoad.kind !== "ready",
+  protection: initialDraftLoad.kind === "protected"
+    ? { kind: "load" }
+    : initialDraftLoad.kind === "migration_pending"
+      ? { kind: "migration", legacyRaw: initialDraftLoad.legacy_raw }
+      : null,
+}));
 useDraftStore.subscribe((state, previous) => {
   if (state.entries === previous.entries || typeof window === "undefined") return;
+  if (state.protection !== null) return;
   let ok = false;
   try { ok = saveDraftEntries(window.localStorage, state.entries); } catch { /* Storage may be disabled. */ }
   if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
 });
 export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
 export function retryDraftPersistence() {
-  try { useDraftStore.setState({ persistenceFailed: !saveDraftEntries(window.localStorage, useDraftStore.getState().entries) }); }
-  catch { useDraftStore.setState({ persistenceFailed: true }); }
+  try {
+    const state = useDraftStore.getState();
+    const read = readDraftEntriesOutcome(window.localStorage);
+    if (read.kind === "protected") {
+      useDraftStore.setState({ persistenceFailed: true, protection: { kind: "load" } });
+      return;
+    }
+    if (state.protection?.kind === "load") {
+      if (read.kind === "empty") {
+        const ok = saveDraftEntries(window.localStorage, state.entries);
+        useDraftStore.setState(ok
+          ? { persistenceFailed: false, protection: null }
+          : { persistenceFailed: true });
+        return;
+      }
+      const entries = read.kind === "v2" ? read.entries : read.kind === "legacy" ? read.entries : {};
+      // Hydrate while protection is still active so the subscription cannot
+      // turn an error-derived state into an authoritative write.
+      useDraftStore.setState({ entries });
+      if (read.kind === "legacy" && !saveDraftEntries(window.localStorage, entries)) {
+        useDraftStore.setState({ persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+        return;
+      }
+      useDraftStore.setState({ persistenceFailed: false, protection: null });
+      return;
+    }
+    if (state.protection?.kind === "migration") {
+      if (read.kind === "v2") {
+        useDraftStore.setState({ entries: read.entries });
+        useDraftStore.setState({ persistenceFailed: false, protection: null });
+        return;
+      }
+      if (read.kind === "empty") {
+        useDraftStore.setState({ persistenceFailed: true });
+        return;
+      }
+      const legacyChanged = read.legacy_raw !== state.protection.legacyRaw;
+      const entries = legacyChanged ? read.entries : state.entries;
+      if (legacyChanged) useDraftStore.setState({ entries });
+      const ok = saveDraftEntries(window.localStorage, entries);
+      useDraftStore.setState(ok
+        ? { persistenceFailed: false, protection: null }
+        : { persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      return;
+    }
+    if (read.kind === "legacy") {
+      useDraftStore.setState({ entries: read.entries, persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      return;
+    }
+    const ok = saveDraftEntries(window.localStorage, state.entries);
+    useDraftStore.setState({ persistenceFailed: !ok });
+  } catch { useDraftStore.setState({ persistenceFailed: true }); }
 }
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
 const matches = (key: string, prefix: readonly string[]) => {
@@ -81,7 +148,7 @@ export function withWorkspaceDrafts<P extends object>(Component: ComponentType<P
 /** Each editable video boundary owns its nested rate settings. */
 function ownMediaDraft<T>(slot: string, value: T): T {
   if (slot === "AudioOptionsPanel.savedCustom") return cloneAudioOptions(value as AudioConvertOptions | null) as T;
-  if (slot === "VideoOptionsPanel.savedCustom") return cloneVideoOptions(value as VideoConvertOptions | null) as T;
+  if (slot === "VideoOptionsPanel.savedCustom" || slot === "VideoOptionsPanel.savedSoftware") return cloneVideoOptions(value as VideoConvertOptions | null) as T;
   if (slot === "ConvertPage.files" && Array.isArray(value)) {
     return value.map(file => ({...file,
       ...(file.audioOptions === undefined ? {} : {audioOptions:cloneAudioOptions(file.audioOptions)}),
@@ -159,7 +226,8 @@ export function claimWorkspaceFilePicker(token: number) {
 export function resetWorkspaceDrafts() {
   notifyRetirement({});
   consumedPickerToken = 0;
-  useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, completionEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1 }));
+  useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, completionEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1,
+    ...(state.protection === null ? {} : { persistenceFailed: true, protection: state.protection }) }));
 }
 
 /** Explicit source removal retires its forms, including source-set batch scopes. */

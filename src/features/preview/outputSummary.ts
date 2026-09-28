@@ -22,12 +22,16 @@ function rateName(numerator: number, denominator: number): string {
 export function videoExecutionText(summary: VideoExecutionSummary, includeAudio = true): string {
   const codec = summary.video_codec === "h264" ? "H.264" : "HEVC";
   const options = summary.requested;
-  const facts = options.kind === "copy" ? ["Video copied (" + codec + ")"] : [
-    codec + " · " + (summary.encoder ?? "Encoder unavailable"),
-    options.rate_control.kind === "constant_quality" ? "CRF " + options.rate_control.crf : options.rate_control.kbps + " kbps",
-    options.speed[0].toUpperCase() + options.speed.slice(1), "Software",
-  ];
-  if (options.kind === "encode") {
+  const facts = options.kind === "copy"
+    ? ["Video copied (" + codec + ")"]
+    : options.kind === "hardware_encode"
+      ? [codec + " · " + (summary.encoder ?? "Encoder unavailable"), options.rate_control.kbps + " kbps", "Hardware required"]
+      : [
+          codec + " · " + (summary.encoder ?? "Encoder unavailable"),
+          options.rate_control.kind === "constant_quality" ? "CRF " + options.rate_control.crf : options.rate_control.kbps + " kbps",
+          options.speed[0].toUpperCase() + options.speed.slice(1), "Software",
+        ];
+  if (options.kind === "encode" || options.kind === "hardware_encode") {
     const resize = summary.requested_resize ?? options.resize;
     if (resize?.kind === "fit_within") {
       facts.push(`Fit within ${resize.width} × ${resize.height} px`);
@@ -53,7 +57,7 @@ export function videoExecutionText(summary: VideoExecutionSummary, includeAudio 
       facts.push(`Constant ${rateName(frameRate.numerator, frameRate.denominator)} fps (${resolved ? `resolved ${resolved} fps; ` : ""}frames may be duplicated or dropped)`);
     }
   }
-  facts.push((options.kind === "encode" && (summary.requested_resize ?? options.resize) ? "resolved " : "") + summary.width + " × " + summary.height + " px upright");
+  facts.push(((options.kind === "encode" || options.kind === "hardware_encode") && (summary.requested_resize ?? options.resize) ? "resolved " : "") + summary.width + " × " + summary.height + " px upright");
   if (includeAudio) {
     facts.push(summary.audio_stream_index == null ? "No audio" : summary.audio_copied ? "Audio copied (" + (summary.audio_codec ?? "codec unavailable") + ")" : summary.audio_codec === "aac" ? "Audio: AAC 192 kbps" : "Audio: " + (summary.audio_codec ?? "codec unavailable"));
   }

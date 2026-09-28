@@ -34,6 +34,16 @@ it("preserves explicit Software detail without repeating the receipt encoder", (
   expect(outputSummary(result({video_execution,video_attempt:{kind:"encode",encoder:"libx264",encode_attempt_ordinal:1,
     selection_context:{kind:"explicit_software"}}}))).toBe(original);
 });
+it("reports Hardware required intent with the actual completed encoder and no performance claim", () => {
+  const video_execution = {requested:{kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000}},
+    encoder:"h264_videotoolbox",video_codec:"h264",video_stream_index:0,audio_copied:false,width:1920,height:1080,notices:[]};
+  const summary = outputSummary(result({video_execution,video_attempt:{kind:"encode",encoder:"h264_videotoolbox",encode_attempt_ordinal:1,
+    selection_context:{kind:"explicit_hardware_required"}}}));
+  expect(summary).toContain("Hardware required");
+  expect(summary).toContain("6000 kbps");
+  expect(summary).toContain("h264_videotoolbox");
+  expect(summary).not.toMatch(/GPU|faster|full acceleration|decode|filter/i);
+});
 it("reports actual savings, growth, and missing facts without invented savings", () => {
   expect(outputSummary(result({}))).toContain("50% smaller");
   expect(outputSummary(result({bytes:300n}))).toContain("50% larger");

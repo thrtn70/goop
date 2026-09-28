@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { armNextDraftWriteFailure } from "./responsivenessBootstrap";
+import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "@/store/draftStorageKeys";
 import {
   createResponsivenessRecorder, installResponsivenessRecorder,
   isValidResponsivenessDescriptor,
@@ -72,7 +73,6 @@ export type ResponsivenessRuntime = {
 const OPAQUE_ID = /^[A-Za-z0-9._:-]+$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const EVENT_TYPES = new Set<ArmAction["eventType"]>(["click", "keydown", "input", "change"]);
-const DRAFT_STORAGE_KEY = "goop.workspace-drafts.v1";
 
 function browserEnvironment(): RecorderEnvironment {
   return {
@@ -136,7 +136,15 @@ async function sha256(value: string): Promise<string> {
 }
 function applyBrowserBootstrap(config: ResponsivenessBootstrap): void {
   history.replaceState(history.state, "", config.initialPath);
-  if (config.draftStorage) localStorage.setItem(DRAFT_STORAGE_KEY, config.draftStorage.raw);
+  if (config.draftStorage) {
+    let storageKey = DRAFT_STORAGE_KEY;
+    try {
+      const parsed: unknown = JSON.parse(config.draftStorage.raw);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        && (parsed as { version?: unknown }).version === 1) storageKey = LEGACY_DRAFT_STORAGE_KEY;
+    } catch { /* Malformed current data belongs in the protected active namespace. */ }
+    localStorage.setItem(storageKey, config.draftStorage.raw);
+  }
   if (config.failNextDraftWrite) armNextDraftWriteFailure();
 }
 function validActions(actions: unknown, bytes: (value: string) => number, allowEmpty: boolean): actions is ArmAction[] {

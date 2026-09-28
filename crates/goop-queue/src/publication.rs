@@ -852,6 +852,34 @@ mod tests {
         .unwrap()
     }
 
+    fn hardware_result(path: &std::path::Path) -> JobResult {
+        let mut value = serde_json::to_value(result(path)).unwrap();
+        value["video_attempt"] = serde_json::json!({
+            "kind": "encode",
+            "encoder": "h264_videotoolbox",
+            "encode_attempt_ordinal": 1,
+            "selection_context": {"kind": "explicit_hardware_required"}
+        });
+        value["video_execution"] = serde_json::json!({
+            "requested": {
+                "kind": "hardware_encode",
+                "codec": "h264",
+                "hardware_policy": {"kind": "required"},
+                "rate_control": {"kind": "average_bitrate", "kbps": 5000}
+            },
+            "encoder": "h264_videotoolbox",
+            "video_codec": "h264",
+            "video_stream_index": 0,
+            "audio_stream_index": 1,
+            "audio_codec": "aac",
+            "audio_copied": true,
+            "width": 1920,
+            "height": 1080,
+            "notices": []
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
     fn running_convert(store: &QueueStore) -> Job {
         let payload = serde_json::json!({
             "input_path": "input.png",
@@ -1063,6 +1091,36 @@ mod tests {
         assert_eq!(
             store.get_by_id(job.id).unwrap().unwrap().state,
             JobState::Done
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn hardware_required_result_recovers_with_full_frozen_equality() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let staged = dir.path().join("staged.mp4");
+        let destination = dir.path().join("output.mp4");
+        fs::write(&staged, b"payload").unwrap();
+        let store = QueueStore::open(&db).unwrap();
+        let job = running_convert(&store);
+        let expected = hardware_result(&destination);
+        let observer = store.begin_publication(job.id, &job.payload).unwrap();
+        observer
+            .before_publish(&staged, &destination, &expected)
+            .unwrap();
+        fs::rename(&staged, &destination).unwrap();
+        observer.published(&destination, &expected).unwrap();
+        drop(observer);
+        drop(store);
+
+        let reopened = QueueStore::open(&db).unwrap();
+        let recovered = reopened.reconcile_publications().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].result.as_ref(), Some(&expected));
+        assert_eq!(
+            reopened.get_by_id(job.id).unwrap().unwrap().result,
+            Some(expected)
         );
     }
 

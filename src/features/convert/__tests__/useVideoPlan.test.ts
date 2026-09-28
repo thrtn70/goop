@@ -123,6 +123,21 @@ it("captures exact nested dimensions and frame timing before deferred planning",
   expect(plan.mock.calls[0][0].video_options.frame_rate).toEqual({kind:"constant",numerator:24000,denominator:1001});
 });
 
+it("owns Hardware required policy, bitrate, dimensions and timing before deferred planning", async () => {
+  vi.useFakeTimers(); plan.mockResolvedValue(summary);
+  const hardware: ConvertRequest = {...request,video_options:{kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000},resize:{kind:"fit_within",width:1280,height:721},frame_rate:{kind:"constant",numerator:24000,denominator:1001}}};
+  renderHook(() => useVideoPlan(hardware));
+  if (hardware.video_options?.kind !== "hardware_encode" || hardware.video_options.resize?.kind !== "fit_within" || hardware.video_options.frame_rate?.kind !== "constant") throw new Error("bad Hardware required fixture");
+  hardware.video_options.rate_control.kbps = 9000;
+  hardware.video_options.resize.width = 640;
+  hardware.video_options.frame_rate.numerator = 24;
+  await act(async()=>vi.advanceTimersByTime(300));
+  expect(plan.mock.calls[0][0].video_options).toMatchObject({
+    kind:"hardware_encode",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000},
+    resize:{kind:"fit_within",width:1280,height:721},frame_rate:{kind:"constant",numerator:24000,denominator:1001},
+  });
+});
+
 it("shares the bounded planner with source-bound audio requests and owns the binding snapshot", async () => {
   vi.useFakeTimers();
   const audioSummary: AudioExecutionSummary = {

@@ -15,6 +15,16 @@ fn encode_with(rate: Value, resize: Value, frame_rate: Value) -> Value {
         "frame_rate":frame_rate
     })
 }
+fn hardware_encode(kbps: Value) -> Value {
+    json!({
+        "kind":"hardware_encode",
+        "codec":"h264",
+        "hardware_policy":{"kind":"required"},
+        "rate_control":{"kind":"average_bitrate","kbps":kbps},
+        "resize":{"kind":"original"},
+        "frame_rate":{"kind":"preserve"}
+    })
+}
 fn request(options: Value) -> ConvertRequest {
     serde_json::from_value(json!({"input_path":"in.mp4","output_path":"out.mp4","target":"mp4","video_options":options})).unwrap()
 }
@@ -36,6 +46,39 @@ fn exact_wire_forms_roundtrip_and_reject_unknown_nested_fields() {
         json!({"kind":"encode","codec":"h264","rate_control":{"kind":"constant_quality","crf":23},"speed":"medium","processor":"software","extra":true}),
     ] {
         assert!(serde_json::from_value::<VideoConvertOptions>(value).is_err());
+    }
+}
+
+#[test]
+fn hardware_required_wire_is_distinct_strict_and_bounded() {
+    for kbps in [json!(100), json!(5000), json!(200000)] {
+        let value = hardware_encode(kbps);
+        let options: VideoConvertOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&options).unwrap(), value);
+        assert!(validate_video_options(&options).is_ok());
+    }
+
+    for kbps in [json!(0), json!(99), json!(200001)] {
+        let options: VideoConvertOptions = serde_json::from_value(hardware_encode(kbps)).unwrap();
+        assert!(validate_video_options(&options).is_err());
+    }
+
+    for invalid in [
+        json!({"kind":"hardware_encode","codec":"hevc","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000}}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"preferred"},"rate_control":{"kind":"average_bitrate","kbps":5000}}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required","extra":null},"rate_control":{"kind":"average_bitrate","kbps":5000}}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"constant_quality","crf":23}}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000,"crf":null}}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000},"speed":null}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000},"processor":null}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000},"resize":null}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000},"frame_rate":null}),
+        json!({"kind":"hardware_encode","codec":"h264","hardware_policy":{"kind":"required"},"rate_control":{"kind":"average_bitrate","kbps":5000},"extra":null}),
+    ] {
+        assert!(
+            serde_json::from_value::<VideoConvertOptions>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
     }
 }
 #[test]
@@ -366,12 +409,73 @@ fn capability_wire_contract_rejects_unknown_nested_settings() {
 }
 
 #[test]
+fn hardware_capability_is_additive_optional_and_strict() {
+    let old = json!({"copy":{"available":true,"reason":null},"encode":{"available":true,"reason":null},"codecs":[],"crf_min":1,"crf_max":51,"default_crf":23,"bitrate_min_kbps":100,"bitrate_max_kbps":200000,"default_bitrate_kbps":5000,"speeds":["fast","medium","slow"],"default_speed":"medium","processor":"software","preview_available":false});
+    let parsed: VideoSettingsCapabilities = serde_json::from_value(old).unwrap();
+    assert!(parsed.hardware.is_none());
+
+    let hardware = json!({
+        "available":true,
+        "reason":null,
+        "codec":"h264",
+        "bitrate_min_kbps":100,
+        "bitrate_max_kbps":200000,
+        "default_bitrate_kbps":5000
+    });
+    let parsed: VideoHardwareCapabilities = serde_json::from_value(hardware.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), hardware);
+    let mut invalid = hardware;
+    invalid["runtime_proven"] = json!(true);
+    assert!(serde_json::from_value::<VideoHardwareCapabilities>(invalid).is_err());
+}
+
+#[test]
 fn generated_tagged_unions_match_the_json_wire_contract() {
     use ts_rs::TS;
     let options = VideoConvertOptions::decl();
     assert!(options.contains("\"kind\": \"copy\""), "{options}");
     assert!(options.contains("\"kind\": \"encode\""), "{options}");
+    assert!(
+        options.contains("\"kind\": \"hardware_encode\""),
+        "{options}"
+    );
     let rate = VideoRateControl::decl();
     assert!(rate.contains("\"kind\": \"constant_quality\""), "{rate}");
     assert!(rate.contains("\"kind\": \"average_bitrate\""), "{rate}");
+    assert!(
+        VideoHardwareRateControl::decl().contains("\"kind\": \"average_bitrate\""),
+        "{}",
+        VideoHardwareRateControl::decl()
+    );
+}
+
+#[test]
+fn hardware_queue_and_result_payloads_have_an_explicit_old_reader_limit() {
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+    enum OldVideoOptions {
+        Copy {},
+        Encode {
+            codec: Value,
+            rate_control: Value,
+            speed: Value,
+            processor: Value,
+        },
+    }
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+    enum OldSelectionContext {
+        ExplicitSoftware {},
+        LegacyGlobalAtExecution { hw_acceleration_enabled: bool },
+    }
+
+    let request_payload = hardware_encode(json!(5000));
+    assert!(serde_json::from_value::<VideoConvertOptions>(request_payload.clone()).is_ok());
+    assert!(serde_json::from_value::<OldVideoOptions>(request_payload).is_err());
+
+    let result_context = json!({"kind":"explicit_hardware_required"});
+    assert!(serde_json::from_value::<VideoSelectionContext>(result_context.clone()).is_ok());
+    assert!(serde_json::from_value::<OldSelectionContext>(result_context).is_err());
 }

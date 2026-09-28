@@ -15,7 +15,7 @@ import { cloneAudioOptions, validateAudioRequest, type AudioConvertOptions } fro
 import { cloneImageAlphaPolicy, validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 
 /** Current bundle schema version. Bump when the shape changes. */
-export const PRESET_BUNDLE_VERSION = 10 as const;
+export const PRESET_BUNDLE_VERSION = 11 as const;
 
 // An exhaustive record makes new generated target variants a type error
 // until imports support them, so exports cannot silently outgrow imports.
@@ -299,6 +299,9 @@ function validateEntry(v: unknown, index: number, version: number): PresetEntry 
       throw new Error("image_options is not allowed in schema 1");
     }
     imageOptions = validateImageOptions(v.image_options);
+    if (version < 11 && isObject(v.video_options) && v.video_options.kind === "hardware_encode") {
+      throw new Error("Hardware required video_options require schema 11");
+    }
     if (version < 3 && v.video_options != null) throw new Error("video_options is not allowed before schema 3");
     let requestEntry = v;
     if (version === 3 && isObject(v.video_options)) {
@@ -394,7 +397,7 @@ export function parsePresetBundle(raw: string): PresetEntry[] {
   if (!isObject(parsed)) {
     throw new PresetParseError("file must contain a JSON object at the top level");
   }
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, PRESET_BUNDLE_VERSION].includes(Number(parsed.version))) {
     throw new PresetParseError(
       `unsupported bundle version: ${String(parsed.version)} (expected 1 through ${PRESET_BUNDLE_VERSION})`,
     );
