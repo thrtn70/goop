@@ -528,6 +528,23 @@ mod tests {
         assert!(import(&path, vec![sample("first", "First")]).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
+
+    #[test]
+    fn unreadable_profile_is_never_replaced_by_mutations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let unreadable = br#"[{"id":"future","video_options":{"kind":"future_hardware"}}]"#;
+        std::fs::write(&path, unreadable).unwrap();
+
+        assert!(save_one(&path, sample("new", "New")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unreadable);
+        assert!(import(&path, vec![sample("new", "New")]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unreadable);
+        assert!(delete(&path, "future").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unreadable);
+        assert!(load_or_seed(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unreadable);
+    }
     #[test]
     fn concurrent_import_save_delete_and_seed_retain_mutations() {
         let dir = tempdir().unwrap();

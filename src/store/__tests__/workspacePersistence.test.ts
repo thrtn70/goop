@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { decodeDraftEntries, encodeDraftEntries, loadDraftEntries, persistDraftEntries, saveDraftEntries } from "../workspacePersistence";
+import {
+  decodeDraftEntries,
+  DRAFT_STORAGE_KEY,
+  encodeDraftEntries,
+  LEGACY_DRAFT_STORAGE_KEY,
+  loadDraftEntries,
+  loadDraftEntriesOutcome,
+  persistDraftEntries,
+  saveDraftEntries,
+} from "../workspacePersistence";
 import type { CausalOwner, ResponsivenessRecorder, SpanKind } from "@/performance/responsiveness";
 import { NOOP_RESPONSIVENESS_RECORDER } from "@/performance/responsiveness";
 import { armNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
@@ -61,6 +70,119 @@ describe("durable editable drafts", () => {
     expect(writes).toHaveLength(0);
     expect(persistDraftEntries(storage, {}, NOOP_RESPONSIVENESS_RECORDER).ok).toBe(true);
     expect(writes).toHaveLength(1);
+  });
+
+  it("writes a version-2 envelope in a new namespace", () => {
+    const entries = { [key("ImageRotateFlow.degrees")]: { value: "cw90" } };
+    const raw = encodeDraftEntries(entries);
+    expect(JSON.parse(raw)).toMatchObject({ version: 2, entries });
+    expect(DRAFT_STORAGE_KEY).toBe("goop.workspace-drafts.v2");
+    expect(LEGACY_DRAFT_STORAGE_KEY).toBe("goop.workspace-drafts.v1");
+    expect(decodeDraftEntries(raw)).toEqual(entries);
+  });
+
+  it("migrates validated v1 once while retaining its exact bytes", () => {
+    const oldSlot = JSON.stringify(["convert", "source", "/movie.mp4", "VideoOptionsPanel.savedCustom"]);
+    const newSlot = JSON.stringify(["convert", "source", "/movie.mp4", "VideoOptionsPanel.savedSoftware"]);
+    const software = { kind: "encode", codec: "h264", processor: "software", speed: "medium",
+      rate_control: { kind: "constant_quality", crf: 23 } };
+    const legacyRaw = JSON.stringify({ version: 1, entries: {
+      [oldSlot]: { value: software },
+      [key("ImageRotateFlow.degrees")]: { value: "cw90" },
+    } });
+    const values = new Map([[LEGACY_DRAFT_STORAGE_KEY, legacyRaw]]);
+    const storage = {
+      getItem: (storageKey: string) => values.get(storageKey) ?? null,
+      setItem: (storageKey: string, value: string) => { values.set(storageKey, value); },
+    };
+
+    expect(loadDraftEntriesOutcome(storage)).toEqual({
+      kind: "ready",
+      entries: {
+        [newSlot]: { value: software },
+        [key("ImageRotateFlow.degrees")]: { value: "cw90" },
+      },
+    });
+    expect(values.get(LEGACY_DRAFT_STORAGE_KEY)).toBe(legacyRaw);
+    expect(decodeDraftEntries(values.get(DRAFT_STORAGE_KEY) ?? "")).toEqual({
+      [newSlot]: { value: software },
+      [key("ImageRotateFlow.degrees")]: { value: "cw90" },
+    });
+  });
+
+  it("migrates an intentional null saved Custom value into null saved Software", () => {
+    const oldSlot = JSON.stringify(["convert", "source", "/movie.mp4", "VideoOptionsPanel.savedCustom"]);
+    const newSlot = JSON.stringify(["convert", "source", "/movie.mp4", "VideoOptionsPanel.savedSoftware"]);
+    const legacyRaw = JSON.stringify({ version: 1, entries: { [oldSlot]: { value: null } } });
+    const values = new Map([[LEGACY_DRAFT_STORAGE_KEY, legacyRaw]]);
+
+    expect(loadDraftEntriesOutcome({
+      getItem: storageKey => values.get(storageKey) ?? null,
+      setItem: (storageKey, value) => { values.set(storageKey, value); },
+    })).toEqual({ kind: "ready", entries: { [newSlot]: { value: null } } });
+    expect(values.get(LEGACY_DRAFT_STORAGE_KEY)).toBe(legacyRaw);
+    expect(decodeDraftEntries(values.get(DRAFT_STORAGE_KEY) ?? "")).toEqual({ [newSlot]: { value: null } });
+  });
+
+  it("reports a failed migration without changing v1 or claiming readiness", () => {
+    const legacyRaw = JSON.stringify({ version: 1, entries: {
+      [key("ImageRotateFlow.degrees")]: { value: "cw90" },
+    } });
+    const writes: string[] = [];
+    const outcome = loadDraftEntriesOutcome({
+      getItem: storageKey => storageKey === LEGACY_DRAFT_STORAGE_KEY ? legacyRaw : null,
+      setItem: (_storageKey, value) => { writes.push(value); throw new Error("quota"); },
+    });
+
+    expect(outcome).toEqual({
+      kind: "migration_pending",
+      entries: { [key("ImageRotateFlow.degrees")]: { value: "cw90" } },
+      legacy_raw: legacyRaw,
+    });
+    expect(writes).toHaveLength(1);
+  });
+
+  it.each([
+    ["malformed", "{"],
+    ["future", JSON.stringify({ version: 99, entries: {} })],
+  ] as const)("protects %s v2 data and never falls back to stale v1", (reason, v2Raw) => {
+    const reads: string[] = [];
+    const outcome = loadDraftEntriesOutcome({
+      getItem: storageKey => {
+        reads.push(storageKey);
+        if (storageKey === DRAFT_STORAGE_KEY) return v2Raw;
+        return JSON.stringify({ version: 1, entries: { [key("ImageRotateFlow.degrees")]: { value: "cw90" } } });
+      },
+      setItem: () => { throw new Error("must not write"); },
+    });
+    expect(outcome).toEqual({ kind: "protected", reason });
+    expect(reads).toEqual([DRAFT_STORAGE_KEY]);
+  });
+
+  it("protects v2 when a known slot is invalid instead of silently erasing it", () => {
+    const invalid = JSON.stringify({ version: 2, entries: {
+      [key("ImageRotateFlow.degrees")]: { value: "cw90" },
+      [JSON.stringify(["convert", "source", "/movie.mp4", "VideoOptionsPanel.savedSoftware"])]: {
+        value: { kind: "hardware_encode", codec: "h264", hardware_policy: { kind: "required" },
+          rate_control: { kind: "average_bitrate", kbps: 5000 } },
+      },
+    } });
+    expect(loadDraftEntriesOutcome({ getItem: () => invalid, setItem: () => undefined }))
+      .toEqual({ kind: "protected", reason: "malformed" });
+  });
+
+  it("does not inspect v1 when the v2 read itself fails", () => {
+    const reads: string[] = [];
+    const outcome = loadDraftEntriesOutcome({
+      getItem: storageKey => {
+        reads.push(storageKey);
+        if (storageKey === DRAFT_STORAGE_KEY) throw new Error("disabled");
+        return null;
+      },
+      setItem: () => undefined,
+    });
+    expect(outcome).toEqual({ kind: "protected", reason: "read_error" });
+    expect(reads).toEqual([DRAFT_STORAGE_KEY]);
   });
 });
 
@@ -238,9 +360,43 @@ describe("video draft persistence", () => {
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.heightDraft"])]:{value:"-"},
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.appliedWidth"])]:{value:"1920"},
       [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.appliedHeight"])]:{value:"1080"},
-      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.savedCustom"])]:{value:custom},
+      [JSON.stringify(["convert","source","/v.mp4","id","VideoOptionsPanel.savedSoftware"])]:{value:custom},
     };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual(entries);
+  });
+
+  it("retains active Hardware required intent, raw bitrate text and inactive Software settings only in v2", () => {
+    const hardware = { kind: "hardware_encode", codec: "h264", hardware_policy: { kind: "required" },
+      rate_control: { kind: "average_bitrate", kbps: 5000 }, resize: { kind: "original" }, frame_rate: { kind: "preserve" } };
+    const software = { kind: "encode", codec: "h264", processor: "software", speed: "medium",
+      rate_control: { kind: "constant_quality", crf: 23 } };
+    const entries = {
+      [JSON.stringify(["convert", "ConvertPage.files"])]: { value: [{
+        path: "/v.mp4", sourceDir: "/", target: "mp4", qualityPreset: null, resolutionCap: null, videoOptions: hardware,
+      }] },
+      [JSON.stringify(["convert", "source", "/v.mp4", "id", "VideoOptionsPanel.hardwareBitrateDraft"])]: { value: "" },
+      [JSON.stringify(["convert", "source", "/v.mp4", "id", "VideoOptionsPanel.savedSoftware"])]: { value: software },
+    };
+    const raw = encodeDraftEntries(entries);
+    expect(JSON.parse(raw).version).toBe(2);
+    expect(decodeDraftEntries(raw)).toEqual(entries);
+  });
+
+  it("retains an intentional null inactive Software value across a strict v2 restart", () => {
+    const savedSoftware = JSON.stringify(["convert", "source", "/v.mp4", "id", "VideoOptionsPanel.savedSoftware"]);
+    const entries = {
+      [JSON.stringify(["convert", "ConvertPage.files"])]: { value: [{
+        path: "/v.mp4", sourceDir: "/", target: "mp4", qualityPreset: "original", videoOptions: null,
+      }] },
+      [savedSoftware]: { value: null },
+    };
+    const raw = encodeDraftEntries(entries);
+    const values = new Map([[DRAFT_STORAGE_KEY, raw]]);
+
+    expect(loadDraftEntriesOutcome({
+      getItem: storageKey => values.get(storageKey) ?? null,
+      setItem: () => { throw new Error("strict v2 load must not write"); },
+    })).toEqual({ kind: "ready", entries });
   });
 });
 

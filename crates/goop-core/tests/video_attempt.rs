@@ -14,6 +14,11 @@ fn video_attempt_typescript_shape_matches_tagged_json() {
         "{}",
         VideoSelectionContext::inline()
     );
+    assert!(
+        VideoSelectionContext::inline().contains("\"kind\": \"explicit_hardware_required\""),
+        "{}",
+        VideoSelectionContext::inline()
+    );
 }
 
 fn encode() -> Value {
@@ -29,6 +34,8 @@ fn video_attempt_valid_receipts_roundtrip() {
         encode(),
         json!({"kind":"encode", "encoder":"libx265",
         "encode_attempt_ordinal":1,"selection_context":{"kind":"explicit_software"}}),
+        json!({"kind":"encode", "encoder":"h264_videotoolbox",
+        "encode_attempt_ordinal":1,"selection_context":{"kind":"explicit_hardware_required"}}),
     ] {
         let receipt: VideoAttempt = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(receipt).unwrap(), value);
@@ -45,6 +52,25 @@ fn video_attempt_valid_receipts_roundtrip() {
             ..
         }
     ));
+}
+
+#[test]
+fn hardware_required_attempt_rejects_substitution_retry_and_fallback() {
+    let valid = json!({"kind":"encode","encoder":"h264_videotoolbox","encode_attempt_ordinal":1,
+        "selection_context":{"kind":"explicit_hardware_required"}});
+    for (field, replacement) in [
+        ("encoder", json!("libx264")),
+        ("encoder", json!("h264_nvenc")),
+        ("encode_attempt_ordinal", json!(2)),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = replacement;
+        assert!(serde_json::from_value::<VideoAttempt>(invalid).is_err());
+    }
+    let mut invalid = valid;
+    invalid["fallback"] =
+        json!({"from_encoder":"h264_videotoolbox","reason":"hardware_attempt_subprocess_failed"});
+    assert!(serde_json::from_value::<VideoAttempt>(invalid).is_err());
 }
 
 #[test]

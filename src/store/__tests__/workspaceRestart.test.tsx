@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from "react";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DRAFT_STORAGE_KEY } from "../workspacePersistence";
+import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "../workspacePersistence";
 beforeEach(() => {
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -13,7 +13,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 it("loads editable intent into a fresh store and preserves subsequent clearing on another restart", async () => {
   const key = JSON.stringify(["image", "ImagePage.files"]);
-  window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries:{[key]:{value:["/missing.png"]}}}));
+  window.localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries:{[key]:{value:["/missing.png"]}}}));
   vi.resetModules();
   const first = await import("../workspaceDrafts");
   const wrapper=({children}:{children:ReactNode})=>createElement(first.WorkspaceDraftProvider,{tool:"image"},children);
@@ -71,7 +71,7 @@ it("keeps preexisting GIF text drafts at their established scope after adding id
   const { render, screen } = await import("@testing-library/react");
   const { MemoryRouter } = await import("react-router-dom");
   const file = { id: "existing-video", revision: 2, optionsReady: true, path: "/movie.mp4", sourceDir: "/", target: "gif", gifOptions: { size_preset: "medium", trim_start_ms: null, trim_end_ms: null }, subtitle: null, metadataPolicy: "preserve", qualityPreset: null, resolutionCap: null };
-  window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries: {
+  window.localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries: {
     [JSON.stringify(["convert", "ConvertPage.files"])]: { value: [file] },
     [JSON.stringify(["convert", "source", file.path, "GifOptionsPanel.startDraft"])]: { value: "00:" },
     [JSON.stringify(["convert", "source", file.path, "GifOptionsPanel.appliedStart"])]: { value: "" },

@@ -9,16 +9,25 @@ import {
 } from "@/performance/responsiveness";
 import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 import { consumeNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
+import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
+
+export { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
-export const DRAFT_STORAGE_KEY = "goop.workspace-drafts.v1";
 const MAX_BYTES = 512 * 1024;
 const TOOLS = new Set(["extract", "convert", "compress", "image", "metadata", "recognize"]);
 const SLOTS = new Set<string>([...videoDraftSlots,"ImageOptionsPanel.qualityDraft", "ImageOptionsPanel.widthDraft", "ImageOptionsPanel.heightDraft", "ImageOptionsPanel.appliedQuality", "ImageOptionsPanel.appliedWidth", "ImageOptionsPanel.appliedHeight", "AudioBatchEditor.album", "AudioBatchEditor.albumArtist", "AudioBatchEditor.artist", "AudioBatchEditor.backup", "AudioBatchEditor.comment", "AudioBatchEditor.composer", "AudioBatchEditor.cover", "AudioBatchEditor.disc", "AudioBatchEditor.genre", "AudioBatchEditor.titles", "AudioBatchEditor.tracks", "AudioBatchEditor.year", "AudioTagForm.album", "AudioTagForm.albumArtist", "AudioTagForm.artist", "AudioTagForm.backup", "AudioTagForm.comment", "AudioTagForm.composer", "AudioTagForm.cover", "AudioTagForm.disc", "AudioTagForm.genre", "AudioTagForm.title", "AudioTagForm.track", "AudioTagForm.year", "CompressActionBar.overrideDir", "CompressControls.appliedMode", "CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressPage.files", "CompressPage.pdfs", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "ConvertPage.files", "ConvertPage.pdfs", "ConvertPage.selectedId", "CropEditor.aspect", "CropEditor.crop", "CropEditor.zoom", "GifOptionsPanel.appliedEnd", "GifOptionsPanel.appliedStart", "GifOptionsPanel.endDraft", "GifOptionsPanel.startDraft", "ImageAppIconFlow.selected", "ImageCropFlow.rect", "ImageOcrFlow.images", "ImageOcrFlow.lang", "ImageOcrFlow.outputKind", "ImagePage.files", "ImagePage.op", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.mode", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageRotateFlow.degrees", "ImageWatermarkFlow.opacity", "ImageWatermarkFlow.position", "ImageWatermarkFlow.text", "ImagesToPdfFlow.images", "MetadataPage.files", "PdfDeleteFlow.pages", "PdfExtractFlow.ranges", "PdfFlow.op", "PdfFlow.quality", "PdfFlow.ranges", "PdfInsertBlankFlow.draft", "PdfInsertBlankFlow.positions", "PdfMetadataForm.author", "PdfMetadataForm.keywords", "PdfMetadataForm.subject", "PdfMetadataForm.title", "PdfOcrFlow.lang", "PdfReorderFlow.pages", "PdfRotateFlow.pages", "PdfSplitEditor.input", "PdfToImagesFlow.dpi", "PdfToImagesFlow.format", "ProbeCard.audioOnly", "ProbeCard.selected", "RecognizePage.input", "RecognizePage.lang", "RecognizePage.outputKind", "TopBar.url", "UrlHero.lastUrl"]);
 SLOTS.add("AudioOptionsPanel.savedCustom");
 SLOTS.add("AudioOptionsPanel.bitrateDraft");
 SLOTS.add("AudioOptionsPanel.appliedBitrate");
+SLOTS.add("VideoOptionsPanel.hardwareBitrateDraft");
+SLOTS.add("VideoOptionsPanel.savedSoftware");
+const LEGACY_VIDEO_SLOTS = new Set([
+  "VideoOptionsPanel.crfDraft", "VideoOptionsPanel.bitrateDraft", "VideoOptionsPanel.appliedCrf",
+  "VideoOptionsPanel.appliedBitrate", "VideoOptionsPanel.widthDraft", "VideoOptionsPanel.heightDraft",
+  "VideoOptionsPanel.appliedWidth", "VideoOptionsPanel.appliedHeight", "VideoOptionsPanel.savedCustom",
+]);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string" && item.length <= 4096);
 const textBytes = (value: string) => new TextEncoder().encode(value).length;
@@ -173,7 +182,7 @@ function bounded(value: unknown, depth = 0): boolean {
   return Object.keys(value).length <= 1000 && Object.entries(value).every(([key, item]) => !["__proto__", "prototype", "constructor"].includes(key) && bounded(item, depth + 1));
 }
 
-function validFiles(value: unknown, compress: boolean): boolean {
+function validFiles(value: unknown, compress: boolean, allowHardware: boolean): boolean {
   if (!Array.isArray(value)) return false;
   return value.every(file => {
     if (!object(file) || typeof file.path !== "string" || !file.path || typeof file.sourceDir !== "string" || (file.id != null && typeof file.id !== "string") || (file.revision != null && (!Number.isSafeInteger(file.revision) || Number(file.revision) < 0))) return false;
@@ -188,7 +197,8 @@ function validFiles(value: unknown, compress: boolean): boolean {
       // Validate explicit shape independently; submission performs strict admission.
       validateImageAlphaPolicy(file.imageAlphaPolicy);
       validateAudioOptions(file.audioOptions);
-      validateVideoOptions(file.videoOptions);
+      const videoOptions = validateVideoOptions(file.videoOptions);
+      if (!allowHardware && videoOptions?.kind === "hardware_encode") throw new Error("hardware drafts require v2");
       validateTrackOptions(file.trackOptions);
       validateTrackPolicy(file.pendingTrackPolicy);
       validateVideoTrackPolicyDraft(file.videoTrackPolicyDraft);
@@ -198,15 +208,18 @@ function validFiles(value: unknown, compress: boolean): boolean {
   });
 }
 
-function validSlot(slot: string, value: unknown): boolean {
+function validSlot(slot: string, value: unknown, allowHardware: boolean): boolean {
   if (slot === "AudioOptionsPanel.savedCustom") {
     try { const options = validateAudioOptions(value); return options === null || options.kind === "encode"; } catch { return false; }
   }
   if (slot === "VideoOptionsPanel.savedCustom") {
     try { const options = validateVideoOptions(value); return options === null || options.kind === "encode"; } catch { return false; }
   }
-  if (slot === "ConvertPage.files") return validFiles(value, false);
-  if (slot === "CompressPage.files") return validFiles(value, true);
+  if (slot === "VideoOptionsPanel.savedSoftware") {
+    try { const options = validateVideoOptions(value); return options === null || options.kind === "encode"; } catch { return false; }
+  }
+  if (slot === "ConvertPage.files") return validFiles(value, false, allowHardware);
+  if (slot === "CompressPage.files") return validFiles(value, true, allowHardware);
   if (["ImagePage.files", "MetadataPage.files", "ConvertPage.pdfs", "CompressPage.pdfs", "ImagesToPdfFlow.images", "ImageOcrFlow.images"].includes(slot)) return strings(value);
   if (slot === "ImageAppIconFlow.selected") return object(value) && strings(value.set) && value.set.every(platform => ["macos", "windows", "web"].includes(platform));
   if (slot.endsWith(".pages")) return Array.isArray(value) && value.every(page => object(page) && Number.isSafeInteger(page.originalPage) && typeof page.deleted === "boolean" && typeof page.rotation === "number" && [0,90,180,270].includes(page.rotation));
@@ -245,7 +258,7 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
 }
 
 function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
-  const raw = JSON.stringify({version:1, entries}, (_key, value: unknown) => {
+  const raw = JSON.stringify({version:2, entries}, (_key, value: unknown) => {
     if (typeof value === "bigint") {
       const number = Number(value);
       if (!Number.isSafeInteger(number)) throw new Error("Draft number is too large");
@@ -263,32 +276,105 @@ export function encodeDraftEntries(entries: DraftEntries): string {
   return encodeDraftEntriesWithSize(entries).raw;
 }
 
+type DraftProtectionReason = "malformed" | "future" | "read_error";
+export type DraftLoadOutcome =
+  | { kind: "ready"; entries: DraftEntries }
+  | { kind: "migration_pending"; entries: DraftEntries; legacy_raw: string }
+  | { kind: "protected"; reason: DraftProtectionReason };
+export type DraftReadOutcome =
+  | { kind: "v2"; entries: DraftEntries }
+  | { kind: "legacy"; entries: DraftEntries; legacy_raw: string }
+  | { kind: "empty" }
+  | { kind: "protected"; reason: DraftProtectionReason };
+
+class DraftDecodeError extends Error {
+  constructor(readonly reason: Exclude<DraftProtectionReason, "read_error">) { super(reason); }
+}
+
+function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
+  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError("malformed");
+  let data: unknown;
+  try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
+  if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
+  if (data.version > version) throw new DraftDecodeError("future");
+  if (data.version !== version || !object(data.entries) || Object.keys(data.entries).length > 500) throw new DraftDecodeError("malformed");
+  const entries: DraftEntries = {};
+  for (const [key, entry] of Object.entries(data.entries)) {
+    let parts: unknown;
+    try { parts = JSON.parse(key); } catch {
+      if (strict) throw new DraftDecodeError("malformed");
+      continue;
+    }
+    if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) {
+      if (strict) throw new DraftDecodeError("malformed");
+      continue;
+    }
+    const slot = parts[parts.length - 1];
+    const allowed = version === 1 && slot.startsWith("VideoOptionsPanel.")
+      ? LEGACY_VIDEO_SLOTS.has(slot)
+      : SLOTS.has(slot);
+    if (!allowed || !object(entry) || !bounded(entry.value) || !validSlot(slot, entry.value, version === 2)) {
+      if (strict) throw new DraftDecodeError("malformed");
+      continue;
+    }
+    const value = slot === "ImageAppIconFlow.selected"
+      ? new Set((entry.value as {set:string[]}).set)
+      : normalizeSlotValue(slot, entry.value);
+    if (version === 1 && slot === "VideoOptionsPanel.savedCustom") {
+      const migrated = [...parts];
+      migrated[migrated.length - 1] = "VideoOptionsPanel.savedSoftware";
+      entries[JSON.stringify(migrated)] = { value };
+    } else {
+      entries[key] = { value };
+    }
+  }
+  return entries;
+}
+
 export function decodeDraftEntries(raw: string): DraftEntries {
   try {
-    if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) return {};
-    const data: unknown = JSON.parse(raw);
-    if (!object(data) || data.version !== 1 || !object(data.entries) || Object.keys(data.entries).length > 500) return {};
-    const entries: DraftEntries = {};
-    for (const [key, entry] of Object.entries(data.entries)) {
-      let parts: unknown;
-      try { parts = JSON.parse(key); } catch { continue; }
-      if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) continue;
-      const slot = parts[parts.length - 1];
-      if (!SLOTS.has(slot) || !object(entry) || !bounded(entry.value) || !validSlot(slot, entry.value)) continue;
-      const value = slot === "ImageAppIconFlow.selected"
-        ? new Set((entry.value as {set:string[]}).set)
-        : normalizeSlotValue(slot, entry.value);
-      entries[key] = {value};
-    }
-    return entries;
+    const parsed: unknown = JSON.parse(raw);
+    if (!object(parsed) || (parsed.version !== 1 && parsed.version !== 2)) return {};
+    return decodeDraftEnvelope(raw, parsed.version, false);
   } catch { return {}; }
 }
 
+/** Read and validate protected storage without performing a write. */
+export function readDraftEntriesOutcome(storage: Storage): DraftReadOutcome {
+  let current: string | null;
+  try { current = storage.getItem(DRAFT_STORAGE_KEY); } catch { return { kind: "protected", reason: "read_error" }; }
+  if (current !== null) {
+    try { return { kind: "v2", entries: decodeDraftEnvelope(current, 2, true) }; }
+    catch (error) { return { kind: "protected", reason: error instanceof DraftDecodeError ? error.reason : "malformed" }; }
+  }
+  let legacyRaw: string | null;
+  try { legacyRaw = storage.getItem(LEGACY_DRAFT_STORAGE_KEY); } catch { return { kind: "protected", reason: "read_error" }; }
+  if (legacyRaw === null) return { kind: "empty" };
+  try { return { kind: "legacy", entries: decodeDraftEnvelope(legacyRaw, 1, false), legacy_raw: legacyRaw }; }
+  catch (error) { return { kind: "protected", reason: error instanceof DraftDecodeError ? error.reason : "malformed" }; }
+}
+
+export function loadDraftEntriesOutcome(storage: Storage): DraftLoadOutcome {
+  const read = readDraftEntriesOutcome(storage);
+  if (read.kind === "protected") return read;
+  if (read.kind === "v2") return { kind: "ready", entries: read.entries };
+  if (read.kind === "empty") return { kind: "ready", entries: {} };
+  if (saveDraftEntries(storage, read.entries)) return { kind: "ready", entries: read.entries };
+  return { kind: "migration_pending", entries: read.entries, legacy_raw: read.legacy_raw };
+}
+
+export function loadBrowserDraftEntriesOutcome(): DraftLoadOutcome {
+  if (typeof window === "undefined") return { kind: "ready", entries: {} };
+  try { return loadDraftEntriesOutcome(window.localStorage); }
+  catch { return { kind: "protected", reason: "read_error" }; }
+}
 export function loadBrowserDraftEntries(): DraftEntries {
-  try { return typeof window === "undefined" ? {} : loadDraftEntries(window.localStorage); } catch { return {}; }
+  const outcome = loadBrowserDraftEntriesOutcome();
+  return outcome.kind === "protected" ? {} : outcome.entries;
 }
 export function loadDraftEntries(storage: Storage): DraftEntries {
-  try { return decodeDraftEntries(storage.getItem(DRAFT_STORAGE_KEY) ?? ""); } catch { return {}; }
+  const outcome = loadDraftEntriesOutcome(storage);
+  return outcome.kind === "protected" ? {} : outcome.entries;
 }
 
 export type DraftPersistenceResult =

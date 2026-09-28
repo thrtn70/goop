@@ -3,4 +3,4 @@
 /**
  * Execution-time legacy preference is distinct from explicit per-job Software intent.
  */
-export type VideoSelectionContext = { "kind": "explicit_software" } | { "kind": "legacy_global_at_execution", hw_acceleration_enabled: boolean, };
+export type VideoSelectionContext = { "kind": "explicit_software" } | { "kind": "explicit_hardware_required" } | { "kind": "legacy_global_at_execution", hw_acceleration_enabled: boolean, };

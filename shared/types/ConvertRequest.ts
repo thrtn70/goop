@@ -13,18 +13,18 @@ import type { TargetFormat } from "./TargetFormat";
 import type { TrackConvertOptions } from "./TrackConvertOptions";
 import type { VideoConvertOptions } from "./VideoConvertOptions";
 
-export type ConvertRequest = {
+export type ConvertRequest = { 
 /**
  * Explicit color conversion is opt-in. `None` is identical to
  * `Preserve` for older callers, presets and queued jobs.
  */
-image_color_policy?: ImageColorPolicy | null, video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null,
+image_color_policy?: ImageColorPolicy | null, video_options?: VideoConvertOptions | null, input_path: string, output_path: string, target: TargetFormat, quality_preset: QualityPreset | null, resolution_cap: ResolutionCap | null, gif_options: GifOptions | null, compress_mode: CompressMode | null, batch_id: string | null, 
 /**
  * EXIF + ICC handling. `None` is treated as `Preserve` so older
  * callers / presets don't need to migrate; an explicit
  * `StripAll` opts in to scrubbing.
  */
-metadata_policy: MetadataPolicy | null,
+metadata_policy: MetadataPolicy | null, 
 /**
  * External subtitle to soft-embed or burn in. `None` skips all
  * subtitle handling, so pre-subtitle presets and queued job

@@ -45,6 +45,7 @@ const H264_PREFERENCE: &[&str] = &[
 #[derive(Debug, Clone, Default)]
 pub struct DetectedEncoders {
     available: HashSet<String>,
+    h264_videotoolbox_required_options: bool,
 }
 
 impl DetectedEncoders {
@@ -62,11 +63,28 @@ impl DetectedEncoders {
     {
         Self {
             available: iter.into_iter().map(Into::into).collect(),
+            h264_videotoolbox_required_options: false,
         }
+    }
+
+    /// Test/fixture constructor for a bundle whose H.264 VideoToolbox help
+    /// exposes both switches needed to prohibit internal software fallback.
+    pub fn from_names_with_h264_videotoolbox_required_options<I, S>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut detected = Self::from_names(iter);
+        detected.h264_videotoolbox_required_options = detected.is_available("h264_videotoolbox");
+        detected
     }
 
     pub fn is_available(&self, name: &str) -> bool {
         self.available.contains(name)
+    }
+
+    pub fn supports_h264_videotoolbox_required(&self) -> bool {
+        self.is_available("h264_videotoolbox") && self.h264_videotoolbox_required_options
     }
 
     /// Best HW h.264 encoder available, or `None` if no HW codec was found.
@@ -119,7 +137,28 @@ pub(crate) async fn detect_with_cancel(
         return DetectedEncoders::empty();
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    parse_encoders(&stdout)
+    let mut detected = parse_encoders(&stdout);
+    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && detected.is_available("h264_videotoolbox")
+    {
+        let option_help = crate::bounded_process::output(
+            Command::new(&bin.path).args(["-hide_banner", "-h", "encoder=h264_videotoolbox"]),
+            "ffmpeg",
+            cancel,
+        )
+        .await;
+        if let Ok(help) = option_help {
+            let mut text = String::from_utf8_lossy(&help.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&help.stderr));
+            detected.h264_videotoolbox_required_options =
+                help.status.success() && parse_h264_videotoolbox_required_options(&text);
+        }
+    }
+    detected
+}
+
+fn parse_h264_videotoolbox_required_options(help: &str) -> bool {
+    help.contains("-allow_sw") && help.contains("-require_sw")
 }
 
 /// Parse the stdout of `ffmpeg -encoders` and pluck out the names matching
@@ -172,7 +211,10 @@ pub fn parse_encoders(stdout: &str) -> DetectedEncoders {
             found.insert(name.to_string());
         }
     }
-    DetectedEncoders { available: found }
+    DetectedEncoders {
+        available: found,
+        h264_videotoolbox_required_options: false,
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +299,26 @@ Encoders:
         let det = DetectedEncoders::from_names(["h264_videotoolbox", "hevc_videotoolbox"]);
         assert_eq!(det.count(), 2);
         assert_eq!(det.preferred_h264(), Some("h264_videotoolbox"));
+    }
+
+    #[test]
+    fn required_videotoolbox_option_contract_requires_both_switches() {
+        let detected = DetectedEncoders::from_names(["h264_videotoolbox"]);
+        assert!(!detected.supports_h264_videotoolbox_required());
+        let detected = DetectedEncoders::from_names_with_h264_videotoolbox_required_options([
+            "h264_videotoolbox",
+        ]);
+        assert!(detected.supports_h264_videotoolbox_required());
+
+        for help in [
+            "-allow_sw <boolean> allow software encoding",
+            "-require_sw <boolean> require software encoding",
+            "-allow_sw <boolean>\n-require_sw <boolean>",
+        ] {
+            assert_eq!(
+                parse_h264_videotoolbox_required_options(help),
+                help.contains("-allow_sw") && help.contains("-require_sw")
+            );
+        }
     }
 }

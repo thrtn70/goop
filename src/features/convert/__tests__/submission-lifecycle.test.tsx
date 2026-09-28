@@ -291,3 +291,44 @@ it("blank active CRF blocks enqueue and preset saving", () => {
   expect((screen.getByRole("button",{name:"Save as preset"}) as HTMLButtonElement).disabled).toBe(true);
   expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.enqueue).not.toHaveBeenCalled();
 });
+
+it("snapshots committed Hardware required bitrate before the destination dialog", async () => {
+  const options = {kind:"hardware_encode" as const,codec:"h264" as const,hardware_policy:{kind:"required" as const},rate_control:{kind:"average_bitrate" as const,kbps:5000}};
+  const raw = {hardwareBitrateDraft:"6000"};
+  let resolve!: (path:string) => void;
+  mocks.save.mockReset().mockImplementation(() => new Promise(r => {resolve=r;}));
+  mocks.enqueue.mockReset().mockResolvedValue("job");
+  const done = vi.fn();
+  const hardwareCapability = {...videoCapability,hardware:{available:true,codec:"h264" as const,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000}};
+  render(<ConvertActionBar files={[{...file,videoCapability:hardwareCapability as never,videoDraft:raw,videoOptions:options as never}]} disabled={false} onEnqueued={done}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
+  options.rate_control.kbps=1000; raw.hardwareBitrateDraft="7000";
+  await act(async () => resolve("/out.mp4"));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls[0][0].video_options).toEqual({kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000}});
+});
+
+it("does not start or capture the Hardware bitrate suggestion before deliberate entry", () => {
+  mocks.save.mockReset(); mocks.enqueue.mockReset();
+  const hardwareCapability = {...videoCapability,hardware:{available:true,codec:"h264" as const,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000}};
+  const options = {kind:"hardware_encode" as const,codec:"h264" as const,hardware_policy:{kind:"required" as const},rate_control:{kind:"average_bitrate" as const,kbps:5000}};
+  render(<ConvertActionBar files={[{...file,videoCapability:hardwareCapability as never,videoDraft:{hardwareBitrateDraft:""},videoOptions:options as never}]} disabled={false} onEnqueued={vi.fn()}/>);
+  expect((screen.getByRole("button",{name:"Convert 1 file"}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button",{name:"Save as preset"}) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toMatch(/whole number from 100 to 200000/);
+  expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.enqueue).not.toHaveBeenCalled();
+});
+
+it("queues Hardware required batches with independent per-file bitrates", async () => {
+  mocks.save.mockReset(); mocks.enqueue.mockReset().mockResolvedValue("job");
+  const hardwareCapability = {...videoCapability,hardware:{available:true,codec:"h264" as const,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000}};
+  const options = (kbps:number) => ({kind:"hardware_encode" as const,codec:"h264" as const,hardware_policy:{kind:"required" as const},rate_control:{kind:"average_bitrate" as const,kbps}});
+  const done=vi.fn();
+  render(<ConvertActionBar files={[
+    {...file,path:"/first.mp4",videoCapability:hardwareCapability as never,videoDraft:{hardwareBitrateDraft:"4000"},videoOptions:options(5000) as never},
+    {...file,path:"/second.mp4",videoCapability:hardwareCapability as never,videoDraft:{hardwareBitrateDraft:"9000"},videoOptions:options(5000) as never},
+  ]} disabled={false} onEnqueued={done}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Convert 2 files"}));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(mocks.enqueue.mock.calls.map(([request]) => request.video_options.rate_control.kbps)).toEqual([4000,9000]);
+});

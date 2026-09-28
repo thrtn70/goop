@@ -312,12 +312,18 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         // Same effective quality the plan was built with, so the GPU
         // encoder's quality args can't drift from the software ones.
         let quality = effective_quality(req.quality_preset, req.subtitle.as_ref().map(|s| s.mode));
+        let explicit_hardware_required = matches!(
+            req.video_options,
+            Some(goop_core::VideoConvertOptions::HardwareEncode { .. })
+        );
         let hw_encoder = if video_execution.is_some() {
             None
         } else {
             self.maybe_apply_hw(&mut plan, quality)
         };
-        let selection_context = if video_execution.is_some() {
+        let selection_context = if explicit_hardware_required {
+            VideoSelectionContext::ExplicitHardwareRequired
+        } else if video_execution.is_some() {
             VideoSelectionContext::ExplicitSoftware
         } else {
             VideoSelectionContext::LegacyGlobalAtExecution {
@@ -325,7 +331,11 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
             }
         };
         let started = std::time::Instant::now();
-        let mut current_encoder = hw_encoder;
+        let mut current_encoder = if explicit_hardware_required {
+            Some("h264_videotoolbox")
+        } else {
+            hw_encoder
+        };
         let mut completed_video_action = plan.video_action;
         let mut encode_attempt_ordinal = 1;
         let mut fallback = None;
@@ -363,7 +373,12 @@ impl<'a> ConversionBackend for FfmpegBackend<'a> {
         // possible", not "fail loudly when HW won't work."
         let result = match result {
             Err(GoopError::SubprocessFailed { binary, stderr })
-                if current_encoder.is_some() && !cancel.is_cancelled() =>
+                if current_encoder.is_some()
+                    && matches!(
+                        selection_context,
+                        VideoSelectionContext::LegacyGlobalAtExecution { .. }
+                    )
+                    && !cancel.is_cancelled() =>
             {
                 tracing::warn!(
                     encoder = ?current_encoder,

@@ -116,7 +116,7 @@ describe("preset I/O — parse", () => {
       }),
     ]);
 
-    expect(PRESET_BUNDLE_VERSION).toBe(10);
+    expect(PRESET_BUNDLE_VERSION).toBe(11);
     expect(parsePresetBundle(serialized)[0].image_alpha_policy).toEqual(alphaPolicy);
 
     const downgraded = JSON.parse(serialized) as { version: number };
@@ -471,6 +471,58 @@ describe("schema 4 video presets", () => {
   });
   it.each([{target:"webm"}, {quality_preset:"original"}, {subtitle:{source_path:"/x.srt",mode:"soft"}}, {resolution_cap:"r720p",video_options:{kind:"copy"}}])("rejects request conflicts", overrides => {
     expect(() => parsePresetBundle(JSON.stringify({version:4,presets:[{name:"Conflict",target:"mp4",video_options:video,...overrides}]}))).toThrow(/Conflict/);
+  });
+});
+
+describe("schema 11 Hardware required video presets", () => {
+  const hardware = {
+    kind: "hardware_encode",
+    codec: "h264",
+    hardware_policy: { kind: "required" },
+    rate_control: { kind: "average_bitrate", kbps: 5000 },
+    resize: { kind: "original" },
+    frame_rate: { kind: "preserve" },
+  } as const;
+
+  it("roundtrips portable intent without consulting runtime availability", () => {
+    const raw = serializePresets([makePreset({
+      target: "mp4",
+      quality_preset: null,
+      resolution_cap: null,
+      video_options: hardware,
+    })]);
+    expect(JSON.parse(raw).version).toBe(11);
+    expect(entriesToPresets(parsePresetBundle(raw), [])[0].video_options).toEqual(hardware);
+  });
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])("rejects Hardware required under old schema %s", version => {
+    expect(() => parsePresetBundle(JSON.stringify({ version, presets: [{
+      name: "Too new", target: "mp4", video_options: hardware,
+    }] }))).toThrow(/Too new.*schema 11/);
+  });
+
+  it("continues accepting an explicit schema-10 Software preset", () => {
+    const software = { kind: "encode", codec: "h264", processor: "software", speed: "medium",
+      rate_control: { kind: "average_bitrate", kbps: 5000 } };
+    expect(parsePresetBundle(JSON.stringify({ version: 10, presets: [{
+      name: "Software", target: "mp4", video_options: software,
+    }] }))[0].video_options).toEqual(software);
+  });
+
+  it.each([
+    { ...hardware, codec: "hevc" },
+    { ...hardware, speed: "fast" },
+    { ...hardware, rate_control: { kind: "constant_quality", crf: 23 } },
+    { ...hardware, rate_control: { kind: "average_bitrate", kbps: 99 } },
+    { ...hardware, rate_control: { kind: "average_bitrate", kbps: 200001 } },
+    { ...hardware, hardware_policy: { kind: "preferred" } },
+    { ...hardware, extra: true },
+    { ...hardware, resize: null },
+    { ...hardware, frame_rate: null },
+  ])("strictly rejects malformed Hardware required intent: %j", video_options => {
+    expect(() => parsePresetBundle(JSON.stringify({ version: 11, presets: [{
+      name: "Invalid hardware", target: "mp4", video_options,
+    }] }))).toThrow(/Invalid hardware/);
   });
 });
 

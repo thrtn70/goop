@@ -26,6 +26,10 @@ function cloneFrameRate(value: VideoFrameRate | null | undefined): VideoFrameRat
 export function cloneVideoOptions(value: VideoConvertOptions | null | undefined): VideoConvertOptions | null {
   if (value == null) return null;
   if (value.kind === "copy") return {kind:"copy"};
+  if (value.kind === "hardware_encode") return {kind:"hardware_encode",codec:value.codec,hardware_policy:{...value.hardware_policy},rate_control:{...value.rate_control},
+    ...(value.resize === undefined ? {} : {resize:{...value.resize}}),
+    ...(value.frame_rate === undefined ? {} : {frame_rate:{...value.frame_rate}}),
+  };
   return {kind:"encode",codec:value.codec,processor:value.processor,speed:value.speed,rate_control:{...value.rate_control},
     ...(value.resize === undefined ? {} : {resize:cloneResize(value.resize)}),
     ...(value.frame_rate === undefined ? {} : {frame_rate:cloneFrameRate(value.frame_rate)}),
@@ -57,6 +61,18 @@ function validateFrameRate(value: unknown): VideoFrameRate | null {
 export function validateVideoOptions(value: unknown): VideoConvertOptions | null {
   if (value == null) return null;
   if (object(value) && value.kind === "copy" && only(value, ["kind"])) return {kind:"copy"};
+  if (object(value) && value.kind === "hardware_encode") {
+    if (!only(value,["kind","codec","hardware_policy","rate_control","resize","frame_rate"]) || value.codec !== "h264" ||
+        !object(value.hardware_policy) || value.hardware_policy.kind !== "required" || !only(value.hardware_policy,["kind"]) ||
+        !object(value.rate_control) || value.rate_control.kind !== "average_bitrate" || !only(value.rate_control,["kind","kbps"]) ||
+        !integer(value.rate_control.kbps,100,200000) || value.resize === null || value.frame_rate === null) {
+      throw new Error("video_options Hardware required must specify H.264 average bitrate from 100 to 200000 kbps");
+    }
+    return {kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:value.rate_control.kbps},
+      ...(value.resize === undefined ? {} : {resize:validateResize(value.resize)!}),
+      ...(value.frame_rate === undefined ? {} : {frame_rate:validateFrameRate(value.frame_rate)!}),
+    };
+  }
   if (!object(value) || value.kind !== "encode" || !only(value,["kind","codec","processor","speed","rate_control","resize","frame_rate"]) ||
       (value.codec !== "h264" && value.codec !== "hevc") || value.processor !== "software" ||
       (value.speed !== "fast" && value.speed !== "medium" && value.speed !== "slow") || !object(value.rate_control)) {
@@ -86,11 +102,11 @@ export function validateVideoRequest(request: Pick<ConvertRequest,"target"> & Pa
   if (!["mp4","mov","mkv"].includes(request.target)) throw new Error("Explicit video settings require MP4, MOV or MKV output");
   if (request.quality_preset != null || request.compress_mode != null || request.image_options != null || request.gif_options != null || request.subtitle != null) throw new Error(VIDEO_CONFLICT);
   if (options.kind === "copy" && request.resolution_cap != null && request.resolution_cap !== "original") throw new Error("Copy streams requires original resolution");
-  if (options.kind === "encode" && options.resize != null && request.resolution_cap != null && request.resolution_cap !== "original") throw new Error("New video dimensions cannot be combined with a legacy resolution cap");
+  if ((options.kind === "encode" || options.kind === "hardware_encode") && options.resize != null && request.resolution_cap != null && request.resolution_cap !== "original") throw new Error("New video dimensions cannot be combined with a legacy resolution cap");
   return options;
 }
-export type VideoDraftText = Partial<Record<"crfDraft" | "bitrateDraft" | "appliedCrf" | "appliedBitrate" | "widthDraft" | "heightDraft" | "appliedWidth" | "appliedHeight", string>>;
-export const videoDraftSlots = ["crfDraft","bitrateDraft","appliedCrf","appliedBitrate","widthDraft","heightDraft","appliedWidth","appliedHeight","savedCustom"].map(slot => `VideoOptionsPanel.${slot}`);
+export type VideoDraftText = Partial<Record<"crfDraft" | "bitrateDraft" | "hardwareBitrateDraft" | "appliedCrf" | "appliedBitrate" | "widthDraft" | "heightDraft" | "appliedWidth" | "appliedHeight", string>>;
+export const videoDraftSlots = ["crfDraft","bitrateDraft","hardwareBitrateDraft","appliedCrf","appliedBitrate","widthDraft","heightDraft","appliedWidth","appliedHeight","savedSoftware"].map(slot => `VideoOptionsPanel.${slot}`);
 export interface VideoDraftFile {
   target: ConvertRequest["target"];
   videoOptions?: VideoConvertOptions | null;
@@ -105,13 +121,14 @@ export interface VideoDraftFile {
 /** Raw text is authoritative while its applied numeric value still matches. */
 function projected(file: VideoDraftFile): VideoConvertOptions | null {
   const options = validateVideoOptions(file.videoOptions);
-  if (options?.kind === "encode") {
+  if (options?.kind === "encode" || options?.kind === "hardware_encode") {
     const rate = options.rate_control;
-    const crf = rate.kind === "constant_quality";
-    const numeric = crf ? rate.crf : rate.kbps;
+    const hardware = options.kind === "hardware_encode";
+    const crf = !hardware && rate.kind === "constant_quality";
+    const numeric = rate.kind === "constant_quality" ? rate.crf : rate.kbps;
     const raw = file.videoDraft;
-    const applied = crf ? raw?.appliedCrf : raw?.appliedBitrate;
-    const typed = crf ? raw?.crfDraft : raw?.bitrateDraft;
+    const applied = hardware ? undefined : crf ? raw?.appliedCrf : raw?.appliedBitrate;
+    const typed = hardware ? raw?.hardwareBitrateDraft : crf ? raw?.crfDraft : raw?.bitrateDraft;
     const text = applied == null || applied === String(numeric) ? typed ?? String(numeric) : String(numeric);
     if (!/^\d+$/.test(text) || !integer(Number(text),crf ? 1 : 100,crf ? 51 : 200000)) throw new Error(crf ? VIDEO_CRF_ERROR : VIDEO_BITRATE_ERROR);
     options.rate_control = crf ? {kind:"constant_quality",crf:Number(text)} : {kind:"average_bitrate",kbps:Number(text)};
@@ -135,8 +152,23 @@ export function videoOptionsError(file: VideoDraftFile): string | null {
     const options = projected(file);
     if (!options) return null;
     const caps = file.videoCapability;
-    const mode = caps?.[options.kind];
+    const mode = options.kind === "hardware_encode" ? caps?.hardware : caps?.[options.kind];
     if (!mode?.available) return mode?.reason ?? "Video settings are unavailable for this source and target";
+    if (options.kind === "hardware_encode") {
+      const hardware = caps?.hardware;
+      if (!hardware || options.codec !== hardware.codec || options.rate_control.kbps < hardware.bitrate_min_kbps || options.rate_control.kbps > hardware.bitrate_max_kbps) {
+        return VIDEO_BITRATE_ERROR;
+      }
+      if (options.resize != null && !hardware.resize?.available) return hardware.resize?.reason ?? "Video dimensions are unavailable for this source and target";
+      if (options.frame_rate != null && !hardware.frame_rate?.available) return hardware.frame_rate?.reason ?? "Video frame rate is unavailable for this source and target";
+      if (options.frame_rate?.kind === "constant") {
+        const selectedFrameRate = options.frame_rate;
+        if (!hardware.frame_rate?.constant_choices.some(choice => choice.frame_rate.kind === "constant" &&
+          choice.frame_rate.numerator === selectedFrameRate.numerator && choice.frame_rate.denominator === selectedFrameRate.denominator)) {
+          return VIDEO_FRAME_RATE_ERROR;
+        }
+      }
+    }
     if (options.kind === "encode") {
       const codec = caps?.codecs.find(codec => codec.codec === options.codec);
       if (!codec?.available) return codec?.reason ?? "Selected video encoder is unavailable";

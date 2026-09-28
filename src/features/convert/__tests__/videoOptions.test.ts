@@ -6,9 +6,15 @@ const transformed = {...options,
   resize:{kind:"fit_within",width:1920,height:1080},
   frame_rate:{kind:"constant",numerator:24000,denominator:1001},
 } as const;
+const hardware = {kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:5000},
+  resize:{kind:"fit_within",width:1920,height:1080},frame_rate:{kind:"constant",numerator:24000,denominator:1001}} as const;
 const capability: VideoSettingsCapabilities = {copy:{available:true},encode:{available:true},codecs:[{codec:"h264",encoder:"libx264",available:true,recommended_crf:23}],crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",
   resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}},
-  frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{label:"23.976",frame_rate:{kind:"constant",numerator:24000,denominator:1001}}]},preview_available:false};
+  frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{label:"23.976",frame_rate:{kind:"constant",numerator:24000,denominator:1001}}]},preview_available:false,
+  hardware:{available:true,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
+    resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}},
+    frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{label:"23.976",frame_rate:{kind:"constant",numerator:24000,denominator:1001}}]}},
+} as VideoSettingsCapabilities;
 describe("video draft projection", () => {
   it("clones every nested level", () => {
     const copy = cloneVideoOptions(transformed);
@@ -18,6 +24,34 @@ describe("video draft projection", () => {
       expect(copy.resize).not.toBe(transformed.resize);
       expect(copy.frame_rate).not.toBe(transformed.frame_rate);
     }
+  });
+  it("validates and deeply clones only the strict Hardware required wire", () => {
+    expect(validateVideoOptions(hardware)).toEqual(hardware);
+    const copy = cloneVideoOptions(hardware as never) as unknown as typeof hardware;
+    expect(copy).toEqual(hardware);
+    expect(copy).not.toBe(hardware);
+    expect(copy.hardware_policy).not.toBe(hardware.hardware_policy);
+    expect(copy.rate_control).not.toBe(hardware.rate_control);
+    expect(copy.resize).not.toBe(hardware.resize);
+    expect(copy.frame_rate).not.toBe(hardware.frame_rate);
+    for (const invalid of [
+      {...hardware,codec:"hevc"},
+      {...hardware,hardware_policy:{kind:"preferred"}},
+      {...hardware,hardware_policy:{kind:"required",fallback:true}},
+      {...hardware,rate_control:{kind:"constant_quality",crf:23}},
+      {...hardware,rate_control:{kind:"average_bitrate",kbps:99}},
+      {...hardware,rate_control:{kind:"average_bitrate",kbps:200001}},
+      {...hardware,speed:"medium"},
+      {...hardware,processor:"software"},
+      {...hardware,extra:null},
+    ]) expect(() => validateVideoOptions(invalid)).toThrow();
+  });
+  it("keeps raw Hardware bitrate authoritative and blocks unavailable chosen intent", () => {
+    const file = {target:"mp4" as const,videoOptions:hardware as never,videoCapability:capability,videoDraft:{hardwareBitrateDraft:"6000"}};
+    expect(videoRequestOptions(file)).toMatchObject({kind:"hardware_encode",rate_control:{kind:"average_bitrate",kbps:6000}});
+    expect(videoOptionsError({...file,videoDraft:{hardwareBitrateDraft:""}})).toMatch(/whole number from 100 to 200000/);
+    expect(videoOptionsError({...file,videoCapability:{...capability,hardware:{...(capability as never as {hardware: object}).hardware,available:false,reason:"Hardware session unavailable"}} as never}))
+      .toBe("Hardware session unavailable");
   });
   it("rejects unknown copy keys and fractional rates", () => {
     expect(() => validateVideoOptions({kind:"copy",speed:"fast"})).toThrow();

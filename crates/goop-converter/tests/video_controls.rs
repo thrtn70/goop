@@ -23,6 +23,27 @@ fn inventory() -> DetectedEncoders {
         " V..... libx264 H264\n V..... libx265 HEVC\n A..... aac AAC\n V....D h264_videotoolbox HW",
     )
 }
+fn required_hardware_inventory() -> DetectedEncoders {
+    DetectedEncoders::from_names_with_h264_videotoolbox_required_options([
+        "libx264",
+        "libx265",
+        "aac",
+        "h264_videotoolbox",
+    ])
+}
+
+fn hardware_encode_with(
+    resize: Option<VideoResize>,
+    frame_rate: Option<VideoFrameRate>,
+) -> VideoConvertOptions {
+    VideoConvertOptions::HardwareEncode {
+        codec: VideoHardwareCodec::H264,
+        hardware_policy: VideoHardwarePolicy::Required,
+        rate_control: VideoHardwareRateControl::AverageBitrate { kbps: 5000 },
+        resize,
+        frame_rate,
+    }
+}
 
 fn encode_with(
     resize: Option<VideoResize>,
@@ -458,6 +479,67 @@ fn bitrate_and_missing_encoder() {
         .user_message()
         .contains("libx264"));
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn hardware_required_uses_videotoolbox_no_software_contract_without_legacy_args() {
+    let mut req = request();
+    req.video_options = Some(hardware_encode_with(
+        Some(VideoResize::FitWithin {
+            width: 1280,
+            height: 720,
+        }),
+        Some(VideoFrameRate::Constant {
+            numerator: 30_000,
+            denominator: 1_001,
+        }),
+    ));
+    let resolved = resolve(&req, &probe(source_json()), &required_hardware_inventory()).unwrap();
+    for pair in [
+        ["-c:v", "h264_videotoolbox"],
+        ["-b:v", "5000k"],
+        ["-allow_sw", "0"],
+        ["-require_sw", "0"],
+    ] {
+        assert!(
+            resolved.plan.args.windows(2).any(|args| args == pair),
+            "{pair:?}"
+        );
+    }
+    for forbidden in ["-crf", "-preset", "-q:v"] {
+        assert!(!resolved.plan.args.iter().any(|arg| arg == forbidden));
+    }
+    assert_eq!(
+        resolved.summary.encoder.as_deref(),
+        Some("h264_videotoolbox")
+    );
+    assert_eq!(resolved.summary.requested, req.video_options.unwrap());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn hardware_required_refuses_compiled_encoder_without_option_contract() {
+    let mut req = request();
+    req.video_options = Some(hardware_encode_with(None, None));
+    let error = resolve(&req, &probe(source_json()), &inventory())
+        .unwrap_err()
+        .user_message();
+    assert!(
+        error.contains("allow_sw") && error.contains("require_sw"),
+        "{error}"
+    );
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[test]
+fn hardware_required_portable_intent_is_unavailable_on_this_platform() {
+    let mut req = request();
+    req.video_options = Some(hardware_encode_with(None, None));
+    let error = resolve(&req, &probe(source_json()), &required_hardware_inventory())
+        .unwrap_err()
+        .user_message();
+    assert!(error.contains("macOS arm64"), "{error}");
+}
 #[test]
 fn rejects_unsupported_encode_facts() {
     for (field, value) in [
@@ -704,6 +786,35 @@ fn output_validation_and_capabilities() {
     assert!(!caps.encode.available);
     assert!(!caps.preview_available);
     assert_eq!((caps.crf_min, caps.crf_max, caps.default_crf), (1, 51, 23));
+}
+
+#[test]
+fn hardware_capabilities_are_separate_and_reuse_transform_authority() {
+    let source = probe(source_json());
+    let hardware = capabilities(&source, TargetFormat::Mp4, &required_hardware_inventory())
+        .hardware
+        .unwrap();
+    assert_eq!(hardware.codec, VideoHardwareCodec::H264);
+    assert_eq!(
+        (
+            hardware.bitrate_min_kbps,
+            hardware.bitrate_max_kbps,
+            hardware.default_bitrate_kbps,
+        ),
+        (100, 200_000, 5000)
+    );
+    assert_eq!(
+        hardware.available,
+        cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    );
+    assert_eq!(
+        hardware.resize.as_ref().unwrap().available,
+        hardware.available
+    );
+    assert_eq!(
+        hardware.frame_rate.as_ref().unwrap().available,
+        hardware.available
+    );
 }
 
 #[test]

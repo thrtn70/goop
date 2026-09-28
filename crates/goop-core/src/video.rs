@@ -2,6 +2,14 @@ use crate::{ConvertRequest, GoopError, ResolutionCap, TargetFormat};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// Encoder names admitted by the current video planners, not proof of device utilization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
@@ -53,6 +61,7 @@ impl VideoEncoder {
 #[serde(deny_unknown_fields)]
 pub enum VideoSelectionContext {
     ExplicitSoftware,
+    ExplicitHardwareRequired,
     LegacyGlobalAtExecution { hw_acceleration_enabled: bool },
 }
 
@@ -62,10 +71,12 @@ impl<'de> Deserialize<'de> for VideoSelectionContext {
         #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
         enum StrictContext {
             ExplicitSoftware {},
+            ExplicitHardwareRequired {},
             LegacyGlobalAtExecution { hw_acceleration_enabled: bool },
         }
         Ok(match StrictContext::deserialize(deserializer)? {
             StrictContext::ExplicitSoftware {} => Self::ExplicitSoftware,
+            StrictContext::ExplicitHardwareRequired {} => Self::ExplicitHardwareRequired,
             StrictContext::LegacyGlobalAtExecution {
                 hw_acceleration_enabled,
             } => Self::LegacyGlobalAtExecution {
@@ -130,7 +141,7 @@ impl<'de> Deserialize<'de> for VideoAttempt {
                 selection_context,
                 fallback,
             } => {
-                let hw_enabled = matches!(
+                let legacy_hw_enabled = matches!(
                     selection_context,
                     VideoSelectionContext::LegacyGlobalAtExecution {
                         hw_acceleration_enabled: true
@@ -139,14 +150,21 @@ impl<'de> Deserialize<'de> for VideoAttempt {
                 let valid =
                     match &fallback {
                         Some(previous) => {
-                            hw_enabled
+                            legacy_hw_enabled
                                 && encode_attempt_ordinal == 2
                                 && encoder == VideoEncoder::Libx264
                                 && previous.from_encoder.is_hardware()
                         }
-                        None => {
-                            encode_attempt_ordinal == 1 && (!encoder.is_hardware() || hw_enabled)
-                        }
+                        None => match selection_context {
+                            VideoSelectionContext::ExplicitHardwareRequired => {
+                                encode_attempt_ordinal == 1
+                                    && encoder == VideoEncoder::H264Videotoolbox
+                            }
+                            _ => {
+                                encode_attempt_ordinal == 1
+                                    && (!encoder.is_hardware() || legacy_hw_enabled)
+                            }
+                        },
                     } && (!matches!(selection_context, VideoSelectionContext::ExplicitSoftware)
                         || matches!(encoder, VideoEncoder::Libx264 | VideoEncoder::Libx265));
                 if !valid {
@@ -190,6 +208,47 @@ pub enum VideoSpeed {
 #[serde(rename_all = "snake_case")]
 pub enum VideoProcessor {
     Software,
+}
+
+/// The first portable explicit hardware codec contract. Encoder names remain
+/// execution facts and are not persisted as user intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case")]
+pub enum VideoHardwareCodec {
+    H264,
+}
+
+/// Hardware-required means the admitted hardware encoder must be used and no
+/// software substitution or retry is permitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoHardwarePolicy {
+    Required,
+}
+
+impl<'de> Deserialize<'de> for VideoHardwarePolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+        enum StrictPolicy {
+            Required {},
+        }
+        match StrictPolicy::deserialize(deserializer)? {
+            StrictPolicy::Required {} => Ok(Self::Required),
+        }
+    }
+}
+
+/// Rate control admitted by explicit hardware-required encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(deny_unknown_fields)]
+pub enum VideoHardwareRateControl {
+    AverageBitrate { kbps: u32 },
 }
 
 /// One video rate-control mode. CRF admits 1..=51 (lower is higher quality);
@@ -314,6 +373,17 @@ pub enum VideoConvertOptions {
         #[ts(optional = nullable)]
         frame_rate: Option<VideoFrameRate>,
     },
+    HardwareEncode {
+        codec: VideoHardwareCodec,
+        hardware_policy: VideoHardwarePolicy,
+        rate_control: VideoHardwareRateControl,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        resize: Option<VideoResize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        frame_rate: Option<VideoFrameRate>,
+    },
 }
 
 // Serde accepts unknown fields on internally tagged unit variants. An empty
@@ -336,6 +406,15 @@ impl<'de> Deserialize<'de> for VideoConvertOptions {
                 #[serde(default)]
                 frame_rate: Option<VideoFrameRate>,
             },
+            HardwareEncode {
+                codec: VideoHardwareCodec,
+                hardware_policy: VideoHardwarePolicy,
+                rate_control: VideoHardwareRateControl,
+                #[serde(default, deserialize_with = "deserialize_present_option")]
+                resize: Option<VideoResize>,
+                #[serde(default, deserialize_with = "deserialize_present_option")]
+                frame_rate: Option<VideoFrameRate>,
+            },
         }
         Ok(match StrictOptions::deserialize(deserializer)? {
             StrictOptions::Copy {} => Self::Copy,
@@ -351,6 +430,19 @@ impl<'de> Deserialize<'de> for VideoConvertOptions {
                 rate_control,
                 speed,
                 processor,
+                resize,
+                frame_rate,
+            },
+            StrictOptions::HardwareEncode {
+                codec,
+                hardware_policy,
+                rate_control,
+                resize,
+                frame_rate,
+            } => Self::HardwareEncode {
+                codec,
+                hardware_policy,
+                rate_control,
                 resize,
                 frame_rate,
             },
@@ -374,7 +466,17 @@ pub fn validate_video_options(options: &VideoConvertOptions) -> Result<(), GoopE
         } if !(100..=200_000).contains(kbps) => Err(GoopError::InvalidRequest(
             "Video bitrate must be a whole number from 100 to 200000 kbps".into(),
         )),
+        VideoConvertOptions::HardwareEncode {
+            rate_control: VideoHardwareRateControl::AverageBitrate { kbps },
+            ..
+        } if !(100..=200_000).contains(kbps) => Err(GoopError::InvalidRequest(
+            "Hardware video bitrate must be a whole number from 100 to 200000 kbps".into(),
+        )),
         VideoConvertOptions::Encode {
+            resize: Some(VideoResize::FitWithin { width, height }),
+            ..
+        }
+        | VideoConvertOptions::HardwareEncode {
             resize: Some(VideoResize::FitWithin { width, height }),
             ..
         } if !(2..=32_768).contains(width) || !(2..=32_768).contains(height) => {
@@ -383,6 +485,14 @@ pub fn validate_video_options(options: &VideoConvertOptions) -> Result<(), GoopE
             ))
         }
         VideoConvertOptions::Encode {
+            frame_rate:
+                Some(VideoFrameRate::Constant {
+                    numerator,
+                    denominator,
+                }),
+            ..
+        }
+        | VideoConvertOptions::HardwareEncode {
             frame_rate:
                 Some(VideoFrameRate::Constant {
                     numerator,
@@ -443,6 +553,9 @@ pub fn validate_video_request(request: &ConvertRequest) -> Result<(), GoopError>
     if matches!(
         options,
         VideoConvertOptions::Encode {
+            resize: Some(_),
+            ..
+        } | VideoConvertOptions::HardwareEncode {
             resize: Some(_),
             ..
         }
@@ -644,6 +757,29 @@ pub struct VideoCodecCapability {
     pub recommended_crf: u8,
 }
 
+/// Engine-owned eligibility for the explicit Hardware required mode. This is
+/// compiled encoder and option-contract evidence, not proof of a usable device
+/// session; runtime failure remains possible and never enables substitution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../shared/types/")]
+#[serde(deny_unknown_fields)]
+pub struct VideoHardwareCapabilities {
+    pub available: bool,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub reason: Option<String>,
+    pub codec: VideoHardwareCodec,
+    pub bitrate_min_kbps: u32,
+    pub bitrate_max_kbps: u32,
+    pub default_bitrate_kbps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub resize: Option<VideoResizeCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub frame_rate: Option<VideoFrameRateCapabilities>,
+}
+
 /// Engine-owned mode availability and control bounds/defaults for a target.
 /// Defaults describe first-entry UI choices and never overwrite an explicit request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -662,6 +798,9 @@ pub struct VideoSettingsCapabilities {
     pub speeds: Vec<VideoSpeed>,
     pub default_speed: VideoSpeed,
     pub processor: VideoProcessor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub hardware: Option<VideoHardwareCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub resize: Option<VideoResizeCapabilities>,

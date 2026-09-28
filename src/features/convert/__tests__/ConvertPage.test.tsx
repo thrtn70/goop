@@ -146,6 +146,9 @@ vi.mock("@/ipc/commands", () => ({
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
                 crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                 speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",preview_available:false,preview_unavailable_reason:"Explicit video samples are unavailable."
+                ,hardware:{available:path !== "/tmp/no-hardware.mp4" && !(path === "/tmp/target-loss.mp4" && target === "mov"),reason:path === "/tmp/no-hardware.mp4" || (path === "/tmp/target-loss.mp4" && target === "mov") ? "Hardware session unavailable" : null,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
+                  resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}},
+                  frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{frame_rate:{kind:"constant",numerator:24000,denominator:1001},label:"23.976 fps"}]}}
                 ,resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}}
                 ,frame_rate:{available:path !== "/tmp/no-timing.mp4",reason:path === "/tmp/no-timing.mp4" ? "Reported timing is missing or malformed" : null,default:path === "/tmp/no-timing.mp4" ? null : {kind:"preserve"},constant_choices:[
                   {frame_rate:{kind:"constant",numerator:24000,denominator:1001},label:"23.976 fps"},
@@ -1611,7 +1614,57 @@ describe("explicit video inspector", () => {
     expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
     expect(screen.getByLabelText("Codec")).toHaveProperty("value","hevc");
     expect(screen.getByLabelText("Speed")).toHaveProperty("value","slow");
-    expect(screen.getByText(/Software/)).toBeTruthy();
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","software");
+  });
+  it("requires deliberate Hardware bitrate entry across restart and restores inactive Software settings", async () => {
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"31"}});
+    await userEvent.selectOptions(screen.getByLabelText("Speed"),"slow");
+    await userEvent.selectOptions(screen.getByLabelText("Processor"),"hardware_required");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("placeholder","5000");
+    expect(screen.queryByLabelText("CRF")).toBeNull();
+    expect(screen.queryByLabelText("Speed")).toBeNull();
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+    expect(screen.getByRole("button",{name:"Save as preset"})).toHaveProperty("disabled",true);
+
+    cleanup(); renderPage();
+    await screen.findByLabelText("Processor");
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","");
+    fireEvent.change(screen.getByLabelText("Hardware bitrate (kbps)"),{target:{value:"6000"}});
+    await waitFor(()=>expect(mockVideoPlan.mock.calls.at(-1)?.[0].video_options).toMatchObject({kind:"hardware_encode",rate_control:{kind:"average_bitrate",kbps:6000}}));
+    await userEvent.selectOptions(screen.getByLabelText("Processor"),"software");
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+    expect(screen.getByLabelText("Speed")).toHaveProperty("value","slow");
+  });
+  it("applies an unavailable Hardware required preset without resetting its portable intent", async () => {
+    mockOpen.mockResolvedValue(["/tmp/no-hardware.mp4"]);
+    useAppStore.setState({presets:[{
+      id:"hardware",name:"Required H.264",target:"mp4",
+      video_options:{kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000}} as never,
+      quality_preset:null,resolution_cap:null,compress_mode:null,is_builtin:false,created_at:0n,
+    }]});
+    await stage();
+    await userEvent.click(screen.getByRole("button",{name:"Required H.264"}));
+    expect(screen.queryByText(/Settings were not applied/)).toBeNull();
+    expect(screen.getByLabelText("Processing")).toHaveProperty("value","encode");
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
+    expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+  });
+  it("retains committed Hardware required intent when the selected target loses capability", async () => {
+    mockOpen.mockResolvedValue(["/tmp/target-loss.mp4"]);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.selectOptions(screen.getByLabelText("Processor"),"hardware_required");
+    fireEvent.change(screen.getByLabelText("Hardware bitrate (kbps)"),{target:{value:"6000"}});
+    await userEvent.click(screen.getByRole("button",{name:"MOV"}));
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","6000");
+    expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
   });
   it("preserves explicit intent on unsupported targets and offers a way back", async () => {
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
@@ -1694,7 +1747,7 @@ describe("explicit video inspector", () => {
     fireEvent.change(screen.getByLabelText("Video bitrate (kbps)"),{target:{value:"6000"}});
     await userEvent.selectOptions(screen.getByLabelText("Speed"),"fast");
     act(()=>useAppStore.setState({settings:{...useAppStore.getState().settings,hw_acceleration_enabled:true} as Settings}));
-    expect(screen.getByText(/Processor: Software/)).toBeTruthy();
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","software");
     await waitFor(()=>expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",false));
     await userEvent.click(screen.getByRole("button",{name:"Convert 1 file"}));
     await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());

@@ -2302,7 +2302,8 @@ mod tests {
         ] {
             let destination_dir = dir.path().join(match options {
                 goop_core::VideoConvertOptions::Copy => "copy-output",
-                goop_core::VideoConvertOptions::Encode { .. } => "encode-output",
+                goop_core::VideoConvertOptions::Encode { .. }
+                | goop_core::VideoConvertOptions::HardwareEncode { .. } => "encode-output",
             });
             let output = destination_dir.join("result.png");
             let mut req: ConvertRequest = serde_json::from_value(serde_json::json!({

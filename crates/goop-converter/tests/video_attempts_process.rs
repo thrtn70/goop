@@ -104,6 +104,35 @@ fn encode_request(fixture: &Fixture) -> goop_core::ConvertRequest {
     req
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn hardware_required_request(fixture: &Fixture) -> goop_core::ConvertRequest {
+    serde_json::from_value(json!({
+        "input_path": fixture.input,
+        "output_path": fixture.output,
+        "target": "mp4",
+        "video_options": {
+            "kind": "hardware_encode",
+            "codec": "h264",
+            "hardware_policy": {"kind": "required"},
+            "rate_control": {"kind": "average_bitrate", "kbps": 5000}
+        }
+    }))
+    .unwrap()
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn hardware_required_backend(fixture: &Fixture, global_enabled: bool) -> FfmpegBackend<'_> {
+    FfmpegBackend::new(&fixture.resolver, Arc::new(SilentSink)).with_encoders(
+        Arc::new(
+            DetectedEncoders::from_names_with_h264_videotoolbox_required_options([
+                "libx264",
+                "h264_videotoolbox",
+            ]),
+        ),
+        global_enabled,
+    )
+}
+
 #[tokio::test]
 async fn hardware_first_success_reports_completed_encoder_without_fallback() {
     let fixture = fixture("success");
@@ -300,6 +329,23 @@ async fn publication_failure_does_not_retry_encoder() {
     assert!(!fixture.output.exists());
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_publication_failure_never_retries_software() {
+    let fixture = fixture("success");
+    let result = hardware_required_backend(&fixture, true)
+        .with_publication_observer(Arc::new(FailIntent))
+        .convert(
+            JobId::new(),
+            &hardware_required_request(&fixture),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result, Err(GoopError::Queue(_))));
+    assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
+    assert!(!fixture.output.exists());
+}
+
 #[derive(Default)]
 struct RecordingObserver {
     intent: Mutex<Option<JobResult>>,
@@ -341,6 +387,35 @@ async fn completed_attempt_is_frozen_before_publication() {
             encode_attempt_ordinal: 2,
             fallback: Some(_),
             ..
+        })
+    ));
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_execution_attempt_and_result_are_frozen_before_publication() {
+    let fixture = fixture("success");
+    let observer = Arc::new(RecordingObserver::default());
+    let request = hardware_required_request(&fixture);
+    let result = hardware_required_backend(&fixture, false)
+        .with_publication_observer(observer.clone())
+        .convert(JobId::new(), &request, CancellationToken::new())
+        .await
+        .unwrap();
+    let expected = goop_converter::backend::conversion_job_result(&result);
+    assert_eq!(observer.intent.lock().unwrap().as_ref(), Some(&expected));
+    assert_eq!(observer.published.lock().unwrap().as_ref(), Some(&expected));
+    assert_eq!(
+        expected.video_execution.as_ref().unwrap().requested,
+        request.video_options.unwrap()
+    );
+    assert!(matches!(
+        expected.video_attempt,
+        Some(VideoAttempt::Encode {
+            encoder: VideoEncoder::H264Videotoolbox,
+            encode_attempt_ordinal: 1,
+            selection_context: VideoSelectionContext::ExplicitHardwareRequired,
+            fallback: None,
         })
     ));
 }
@@ -403,6 +478,99 @@ async fn explicit_software_reports_explicit_context_and_bypasses_hardware() {
             fallback: None,
         })
     );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_success_is_ordinal_one_and_independent_of_global_toggle() {
+    for global_enabled in [false, true] {
+        let fixture = fixture("success");
+        let request = hardware_required_request(&fixture);
+        let result = hardware_required_backend(&fixture, global_enabled)
+            .convert(JobId::new(), &request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
+        assert_eq!(
+            result.video_execution.as_ref().unwrap().requested,
+            request.video_options.unwrap()
+        );
+        assert_eq!(
+            result.video_attempt,
+            Some(VideoAttempt::Encode {
+                encoder: VideoEncoder::H264Videotoolbox,
+                encode_attempt_ordinal: 1,
+                selection_context: VideoSelectionContext::ExplicitHardwareRequired,
+                fallback: None,
+            })
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_subprocess_failure_never_retries_software() {
+    let fixture = fixture("fallback");
+    let result = hardware_required_backend(&fixture, true)
+        .convert(
+            JobId::new(),
+            &hardware_required_request(&fixture),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result, Err(GoopError::SubprocessFailed { .. })));
+    assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_output_validation_failure_never_retries_software() {
+    let fixture = fixture("no_output");
+    let result = hardware_required_backend(&fixture, true)
+        .convert(
+            JobId::new(),
+            &hardware_required_request(&fixture),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
+    assert!(!fixture.output.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_spawn_failure_never_retries_software() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture("success");
+    std::fs::set_permissions(&fixture.ffmpeg, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let result = hardware_required_backend(&fixture, true)
+        .convert(
+            JobId::new(),
+            &hardware_required_request(&fixture),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result, Err(GoopError::Io(_))));
+    assert!(attempted_encoders(&fixture).is_empty());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn hardware_required_cancellation_never_retries_software() {
+    let fixture = fixture("sleep");
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        trigger.cancel();
+    });
+    let result = hardware_required_backend(&fixture, true)
+        .convert(JobId::new(), &hardware_required_request(&fixture), cancel)
+        .await;
+    assert!(matches!(result, Err(GoopError::Cancelled)));
+    assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
 }
 
 #[tokio::test]
