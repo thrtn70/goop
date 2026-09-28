@@ -36,3 +36,10 @@ test("bundled software availability does not require VideoToolbox on Windows", (
   const end = controls.indexOf("#[tokio::test]", start);
   assert(!controls.slice(start, end).includes("supports_h264_videotoolbox_required"));
 });
+
+test("macOS-only process helpers are absent from Linux lint builds", () => {
+  const processTests = readFileSync(new URL("../crates/goop-converter/tests/video_attempts_process.rs", import.meta.url), "utf8");
+  for (const name of ["hardware_required_request", "hardware_required_backend"]) {
+    assert.match(processTests, new RegExp(`#\\[cfg\\(all\\(target_os = "macos", target_arch = "aarch64"\\)\\)\\]\\nfn ${name}\\(`));
+  }
+});

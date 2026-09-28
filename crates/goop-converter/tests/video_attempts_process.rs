@@ -104,6 +104,7 @@ fn encode_request(fixture: &Fixture) -> goop_core::ConvertRequest {
     req
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn hardware_required_request(fixture: &Fixture) -> goop_core::ConvertRequest {
     serde_json::from_value(json!({
         "input_path": fixture.input,
@@ -119,6 +120,7 @@ fn hardware_required_request(fixture: &Fixture) -> goop_core::ConvertRequest {
     .unwrap()
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn hardware_required_backend(fixture: &Fixture, global_enabled: bool) -> FfmpegBackend<'_> {
     FfmpegBackend::new(&fixture.resolver, Arc::new(SilentSink)).with_encoders(
         Arc::new(
