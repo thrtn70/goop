@@ -852,6 +852,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn hardware_result(path: &std::path::Path) -> JobResult {
         let mut value = serde_json::to_value(result(path)).unwrap();
         value["video_attempt"] = serde_json::json!({

@@ -43,3 +43,8 @@ test("macOS-only process helpers are absent from Linux lint builds", () => {
     assert.match(processTests, new RegExp(`#\\[cfg\\(all\\(target_os = "macos", target_arch = "aarch64"\\)\\)\\]\\nfn ${name}\\(`));
   }
 });
+
+test("platform-only publication fixture is absent from Linux lint builds", () => {
+  const publication = readFileSync(new URL("../crates/goop-queue/src/publication.rs", import.meta.url), "utf8");
+  assert.match(publication, /#\[cfg\(any\(target_os = "macos", target_os = "windows"\)\)\]\n {4}fn hardware_result\(/);
+});
