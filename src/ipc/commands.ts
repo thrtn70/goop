@@ -47,6 +47,18 @@ import type {
   WatermarkSpec,
 } from "@/types";
 
+export type PublicationReviewStatus =
+  | {
+      kind: "observed_matching_output";
+      snapshot: string;
+      output_name: string;
+      bytes: number;
+    }
+  | {
+      kind: "unproven" | "unsupported" | "stale";
+      reason: string;
+    };
+
 function previewToIpc(request: PreviewRequest) {
   return {
     ...request,
@@ -197,6 +209,12 @@ export const api = {
   },
   queue: {
     list: () => invoke<Job[]>("queue_list"),
+    reviewablePublicationIds: () =>
+      invoke<JobId[]>("queue_reviewable_publication_ids"),
+    reviewPublication: (jobId: JobId) =>
+      invoke<PublicationReviewStatus>("queue_review_publication", { jobId }),
+    recoverPublication: (jobId: JobId, snapshot: string) =>
+      invoke<void>("queue_recover_publication", { jobId, snapshot }),
     cancel: (jobId: JobId) => invoke<void>("queue_cancel", { jobId }),
     cancelMany: (jobIds: JobId[]) => invoke<number>("queue_cancel_many", { jobIds }),
     pause: (jobId: JobId) => invoke<void>("queue_pause", { jobId }),

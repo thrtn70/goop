@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronsUpDown, ChevronUp, Eye, FolderOpen, RotateCw } from "lucide-react";
+import { useRef } from "react";
+import { ChevronDown, ChevronsUpDown, ChevronUp, Eye, FolderOpen, RotateCw, SearchCheck } from "lucide-react";
 import type { HistorySort, Job, JobState } from "@/types";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -7,6 +8,10 @@ import { useRevealFile } from "@/hooks/useRevealFile";
 import { canRetryKind, failureView } from "@/lib/jobFailure";
 import { rowLabel } from "@/lib/jobLabel";
 import EmptyHistory from "@/features/history/EmptyHistory";
+import {
+  PublicationReviewDialog,
+  usePublicationReview,
+} from "@/features/history/usePublicationReview";
 
 interface HistoryListProps {
   onPreview: (job: Job) => void;
@@ -98,6 +103,8 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
   const kind = useAppStore((s) => s.history.kind);
   const revealFile = useRevealFile();
   const enqueueToast = useAppStore((s) => s.enqueueToast);
+  const historyTableRef = useRef<HTMLTableElement | null>(null);
+  const publicationReview = usePublicationReview(jobs);
 
   /**
    * Re-queue a failed download. The row stays in History until the queue
@@ -124,7 +131,12 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
 
   return (
     <div className="flex-1 overflow-auto">
-      <table className="w-full text-sm">
+      <table
+        ref={historyTableRef}
+        tabIndex={-1}
+        aria-label="History results"
+        className="w-full text-sm"
+      >
         <thead>
           <tr className="text-xs text-fg-muted">
             <th className="w-8 p-3 pl-6" />
@@ -153,6 +165,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
             // resume, while a conversion failure is deterministic. The
             // backend command is kind-generic; this restraint is the UI's.
             const canRetry = failure !== null && canRetryKind(j.kind);
+            const reviewable = publicationReview.reviewableIds.has(key);
             return (
               <tr
                 key={key}
@@ -202,6 +215,15 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                       {failure.message}
                     </div>
                   )}
+                  {publicationReview.feedback[key] && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="mt-1 max-w-[28rem] text-xs text-warning"
+                    >
+                      {publicationReview.feedback[key]}
+                    </div>
+                  )}
                 </td>
                 <td className="p-3 text-right tabular-nums text-xs text-fg-muted">
                   {formatBytes(j.result?.bytes)}
@@ -211,7 +233,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                 </td>
                 <td className="p-3 pr-6 text-right">
                   <div className="flex items-center justify-end gap-2">
-                    {canRetry && (
+                    {canRetry && !reviewable && (
                       <button
                         type="button"
                         onClick={(e) => {
@@ -227,7 +249,27 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                         <RotateCw size={14} strokeWidth={2.5} aria-hidden="true" />
                       </button>
                     )}
-                    {outputPath && (
+                    {reviewable && (
+                      <button
+                        type="button"
+                        disabled={publicationReview.reviewingId !== null}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void publicationReview.requestReview(
+                            j,
+                            e.currentTarget,
+                            historyTableRef.current,
+                          );
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        className="inline-flex items-center justify-center text-accent transition duration-fast ease-out enabled:hover:text-accent-hover disabled:cursor-wait disabled:opacity-60"
+                        aria-label={`Review uncertain publication for ${rowLabel(j)} (${key})`}
+                        title="Review publication"
+                      >
+                        <SearchCheck size={14} strokeWidth={2.5} aria-hidden="true" />
+                      </button>
+                    )}
+                    {outputPath && !reviewable && (
                       <button
                         type="button"
                         onClick={(e) => {
@@ -260,6 +302,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
           })}
         </tbody>
       </table>
+      <PublicationReviewDialog review={publicationReview} />
     </div>
   );
 }

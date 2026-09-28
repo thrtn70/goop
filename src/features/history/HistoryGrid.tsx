@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, RotateCw } from "lucide-react";
+import { FolderOpen, RotateCw, SearchCheck } from "lucide-react";
 import type { Job, JobId, SourceKind } from "@/types";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -9,6 +9,10 @@ import { useThumbnail } from "@/hooks/useThumbnail";
 import { canRetryKind, failureView } from "@/lib/jobFailure";
 import { rowLabel } from "@/lib/jobLabel";
 import EmptyHistory from "@/features/history/EmptyHistory";
+import {
+  PublicationReviewDialog,
+  usePublicationReview,
+} from "@/features/history/usePublicationReview";
 
 interface HistoryGridProps {
   onPreview: (job: Job) => void;
@@ -60,19 +64,27 @@ function Card({
   job,
   selected,
   previewing,
+  reviewable,
+  reviewing,
+  reviewFeedback,
   onPreview,
   onQuickView,
+  onReview,
 }: {
   job: Job;
   selected: boolean;
   previewing: boolean;
+  reviewable: boolean;
+  reviewing: boolean;
+  reviewFeedback: string | undefined;
   onPreview: (j: Job) => void;
   onQuickView: (j: Job) => void;
+  onReview: (j: Job, opener: HTMLElement) => void;
 }) {
   const toggleSelection = useAppStore((s) => s.toggleHistorySelection);
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const revealFile = useRevealFile();
-  const ref = useRef<HTMLButtonElement | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(false);
   const outputPath = job.result?.output_path ?? null;
   const kind = kindOf(outputPath);
@@ -130,65 +142,74 @@ function Card({
   }
 
   return (
-    <button
+    <div
       ref={ref}
-      type="button"
-      onClick={() => onPreview(job)}
-      onKeyDown={(e) => {
-        if (e.key === " " || e.code === "Space") {
-          e.preventDefault();
-          onQuickView(job);
-        }
-      }}
       className={`group relative flex flex-col overflow-hidden rounded-lg bg-surface-1 text-left transition duration-fast ease-out hover:ring-1 hover:ring-accent ${
         previewing ? "ring-2 ring-accent" : ""
       }`}
     >
-      {thumbState.status === "ready" ? (
-        <img
-          src={thumbState.src}
-          alt=""
-          className="aspect-[16/10] w-full bg-surface-2 object-cover"
-          // Phase: View Transitions. The card gives up its name when its
-          // preview is open so the same name is unique across the page —
-          // avoiding the duplicate-name conflict that would suppress the
-          // morph. The previewing card stays mounted; only the preview
-          // pane's <img> carries the name in the after-state.
-          style={
-            previewing
-              ? undefined
-              : { viewTransitionName: `vt-thumb-${jobIdKey(job.id)}` }
+      <button
+        type="button"
+        onClick={() => onPreview(job)}
+        onKeyDown={(e) => {
+          if (e.key === " " || e.code === "Space") {
+            e.preventDefault();
+            onQuickView(job);
           }
-        />
-      ) : (
-        <KindIcon kind={kind} />
-      )}
-      <div className="p-2.5">
-        <div className="truncate text-xs text-fg" title={outputPath ?? undefined}>
-          {basename(outputPath)}
-        </div>
-        <div className="mt-0.5 flex justify-between text-xs text-fg-muted">
-          <span>{formatBytes(job.result?.bytes)}</span>
-          <span>
-            {job.result?.result_kind === "folder" && job.result.file_count > 1
-              ? `${job.result.file_count} files`
-              : String(job.kind)}
-          </span>
-        </div>
-        {/* The card otherwise reads as a success with a missing thumbnail.
-         *  The raw detail stays in the queue row — a card is smaller than a
-         *  table row, and a traceback in one would crowd out the grid. */}
-        {failed && (
-          <div className="mt-1">
-            <span className="text-xs uppercase text-error">error</span>
-            {failure && (
-              <div className="truncate text-xs text-error/80" title={failure.message}>
-                {failure.message}
-              </div>
-            )}
-          </div>
+        }}
+        className="flex w-full flex-col text-left"
+      >
+        {thumbState.status === "ready" ? (
+          <img
+            src={thumbState.src}
+            alt=""
+            className="aspect-[16/10] w-full bg-surface-2 object-cover"
+            // Phase: View Transitions. The card gives up its name when its
+            // preview is open so the same name is unique across the page —
+            // avoiding the duplicate-name conflict that would suppress the
+            // morph. The previewing card stays mounted; only the preview
+            // pane's <img> carries the name in the after-state.
+            style={
+              previewing
+                ? undefined
+                : { viewTransitionName: `vt-thumb-${jobIdKey(job.id)}` }
+            }
+          />
+        ) : (
+          <KindIcon kind={kind} />
         )}
-      </div>
+        <div className="w-full p-2.5">
+          <div className="truncate text-xs text-fg" title={outputPath ?? undefined}>
+            {basename(outputPath)}
+          </div>
+          <div className="mt-0.5 flex justify-between text-xs text-fg-muted">
+            <span>{formatBytes(job.result?.bytes)}</span>
+            <span>
+              {job.result?.result_kind === "folder" && job.result.file_count > 1
+                ? `${job.result.file_count} files`
+                : String(job.kind)}
+            </span>
+          </div>
+          {/* The card otherwise reads as a success with a missing thumbnail.
+           *  The raw detail stays in the queue row — a card is smaller than a
+           *  table row, and a traceback in one would crowd out the grid. */}
+          {failed && (
+            <div className="mt-1">
+              <span className="text-xs uppercase text-error">error</span>
+              {failure && (
+                <div className="truncate text-xs text-error/80" title={failure.message}>
+                  {failure.message}
+                </div>
+              )}
+            </div>
+          )}
+          {reviewFeedback && (
+            <div role="status" aria-live="polite" className="mt-1 text-xs text-warning">
+              {reviewFeedback}
+            </div>
+          )}
+        </div>
+      </button>
       <span
         onClick={(e) => {
           e.stopPropagation();
@@ -218,7 +239,7 @@ function Card({
        *  container means they sit side by side rather than on top of each
        *  other if that ever stops being true. */}
       <span className="absolute right-2 top-2 flex items-center gap-1">
-        {canRetry && (
+        {canRetry && !reviewable && (
           <span
             onClick={(e) => {
               // The card itself opens a preview. Without this the retry also
@@ -245,7 +266,30 @@ function Card({
             <RotateCw size={12} strokeWidth={2.5} aria-hidden="true" />
           </span>
         )}
-        {outputPath && (
+        {reviewable && (
+          <span
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!reviewing) onReview(job, event.currentTarget);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!reviewing) onReview(job, event.currentTarget);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-disabled={reviewing}
+            aria-label={`Review uncertain publication for ${rowLabel(job)} (${jobIdKey(job.id)})`}
+            title="Review publication"
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover aria-disabled:cursor-wait aria-disabled:opacity-60"
+          >
+            <SearchCheck size={12} strokeWidth={2.5} aria-hidden="true" />
+          </span>
+        )}
+        {outputPath && !reviewable && (
           <span
             onClick={(e) => {
               e.stopPropagation();
@@ -268,7 +312,7 @@ function Card({
           </span>
         )}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -282,6 +326,8 @@ export default function HistoryGrid({ onPreview, onQuickView }: HistoryGridProps
   const previewSelectedId = useAppStore((s) => s.history.previewSelectedId);
   const search = useAppStore((s) => s.history.search);
   const kind = useAppStore((s) => s.history.kind);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const publicationReview = usePublicationReview(jobs);
 
   if (jobs.length === 0) {
     const filtersActive = search.trim() !== "" || kind !== null;
@@ -289,21 +335,36 @@ export default function HistoryGrid({ onPreview, onQuickView }: HistoryGridProps
   }
 
   return (
-    <div className="grid flex-1 gap-3 overflow-auto px-6 py-4 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
-      {jobs.map((j) => {
-        const key = jobIdKey(j.id);
-        return (
-          <Card
-            key={key}
-            job={j}
-            selected={selectedIds.has(key)}
-            previewing={previewSelectedId === key}
-            onPreview={onPreview}
-            onQuickView={onQuickView}
-          />
-        );
-      })}
-    </div>
+    <>
+      <div
+        ref={gridRef}
+        role="region"
+        aria-label="History results"
+        tabIndex={-1}
+        className="grid flex-1 gap-3 overflow-auto px-6 py-4 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]"
+      >
+        {jobs.map((j) => {
+          const key = jobIdKey(j.id);
+          return (
+            <Card
+              key={key}
+              job={j}
+              selected={selectedIds.has(key)}
+              previewing={previewSelectedId === key}
+              reviewable={publicationReview.reviewableIds.has(key)}
+              reviewing={publicationReview.reviewingId !== null}
+              reviewFeedback={publicationReview.feedback[key]}
+              onPreview={onPreview}
+              onQuickView={onQuickView}
+              onReview={(job, opener) => {
+                void publicationReview.requestReview(job, opener, gridRef.current);
+              }}
+            />
+          );
+        })}
+      </div>
+      <PublicationReviewDialog review={publicationReview} />
+    </>
   );
 }
 

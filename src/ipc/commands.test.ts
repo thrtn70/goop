@@ -35,6 +35,39 @@ it("sends the expected output kind with a local open request", async () => {
   });
 });
 
+describe("publication review commands", () => {
+  beforeEach(() => invokeMock.mockClear());
+
+  it("lists reviewable job IDs without a request payload", async () => {
+    invokeMock.mockResolvedValueOnce(["job-one", "job-two"]);
+
+    await expect(api.queue.reviewablePublicationIds()).resolves.toEqual(["job-one", "job-two"]);
+    expect(invokeMock).toHaveBeenCalledWith("queue_reviewable_publication_ids");
+  });
+
+  it("returns the typed point-in-time assessment", async () => {
+    const result = {
+      kind: "observed_matching_output" as const,
+      snapshot: "opaque-snapshot",
+      output_name: "clip.mp4",
+      bytes: 2048,
+    };
+    invokeMock.mockResolvedValueOnce(result);
+
+    await expect(api.queue.reviewPublication("job-one")).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("queue_review_publication", { jobId: "job-one" });
+  });
+
+  it("passes the opaque snapshot when recovery is confirmed", async () => {
+    await api.queue.recoverPublication("job-one", "opaque-snapshot");
+
+    expect(invokeMock).toHaveBeenCalledWith("queue_recover_publication", {
+      jobId: "job-one",
+      snapshot: "opaque-snapshot",
+    });
+  });
+});
+
 // Lock the discriminator + field names emitted by each PdfOperation
 // builder. The Rust side uses #[serde(tag = "kind", rename_all =
 // "snake_case")]; if the wire shape ever drifts, the backend's
