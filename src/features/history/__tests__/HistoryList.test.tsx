@@ -246,6 +246,7 @@ describe("HistoryList verified publication review", () => {
 
     expect(api.queue.reviewPublication).toHaveBeenCalledWith(uncertain.id);
     const dialog = await screen.findByRole("dialog", { name: /recover completed output/i });
+    expect(dialog.querySelector(".enter-up")).toBeNull();
     expect(dialog.textContent).toMatch(/observed at the destination during this check/i);
     expect(dialog.textContent).toMatch(/does not guarantee/i);
     expect(screen.getByText("clip.mp4")).toBeTruthy();

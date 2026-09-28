@@ -256,7 +256,7 @@ export function PublicationReviewDialog({
       }}
       onKeyDown={review.handleDialogKeyDown}
     >
-      <div className="enter-up w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg bg-surface-1 p-5 shadow-xl">
+      <div className="w-[28rem] max-w-[calc(100vw-2rem)] rounded-lg bg-surface-1 p-5 shadow-xl">
         <h3
           id="publication-recovery-title"
           className="font-display text-sm font-semibold text-fg"
