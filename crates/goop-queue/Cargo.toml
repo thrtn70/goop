@@ -16,6 +16,7 @@ rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
 parking_lot = "0.12"
 dashmap = "6"
 uuid = { workspace = true, features = ["v7"] }
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

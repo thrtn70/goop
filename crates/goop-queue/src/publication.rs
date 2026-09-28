@@ -1,8 +1,9 @@
 use crate::store::QueueStore;
 use goop_core::publication::{FileIdentity, PublicationObserver};
-use goop_core::{GoopError, JobId, JobKind, JobResult, JobState};
+use goop_core::{GoopError, JobId, JobKind, JobResult, JobState, ResultKind};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -23,6 +24,25 @@ pub struct PublicationRecovery {
 pub struct PublicationFinalization {
     pub state: JobState,
     pub result: Option<JobResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PublicationReview {
+    ObservedMatchingOutput {
+        snapshot: String,
+        output_name: String,
+        bytes: u64,
+    },
+    Unproven {
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
+    Stale {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +72,31 @@ enum PublicationPhase {
     },
 }
 
+#[derive(Debug)]
+struct PublicationReviewState {
+    raw: String,
+    kind: String,
+    state: String,
+    payload: String,
+    result: Option<String>,
+    attempts: u32,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+    error_detail: Option<String>,
+}
+
+struct ReviewableIntent {
+    staged_path: PathBuf,
+    destination: PathBuf,
+    result: JobResult,
+    identity: FileIdentity,
+}
+
+enum ReviewIntentError {
+    Unsupported(String),
+    Stale(String),
+}
+
 struct QueuePublicationObserver {
     store: QueueStore,
     job_id: JobId,
@@ -60,6 +105,179 @@ struct QueuePublicationObserver {
 }
 
 impl QueueStore {
+    pub fn list_reviewable_publication_ids(&self) -> Result<Vec<JobId>, GoopError> {
+        let connection = self.conn.lock();
+        let mut statement = connection
+            .prepare(
+                "SELECT j.id
+                 FROM jobs j JOIN publication_journal p ON p.job_id = j.id
+                 WHERE j.kind = 'convert' AND j.state LIKE 'error:%'
+                 ORDER BY j.created_at ASC",
+            )
+            .map_err(queue_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(queue_error)?;
+        rows.map(|row| parse_job_id(&row.map_err(queue_error)?))
+            .collect()
+    }
+
+    pub fn review_publication_intent(&self, id: JobId) -> Result<PublicationReview, GoopError> {
+        self.review_publication_intent_with(id, || {})
+    }
+
+    fn review_publication_intent_with(
+        &self,
+        id: JobId,
+        after_verification: impl FnOnce(),
+    ) -> Result<PublicationReview, GoopError> {
+        let state = {
+            let connection = self.conn.lock();
+            load_review_state(&connection, id)?
+        };
+        let Some(state) = state else {
+            return Ok(PublicationReview::Stale {
+                reason: "publication attempt is no longer unresolved".into(),
+            });
+        };
+        if state.kind != "convert" || !state.state.starts_with("error:") {
+            return Ok(PublicationReview::Stale {
+                reason: "publication job is no longer an eligible conversion error".into(),
+            });
+        }
+        if state.result.is_some() {
+            return Ok(PublicationReview::Unsupported {
+                reason: "publication job already carries a contradictory result".into(),
+            });
+        }
+        let intent = match strict_reviewable_intent(&state) {
+            Ok(intent) => intent,
+            Err(ReviewIntentError::Unsupported(reason)) => {
+                return Ok(PublicationReview::Unsupported { reason });
+            }
+            Err(ReviewIntentError::Stale(reason)) => {
+                return Ok(PublicationReview::Stale { reason });
+            }
+        };
+        if let Err(reason) = verify_review_filesystem(&intent) {
+            return Ok(PublicationReview::Unproven { reason });
+        }
+        after_verification();
+        let current = {
+            let connection = self.conn.lock();
+            load_review_state(&connection, id)?
+        };
+        if current
+            .as_ref()
+            .is_none_or(|current| review_snapshot(id, current) != review_snapshot(id, &state))
+        {
+            return Ok(PublicationReview::Stale {
+                reason: "publication job changed during verification".into(),
+            });
+        }
+        let output_name = match intent
+            .destination
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            Some(name) if !name.is_empty() => name.to_owned(),
+            _ => {
+                return Ok(PublicationReview::Unsupported {
+                    reason: "publication destination has no supported output name".into(),
+                })
+            }
+        };
+        Ok(PublicationReview::ObservedMatchingOutput {
+            snapshot: review_snapshot(id, &state),
+            output_name,
+            bytes: intent
+                .result
+                .bytes
+                .expect("validated publication byte count"),
+        })
+    }
+
+    pub fn recover_publication_intent(
+        &self,
+        id: JobId,
+        snapshot: &str,
+        now_ms: i64,
+    ) -> Result<(), GoopError> {
+        self.recover_publication_intent_with(id, snapshot, now_ms, || {})
+    }
+
+    fn recover_publication_intent_with(
+        &self,
+        id: JobId,
+        snapshot: &str,
+        now_ms: i64,
+        before_verification: impl FnOnce(),
+    ) -> Result<(), GoopError> {
+        let state = {
+            let connection = self.conn.lock();
+            load_review_state(&connection, id)?.ok_or_else(stale_review_error)?
+        };
+        if review_snapshot(id, &state) != snapshot {
+            return Err(stale_review_error());
+        }
+        if state.kind != "convert" || !state.state.starts_with("error:") || state.result.is_some() {
+            return Err(stale_review_error());
+        }
+        let intent = strict_reviewable_intent(&state).map_err(|error| match error {
+            ReviewIntentError::Unsupported(reason) | ReviewIntentError::Stale(reason) => {
+                GoopError::Queue(reason)
+            }
+        })?;
+        before_verification();
+        verify_review_filesystem(&intent).map_err(GoopError::Queue)?;
+
+        let mut connection = self.conn.lock();
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(queue_error)?;
+        let current = load_review_state(&tx, id)?.ok_or_else(stale_review_error)?;
+        if review_snapshot(id, &current) != snapshot {
+            return Err(stale_review_error());
+        }
+        let serialized_result = serde_json::to_string(&intent.result).map_err(queue_error)?;
+        let updated = tx
+            .execute(
+                "UPDATE jobs SET state = 'done', result = ?2, finished_at = ?3, error_detail = NULL
+                 WHERE id = ?1 AND kind = ?4 AND state = ?5 AND payload = ?6
+                   AND result IS NULL AND attempts = ?7
+                   AND started_at IS ?8 AND finished_at IS ?9 AND error_detail IS ?10
+                   AND EXISTS (SELECT 1 FROM publication_journal
+                               WHERE job_id = jobs.id AND record = ?11)",
+                params![
+                    id.0.to_string(),
+                    serialized_result,
+                    now_ms,
+                    state.kind,
+                    state.state,
+                    state.payload,
+                    state.attempts,
+                    state.started_at,
+                    state.finished_at,
+                    state.error_detail,
+                    state.raw,
+                ],
+            )
+            .map_err(queue_error)?;
+        if updated != 1 {
+            return Err(stale_review_error());
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM publication_journal WHERE job_id = ?1 AND record = ?2",
+                params![id.0.to_string(), state.raw],
+            )
+            .map_err(queue_error)?;
+        if deleted != 1 {
+            return Err(stale_review_error());
+        }
+        tx.commit().map_err(queue_error)
+    }
+
     pub fn begin_publication(
         &self,
         id: JobId,
@@ -720,6 +938,194 @@ impl QueuePublicationObserver {
     }
 }
 
+fn load_review_state(
+    connection: &rusqlite::Connection,
+    id: JobId,
+) -> Result<Option<PublicationReviewState>, GoopError> {
+    connection
+        .query_row(
+            "SELECT p.record, j.kind, j.state, j.payload, j.result, j.attempts,
+                    j.started_at, j.finished_at, j.error_detail
+             FROM publication_journal p JOIN jobs j ON j.id = p.job_id
+             WHERE j.id = ?1",
+            params![id.0.to_string()],
+            |row| {
+                Ok(PublicationReviewState {
+                    raw: row.get(0)?,
+                    kind: row.get(1)?,
+                    state: row.get(2)?,
+                    payload: row.get(3)?,
+                    result: row.get(4)?,
+                    attempts: row.get(5)?,
+                    started_at: row.get(6)?,
+                    finished_at: row.get(7)?,
+                    error_detail: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(queue_error)
+}
+
+fn strict_reviewable_intent(
+    state: &PublicationReviewState,
+) -> Result<ReviewableIntent, ReviewIntentError> {
+    let value: serde_json::Value = serde_json::from_str(&state.raw).map_err(|error| {
+        unsupported_review(format!("publication journal is malformed: {error}"))
+    })?;
+    let recorded_result = value
+        .pointer("/phase/result")
+        .cloned()
+        .ok_or_else(|| unsupported_review("publication intent has no recorded result"))?;
+    let record = parse_record(&state.raw).map_err(|error| unsupported_review(error.to_string()))?;
+    let row_payload: serde_json::Value = serde_json::from_str(&state.payload).map_err(|error| {
+        unsupported_review(format!("publication job payload is malformed: {error}"))
+    })?;
+    if record.payload != row_payload {
+        return Err(ReviewIntentError::Stale(
+            "publication journal no longer matches its job payload".into(),
+        ));
+    }
+    let PublicationPhase::Intent {
+        staged_path,
+        destination,
+        result,
+        staged_identity,
+    } = record.phase
+    else {
+        return Err(unsupported_review(
+            "publication journal does not contain a reviewable intent",
+        ));
+    };
+    let normalized_result = serde_json::to_value(&result).map_err(|error| {
+        unsupported_review(format!(
+            "publication result could not be preserved: {error}"
+        ))
+    })?;
+    if normalized_result != recorded_result {
+        return Err(unsupported_review(
+            "publication result contains unknown or default-altered fields and cannot be preserved",
+        ));
+    }
+    validate_result_destination(&destination, &result)
+        .map_err(|error| unsupported_review(error.to_string()))?;
+    if !destination.is_absolute() || !staged_path.is_absolute() {
+        return Err(unsupported_review(
+            "publication intent requires absolute staged and destination paths",
+        ));
+    }
+    if result.result_kind != ResultKind::File || result.file_count != 1 {
+        return Err(unsupported_review(
+            "publication intent is not a single-file result",
+        ));
+    }
+    let bytes = result
+        .bytes
+        .ok_or_else(|| unsupported_review("publication intent has no recorded byte count"))?;
+    if bytes != identity_size(&staged_identity) {
+        return Err(unsupported_review(
+            "publication result byte count does not match its recorded identity",
+        ));
+    }
+    Ok(ReviewableIntent {
+        staged_path,
+        destination,
+        result,
+        identity: staged_identity,
+    })
+}
+
+fn unsupported_review(reason: impl Into<String>) -> ReviewIntentError {
+    ReviewIntentError::Unsupported(reason.into())
+}
+
+fn verify_review_filesystem(intent: &ReviewableIntent) -> Result<(), String> {
+    intent
+        .identity
+        .verify(&intent.destination)
+        .map_err(|error| format!("destination identity could not be verified: {error}"))?;
+    confirm_staged_entry_absent(&intent.staged_path)
+}
+
+fn confirm_staged_entry_absent(staged_path: &Path) -> Result<(), String> {
+    let parent = staged_path
+        .parent()
+        .ok_or_else(|| "staged path has no inspectable parent".to_owned())?;
+    let name = staged_path
+        .file_name()
+        .ok_or_else(|| "staged path has no inspectable entry name".to_owned())?;
+    let metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| format!("staged parent could not be inspected: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("staged parent is not an inspectable directory".into());
+    }
+    let entries = std::fs::read_dir(parent)
+        .map_err(|error| format!("staged parent could not be inspected: {error}"))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("staged parent entry could not be inspected: {error}"))?;
+        if entry.file_name() == name {
+            return Err("staged entry is still present".into());
+        }
+    }
+    Ok(())
+}
+
+fn identity_size(identity: &FileIdentity) -> u64 {
+    match identity {
+        FileIdentity::MacosV1 { size, .. } | FileIdentity::WindowsV1 { size, .. } => *size,
+    }
+}
+
+fn review_snapshot(id: JobId, state: &PublicationReviewState) -> String {
+    let mut hasher = Sha256::new();
+    hash_snapshot_field(&mut hasher, b"goop-publication-review-v1");
+    hash_snapshot_field(&mut hasher, id.0.as_bytes());
+    hash_snapshot_field(&mut hasher, state.raw.as_bytes());
+    hash_snapshot_field(&mut hasher, state.kind.as_bytes());
+    hash_snapshot_field(&mut hasher, state.state.as_bytes());
+    hash_snapshot_field(&mut hasher, state.payload.as_bytes());
+    hash_optional_snapshot_field(&mut hasher, state.result.as_deref());
+    hash_snapshot_field(&mut hasher, &state.attempts.to_be_bytes());
+    hash_optional_i64_snapshot_field(&mut hasher, state.started_at);
+    hash_optional_i64_snapshot_field(&mut hasher, state.finished_at);
+    hash_optional_snapshot_field(&mut hasher, state.error_detail.as_deref());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn hash_snapshot_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn hash_optional_snapshot_field(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_snapshot_field(hasher, value.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_optional_i64_snapshot_field(hasher: &mut Sha256, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_snapshot_field(hasher, &value.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn stale_review_error() -> GoopError {
+    GoopError::Queue("publication review is stale or already resolved".into())
+}
+
 fn validate_result_destination(destination: &Path, result: &JobResult) -> Result<(), GoopError> {
     let expected = destination
         .to_str()
@@ -788,7 +1194,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    use super::{parse_record, serialize_record};
+    use super::{parse_record, serialize_record, PublicationReview};
     use crate::store::QueueStore;
     use goop_core::{Job, JobKind, JobResult, JobState};
     use rusqlite::params;
@@ -891,6 +1297,495 @@ mod tests {
         job.state = JobState::Running;
         store.insert(&job).unwrap();
         job
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn unresolved_moved_intent(
+        store: &QueueStore,
+        root: &std::path::Path,
+    ) -> (Job, std::path::PathBuf, std::path::PathBuf, JobResult) {
+        let staged = root.join("staged.jpg");
+        let destination = root.join("output.jpg");
+        fs::write(&staged, b"payload").unwrap();
+        let job = running_convert(store);
+        let expected = result(&destination);
+        let observer = store.begin_publication(job.id, &job.payload).unwrap();
+        observer
+            .before_publish(&staged, &destination, &expected)
+            .unwrap();
+        fs::rename(&staged, &destination).unwrap();
+        drop(observer);
+        let recovered = store.reconcile_publications().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert!(matches!(recovered[0].state, JobState::Error { .. }));
+        (job, staged, destination, expected)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn review_and_recover_matching_intent_preserves_full_result_across_reopens() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let store = QueueStore::open(&db).unwrap();
+        let (job, _staged, _destination, expected) = unresolved_moved_intent(&store, dir.path());
+
+        assert_eq!(
+            store.list_reviewable_publication_ids().unwrap(),
+            vec![job.id]
+        );
+        let review = store.review_publication_intent(job.id).unwrap();
+        let serialized = serde_json::to_value(&review).unwrap();
+        assert_eq!(serialized["kind"], "observed_matching_output");
+        let snapshot = match review {
+            PublicationReview::ObservedMatchingOutput {
+                snapshot,
+                output_name,
+                bytes,
+            } => {
+                assert_eq!(output_name, "output.jpg");
+                assert_eq!(bytes, 7);
+                snapshot
+            }
+            other => panic!("expected matching output, got {other:?}"),
+        };
+
+        store
+            .recover_publication_intent(job.id, &snapshot, 123)
+            .unwrap();
+        let recovered = store.get_by_id(job.id).unwrap().unwrap();
+        assert_eq!(recovered.state, JobState::Done);
+        assert_eq!(recovered.result.as_ref(), Some(&expected));
+        assert!(!store.has_publication_journal(job.id).unwrap());
+        assert!(store
+            .recover_publication_intent(job.id, &snapshot, 124)
+            .unwrap_err()
+            .to_string()
+            .contains("stale"));
+
+        drop(store);
+        for _ in 0..2 {
+            let reopened = QueueStore::open(&db).unwrap();
+            let restored = reopened.get_by_id(job.id).unwrap().unwrap();
+            assert_eq!(restored.state, JobState::Done);
+            assert_eq!(restored.result.as_ref(), Some(&expected));
+            drop(reopened);
+        }
+    }
+
+    #[test]
+    fn reviewable_ids_include_only_journal_bearing_error_converts() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let mut error_convert = Job::new(JobKind::Convert, serde_json::json!({"case": "yes"}));
+        error_convert.state = JobState::Error {
+            message: "uncertain".into(),
+            detail: None,
+        };
+        store.insert(&error_convert).unwrap();
+        let running_convert = running_convert(&store);
+        let mut error_extract = Job::new(JobKind::Extract, serde_json::json!({"case": "no"}));
+        error_extract.state = JobState::Error {
+            message: "failed".into(),
+            detail: None,
+        };
+        store.insert(&error_extract).unwrap();
+        let connection = store.conn.lock();
+        for id in [error_convert.id, running_convert.id, error_extract.id] {
+            connection
+                .execute(
+                    "INSERT INTO publication_journal (job_id, record) VALUES (?1, 'not-json')",
+                    params![id.0.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(
+            store.list_reviewable_publication_ids().unwrap(),
+            vec![error_convert.id]
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn malformed_future_and_payload_changed_intents_are_classified_without_mutation() {
+        for case in ["malformed", "future", "payload_changed"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _staged, _destination, _expected) =
+                unresolved_moved_intent(&store, dir.path());
+            let original = store.load_journal(job.id).unwrap().unwrap();
+            match case {
+                "malformed" => {
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE publication_journal SET record = 'not-json' WHERE job_id = ?1",
+                            params![job.id.0.to_string()],
+                        )
+                        .unwrap();
+                }
+                "future" => {
+                    let mut value: serde_json::Value = serde_json::from_str(&original).unwrap();
+                    value["version"] = serde_json::json!(999);
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE publication_journal SET record = ?2 WHERE job_id = ?1",
+                            params![job.id.0.to_string(), serde_json::to_string(&value).unwrap()],
+                        )
+                        .unwrap();
+                }
+                "payload_changed" => {
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE jobs SET payload = '{\"changed\":true}' WHERE id = ?1",
+                            params![job.id.0.to_string()],
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let review = store.review_publication_intent(job.id).unwrap();
+            if case == "payload_changed" {
+                assert!(matches!(review, PublicationReview::Stale { .. }));
+            } else {
+                assert!(matches!(review, PublicationReview::Unsupported { .. }));
+            }
+            assert!(store.has_publication_journal(job.id).unwrap());
+            assert!(matches!(
+                store.get_by_id(job.id).unwrap().unwrap().state,
+                JobState::Error { .. }
+            ));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn review_refuses_unknown_missing_and_contradictory_result_data() {
+        for case in ["unknown", "missing", "contradictory"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _staged, _destination, expected) =
+                unresolved_moved_intent(&store, dir.path());
+            if case == "contradictory" {
+                store
+                    .conn
+                    .lock()
+                    .execute(
+                        "UPDATE jobs SET result = ?2 WHERE id = ?1",
+                        params![
+                            job.id.0.to_string(),
+                            serde_json::to_string(&expected).unwrap()
+                        ],
+                    )
+                    .unwrap();
+            } else {
+                let raw = store.load_journal(job.id).unwrap().unwrap();
+                let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                let result = value["phase"]["result"].as_object_mut().unwrap();
+                if case == "unknown" {
+                    result.insert("future_fact".into(), serde_json::json!(true));
+                } else {
+                    result.remove("video_attempt");
+                }
+                store
+                    .conn
+                    .lock()
+                    .execute(
+                        "UPDATE publication_journal SET record = ?2 WHERE job_id = ?1",
+                        params![job.id.0.to_string(), serde_json::to_string(&value).unwrap()],
+                    )
+                    .unwrap();
+            }
+
+            assert!(matches!(
+                store.review_publication_intent(job.id).unwrap(),
+                PublicationReview::Unsupported { .. }
+            ));
+            assert!(store.has_publication_journal(job.id).unwrap());
+            assert!(matches!(
+                store.get_by_id(job.id).unwrap().unwrap().state,
+                JobState::Error { .. }
+            ));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn review_refuses_non_file_and_wrong_byte_count_results() {
+        for case in ["folder", "multiple_files", "missing_bytes", "wrong_bytes"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _staged, _destination, _expected) =
+                unresolved_moved_intent(&store, dir.path());
+            let raw = store.load_journal(job.id).unwrap().unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            match case {
+                "folder" => value["phase"]["result"]["result_kind"] = serde_json::json!("folder"),
+                "multiple_files" => value["phase"]["result"]["file_count"] = serde_json::json!(2),
+                "missing_bytes" => value["phase"]["result"]["bytes"] = serde_json::Value::Null,
+                "wrong_bytes" => value["phase"]["result"]["bytes"] = serde_json::json!(8),
+                _ => unreachable!(),
+            }
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE publication_journal SET record = ?2 WHERE job_id = ?1",
+                    params![job.id.0.to_string(), serde_json::to_string(&value).unwrap()],
+                )
+                .unwrap();
+
+            assert!(matches!(
+                store.review_publication_intent(job.id).unwrap(),
+                PublicationReview::Unsupported { .. }
+            ));
+            assert!(store.has_publication_journal(job.id).unwrap());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn review_requires_verified_destination_and_confirmed_staged_absence() {
+        for case in [
+            "destination_changed",
+            "staged_present",
+            "staged_parent_missing",
+        ] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, staged, destination, _expected) = unresolved_moved_intent(&store, dir.path());
+            match case {
+                "destination_changed" => fs::write(&destination, b"changed").unwrap(),
+                "staged_present" => fs::write(&staged, b"replacement").unwrap(),
+                "staged_parent_missing" => {
+                    let raw = store.load_journal(job.id).unwrap().unwrap();
+                    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                    value["phase"]["staged_path"] =
+                        serde_json::json!(dir.path().join("missing").join("staged.jpg"));
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE publication_journal SET record = ?2 WHERE job_id = ?1",
+                            params![job.id.0.to_string(), serde_json::to_string(&value).unwrap()],
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(matches!(
+                store.review_publication_intent(job.id).unwrap(),
+                PublicationReview::Unproven { .. }
+            ));
+            assert!(store.has_publication_journal(job.id).unwrap());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn review_refuses_hard_linked_destination() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _staged, destination, _expected) = unresolved_moved_intent(&store, dir.path());
+        fs::hard_link(&destination, dir.path().join("second-link.jpg")).unwrap();
+
+        assert!(matches!(
+            store.review_publication_intent(job.id).unwrap(),
+            PublicationReview::Unproven { .. }
+        ));
+        assert!(store.has_publication_journal(job.id).unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn review_refuses_symlinked_destination_and_dangling_staged_entry() {
+        use std::os::unix::fs::symlink;
+
+        for case in ["destination", "staged"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, staged, destination, _expected) = unresolved_moved_intent(&store, dir.path());
+            if case == "destination" {
+                let moved = dir.path().join("moved-output.jpg");
+                fs::rename(&destination, &moved).unwrap();
+                symlink(&moved, &destination).unwrap();
+            } else {
+                symlink(dir.path().join("missing-entry"), &staged).unwrap();
+            }
+
+            assert!(matches!(
+                store.review_publication_intent(job.id).unwrap(),
+                PublicationReview::Unproven { .. }
+            ));
+            assert!(store.has_publication_journal(job.id).unwrap());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn changed_attempt_or_journal_makes_snapshot_stale() {
+        for case in ["attempt", "payload", "journal", "reconcile"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _staged, _destination, _expected) =
+                unresolved_moved_intent(&store, dir.path());
+            let snapshot = match store.review_publication_intent(job.id).unwrap() {
+                PublicationReview::ObservedMatchingOutput { snapshot, .. } => snapshot,
+                other => panic!("expected matching output, got {other:?}"),
+            };
+            match case {
+                "attempt" => {
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE jobs SET attempts = attempts + 1 WHERE id = ?1",
+                            params![job.id.0.to_string()],
+                        )
+                        .unwrap();
+                }
+                "payload" => {
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE jobs SET payload = '{\"changed\":true}' WHERE id = ?1",
+                            params![job.id.0.to_string()],
+                        )
+                        .unwrap();
+                }
+                "journal" => {
+                    let raw = store.load_journal(job.id).unwrap().unwrap();
+                    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                    value["attempt_id"] = serde_json::json!(uuid::Uuid::now_v7());
+                    store
+                        .conn
+                        .lock()
+                        .execute(
+                            "UPDATE publication_journal SET record = ?2 WHERE job_id = ?1",
+                            params![job.id.0.to_string(), serde_json::to_string(&value).unwrap()],
+                        )
+                        .unwrap();
+                }
+                "reconcile" => {
+                    assert_eq!(store.reconcile_publications().unwrap().len(), 1);
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(store
+                .recover_publication_intent(job.id, &snapshot, 123)
+                .unwrap_err()
+                .to_string()
+                .contains("stale"));
+            assert!(store.has_publication_journal(job.id).unwrap());
+            assert!(matches!(
+                store.get_by_id(job.id).unwrap().unwrap().state,
+                JobState::Error { .. }
+            ));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn destination_change_after_assessment_refuses_confirmation() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _staged, destination, _expected) = unresolved_moved_intent(&store, dir.path());
+        let snapshot = match store.review_publication_intent(job.id).unwrap() {
+            PublicationReview::ObservedMatchingOutput { snapshot, .. } => snapshot,
+            other => panic!("expected matching output, got {other:?}"),
+        };
+        fs::write(&destination, b"changed after assessment").unwrap();
+
+        assert!(store
+            .recover_publication_intent(job.id, &snapshot, 123)
+            .is_err());
+        assert!(store.has_publication_journal(job.id).unwrap());
+        let retained = store.get_by_id(job.id).unwrap().unwrap();
+        assert!(matches!(retained.state, JobState::Error { .. }));
+        assert!(retained.result.is_none());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn assessment_rejects_row_change_during_filesystem_observation() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _staged, _destination, _expected) = unresolved_moved_intent(&store, dir.path());
+
+        let review = store
+            .review_publication_intent_with(job.id, || {
+                store
+                    .conn
+                    .lock()
+                    .execute(
+                        "UPDATE jobs SET attempts = attempts + 1 WHERE id = ?1",
+                        params![job.id.0.to_string()],
+                    )
+                    .unwrap();
+            })
+            .unwrap();
+        assert!(matches!(review, PublicationReview::Stale { .. }));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn confirmation_checks_filesystem_without_holding_queue_connection() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _staged, _destination, _expected) = unresolved_moved_intent(&store, dir.path());
+        let snapshot = match store.review_publication_intent(job.id).unwrap() {
+            PublicationReview::ObservedMatchingOutput { snapshot, .. } => snapshot,
+            other => panic!("expected matching output, got {other:?}"),
+        };
+
+        store
+            .recover_publication_intent_with(job.id, &snapshot, 123, || {
+                assert!(store.conn.try_lock().is_some());
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_by_id(job.id).unwrap().unwrap().state,
+            JobState::Done
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn recovery_sqlite_fault_rolls_back_row_and_journal_together() {
+        for phase in ["update", "delete"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _staged, _destination, _expected) =
+                unresolved_moved_intent(&store, dir.path());
+            let snapshot = match store.review_publication_intent(job.id).unwrap() {
+                PublicationReview::ObservedMatchingOutput { snapshot, .. } => snapshot,
+                other => panic!("expected matching output, got {other:?}"),
+            };
+            let trigger = if phase == "update" {
+                "CREATE TRIGGER owned_review_fault BEFORE UPDATE ON jobs WHEN NEW.state = 'done' BEGIN SELECT RAISE(ABORT, 'owned review update fault'); END;"
+            } else {
+                "CREATE TRIGGER owned_review_fault BEFORE DELETE ON publication_journal BEGIN SELECT RAISE(ABORT, 'owned review delete fault'); END;"
+            };
+            store.conn.lock().execute_batch(trigger).unwrap();
+
+            assert!(store
+                .recover_publication_intent(job.id, &snapshot, 123)
+                .is_err());
+            assert!(store.has_publication_journal(job.id).unwrap());
+            let retained = store.get_by_id(job.id).unwrap().unwrap();
+            assert!(matches!(retained.state, JobState::Error { .. }));
+            assert!(retained.result.is_none());
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

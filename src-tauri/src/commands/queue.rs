@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use goop_core::{IpcError, Job, JobId, JobKind, JobState, ResultKind};
-use goop_queue::SchedulerError;
+use goop_queue::{PublicationReview, SchedulerError};
 use tauri::State;
 
 fn map_scheduler_err(e: SchedulerError) -> IpcError {
@@ -19,6 +19,47 @@ fn map_scheduler_err(e: SchedulerError) -> IpcError {
 #[tauri::command]
 pub fn queue_list(state: State<'_, AppState>) -> Result<Vec<Job>, IpcError> {
     state.store.list().map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn queue_reviewable_publication_ids(
+    state: State<'_, AppState>,
+) -> Result<Vec<JobId>, IpcError> {
+    state
+        .store
+        .list_reviewable_publication_ids()
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn queue_review_publication(
+    job_id: JobId,
+    state: State<'_, AppState>,
+) -> Result<PublicationReview, IpcError> {
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || store.review_publication_intent(job_id))
+        .await
+        .map_err(|error| IpcError::Unknown(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn queue_recover_publication(
+    job_id: JobId,
+    snapshot: String,
+    state: State<'_, AppState>,
+) -> Result<(), IpcError> {
+    let store = state.store.clone();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        store.recover_publication_intent(job_id, &snapshot, now_ms)
+    })
+    .await
+    .map_err(|error| IpcError::Unknown(error.to_string()))?
+    .map_err(Into::into)
 }
 
 /// Cancel a job in any non-terminal state: running jobs get their stop
