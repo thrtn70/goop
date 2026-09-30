@@ -160,14 +160,42 @@ test("only the no-build publish job can write release state", () => {
   assert.doesNotMatch(publish, /draft: false/);
 });
 
-test("both platform builds stage immutable workflow artifacts before publication", () => {
+test("the macOS arm64 build stages one immutable workflow artifact before publication", () => {
   const build = job("build");
+  assert.match(build, /os: macos-14/);
+  assert.match(build, /target: aarch64-apple-darwin/);
+  assert.match(build, /bundle: "app,dmg"/);
+  assert.doesNotMatch(build, /windows-latest|x86_64-pc-windows-msvc|nsis|msi/);
   assert.match(build, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(build, /name: release-assets-\$\{\{ matrix\.target \}\}/);
   assert.match(build, /if-no-files-found: error/);
   assert.match(build, /overwrite: true/);
+  const publish = job("publish");
+  assert.equal((publish.match(/actions\/download-artifact@/g) ?? []).length, 1);
+  assert.match(publish, /name: release-assets-aarch64-apple-darwin/);
+  assert.doesNotMatch(publish, /release-assets-x86_64-pc-windows-msvc|release-input\/windows/);
   assert.match(workflow, /group: release-\$\{\{ github\.ref \}\}/);
   assert.match(workflow, /cancel-in-progress: false/);
+});
+
+test("the macOS release keeps version, licensing, entitlement, and in-bundle smoke gates", () => {
+  const validate = job("validate");
+  assert.match(validate, /Tag matches the version in every manifest/);
+  assert.match(validate, /package\.json/);
+  assert.match(validate, /src-tauri\/tauri\.conf\.json/);
+  assert.match(validate, /Cargo\.toml \[workspace\.package\]/);
+
+  const legal = job("legal");
+  assert.match(legal, /Rust dep graph clear of mupdf-\*/);
+  assert.match(legal, /Frontend free of mupdf\.js \/ mupdf\.wasm imports/);
+
+  const build = job("build");
+  assert.match(build, /\.\/scripts\/fetch-sidecars\.sh "\$\{\{ matrix\.target \}\}"/);
+  assert.match(build, /Verify macOS entitlements file is present/);
+  assert.match(build, /Verify signed sidecars run \(macOS\)/);
+  assert.match(build, /for bin in gallery-dl yt-dlp tesseract gs ffmpeg ffprobe mutool/);
+  assert.match(build, /Contents\/Resources\/gs-resources/);
+  assert.match(build, /GS_LIB="\$GSRES"/);
 });
 
 test("audit executes the pinned static Little CMS transform on both release targets", () => {
@@ -186,15 +214,15 @@ test("audit executes the pinned static Little CMS transform on both release targ
   assert.match(step[0], /lcms2\[\^ \]\*\\\.dll/);
 });
 
-test("Windows audit and release use one immutable libheif 1.23 vcpkg tree", () => {
+test("Windows audit keeps the immutable libheif 1.23 vcpkg tree outside the macOS release", () => {
   const installer = "./scripts/install-windows-heif-deps.sh";
   assert.equal(auditWorkflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
-  assert.equal(workflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length, 1);
+  assert.equal(workflow.match(new RegExp(installer.replaceAll(".", "\\."), "g"))?.length ?? 0, 0);
   assert.match(windowsHeifInstaller, /VCPKG_COMMIT="[0-9a-f]{40}"/);
   assert.match(windowsHeifInstaller, /checkout --detach "\$VCPKG_COMMIT"/);
   assert.match(windowsHeifInstaller, /libheif\[core\]:x64-windows-static/);
   assert.match(auditWorkflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
-  assert.match(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
+  assert.doesNotMatch(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
 });
 
 test("Windows audit records fresh-process HEIC preview memory evidence", () => {
@@ -236,8 +264,6 @@ const publishedVersion = "0.3.4";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
   "Goop_aarch64.app.tar.gz",
-  `Goop_${version}_x64-setup.exe`,
-  `Goop_${version}_x64_en-US.msi`,
 ];
 const expectedAssets = [...installers, ...installers.map((name) => `${name}.sha256`)].sort();
 const require = createRequire(import.meta.url);
@@ -266,7 +292,15 @@ function inlinePublishScript() {
   return body.slice(start + 1).map((line) => line.startsWith("            ") ? line.slice(12) : line).join("\n");
 }
 
-async function exercisePublish({ releases = [], initialAssets = [], corruptChecksum = false, failFirstUpload = null } = {}) {
+async function exercisePublish({
+  releases = [],
+  initialAssets = [],
+  missingAsset = null,
+  extraAssets = [],
+  duplicateAsset = null,
+  corruptChecksum = false,
+  failFirstUpload = null,
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), "goop-release-contract-"));
   const previous = process.cwd();
   const previousVersion = process.env.RELEASE_VERSION;
@@ -280,14 +314,24 @@ async function exercisePublish({ releases = [], initialAssets = [], corruptCheck
     failedOnce: false,
   };
   try {
-    for (const root of ["release-input/macos", "release-input/windows"]) mkdirSync(join(directory, root), { recursive: true });
+    const root = "release-input/macos";
+    mkdirSync(join(directory, root), { recursive: true });
     for (const [index, name] of installers.entries()) {
-      const root = index < 2 ? "release-input/macos" : "release-input/windows";
       const bytes = Buffer.from(`installer:${name}`);
-      writeFileSync(join(directory, root, name), bytes);
+      if (missingAsset !== name) writeFileSync(join(directory, root, name), bytes);
       const hash = createHash("sha256").update(bytes).digest("hex");
       const writtenHash = corruptChecksum && index === 0 ? "0".repeat(64) : hash;
-      writeFileSync(join(directory, root, `${name}.sha256`), `${writtenHash}  ${name}\n`);
+      if (missingAsset !== `${name}.sha256`) {
+        writeFileSync(join(directory, root, `${name}.sha256`), `${writtenHash}  ${name}\n`);
+      }
+    }
+    for (const name of extraAssets) {
+      writeFileSync(join(directory, root, name), `extra:${name}`);
+    }
+    if (duplicateAsset) {
+      const duplicateRoot = "release-input/duplicate";
+      mkdirSync(join(directory, duplicateRoot), { recursive: true });
+      writeFileSync(join(directory, duplicateRoot, duplicateAsset), `duplicate:${duplicateAsset}`);
     }
     process.chdir(directory);
     process.env.RELEASE_VERSION = version;
@@ -338,11 +382,36 @@ async function exercisePublish({ releases = [], initialAssets = [], corruptCheck
 }
 
 test("inline publisher validates bytes and release state before mutating a draft", async (t) => {
-  await t.test("creates one draft with the exact eight-asset allowlist", async () => {
+  await t.test("creates one draft with the exact four-asset allowlist", async () => {
     const state = await exercisePublish();
     assert.deepEqual(state.failures, []);
     assert.equal(state.created, 1);
     assert.deepEqual(state.assets.map((asset) => asset.name).sort(), expectedAssets);
+  });
+
+  await t.test("refuses missing and extra inputs before any release API mutation", async () => {
+    const missing = await exercisePublish({ missingAsset: expectedAssets[0] });
+    assert.match(missing.failures[0], /allowlist mismatch/);
+    assert.equal(missing.created, 0);
+    assert.deepEqual(missing.uploads, []);
+
+    const extra = await exercisePublish({ extraAssets: ["unexpected.zip"] });
+    assert.match(extra.failures[0], /allowlist mismatch/);
+    assert.equal(extra.created, 0);
+    assert.deepEqual(extra.uploads, []);
+  });
+
+  await t.test("refuses Windows release inputs and duplicate asset names", async () => {
+    const windows = await exercisePublish({ extraAssets: [`Goop_${version}_x64-setup.exe`] });
+    assert.match(windows.failures[0], /allowlist mismatch/);
+    assert.match(windows.failures[0], /x64-setup\.exe/);
+    assert.equal(windows.created, 0);
+    assert.deepEqual(windows.uploads, []);
+
+    const duplicate = await exercisePublish({ duplicateAsset: expectedAssets[0] });
+    assert.match(duplicate.failures[0], /duplicate release asset name/);
+    assert.equal(duplicate.created, 0);
+    assert.deepEqual(duplicate.uploads, []);
   });
 
   await t.test("refuses a checksum mismatch before any release API mutation", async () => {
