@@ -260,7 +260,7 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
 });
 
 const version = "0.3.5";
-const publishedVersion = "0.3.4";
+const publishedVersion = "0.3.5";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
   "Goop_aarch64.app.tar.gz",

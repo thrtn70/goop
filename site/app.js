@@ -15,9 +15,8 @@
    * `version` is cosmetic — the eyebrow and colophon labels. When the fetch
    * fails, [data-fetch-status] tells the visitor the check was unavailable. */
   const FALLBACK = Object.freeze({
-    version: 'v0.3.4',
+    version: 'v0.3.5',
     mac: 'https://github.com/thrtn70/goop/releases/latest',
-    windows: 'https://github.com/thrtn70/goop/releases/latest',
   });
 
   const REPO = 'thrtn70/goop';
@@ -37,72 +36,10 @@
     });
   }
 
-  function setDownloadURLs(macURL, winURL) {
+  function setDownloadURL(macURL) {
     document.querySelectorAll('[data-mac-url]').forEach((el) => {
       el.setAttribute('href', macURL);
     });
-    document.querySelectorAll('[data-win-url]').forEach((el) => {
-      el.setAttribute('href', winURL);
-    });
-    syncAltLink();
-  }
-
-  /* ----------------------------------------------------------------
-   * OS-detected CTA hierarchy
-   *
-   * Visitors on a recognized desktop OS see one primary download
-   * button matching their platform. The non-matching platform shows
-   * up as a small italic "Or download for ___" link below — power
-   * users (or Mac visitors with a Windows machine handy) can still
-   * reach it. Linux / mobile / unknown UAs fall back to both buttons
-   * at equal weight, which is what the page used to do for everyone.
-   * ---------------------------------------------------------------- */
-
-  function detectOS() {
-    const platform = navigator.userAgentData?.platform || '';
-    if (platform === 'macOS') return 'mac';
-    if (platform === 'Windows') return 'win';
-
-    const ua = navigator.userAgent || '';
-    if (/iPhone|iPad|iPod|Android/i.test(ua)) return 'unknown';
-    if (/Macintosh|Mac OS X/i.test(ua)) return 'mac';
-    if (/Windows/i.test(ua)) return 'win';
-    return 'unknown';
-  }
-
-  function applyOSCtaHierarchy() {
-    const macBtn = document.querySelector('[data-cta="mac"]');
-    const winBtn = document.querySelector('[data-cta="win"]');
-    const alt = document.querySelector('[data-cta-alt]');
-    const altLabel = document.querySelector('[data-cta-alt-label]');
-    const altMeta = document.querySelector('[data-cta-alt-meta]');
-    if (!macBtn || !winBtn || !alt || !altLabel || !altMeta) return;
-
-    const os = detectOS();
-    if (os === 'mac') {
-      winBtn.hidden = true;
-      altLabel.textContent = 'Windows';
-      altMeta.textContent = ' · x64 · .msi';
-      alt.hidden = false;
-    } else if (os === 'win') {
-      macBtn.hidden = true;
-      altLabel.textContent = 'macOS';
-      altMeta.textContent = ' · Apple Silicon · .dmg';
-      alt.hidden = false;
-    }
-    syncAltLink();
-  }
-
-  function syncAltLink() {
-    const alt = document.querySelector('[data-cta-alt]');
-    const altLink = document.querySelector('[data-cta-alt-link]');
-    if (!alt || alt.hidden || !altLink) return;
-    const macBtn = document.querySelector('[data-cta="mac"]');
-    const winBtn = document.querySelector('[data-cta="win"]');
-    if (!macBtn || !winBtn) return;
-    const hiddenBtn = macBtn.hidden ? macBtn : winBtn.hidden ? winBtn : null;
-    const href = hiddenBtn?.getAttribute('href');
-    if (href) altLink.setAttribute('href', href);
   }
 
   function isHTTPS(url) {
@@ -132,7 +69,6 @@
       return {
         version: typeof data.tag_name === 'string' ? data.tag_name : FALLBACK.version,
         mac: pickAsset(data.assets, '.dmg') || FALLBACK.mac,
-        windows: pickAsset(data.assets, '.msi') || FALLBACK.windows,
       };
     } catch {
       return null;
@@ -475,8 +411,7 @@
 
   async function init() {
     setVersion(FALLBACK.version);
-    setDownloadURLs(FALLBACK.mac, FALLBACK.windows);
-    applyOSCtaHierarchy();
+    setDownloadURL(FALLBACK.mac);
     initCursorChoreography();
 
     const [latest] = await Promise.all([
@@ -486,7 +421,7 @@
 
     if (latest) {
       setVersion(latest.version);
-      setDownloadURLs(latest.mac, latest.windows);
+      setDownloadURL(latest.mac);
     } else {
       setFetchStatus(true);
     }

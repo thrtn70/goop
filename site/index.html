@@ -6,7 +6,7 @@
     <title>Goop — Take control of your files.</title>
     <meta
       name="description"
-      content="Download, convert, compress, and handle PDFs in one small desktop app. Works with 2,000+ sites. macOS and Windows, no accounts, no tracking."
+      content="Download, convert, compress, and handle PDFs in one small desktop app. The current release targets Apple Silicon Macs; an older Windows build remains archived."
     />
     <meta name="color-scheme" content="dark" />
     <!-- Matches --ink-0 exactly. It used to read #0c0e0d, which is several
@@ -81,7 +81,7 @@
           <p class="hero__eyebrow">
             <span class="hero__eyebrow-mark" aria-hidden="true">¶</span>
             <span>A field guide to <em>Goop</em>, issue</span>
-            <span data-latest-version>v0.3.4</span>
+            <span data-latest-version>v0.3.5</span>
           </p>
           <h1 id="hero-headline" class="hero__headline">
             <span class="hero__headline-line">Take&nbsp;control</span>
@@ -108,22 +108,16 @@
               <span class="btn__label">Download for macOS</span>
               <span class="btn__meta">Apple Silicon · .dmg</span>
             </a>
-            <a
-              class="btn btn--primary"
-              data-cta="win"
-              data-win-url
-              href="https://github.com/thrtn70/goop/releases/latest"
-              rel="noopener"
-            >
-              <span class="btn__rule" aria-hidden="true"></span>
-              <span class="btn__label">Download for Windows</span>
-              <span class="btn__meta">x64 · .msi</span>
-            </a>
-            <p class="hero__alt" data-cta-alt hidden>
-              Or download for
-              <a data-cta-alt-link href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                <span data-cta-alt-label></span><span class="hero__alt-meta" data-cta-alt-meta></span>
+            <p class="hero__alt">
+              Windows packaging is paused for current releases.
+              <a
+                data-windows-archive
+                href="https://github.com/thrtn70/goop/releases/tag/v0.3.4"
+                rel="noopener"
+              >
+                Older Windows v0.3.4
               </a>
+              remains available in the archive.
             </p>
             <p class="hero__archive">
               <a href="#archive">Looking for an older version? See the archive</a>
@@ -133,7 +127,7 @@
           <dl class="colophon">
             <div class="colophon__row">
               <dt>Platform</dt>
-              <dd>macOS 13+, Windows 10+</dd>
+              <dd>Current: macOS 13+ · Windows v0.3.4 archived</dd>
             </div>
             <div class="colophon__row">
               <dt>License</dt>
@@ -143,7 +137,7 @@
               <dt>Latest</dt>
               <dd>
                 <a href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                  <span data-latest-version>v0.3.4</span>
+                  <span data-latest-version>v0.3.5</span>
                 </a>
               </dd>
             </div>
@@ -295,8 +289,9 @@
           <div class="glossary__row">
             <dt><span class="glossary__roman">iii.</span> Hardware-accelerated encoding</dt>
             <dd>
-              VideoToolbox on macOS. NVENC, QuickSync, and AMF on Windows.
-              Goop probes your machine and picks the right one.
+              The current macOS release uses VideoToolbox. The older Windows
+              v0.3.4 build supports NVENC, QuickSync, and AMF. Goop probes your
+              machine and picks the right one.
             </dd>
           </div>
           <div class="glossary__row">
@@ -311,8 +306,9 @@
           <div class="glossary__row">
             <dt><span class="glossary__roman">v.</span> Command palette</dt>
             <dd>
-              <kbd>⌘ K</kbd> on macOS, <kbd>Ctrl K</kbd> on Windows. Fuzzy
-              search across every page, plus a handful of actions.
+              <kbd>⌘ K</kbd> in the current macOS release. The older Windows
+              v0.3.4 build uses <kbd>Ctrl K</kbd>. Fuzzy search covers every
+              page, plus a handful of actions.
             </dd>
           </div>
           <div class="glossary__row">
@@ -353,16 +349,19 @@
           <li class="step">
             <span class="step__numeral" aria-hidden="true">01</span>
             <div class="step__body">
-              <h3 class="step__headline">Download the right installer.</h3>
+              <h3 class="step__headline">Download the current build.</h3>
               <p>
                 <a class="link" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
                   macOS, Apple Silicon (.dmg)
-                </a>
-                or
-                <a class="link" data-win-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                  Windows (.msi)
                 </a>.
-                Both come from GitHub Releases.
+                Windows packaging is deferred for current releases. The
+                <a
+                  class="link"
+                  data-windows-archive
+                  href="https://github.com/thrtn70/goop/releases/tag/v0.3.4"
+                  rel="noopener"
+                >older Windows v0.3.4 release</a>
+                remains available on GitHub.
               </p>
             </div>
           </li>
@@ -377,8 +376,9 @@
               </p>
               <pre tabindex="0"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
               <p class="step__os">
-                <em>On Windows,</em> run the <em>.msi</em>. If SmartScreen
-                warns, click <em>More info</em>, then <em>Run anyway</em>.
+                <em>For the older Windows v0.3.4 build,</em> run the
+                <em>.msi</em>. If SmartScreen warns, click <em>More info</em>,
+                then <em>Run anyway</em>.
               </p>
               <p class="step__note">
                 Goop isn't code-signed yet. That's on the roadmap.
@@ -462,14 +462,13 @@
             <details>
               <summary>
                 <span class="faq__index">iii.</span>
-                <span class="faq__question">Why is Windows SmartScreen warning me?</span>
+                <span class="faq__question">Why does the older Windows v0.3.4 build trigger SmartScreen?</span>
                 <span class="faq__chevron" aria-hidden="true"></span>
               </summary>
               <div class="faq__answer">
                 <p>
-                  Same reason: the installer isn't signed yet. On the
-                  SmartScreen dialog, click <em>More info</em>, then
-                  <em>Run anyway</em>.
+                  The archived installer isn't signed. On the SmartScreen
+                  dialog, click <em>More info</em>, then <em>Run anyway</em>.
                 </p>
               </div>
             </details>
