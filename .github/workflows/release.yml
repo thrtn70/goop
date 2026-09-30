@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   # Reject a tag whose manifests disagree before any expensive build starts.
-  # This job is read-only; draft creation happens only after both builders pass.
+  # This job is read-only; draft creation happens only after the builder passes.
   validate:
     runs-on: ubuntu-latest
     outputs:
@@ -32,10 +32,9 @@ jobs:
       # itself 0.2.9, sees latest 0.3.0, and offers the user an update to the
       # binary they are already running — every launch, with no way out but
       # cutting another release. tauri.conf.json's version stamps the bundle
-      # itself (CFBundleShortVersionString, the MSI ProductVersion Windows
-      # Installer uses to decide whether an upgrade even applies, and the
-      # version in the Goop_<version>_aarch64.dmg asset name); package.json's
-      # is what the repo reports about itself.
+      # itself (CFBundleShortVersionString and the version in the
+      # Goop_<version>_aarch64.dmg asset name); package.json's is what the repo
+      # reports about itself.
       #
       # This runs before any release mutation deliberately. A rejected tag
       # cannot leave an orphan draft behind.
@@ -117,8 +116,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,       target: aarch64-apple-darwin,   bundle: "app,dmg" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, bundle: "nsis,msi" }
+          - { os: macos-14, target: aarch64-apple-darwin, bundle: "app,dmg" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -132,9 +130,8 @@ jobs:
       # Restore from existing main-branch caches but don't save new ones.
       # Tag builds happen rarely (a few per quarter) and each adds ~500MB
       # to the 10GB cache quota; over time that fills up and the post-step
-      # cache-save fails (e.g. v0.2.1's Windows builder hit the quota at
-      # 9.4GB). save-if=false lets us keep the warm-start benefit without
-      # accumulating tag-only caches forever.
+      # cache-save can fail once the quota is full. save-if=false lets us keep
+      # the warm-start benefit without accumulating tag-only caches forever.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           save-if: "false"
@@ -156,18 +153,6 @@ jobs:
           ./scripts/build-static-heif-deps.sh
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        if: matrix.os == 'windows-latest'
-        with:
-          path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('scripts/install-windows-heif-deps.sh') }}
-      - name: Static HEIC decode stack (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          ./scripts/install-windows-heif-deps.sh
-          echo "VCPKGRS_TRIPLET=x64-windows-static" >> "$GITHUB_ENV"
-          echo "VCPKG_ROOT=C:/vcpkg" >> "$GITHUB_ENV"
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
@@ -278,21 +263,12 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           mkdir -p release-assets
-          if [ "${{ matrix.os }}" = "macos-14" ]; then
-            dmg="target/${{ matrix.target }}/release/bundle/dmg/Goop_${RELEASE_VERSION}_aarch64.dmg"
-            app="target/${{ matrix.target }}/release/bundle/macos/Goop.app.tar.gz"
-            [ -s "$dmg" ] || { echo "::error::missing macOS installer $dmg"; exit 1; }
-            [ -s "$app" ] || { echo "::error::missing macOS app archive $app"; exit 1; }
-            cp "$dmg" "release-assets/Goop_${RELEASE_VERSION}_aarch64.dmg"
-            cp "$app" "release-assets/Goop_aarch64.app.tar.gz"
-          else
-            setup="target/${{ matrix.target }}/release/bundle/nsis/Goop_${RELEASE_VERSION}_x64-setup.exe"
-            msi="target/${{ matrix.target }}/release/bundle/msi/Goop_${RELEASE_VERSION}_x64_en-US.msi"
-            [ -s "$setup" ] || { echo "::error::missing Windows installer $setup"; exit 1; }
-            [ -s "$msi" ] || { echo "::error::missing Windows installer $msi"; exit 1; }
-            cp "$setup" "release-assets/Goop_${RELEASE_VERSION}_x64-setup.exe"
-            cp "$msi" "release-assets/Goop_${RELEASE_VERSION}_x64_en-US.msi"
-          fi
+          dmg="target/${{ matrix.target }}/release/bundle/dmg/Goop_${RELEASE_VERSION}_aarch64.dmg"
+          app="target/${{ matrix.target }}/release/bundle/macos/Goop.app.tar.gz"
+          [ -s "$dmg" ] || { echo "::error::missing macOS installer $dmg"; exit 1; }
+          [ -s "$app" ] || { echo "::error::missing macOS app archive $app"; exit 1; }
+          cp "$dmg" "release-assets/Goop_${RELEASE_VERSION}_aarch64.dmg"
+          cp "$app" "release-assets/Goop_aarch64.app.tar.gz"
 
       - name: SHA-256 the staged assets
         shell: bash
@@ -323,7 +299,7 @@ jobs:
           overwrite: true
 
   # This is the only write-capable job. It receives already-built bytes from
-  # both read-only builders, validates their complete allowlist and digests,
+  # the read-only builder, validates its complete allowlist and digests,
   # then creates or updates a draft. It never checks out or executes project
   # code, dependencies, installers or sidecars.
   publish:
@@ -336,10 +312,6 @@ jobs:
         with:
           name: release-assets-aarch64-apple-darwin
           path: release-input/macos
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: release-assets-x86_64-pc-windows-msvc
-          path: release-input/windows
       - name: Validate and attach assets to draft release
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
@@ -352,15 +324,25 @@ jobs:
             const { owner, repo } = context.repo;
             const version = process.env.RELEASE_VERSION;
             const tag = context.ref.replace('refs/tags/', '');
-            const roots = ['release-input/macos', 'release-input/windows'];
+            const inputRoot = 'release-input';
             const installers = [
               `Goop_${version}_aarch64.dmg`,
               'Goop_aarch64.app.tar.gz',
-              `Goop_${version}_x64-setup.exe`,
-              `Goop_${version}_x64_en-US.msi`,
             ];
             const expected = [...installers, ...installers.map(name => `${name}.sha256`)].sort();
             const files = new Map();
+            const roots = [];
+            for (const entry of fs.readdirSync(inputRoot, { withFileTypes: true })) {
+              if (!entry.isDirectory() || entry.isSymbolicLink()) {
+                core.setFailed(`unexpected release input entry: ${path.join(inputRoot, entry.name)}`);
+                return;
+              }
+              roots.push(path.join(inputRoot, entry.name));
+            }
+            if (roots.length === 0) {
+              core.setFailed('no release input directories found');
+              return;
+            }
             for (const root of roots) {
               for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
                 if (!entry.isFile() || entry.isSymbolicLink()) {
