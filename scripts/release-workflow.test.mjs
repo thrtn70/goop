@@ -15,6 +15,10 @@ const packageLock = JSON.parse(readFileSync(new URL("../package-lock.json", impo
 const tauriVersion = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8")).version;
 const cargoManifest = readFileSync(new URL("../Cargo.toml", import.meta.url), "utf8");
 const cargoVersion = cargoManifest.split("[workspace.package]", 2)[1]?.match(/^version = "([^"]+)"$/m)?.[1];
+const galleryDlMacosRequirements = readFileSync(
+  new URL("./gallery-dl-macos-requirements.txt", import.meta.url),
+  "utf8",
+);
 const siteScript = readFileSync(new URL("../site/app.js", import.meta.url), "utf8");
 const siteHtml = readFileSync(new URL("../site/index.html", import.meta.url), "utf8");
 const windowsHeifInstaller = readFileSync(
@@ -196,6 +200,21 @@ test("the macOS release keeps version, licensing, entitlement, and in-bundle smo
   assert.match(build, /for bin in gallery-dl yt-dlp tesseract gs ffmpeg ffprobe mutool/);
   assert.match(build, /Contents\/Resources\/gs-resources/);
   assert.match(build, /GS_LIB="\$GSRES"/);
+});
+
+test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {
+  const lines = galleryDlMacosRequirements.split("\n");
+  const urllib3Lines = lines.filter((line) => line.startsWith("urllib3=="));
+  assert.equal(urllib3Lines.length, 1, "expected exactly one urllib3 pin");
+
+  const pin = /^urllib3==(\d+)\.(\d+)\.(\d+) \\$/.exec(urllib3Lines[0]);
+  assert.ok(pin, "urllib3 must use a stable numeric pin with one hash stanza");
+  const pinIndex = lines.indexOf(urllib3Lines[0]);
+  assert.match(lines[pinIndex + 1], /^ {4}--hash=sha256:[0-9a-f]{64}$/);
+
+  const major = Number(pin[1]);
+  const minor = Number(pin[2]);
+  assert.ok(major > 2 || (major === 2 && minor >= 8), "urllib3 must be at least 2.8.0");
 });
 
 test("audit executes the pinned static Little CMS transform on both release targets", () => {
