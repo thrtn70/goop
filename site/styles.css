@@ -563,6 +563,20 @@ main {
   align-items: stretch;
 }
 
+.hero__pause {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 16rem;
+  padding: var(--s-4) var(--s-6) var(--s-3);
+  border: 1px solid var(--teal);
+  color: var(--paper);
+  font-family: 'Bricolage Grotesque', system-ui;
+  font-weight: 600;
+  letter-spacing: var(--tracking-snug);
+}
+
 .btn[hidden] { display: none; }
 
 .btn {

@@ -279,7 +279,6 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
 });
 
 const version = "0.3.5";
-const publishedVersion = "0.3.5";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
   "Goop_aarch64.app.tar.gz",
@@ -296,12 +295,18 @@ test("candidate manifests agree on the release version", () => {
   assert.equal(cargoVersion, version);
 });
 
-test("static website fallbacks retain the published version until publication", () => {
-  assert.match(siteScript, new RegExp(`version: ['"]v${publishedVersion}['"]`));
-  assert.deepEqual(
-    [...siteHtml.matchAll(/data-latest-version>v([^<]+)</g)].map((match) => match[1]),
-    [publishedVersion, publishedVersion],
+test("static website cannot promote an older API release while downloads are paused", () => {
+  assert.match(siteHtml, /data-download-paused/);
+  assert.match(siteHtml, /release downloads are temporarily paused/i);
+  assert.doesNotMatch(
+    siteHtml,
+    /data-(?:cta|mac-url|latest-version)|\/releases\/(?:latest|download)\//,
   );
+  assert.doesNotMatch(
+    siteScript,
+    /browser_download_url|data-(?:mac-url|latest-version)|\/releases\/latest/,
+  );
+  assert.match(siteScript, /makeLink\(notesURL, 'Release page'\)/);
 });
 
 function inlinePublishScript() {
