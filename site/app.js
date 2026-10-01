@@ -1,77 +1,15 @@
 (() => {
   'use strict';
 
-  /* Fallback used before the release fetch resolves, and permanently if it
-   * fails (api.github.com is 60 req/hr per IP unauthenticated).
-   *
-   * The download URLs deliberately point at the releases *page*, not at a
-   * pinned asset. `/releases/latest/download/<name>` resolves <name> against
-   * the newest release only, so any version-pinned asset name 404s the moment
-   * the next release ships — and since init() overwrites the markup's hrefs
-   * with these values immediately, a stale pin breaks the primary CTA even on
-   * the happy path, for anyone who clicks inside the fetch window. The page
-   * costs one extra click and never 404s.
-   *
-   * `version` is cosmetic — the eyebrow and colophon labels. When the fetch
-   * fails, [data-fetch-status] tells the visitor the check was unavailable. */
-  const FALLBACK = Object.freeze({
-    version: 'v0.3.5',
-    mac: 'https://github.com/thrtn70/goop/releases/latest',
-  });
-
   const REPO = 'thrtn70/goop';
-  const RELEASE_LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
   const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=12`;
   const ARCHIVE_LIMIT = 10;
-
-  /* ----------------------------------------------------------------
-   * Hero version + download URLs
-   * ---------------------------------------------------------------- */
-
-  function setVersion(version) {
-    const cleaned = typeof version === 'string' && version.length > 0 ? version : FALLBACK.version;
-    const formatted = cleaned.startsWith('v') ? cleaned : `v${cleaned}`;
-    document.querySelectorAll('[data-latest-version]').forEach((el) => {
-      el.textContent = formatted;
-    });
-  }
-
-  function setDownloadURL(macURL) {
-    document.querySelectorAll('[data-mac-url]').forEach((el) => {
-      el.setAttribute('href', macURL);
-    });
-  }
 
   function isHTTPS(url) {
     try {
       return new URL(url).protocol === 'https:';
     } catch {
       return false;
-    }
-  }
-
-  function pickAsset(assets, suffix) {
-    if (!Array.isArray(assets)) return null;
-    const match = assets.find(
-      (a) => typeof a?.name === 'string' && a.name.toLowerCase().endsWith(suffix),
-    );
-    const url = match?.browser_download_url;
-    return typeof url === 'string' && isHTTPS(url) ? url : null;
-  }
-
-  async function fetchLatestRelease() {
-    try {
-      const res = await fetch(RELEASE_LATEST_API, {
-        headers: { Accept: 'application/vnd.github+json' },
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      return {
-        version: typeof data.tag_name === 'string' ? data.tag_name : FALLBACK.version,
-        mac: pickAsset(data.assets, '.dmg') || FALLBACK.mac,
-      };
-    } catch {
-      return null;
     }
   }
 
@@ -153,15 +91,11 @@
     const links = document.createElement('div');
     links.className = 'archive__links';
 
-    const macURL = pickAsset(release.assets, '.dmg');
-    const winURL = pickAsset(release.assets, '.msi');
     const notesURL = typeof release.html_url === 'string' && isHTTPS(release.html_url)
       ? release.html_url
       : null;
 
-    if (macURL) links.appendChild(makeLink(macURL, 'macOS'));
-    if (winURL) links.appendChild(makeLink(winURL, 'Windows'));
-    if (notesURL) links.appendChild(makeLink(notesURL, 'Notes'));
+    if (notesURL) links.appendChild(makeLink(notesURL, 'Release page'));
 
     const body = document.createElement('div');
     body.className = 'archive__body';
@@ -217,7 +151,7 @@
 
   async function initArchive() {
     const list = document.querySelector('[data-archive-list]');
-    if (!list) return;
+    if (!list) return true;
     const releases = await fetchReleases();
     // An empty array is truthy, so this has to test length too — otherwise a
     // 200 with no releases falls through to renderArchive(), which returns
@@ -225,9 +159,10 @@
     // ghost bars carry no shimmer by design, so that reads as broken, not busy.
     if (!releases || releases.length === 0) {
       archiveFallback();
-      return;
+      return false;
     }
     renderArchive(releases);
+    return true;
   }
 
   /* ----------------------------------------------------------------
@@ -410,21 +345,9 @@
   }
 
   async function init() {
-    setVersion(FALLBACK.version);
-    setDownloadURL(FALLBACK.mac);
     initCursorChoreography();
-
-    const [latest] = await Promise.all([
-      fetchLatestRelease(),
-      initArchive(),
-    ]);
-
-    if (latest) {
-      setVersion(latest.version);
-      setDownloadURL(latest.mac);
-    } else {
-      setFetchStatus(true);
-    }
+    const archiveLoaded = await initArchive();
+    setFetchStatus(!archiveLoaded);
   }
 
   if (document.readyState === 'loading') {
