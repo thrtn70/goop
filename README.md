@@ -15,7 +15,6 @@
   <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square">
   <img alt="TypeScript 5" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
-  <img alt="Latest release" src="https://img.shields.io/github/v/release/thrtn70/goop?style=flat-square">
 </p>
 
 * * *
@@ -41,10 +40,10 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 | **PDF** | 14 ops including Merge, Split, Compress (Ghostscript), Extract pages / Reorder / Rotate / Delete / Insert blank, Edit metadata, Extract text, Extract images, Images→PDF (now with JPEG passthrough for ~10× smaller photo PDFs), PDF OCR + Image OCR. |
 | **Queue** | Pause / resume on running ffmpeg + Ghostscript jobs (CPU drops to ~0; partial output preserved). Drag-to-reorder, batch cancel, resizable + collapsible sidebar, total-ETA in the header. |
 | **History** | List or grid view with thumbnails, sort by date / size / name, filter by job kind, full-text search, multi-select for batch reveal / remove / move-to-trash. Slide-out preview panel + Quick View modal. |
-| **Hardware acceleration** | Auto-detects VideoToolbox (macOS), NVENC / QSV / AMF (Windows). 2–5× faster re-encodes when available; transparently falls back to software on encoder errors. |
+| **Hardware acceleration** | macOS builds support VideoToolbox, including Hardware required H.264 encoding that never falls back to software. The historical Windows v0.3.4 source supports NVENC / QSV / AMF. |
 | **Cookies from browser** | Pick Chrome / Firefox / Safari / Edge / Brave / Vivaldi / Opera / Chromium / Whale and Goop forwards your existing browser session via `--cookies-from-browser` for sites that require login. Cookies stay local. |
 | **Presets** | Named format + quality combinations applied as chips. Ships with four built-ins (YouTube Upload, Twitter/X Video, Podcast MP3, Web Image). Save your own; export / import as JSON between machines. |
-| **Updates** | One-click in-app updates for the bundled yt-dlp and gallery-dl. Goop itself checks GitHub for new releases on launch and offers a one-click installer download. |
+| **Updates** | One-click in-app updates for the bundled yt-dlp and gallery-dl. The macOS app can check GitHub for new releases; installer availability is currently paused. |
 | **Accessibility** | WCAG 2.1 AA audit pass: visible focus rings, full keyboard nav, screen-reader job-state announcements, focus trap inside modals, `prefers-reduced-motion` respected on every animation. |
 | **Performance** | Lazy-loaded route chunks (~16% smaller cold-start payload). Thumbnail generation bounded to 4 concurrent workers. Spring-settled queue ETA so the seconds counter doesn't jitter. |
 
@@ -52,36 +51,35 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 
 ## Installation
 
-### Download (Recommended)
+### Downloads temporarily paused
 
-Grab the build for your OS from the [Releases page](https://github.com/thrtn70/goop/releases/latest).
+Installer downloads are temporarily paused while a patched Apple Silicon macOS build is prepared. No older package is being promoted as a current replacement. The [GitHub release history](https://github.com/thrtn70/goop/releases) remains available for notes and source records.
 
-#### macOS arm64
+#### macOS arm64 target
 
-1. Download `Goop_<version>_aarch64.dmg`.
-2. Open the DMG and drag **Goop.app** into `/Applications`.
-3. Run once in Terminal to clear the Gatekeeper quarantine flag:
+When downloads resume, the packaged build will target macOS 13+ on Apple Silicon. Installation will remain:
+
+1. Open the DMG and drag **Goop.app** into `/Applications`.
+2. Run once in Terminal to clear the Gatekeeper quarantine flag:
    ```bash
    sudo xattr -cr /Applications/Goop.app
    ```
-4. Open Goop from Launchpad or Spotlight.
+3. Open Goop from Launchpad or Spotlight.
 
-#### Windows x64
+#### Windows x64 history
 
-1. Download `Goop_<version>_x64_en-US.msi`.
-2. Double-click to install.
-3. Launch from the Start menu.
+Windows-specific development and installer promotion are deferred. The [Goop v0.3.4 release page](https://github.com/thrtn70/goop/releases/tag/v0.3.4) is retained as a historical source and release record, not as the current recommended package.
 
 ### System Requirements
 
-- **macOS 13+** on Apple Silicon (M-series). Intel Macs are not a release target.
-- **Windows 10+** (x64) with WebView2 Runtime (ships with Windows 11; auto-installed on Windows 10 if missing).
+- **Next packaged release target:** macOS 13+ on Apple Silicon (M-series). Intel Macs are not a release target.
+- **Historical v0.3.4 source target:** Windows 10+ (x64) with WebView2 Runtime. Windows-specific development remains deferred.
 - ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, and Tesseract).
 - A network connection for requested downloads and any enabled app or tool update checks.
 
 ### Auto-Update
 
-> Goop checks GitHub for new releases on launch (toggle in **Settings → Updates**). When an update is available, an in-app banner downloads and opens the installer with one click. The bundled yt-dlp and gallery-dl have their own update buttons in the same section.
+> The macOS app can check GitHub for new releases on launch (toggle in **Settings → Updates**). Installer availability is currently paused; a future patched package requires a separately approved release. Windows-specific packaging remains deferred. The bundled yt-dlp and gallery-dl have their own update buttons in the same section.
 
 > **Portable build** — not currently shipped. The underlying Tauri build supports it; [open an issue](https://github.com/thrtn70/goop/issues/new) if you'd like one.
 
@@ -252,15 +250,9 @@ Make sure the selected format row has `audio only` in the dropdown, or toggle th
 
 Normal for large files — yt-dlp is muxing/finalising. Don't cancel.
 
-### Windows Defender flags the installer
+### About the historical Windows v0.3.4 package
 
-The installer is not code-signed, so SmartScreen has no publisher to check. Every release publishes a `.sha256` file next to each installer — download it and compare:
-
-```powershell
-Get-FileHash .\Goop_<version>_x64_en-US.msi -Algorithm SHA256
-```
-
-`Get-FileHash` prints the hash in uppercase, so compare the characters rather than expecting the two strings to match exactly. That confirms the file arrived intact; it can't prove who built it, since anyone able to swap the installer could swap the hash alongside it. Then click **More info → Run anyway**.
+Windows-specific development and installer promotion are deferred. The v0.3.4 release page is retained as a historical source and release record and is not the current recommended package.
 
 ### Where does Goop store files?
 
