@@ -193,14 +193,16 @@ function main(argv) {
   }
   try {
     const accepted = readAccepted(options.accepted);
-    // --include=dev keeps NODE_ENV=production or npm_config_omit from
-    // silently shrinking the full run to shipped dependencies.
+    // Explicit includes override an inherited NODE_ENV=production or
+    // npm_config_omit, which would otherwise silently drop dev, optional or
+    // peer packages from a run. Only the shipped run omits anything: dev.
+    const keep = ["--include=optional", "--include=peer"];
     const fullSource = options.fullReport
       ? { label: options.fullReport, text: readFileSync(options.fullReport, "utf8") }
-      : runNpmAudit(["--include=dev"]);
+      : runNpmAudit(["--include=dev", ...keep]);
     const prodSource = options.prodReport
       ? { label: options.prodReport, text: readFileSync(options.prodReport, "utf8") }
-      : runNpmAudit(["--omit=dev"]);
+      : runNpmAudit(["--omit=dev", ...keep]);
     const full = blockingAdvisories(readReport(fullSource), fullSource.label);
     const prod = blockingAdvisories(readReport(prodSource), prodSource.label);
     const problems = evaluate(full, prod, accepted, Date.now());

@@ -247,10 +247,15 @@ test("rejects a malformed accepted list", async (t) => {
   }
 });
 
-test("runs npm audit itself: the full tree including dev, then shipped only", () => {
+// Explicit includes override an inherited npm_config_omit (or NODE_ENV)
+// that would otherwise drop dev, optional or peer packages from a run.
+test("runs npm audit itself: every dependency type, then shipped only", () => {
   const result = runWithStubNpm({ fullStdout: JSON.stringify(TAILWIND_CHAIN), prodStdout: JSON.stringify(CLEAN) });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.argv, ["audit --json --include=dev", "audit --json --omit=dev"]);
+  assert.deepEqual(result.argv, [
+    "audit --json --include=dev --include=optional --include=peer",
+    "audit --json --omit=dev --include=optional --include=peer",
+  ]);
 });
 
 test("reports why npm audit failed", async (t) => {
