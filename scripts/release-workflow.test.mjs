@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -184,7 +185,7 @@ test("the macOS arm64 build stages one immutable workflow artifact before public
 
 test("the macOS release keeps version, licensing, entitlement, and in-bundle smoke gates", () => {
   const validate = job("validate");
-  assert.match(validate, /Tag matches the version in every manifest/);
+  assert.match(validate, /Release version matches every manifest/);
   assert.match(validate, /package\.json/);
   assert.match(validate, /src-tauri\/tauri\.conf\.json/);
   assert.match(validate, /Cargo\.toml \[workspace\.package\]/);
@@ -215,6 +216,148 @@ test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {
   const major = Number(pin[1]);
   const minor = Number(pin[2]);
   assert.ok(major > 2 || (major === 2 && minor >= 8), "urllib3 must be at least 2.8.0");
+});
+
+// A source pin is not proof the frozen binary contains it. These checks run
+// the built gallery-dl and compare what it reports against the recipe.
+const galleryRuntimeCheck =
+  /node scripts\/check-gallery-dl-runtime\.mjs --binary "([^"]+)" --python "\$GALLERY_DL_PYTHON"/;
+
+function setupPythonStep(body) {
+  const match = body.match(/ {6}- uses: actions\/setup-python@[0-9a-f]{40}\n((?: {8}.*\n)+)/);
+  assert.ok(match, "missing setup-python step");
+  return match[0];
+}
+
+test("audit proves the frozen gallery-dl runtime against the recipe pins on macOS", () => {
+  const smoke = auditJob("sidecar-smoke");
+  const python = setupPythonStep(smoke);
+  assert.match(python, /^ {8}id: python$/m);
+  assert.match(python, /python-version: "3\.14\.6"/);
+
+  const step = namedStep(smoke, "gallery-dl runtime matches the recipe (macOS)");
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /^ {10}GALLERY_DL_PYTHON: \$\{\{ steps\.python\.outputs\.python-version \}\}$/m);
+  assert.equal(step.match(galleryRuntimeCheck)?.[1], "./src-tauri/bin/gallery-dl-$TARGET");
+  assert.ok(
+    smoke.indexOf("- name: Fetch sidecars") < smoke.indexOf("- name: gallery-dl runtime matches the recipe (macOS)"),
+    "the runtime check must run on the freshly frozen binary",
+  );
+});
+
+test("the signed in-bundle gallery-dl must report the recipe's runtime before assets are staged", () => {
+  const build = job("build");
+  const python = setupPythonStep(build);
+  assert.match(python, /^ {8}id: python$/m);
+
+  const verify = namedStep(build, "Verify signed sidecars run (macOS)");
+  assert.match(verify, /^ {10}GALLERY_DL_PYTHON: \$\{\{ steps\.python\.outputs\.python-version \}\}$/m);
+  assert.equal(verify.match(galleryRuntimeCheck)?.[1], "$APP/Contents/MacOS/gallery-dl");
+  assert.ok(
+    build.indexOf("- name: Verify signed sidecars run (macOS)") < build.indexOf("- name: Stage release assets"),
+    "assets must not be staged before the in-bundle runtime check",
+  );
+});
+
+test("both quality gates run the gallery-dl runtime checker tests", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  assert.match(prePush, /node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
+  assert.match(auditJob("web"), /- run: node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
+});
+
+test("a manual rehearsal builds the signed package but can never publish", () => {
+  const triggers = workflow.split("\npermissions:", 1)[0];
+  assert.match(triggers, /^on:\n {2}push:\n {4}tags: \["v\*"\]\n(?: {2}#.*\n)* {2}workflow_dispatch:$/m);
+  assert.doesNotMatch(triggers, /pull_request|schedule|workflow_run|repository_dispatch/);
+
+  // A dispatch can target a tag ref, where github.ref_type is also 'tag', so
+  // the ref type alone does not tell a rehearsal from a tag push.
+  const publish = job("publish");
+  assert.match(publish, /^ {4}if: github\.event_name == 'push' && github\.ref_type == 'tag'$/m);
+  for (const name of ["validate", "legal", "build"]) {
+    assert.doesNotMatch(job(name), /^ {4}if:/m, `${name} must run unchanged in a rehearsal`);
+  }
+});
+
+test("rehearsal artifacts expire after 3 days; a tag push keeps 90", () => {
+  const build = job("build");
+  assert.match(build, /^ {10}retention-days: \$\{\{ github\.event_name == 'push' && 90 \|\| 3 \}\}$/m);
+});
+
+function validateScript() {
+  const step = namedStep(job("validate"), "Release version matches every manifest").split("\n");
+  const start = step.findIndex((line) => line === "        run: |");
+  assert.notEqual(start, -1, "missing validate run block");
+  return step.slice(start + 1).map((line) => (line.startsWith("          ") ? line.slice(10) : line)).join("\n");
+}
+
+function runValidate({ eventName, refType, refName, pkg = "0.3.6", tauri = "0.3.6", cargo = "0.3.6" }) {
+  const directory = mkdtempSync(join(tmpdir(), "goop-release-validate-"));
+  try {
+    mkdirSync(join(directory, "src-tauri"));
+    writeFileSync(join(directory, "package.json"), pkg === null ? "{}" : JSON.stringify({ version: pkg }));
+    writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify({ version: tauri }));
+    writeFileSync(
+      join(directory, "Cargo.toml"),
+      cargo === null ? "[workspace]\n" : `[workspace.package]\nversion = "${cargo}"\n`,
+    );
+    const output = join(directory, "github-output");
+    writeFileSync(output, "");
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", validateScript()], {
+      cwd: directory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: eventName,
+        GITHUB_REF_TYPE: refType,
+        GITHUB_REF_NAME: refName,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    return { status: result.status, log: result.stdout + result.stderr, output: readFileSync(output, "utf8") };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("validate accepts a matching tag push or agreeing manifests, and nothing else", async (t) => {
+  const tagPush = { eventName: "push", refType: "tag" };
+  const rehearsal = { eventName: "workflow_dispatch", refType: "branch", refName: "main" };
+  await t.test("tag push that matches every manifest", () => {
+    const run = runValidate({ ...tagPush, refName: "v0.3.6" });
+    assert.equal(run.status, 0, run.log);
+    assert.equal(run.output, "version=0.3.6\n");
+  });
+  await t.test("tag push that disagrees with the manifests", () => {
+    const run = runValidate({ ...tagPush, refName: "v0.3.7" });
+    assert.equal(run.status, 1, run.log);
+    assert.equal(run.output, "");
+  });
+  await t.test("rehearsal whose manifests agree", () => {
+    const run = runValidate(rehearsal);
+    assert.equal(run.status, 0, run.log);
+    assert.equal(run.output, "version=0.3.6\n");
+  });
+  await t.test("rehearsal dispatched on a tag ref compares manifests, not the tag", () => {
+    const run = runValidate({ eventName: "workflow_dispatch", refType: "tag", refName: "v0.3.7" });
+    assert.equal(run.status, 0, run.log);
+    assert.equal(run.output, "version=0.3.6\n");
+  });
+  await t.test("rehearsal whose manifests disagree", () => {
+    const run = runValidate({ ...rehearsal, tauri: "0.3.5" });
+    assert.equal(run.status, 1, run.log);
+    assert.equal(run.output, "");
+  });
+  await t.test("rehearsal with an unreadable Cargo.toml", () => {
+    const run = runValidate({ ...rehearsal, cargo: null });
+    assert.equal(run.status, 1, run.log);
+    assert.equal(run.output, "");
+  });
+  await t.test("rehearsal with an unreadable package.json", () => {
+    const run = runValidate({ ...rehearsal, pkg: null });
+    assert.equal(run.status, 1, run.log);
+    assert.equal(run.output, "");
+  });
 });
 
 test("audit executes the pinned static Little CMS transform on both release targets", () => {

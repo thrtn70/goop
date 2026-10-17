@@ -2,6 +2,11 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # A dispatch is a rehearsal: it builds, signs and verifies the macOS package
+  # from the chosen ref and uploads it as the build job's workflow artifact.
+  # The publish job only runs for a tag push, so a rehearsal can never create
+  # or change a release, even when dispatched on a tag ref.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,12 +49,9 @@ jobs:
       # interpolated tag name into a command. The job remains read-only, but
       # treating the ref as data keeps this guard safe if permissions drift.
       # The env var is inert.
-      - name: Tag matches the version in every manifest
+      - name: Release version matches every manifest
         id: version
         run: |
-          # Same strip the app does — app_update.rs's strip_v_prefix is
-          # raw.strip_prefix('v').unwrap_or(raw).
-          want="${GITHUB_REF_NAME#v}"
           pkg=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" || true)
           tauri=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])" || true)
           # Scoped to the [workspace.package] table. A bare /^version/ matches
@@ -63,7 +65,7 @@ jobs:
             wp && /^[[:space:]]*version[[:space:]]*=/ {
               if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
             }' Cargo.toml || true)
-          echo "tag=$GITHUB_REF_NAME  package.json=$pkg  tauri.conf.json=$tauri  Cargo.toml=$cargo"
+          echo "$GITHUB_REF_TYPE=$GITHUB_REF_NAME  package.json=$pkg  tauri.conf.json=$tauri  Cargo.toml=$cargo"
           # Parse first, compare second: a manifest that can't be read and a
           # manifest that disagrees have different fixes, so they get different
           # errors. Fail closed — awk exits 0 when it matches nothing, so a
@@ -74,17 +76,33 @@ jobs:
           [ -n "$tauri" ] || { echo "::error::could not read .version from src-tauri/tauri.conf.json"; bad=1; }
           [ -n "$cargo" ] || { echo "::error::could not read version from Cargo.toml [workspace.package]"; bad=1; }
           if [ "$bad" -ne 0 ]; then
-            echo "::error::a manifest version could not be parsed, so tag $GITHUB_REF_NAME cannot be verified — refusing to create a release"
+            echo "::error::a manifest version could not be parsed, so $GITHUB_REF_TYPE $GITHUB_REF_NAME cannot be verified — refusing to build a release"
             exit 1
           fi
-          [ "$pkg"   = "$want" ] || { echo "::error::package.json version is '$pkg' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
-          [ "$tauri" = "$want" ] || { echo "::error::src-tauri/tauri.conf.json version is '$tauri' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
-          [ "$cargo" = "$want" ] || { echo "::error::Cargo.toml [workspace.package] version is '$cargo' but tag $GITHUB_REF_NAME expects '$want'"; bad=1; }
+          # A tag push releases the tag's version, with the same strip the app
+          # does (app_update.rs's strip_v_prefix is
+          # raw.strip_prefix('v').unwrap_or(raw)). Any dispatch is a rehearsal,
+          # even on a tag ref: package.json is the reference and the other two
+          # must agree with it.
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            want="${GITHUB_REF_NAME#v}"
+            expects="tag $GITHUB_REF_NAME expects"
+          else
+            want="$pkg"
+            expects="package.json (rehearsal of $GITHUB_REF_NAME) has"
+          fi
+          [ "$pkg"   = "$want" ] || { echo "::error::package.json version is '$pkg' but $expects '$want'"; bad=1; }
+          [ "$tauri" = "$want" ] || { echo "::error::src-tauri/tauri.conf.json version is '$tauri' but $expects '$want'"; bad=1; }
+          [ "$cargo" = "$want" ] || { echo "::error::Cargo.toml [workspace.package] version is '$cargo' but $expects '$want'"; bad=1; }
           if [ "$bad" -ne 0 ]; then
-            echo "::error::tag/manifest version mismatch. Set all three to $want and commit, then retag: git tag -d $GITHUB_REF_NAME && git push origin :$GITHUB_REF_NAME && git tag $GITHUB_REF_NAME && git push origin $GITHUB_REF_NAME. No draft release was created."
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "::error::tag/manifest version mismatch. Set all three to $want and commit, then retag: git tag -d $GITHUB_REF_NAME && git push origin :$GITHUB_REF_NAME && git tag $GITHUB_REF_NAME && git push origin $GITHUB_REF_NAME. No draft release was created."
+            else
+              echo "::error::manifest versions disagree. Set package.json, src-tauri/tauri.conf.json and Cargo.toml to one version and commit before rehearsing."
+            fi
             exit 1
           fi
-          echo "tag $GITHUB_REF_NAME matches version $want in package.json, src-tauri/tauri.conf.json and Cargo.toml"
+          echo "$GITHUB_REF_TYPE $GITHUB_REF_NAME: version $want in package.json, src-tauri/tauri.conf.json and Cargo.toml"
           echo "version=$want" >> "$GITHUB_OUTPUT"
 
   # Mirror the audit workflow's `legal` job at release time so a tag push
@@ -125,6 +143,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { targets: "${{ matrix.target }}" }
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
       # Restore from existing main-branch caches but don't save new ones.
@@ -187,6 +206,8 @@ jobs:
       - name: Verify signed sidecars run (macOS)
         if: matrix.os == 'macos-14'
         shell: bash
+        env:
+          GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
         run: |
           # The Cargo workspace root is the repo root, so `tauri build` writes
           # the bundle under ./target — not ./src-tauri/target. Search both so
@@ -236,6 +257,11 @@ jobs:
             echo "== $bin $flag (signed, in-bundle) =="
             "$exe" "$flag"
           done
+          # --version proves gallery-dl launches, not which urllib3 it carries:
+          # a source pin is no proof the frozen binary contains it. Ask the
+          # signed binary what it imported and compare with the freezer recipe.
+          echo "== gallery-dl runtime vs scripts/gallery-dl-macos-requirements.txt (signed, in-bundle) =="
+          node scripts/check-gallery-dl-runtime.mjs --binary "$APP/Contents/MacOS/gallery-dl" --python "$GALLERY_DL_PYTHON"
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
           # PDF compress/thumbnail features reach via GS_LIB (set to the
@@ -297,12 +323,18 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           overwrite: true
+          # A rehearsal's package is an unreleased build that any signed-in
+          # GitHub user can download from this public repo; keep it briefly.
+          retention-days: ${{ github.event_name == 'push' && 90 || 3 }}
 
   # This is the only write-capable job. It receives already-built bytes from
   # the read-only builder, validates its complete allowlist and digests,
   # then creates or updates a draft. It never checks out or executes project
   # code, dependencies, installers or sidecars.
   publish:
+    # Tag pushes only. A dispatch stops at the build artifact, and the event
+    # check matters: a dispatch on a tag ref also has ref_type 'tag'.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [validate, legal, build]
     runs-on: ubuntu-latest
     permissions:
