@@ -1,0 +1,16 @@
+{
+  "advisories": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "expires": "2027-01-15",
+      "reason": "Build-time only: reached through tailwindcss 3 (chokidar, micromatch, fast-glob) and absent from shipped dependencies. No patched braces release exists; remove this entry with the Tailwind 4 migration."
+    },
+    {
+      "id": "GHSA-rj75-hqrm-r3gf",
+      "package": "postcss-selector-parser",
+      "expires": "2027-01-15",
+      "reason": "Build-time only: tailwindcss 3 and postcss-nested both pin the 6.x line, and it is absent from shipped dependencies. The fix is 7.1.6, which tailwindcss 3 cannot use; remove this entry with the Tailwind 4 migration."
+    }
+  ]
+}

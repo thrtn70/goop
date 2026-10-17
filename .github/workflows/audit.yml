@@ -95,11 +95,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22", cache: "npm" }
       - run: npm ci
-      # Keep both shipped and development dependencies free of advisories at
-      # moderate severity or above. The lockfile makes the audited dependency
-      # graph reproducible; low-severity advisories remain visible without
-      # blocking maintenance.
-      - run: npm audit --audit-level=moderate
+      # Shipped dependencies must be free of advisories at moderate severity
+      # or above, with no exceptions. A development-only advisory with no
+      # usable fix can be accepted by GHSA id and package in
+      # scripts/npm-audit-accepted.json; the gate fails once an accepted one
+      # disappears. The lockfile makes the audited dependency graph
+      # reproducible; low-severity advisories remain visible without blocking.
+      - run: node scripts/npm-audit-gate.mjs
       - run: npm run typecheck
       # Same order as scripts/pre-push.sh. The local gate is a git hook and
       # can be bypassed; this is the only lint enforcement that always runs.
@@ -109,6 +111,7 @@ jobs:
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs
+      - run: node --test scripts/npm-audit-gate.test.mjs
       - run: npm run build
 
   legal:
