@@ -194,6 +194,119 @@ jobs:
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         with:
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      # bundle.macOS.minimumSystemVersion in tauri.conf.json is the oldest
+      # macOS Goop claims to run on. It reaches the package by two routes and
+      # no PR job exercises either: the bundler writes it into Info.plist as
+      # LSMinimumSystemVersion, which is what macOS checks before it launches
+      # the app, and tauri-build exports it as MACOSX_DEPLOYMENT_TARGET for
+      # release builds only, which sets the main executable's Mach-O minos.
+      # Hold both to the declared value in the bundle that is about to ship.
+      # That proves the declaration reached the package, not that the code
+      # runs there: the executable's minos is what the linker was told, and
+      # static libraries built for a newer macOS (the HEIC stack sets no
+      # deployment target) only make the linker warn.
+      #
+      # Everything else in Contents/MacOS is reported, not enforced. The
+      # sidecars and their dylibs are upstream, Homebrew and PyInstaller
+      # builds whose floor nothing in this repo sets; Homebrew bottles target
+      # the runner's own macOS. One whose minos is above the declared floor
+      # was built for a newer macOS, so Goop's real floor may be higher than
+      # it says. Only slices Apple Silicon runs count; an x86_64 slice counts
+      # when it is the only one. For the PyInstaller sidecars the minos is
+      # the bootloader's; the Python they unpack at run time is not covered.
+      #
+      # This runs before the sidecar smoke test so a failing sidecar cannot
+      # take the report down with it.
+      - name: Verify the macOS deployment floor
+        if: matrix.os == 'macos-14'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          want=$(node -e 'const c=JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json","utf8")); process.stdout.write((c.bundle&&c.bundle.macOS&&c.bundle.macOS.minimumSystemVersion)||"")')
+          [ -n "$want" ] || { echo "::error::bundle.macOS.minimumSystemVersion is unset in src-tauri/tauri.conf.json"; exit 1; }
+          # The same lookup, with the same load-bearing `|| true`, as the
+          # sidecar smoke test below.
+          APP=$(find target src-tauri/target -type d -path "*/$TARGET/release/bundle/macos/*.app" 2>/dev/null | head -1 || true)
+          [ -n "$APP" ] || { echo "::error::no .app bundle found under (src-tauri/)target/$TARGET/release/bundle/macos"; exit 1; }
+          # One "<arch> <version>" line per slice, arch "-" for a thin file:
+          # LC_BUILD_VERSION's minos, or the version in the older
+          # LC_VERSION_MIN_MACOSX that x86_64 slices built for 10.13 carry.
+          # Prints nothing, and still succeeds, for a file vtool can't read.
+          minos() {
+            vtool -show-build "$1" 2>/dev/null | awk '
+              /\(architecture [^)]*\):$/ { arch = $NF; sub(/\):$/, "", arch) }
+              $1 == "cmd" { cmd = $2 }
+              (cmd == "LC_BUILD_VERSION" && $1 == "minos") || (cmd == "LC_VERSION_MIN_MACOSX" && $1 == "version") {
+                print (arch == "" ? "-" : arch), $2
+              }' || true
+          }
+          # Succeeds when dotted version $1 is newer than $2.
+          above() {
+            awk -v a="$1" -v b="$2" 'BEGIN {
+              n = split(a, x, "."); m = split(b, y, "."); if (m > n) n = m
+              for (i = 1; i <= n; i++) if (x[i] + 0 != y[i] + 0) exit !(x[i] + 0 > y[i] + 0)
+              exit 1
+            }'
+          }
+          # "12.0" for a thin file, "x86_64 10.13, arm64 11.0" for a fat one.
+          show() { awk 'NF { printf "%s%s", (n++ ? ", " : ""), ($1 == "-" ? $2 : $1 " " $2) }'; }
+
+          bad=0
+          plist="$APP/Contents/Info.plist"
+          declared=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist" 2>/dev/null || true)
+          echo "== Info.plist LSMinimumSystemVersion: ${declared:-<missing>} (tauri.conf.json declares $want) =="
+          if [ "$declared" != "$want" ]; then
+            echo "::error::Info.plist LSMinimumSystemVersion is '${declared:-<missing>}' but tauri.conf.json declares $want"
+            bad=1
+          fi
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null || true)
+          slices=""
+          if [ -n "$exe" ]; then slices=$(minos "$APP/Contents/MacOS/$exe"); fi
+          echo "== ${exe:-<no CFBundleExecutable>} (main executable) minos: $(printf '%s\n' "$slices" | show) =="
+          if [ -z "$slices" ]; then
+            echo "::error::${exe:-the main executable} has no macOS build version to check"
+            bad=1
+          fi
+          while read -r arch v; do
+            [ -n "$v" ] || continue
+            if above "$v" "$want" || above "$want" "$v"; then
+              label="$exe"
+              [ "$arch" = "-" ] || label="$exe $arch"
+              echo "::error::$label is linked for macOS $v, not the declared $want"
+              bad=1
+            fi
+          done <<< "$slices"
+
+          echo "== other binaries in Contents/MacOS (reported, not enforced) =="
+          over=()
+          while IFS= read -r file <&3; do
+            name=$(basename "$file")
+            slices=$(minos "$file")
+            if [ -z "$slices" ]; then
+              printf '%-24s %s\n' "$name" "no macOS build version"
+              continue
+            fi
+            runs=$(printf '%s\n' "$slices" | awk '$1 !~ /^x86_64/')
+            [ -n "$runs" ] || runs="$slices"
+            top=""
+            while read -r _ v; do
+              if [ -z "$top" ] || above "$v" "$top"; then top="$v"; fi
+            done <<< "$runs"
+            mark=""
+            if above "$top" "$want"; then
+              mark="  above the $want floor"
+              over+=("$name ($top)")
+            fi
+            printf '%-24s %s%s\n' "$name" "$(printf '%s\n' "$slices" | show)" "$mark"
+          done 3< <(find "$APP/Contents/MacOS" -maxdepth 1 -type f ! -name "$exe" | sort)
+          if [ "${#over[@]}" -gt 0 ]; then
+            list=$(printf '%s, ' "${over[@]}")
+            echo "::warning::bundled binaries were built for a newer macOS than the declared $want, so the real floor may be higher: ${list%, }"
+          fi
+
+          [ "$bad" -eq 0 ] || { echo "::error::the signed bundle does not carry the declared macOS $want floor"; exit 1; }
+          echo "Info.plist and $exe both carry the declared macOS $want floor"
       # Smoke-test the PyInstaller sidecars INSIDE the signed .app. Tauri
       # ad-hoc-signs every sidecar with hardened runtime; the gallery-dl and
       # yt-dlp --onefile bundles can't load their embedded Python.framework
