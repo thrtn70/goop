@@ -108,6 +108,7 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: node --test scripts/release-workflow.test.mjs
+      - run: node --test scripts/check-gallery-dl-runtime.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs
@@ -173,6 +174,7 @@ jobs:
         shell: bash
         run: node scripts/performance-suite.mjs --synthetic-smoke --output "$RUNNER_TEMP/goop-perf-smoke"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
       - name: Resolve target
@@ -206,6 +208,16 @@ jobs:
           # in-.app variant on macOS only, and only on tags).
           "./src-tauri/bin/gs-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/tesseract-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+      # A pin in the freezer recipe is no proof the frozen binary carries it.
+      # Ask the freshly built gallery-dl which gallery-dl, Python, requests and
+      # urllib3 it imported, and compare with the recipe. release.yml repeats
+      # this on the signed, in-bundle copy.
+      - name: gallery-dl runtime matches the recipe (macOS)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        env:
+          GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
+        run: node scripts/check-gallery-dl-runtime.mjs --binary "./src-tauri/bin/gallery-dl-$TARGET" --python "$GALLERY_DL_PYTHON"
       # Every sidecar must stay owner-writable. Tauri's bundler clears extended
       # attributes across Contents/ before signing, `cp` carries the mode in
       # from src-tauri/bin, and a read-only binary fails that step with

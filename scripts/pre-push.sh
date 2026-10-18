@@ -50,6 +50,7 @@ run_step "desktop preview"   node --test scripts/desktop-preview.test.mjs
 run_step "video hardware contracts" node --test scripts/video-hardware-contract.test.mjs
 run_step "PERF-02 contracts" node --test scripts/responsiveness-baseline.test.mjs
 run_step "release workflow"  node --test scripts/release-workflow.test.mjs
+run_step "gallery-dl runtime check" node --test scripts/check-gallery-dl-runtime.test.mjs
 run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
