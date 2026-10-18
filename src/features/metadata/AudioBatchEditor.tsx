@@ -146,7 +146,7 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
                 placeholder="Title"
                 aria-label={`Title for ${basename(v.path)}`}
                 onChange={(e) => setTitles((t) => ({ ...t, [v.path]: e.target.value }))}
-                className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"
+                className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-fg focus:outline-hidden focus:ring-2 focus:ring-accent"
               />
               <input
                 type="text"
@@ -155,7 +155,7 @@ function AudioBatchEditor({ views, onDone }: AudioBatchEditorProps) {
                 placeholder="#"
                 aria-label={`Track number for ${basename(v.path)}`}
                 onChange={(e) => setTracks((t) => ({ ...t, [v.path]: e.target.value }))}
-                className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"
+                className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-fg focus:outline-hidden focus:ring-2 focus:ring-accent"
               />
             </div>
           ))}

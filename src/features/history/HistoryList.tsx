@@ -179,7 +179,7 @@ export default function HistoryList({ onPreview, onQuickView }: HistoryListProps
                     onPreview(j);
                   }
                 }}
-                className={`cursor-pointer border-t border-subtle transition duration-fast ease-out hover:bg-surface-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+                className={`cursor-pointer border-t border-subtle transition duration-fast ease-out hover:bg-surface-1 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent ${
                   previewing ? "bg-accent-subtle" : ""
                 }`}
               >

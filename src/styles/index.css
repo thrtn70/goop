@@ -1,9 +1,153 @@
+@import "tailwindcss" source(none);
 @import "./tokens.css";
 @import "./fonts.css";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Where Tailwind looks for class names. Listed rather than auto-detected,
+ * which would also scan crates/, site/ and any git worktree nested inside
+ * the checkout. These match what the Tailwind 3 `content` setting covered. */
+@source "../../index.html";
+@source "../**/*.{ts,tsx}";
+
+/* ------------------------------------------------------------------ */
+/* Tailwind theme                                                     */
+/* ------------------------------------------------------------------ */
+
+/* tokens.css stays the single source of truth: OKLCH triplets per theme,
+ * read at runtime, so the `.light` / `.system` class on <html> keeps
+ * working. This block only teaches Tailwind the names.
+ *
+ * `inline` makes each utility read our variable directly. `reference` stops
+ * Tailwind writing these variables onto :root. That matters because several
+ * of our token names (--radius-*, --text-*, --font-*, --ease-*) are also
+ * Tailwind theme names: emitted, `--radius-sm: var(--radius-sm)` would refer
+ * to itself, and the first cascade-layer slip would invalidate every radius
+ * in the app. */
+@theme inline reference {
+  --color-surface-0: oklch(var(--surface-0));
+  --color-surface-1: oklch(var(--surface-1));
+  --color-surface-2: oklch(var(--surface-2));
+  --color-surface-3: oklch(var(--surface-3));
+  --color-fg: oklch(var(--fg));
+  --color-fg-secondary: oklch(var(--fg-secondary));
+  --color-fg-muted: oklch(var(--fg-muted));
+  --color-accent: oklch(var(--accent));
+  --color-accent-hover: oklch(var(--accent-hover));
+  --color-accent-subtle: oklch(var(--accent-subtle));
+  --color-accent-fg: oklch(var(--accent-fg));
+  --color-accent-strong: oklch(var(--accent-strong));
+  --color-scrim: oklch(var(--scrim));
+  --color-success: oklch(var(--success));
+  --color-success-subtle: oklch(var(--success-subtle));
+  --color-error: oklch(var(--error));
+  --color-error-subtle: oklch(var(--error-subtle));
+  --color-warning: oklch(var(--warning));
+  --color-warning-subtle: oklch(var(--warning-subtle));
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+
+  --text-xs: var(--text-xs);
+  --text-xs--line-height: var(--leading-normal);
+  --text-sm: var(--text-sm);
+  --text-sm--line-height: var(--leading-normal);
+  --text-base: var(--text-base);
+  --text-base--line-height: var(--leading-normal);
+  --text-lg: var(--text-lg);
+  --text-lg--line-height: var(--leading-tight);
+  --text-xl: var(--text-xl);
+  --text-xl--line-height: var(--leading-tight);
+  --text-2xl: var(--text-2xl);
+  --text-2xl--line-height: var(--leading-tight);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-full: var(--radius-full);
+
+  --ease-out: var(--ease-out);
+  --ease-in: var(--ease-in);
+  --ease-in-out: var(--ease-in-out);
+
+  /* tokens.css also defines --leading-relaxed (1.7, or 1.65 in light), and
+     that is a Tailwind theme name too. Pin the utility to Tailwind's own
+     value, which is what `leading-relaxed` has always produced here.
+     --leading-tight and --leading-normal collide the same way and are left
+     unpinned on purpose: no class uses them, and a future `leading-tight`
+     should follow the themed token, as the text sizes above do. */
+  --leading-relaxed: 1.625;
+}
+
+/* Tailwind 4 has no duration theme, so the named durations are utilities.
+ * Each also sets --tw-duration, as the built-in duration-* utilities do, so
+ * a transition-* utility on the same element cannot reset it to 150ms. */
+@utility duration-instant {
+  --tw-duration: var(--duration-instant);
+  transition-duration: var(--duration-instant);
+}
+@utility duration-fast {
+  --tw-duration: var(--duration-fast);
+  transition-duration: var(--duration-fast);
+}
+@utility duration-normal {
+  --tw-duration: var(--duration-normal);
+  transition-duration: var(--duration-normal);
+}
+@utility duration-slow {
+  --tw-duration: var(--duration-slow);
+  transition-duration: var(--duration-slow);
+}
+
+/* --border-subtle was a border-only colour in the Tailwind 3 config. These
+ * are the only two forms in use. */
+@utility border-subtle {
+  border-color: oklch(var(--border-subtle));
+}
+@utility divide-subtle {
+  :where(& > :not(:last-child)) {
+    border-color: oklch(var(--border-subtle));
+  }
+}
+
+/* Tailwind 3 behaviour that Tailwind 4's preflight dropped, restored so the
+ * upgrade changes nothing visible. */
+@layer base {
+  /* Tailwind 3 drew every border in the theme's default border colour;
+     Tailwind 4 uses currentColor. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: oklch(var(--border));
+  }
+
+  /* Tailwind 3 gave buttons a pointer cursor. */
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+  :disabled {
+    cursor: default;
+  }
+
+  /* Tailwind 3's placeholder grey (its gray-400). */
+  input::placeholder,
+  textarea::placeholder {
+    color: #9ca3af;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Global styles                                                      */
+/* ------------------------------------------------------------------ */
+
+/* Cascade layers decide who wins here. Tailwind 4 puts its utilities in
+ * `@layer utilities`, and any rule outside a layer beats every rule inside
+ * one, whatever the specificity. Everything below stays unlayered so it
+ * keeps winning, as it did under Tailwind 3 on source order. The one
+ * exception is the :focus-visible outline, which has to lose to
+ * `focus:outline-hidden`. src/styles/__tests__/cascade.test.ts holds both. */
 
 html, body, #root {
   height: 100%;
@@ -25,10 +169,20 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Focus-visible ring for keyboard navigation */
+/* Focus-visible ring for keyboard navigation. In @layer base so the
+ * controls that draw their own ring (`focus:outline-hidden focus:ring-2`)
+ * can turn it off; left unlayered it would sit on top of theirs. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid oklch(var(--accent));
+    outline-offset: 2px;
+  }
+}
+
+/* The radius half stays unlayered. Under Tailwind 3 this rule came after the
+ * utilities, so a focused `rounded-md` or `rounded-full` control took this
+ * radius instead of its own, and the upgrade keeps that look unchanged. */
 :focus-visible {
-  outline: 2px solid oklch(var(--accent));
-  outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
@@ -285,9 +439,9 @@ body {
    * Tailwind's keyframes never read them.
    *
    * A substring selector covers the family and every utility added later,
-   * which an enumeration would not. Source order carries it: this sits after
-   * `@tailwind utilities`, and the selector ties `.animate-pulse` on
-   * specificity, so the later rule wins with no `!important`.
+   * which an enumeration would not. Cascade layers carry it: Tailwind puts
+   * `.animate-pulse` in `@layer utilities`, and this rule is unlayered, so it
+   * wins with no `!important`. Moving it into a layer would quietly undo it.
    *
    * Placed after the entrance rules on purpose. FileRow and CompressFileRow
    * carry `enter-stagger animate-pulse` together, so this also strips the

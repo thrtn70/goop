@@ -86,7 +86,7 @@ export default function GifOptionsPanel({
             <input
               type="text"
               placeholder="00:00"
-              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
               value={startDraft}
               onChange={(e) => {
                 setStartDraft(e.target.value);
@@ -103,7 +103,7 @@ export default function GifOptionsPanel({
             <input
               type="text"
               placeholder={msToMmSs(maxDurationMs)}
-              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+              className="w-16 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
               value={endDraft}
               onChange={(e) => {
                 setEndDraft(e.target.value);

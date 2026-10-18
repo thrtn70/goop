@@ -297,7 +297,7 @@ export default function SettingsPage() {
         >
           <select
             id={namingSchemeFieldId}
-            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
             value={settings.extract_naming_scheme}
             onChange={(e) => {
               const v = e.target.value;
@@ -318,7 +318,7 @@ export default function SettingsPage() {
         >
           <select
             id={themeFieldId}
-            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
             value={settings.theme}
             onChange={(e) => void patch({ theme: e.target.value as Theme })}
           >
@@ -337,7 +337,7 @@ export default function SettingsPage() {
             type="number"
             min={MIN_CONCURRENCY}
             max={MAX_CONCURRENCY}
-            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
             defaultValue={settings.extract_concurrency}
             key={`ec-${settings.extract_concurrency}`}
             onBlur={(e) => void patch({ extract_concurrency: clampConcurrency(e.target.value) })}
@@ -353,7 +353,7 @@ export default function SettingsPage() {
             type="number"
             min={MIN_CONCURRENCY}
             max={MAX_CONCURRENCY}
-            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="w-24 rounded-md bg-surface-2 p-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
             defaultValue={settings.convert_concurrency}
             key={`cc-${settings.convert_concurrency}`}
             onBlur={(e) => void patch({ convert_concurrency: clampConcurrency(e.target.value) })}
@@ -395,7 +395,7 @@ export default function SettingsPage() {
           >
             <select
               id={cookiesFieldId}
-              className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+              className="rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
               value={settings.cookies_from_browser ?? ""}
               onChange={(e) => {
                 const v = e.target.value;
@@ -432,7 +432,7 @@ export default function SettingsPage() {
               if (v === (settings.torbox_api_key ?? "")) return;
               void patch({ torbox_api_key: v === "" ? null : v });
             }}
-            className="w-full rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="w-full rounded-md bg-surface-2 px-3 py-2 font-mono text-xs text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           />
         </Field>
       </SettingsSection>

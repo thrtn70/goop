@@ -105,7 +105,7 @@ export default function PdfInsertBlankFlow({ file, onDone }: PdfInsertBlankFlowP
           }}
           aria-label={`Insert position, between 1 and ${totalPages + 1}`}
           placeholder={`1–${totalPages + 1}`}
-          className="w-32 rounded-md bg-surface-2 px-3 py-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+          className="w-32 rounded-md bg-surface-2 px-3 py-2 text-sm tabular-nums text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
         />
         <button
           type="button"

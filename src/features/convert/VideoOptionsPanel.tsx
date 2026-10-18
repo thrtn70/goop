@@ -107,7 +107,7 @@ export default function VideoOptionsPanel({ file, capability, sourceSize, onChan
     state.setApplied(String(numeric));
     change({...explicit,resize:{...explicit.resize,[field]:numeric}});
   }
-  const className = "rounded-md bg-surface-2 px-2 py-1 text-fg focus:outline-none focus:ring-2 focus:ring-accent";
+  const className = "rounded-md bg-surface-2 px-2 py-1 text-fg focus:outline-hidden focus:ring-2 focus:ring-accent";
   const processing = value?.kind === "encode" || value?.kind === "hardware_encode" ? "encode" : value?.kind ?? "automatic";
   const anyCustomAvailable = Boolean(capability?.encode.available && defaultCodec) || Boolean(capability?.hardware?.available);
   function customEncode() {

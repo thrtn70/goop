@@ -222,7 +222,7 @@ function Card({
             toggleSelection(job.id);
           }
         }}
-        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-xs transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
+        className={`absolute left-2 top-2 flex h-5 w-5 items-center justify-center rounded-sm border text-xs transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
           selected
             ? "border-accent bg-accent text-accent-fg"
             : "border-subtle bg-surface-1/70 text-fg-muted opacity-0 group-hover:opacity-100"
@@ -261,7 +261,7 @@ function Card({
             // Unlike the reveal affordance this stays visible: a failed card
             // has no thumbnail to keep clear, and re-running is the only
             // thing left to do with it.
-            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover"
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover"
           >
             <RotateCw size={12} strokeWidth={2.5} aria-hidden="true" />
           </span>
@@ -284,7 +284,7 @@ function Card({
             aria-disabled={reviewing}
             aria-label={`Review uncertain publication for ${rowLabel(job)} (${jobIdKey(job.id)})`}
             title="Review publication"
-            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover aria-disabled:cursor-wait aria-disabled:opacity-60"
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-accent transition duration-fast ease-out focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent hover:text-accent-hover aria-disabled:cursor-wait aria-disabled:opacity-60"
           >
             <SearchCheck size={12} strokeWidth={2.5} aria-hidden="true" />
           </span>
@@ -306,7 +306,7 @@ function Card({
             tabIndex={0}
             aria-label={`Show ${basename(outputPath)} in folder`}
             title="Show in folder"
-            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
+            className="flex h-5 w-5 items-center justify-center rounded-sm border border-subtle bg-surface-1/70 text-fg-muted opacity-0 transition duration-fast ease-out focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent group-hover:opacity-100 hover:text-fg"
           >
             <FolderOpen size={12} strokeWidth={2.5} aria-hidden="true" />
           </span>

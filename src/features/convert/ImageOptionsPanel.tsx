@@ -62,7 +62,7 @@ export default function ImageOptionsPanel({ value, capability, sourceSize, onCha
       output = { width: Math.max(1, Math.min(fit.width, width)), height: fit.height };
     }
   }
-  const inputClass = "w-24 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums focus:outline-none focus:ring-2 focus:ring-accent";
+  const inputClass = "w-24 rounded-md bg-surface-2 px-2 py-1 text-fg tabular-nums focus:outline-hidden focus:ring-2 focus:ring-accent";
   return <section aria-label="Image settings" className="space-y-3 rounded-md bg-surface-0 p-3 text-xs">
     <h3 className="font-medium text-fg">Image</h3>
     {!value && <p className="text-fg-secondary">Default ({capability.default_quality}), Original size</p>}

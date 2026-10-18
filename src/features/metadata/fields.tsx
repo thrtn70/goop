@@ -46,7 +46,7 @@ export function TextField({ label, value, onChange, placeholder, inputMode }: Te
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
       />
     </div>
   );

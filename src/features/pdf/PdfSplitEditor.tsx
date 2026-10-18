@@ -77,7 +77,7 @@ export default function PdfSplitEditor({
         value={input}
         onChange={(e) => setInput(e.target.value)}
         placeholder={`e.g. 1-3, 7-10  (this PDF has ${totalPages} pages)`}
-        className="rounded-md bg-surface-2 px-3 py-1.5 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        className="rounded-md bg-surface-2 px-3 py-1.5 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
         aria-invalid={error ? true : false}
         aria-describedby="pdf-split-pages-help"
       />

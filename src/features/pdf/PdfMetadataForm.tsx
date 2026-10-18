@@ -87,7 +87,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           />
         </FieldGroup>
         <FieldGroup id={authorId} label="Author">
@@ -96,7 +96,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
             type="text"
             value={author}
             onChange={(e) => setAuthor(e.target.value)}
-            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           />
         </FieldGroup>
         <FieldGroup id={subjectId} label="Subject">
@@ -105,7 +105,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
             type="text"
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
-            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           />
         </FieldGroup>
         <FieldGroup id={keywordsId} label="Keywords">
@@ -115,7 +115,7 @@ export default function PdfMetadataForm({ file, onDone }: PdfMetadataFormProps) 
             value={keywords}
             onChange={(e) => setKeywords(e.target.value)}
             placeholder="comma, separated, terms"
-            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+            className="rounded-md bg-surface-2 px-3 py-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           />
         </FieldGroup>
       </div>

@@ -11,8 +11,8 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     // Without this, vitest stubs every `.css` import to an empty string —
     // including `?raw` — and the token contrast test silently parses nothing.
-    // Only tokens.css is ever imported by a test, so no component suite pays
-    // for PostCSS/Tailwind here.
+    // Tests only read stylesheets as `?raw` text, and this config has no
+    // Tailwind plugin, so no suite pays for a Tailwind build.
     css: true,
     // Anchor discovery to this checkout's sources: the default glob also
     // crawls nested checkouts (git worktrees, vendored copies) and runs

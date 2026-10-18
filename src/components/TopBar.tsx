@@ -118,7 +118,7 @@ function TopBar({ onSubmit }: Props) {
           acknowledgeResponsivenessVisible(pending.actionId);
         }}
         placeholder="Paste a link and press Enter..."
-        className="min-w-0 flex-1 rounded bg-transparent py-1 text-sm text-fg placeholder:text-fg-muted focus:outline-none"
+        className="min-w-0 flex-1 rounded bg-transparent py-1 text-sm text-fg placeholder:text-fg-muted focus:outline-hidden"
       />
       </div>
     </header>

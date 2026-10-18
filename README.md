@@ -178,7 +178,7 @@ Run `./scripts/pre-push.sh` before every push. It checks Rust formatting, worksp
 |---|---|
 | Desktop shell | Tauri 2 (`tauri = { version = "2", features = ["protocol-asset"] }`) |
 | Backend | Rust 2021 edition, eight Tauri-independent engine crates + the desktop shell |
-| Frontend | React 18 + TypeScript 5 + Tailwind 3 + Vite 8 + Zustand 4 |
+| Frontend | React 18 + TypeScript 5 + Tailwind 4 + Vite 8 + Zustand 4 |
 | Type bridge | `ts-rs` Rust → TypeScript bindings |
 | Sidecars | ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, Tesseract |
 | Drag/drop | `@dnd-kit/core` + `@dnd-kit/sortable` |

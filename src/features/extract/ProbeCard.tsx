@@ -197,7 +197,7 @@ function MediaCard({ probe, start, onStart, ...presentation }: Props) {
       <label className="text-sm text-fg-secondary">Format:</label>
       <select
         aria-label="Download format"
-        className="w-full min-w-0 rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+        className="w-full min-w-0 rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
         value={selected ?? ""}
         onChange={(e) => setSelected(e.target.value || null)}
       >

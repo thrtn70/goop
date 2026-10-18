@@ -154,7 +154,7 @@ export default function PresetSaveDialog({ open, onClose, snapshot, validationEr
           aria-label="Preset name"
           aria-invalid={error ? true : false}
           aria-describedby="preset-name-error"
-          className="mt-3 w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+          className="mt-3 w-full rounded-md bg-surface-2 p-2 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
           placeholder="e.g. YouTube Upload"
           value={name}
           onChange={(e) => setName(e.target.value)}

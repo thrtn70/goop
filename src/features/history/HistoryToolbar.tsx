@@ -34,7 +34,7 @@ export default function HistoryToolbar() {
         placeholder="Search by filename..."
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        className="min-w-[220px] max-w-xs flex-1 rounded-md bg-surface-2 px-3 py-1.5 text-sm text-fg transition duration-fast ease-out placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"
+        className="min-w-[220px] max-w-xs flex-1 rounded-md bg-surface-2 px-3 py-1.5 text-sm text-fg transition duration-fast ease-out placeholder:text-fg-muted focus:outline-hidden focus:ring-2 focus:ring-accent"
       />
       <HistoryFilterChips />
       <div className="ml-auto flex gap-1 rounded-md bg-surface-2 p-1" role="group" aria-label="View mode">
