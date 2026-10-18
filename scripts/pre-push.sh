@@ -44,6 +44,7 @@ run_step "tsc typecheck"     npm run --silent typecheck
 # pages.yml without a single check running against it.
 run_step "eslint"            npm run --silent lint
 run_step "vitest"            npm run --silent test
+run_step "npm audit gate"    node --test scripts/npm-audit-gate.test.mjs
 run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs
 run_step "desktop preview"   node --test scripts/desktop-preview.test.mjs
 run_step "video hardware contracts" node --test scripts/video-hardware-contract.test.mjs
