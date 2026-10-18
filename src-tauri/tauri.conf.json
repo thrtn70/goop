@@ -63,6 +63,7 @@
       "licenses/littlecms-LICENSE.txt": "licenses/littlecms-LICENSE.txt"
     },
     "macOS": {
+      "minimumSystemVersion": "13.3",
       "signingIdentity": "-",
       "entitlements": "entitlements.plist"
     }

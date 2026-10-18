@@ -632,3 +632,11 @@ test("inline publisher validates bytes and release state before mutating a draft
     assert.deepEqual(state.assets.map((asset) => asset.name).sort(), expectedAssets);
   });
 });
+
+test("the macOS bundle declares the WebKit its stylesheet needs", () => {
+  // Tailwind 4's output relies on cascade layers, color-mix() and @property,
+  // all present from Safari 16.4. macOS 13.3 is the first release whose
+  // system WebKit, which the app's web view uses, is that new.
+  const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  assert.equal(config.bundle.macOS.minimumSystemVersion, "13.3");
+});
