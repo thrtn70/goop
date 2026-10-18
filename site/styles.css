@@ -145,6 +145,8 @@ a { color: inherit; text-decoration: none; }
 
 button { all: unset; cursor: pointer; }
 
+::selection { background: var(--teal); color: var(--ink-0); }
+
 /* Visible focus on every interactive surface. */
 :focus-visible {
   outline: 1.5px solid var(--teal-bright);
@@ -222,11 +224,9 @@ em { font-style: italic; font-feature-settings: 'kern', 'liga'; }
 
 .masthead,
 .hero,
-.ticker,
+.workflow,
 .dossier,
-.indexed,
 .begin,
-.aside,
 .faq,
 .colophon-footer {
   position: relative;
@@ -353,11 +353,9 @@ main {
   .masthead__nav a.masthead__github { display: none; }
 }
 
-/* On small mobile, drop the two interior nav links — visitors will
-   scroll past those sections anyway. Keep entry, FAQ, and Archive. */
+/* Keep the first-launch destination available at every viewport. */
 @media (max-width: 540px) {
-  .masthead__nav a[href="#depth"],
-  .masthead__nav a[href="#begin"] { display: none; }
+  .masthead__nav a[href="#archive"] { display: none; }
 }
 
 /* ============================================================
@@ -648,28 +646,30 @@ main {
   border-color: var(--teal);
 }
 
-.hero__archive {
-  flex-basis: 100%;
-  font-size: 0.78rem;
+.hero__install {
+  flex: 1 1 15rem;
+  align-self: center;
+  padding-inline: var(--s-4);
+  max-width: 30rem;
+}
+
+.hero__install p {
   color: var(--paper-3);
-  letter-spacing: var(--tracking-snug);
-  margin: var(--s-1) 0 0;
-  font-style: italic;
+  font-size: var(--type-body-s);
+  max-width: 28rem;
 }
 
-.hero__archive a {
-  color: var(--paper-2);
-  border-bottom: 1px solid var(--ink-3);
-  padding-bottom: 1px;
-  padding-block: 15px;
-  transition: color var(--dur-fast) var(--ease-quart),
-              border-color var(--dur-fast) var(--ease-quart);
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+  text-decoration-color: var(--paper-4);
+  transition: color var(--dur-fast) var(--ease-quart);
 }
 
-.hero__archive a:hover {
-  color: var(--teal);
-  border-color: var(--teal);
-}
+.text-link:hover { color: var(--teal); }
 
 /* Failure note revealed by app.js when the GitHub release fetch can't
    resolve. Hidden by default so the page stays clean on the happy path. */
@@ -758,124 +758,139 @@ main {
   .btn { min-width: 0; flex: 1 1 16rem; }
 }
 
-/* On narrow mobile (iPhone SE class), collapse hero whitespace so both
-   the alt-OS link and the archive link land above the 812 fold.
-   Body lede font drops slightly to absorb a long paragraph in fewer
-   lines without going below 16px. */
 @media (max-width: 540px) {
-  .hero {
-    padding-block-end: var(--s-3);
-  }
-  .hero__grid {
-    row-gap: var(--s-3);
-  }
-  .hero__headline-line--indent {
-    /* Indent eats too much horizontal room at this width — the
-       enjambment becomes a hard break mid-word. Pull it back to
-       a visible-but-modest offset. */
-    padding-left: var(--s-4);
-  }
-  .hero__lede {
-    gap: var(--s-3);
-    padding-top: var(--s-3);
-  }
-  .hero__lede p:not(.hero__lede-pull) {
-    font-size: 1rem;
-    line-height: 1.5;
-  }
-  .hero__alt {
-    margin-top: 0;
-  }
-  .hero__archive {
-    margin-top: var(--s-1);
-  }
-  /* The padding-block on these two used to be clawed back here to hold both
-     links above the 812 fold. It bought nothing: both links are inline, and
-     vertical padding on an inline box never enters the line box, so the claw-
-     back moved no layout at all — it only shrank the hit area, on exactly the
-     viewports where touch accuracy matters most. Measured with and without:
-     the colophon starts at 693px either way, while the targets go from
-     24.3/24.7px to 45.5/46px. The margin-top rules above are what actually
-     recover the height. */
+  .hero { padding-block-end: var(--s-8); }
+  .hero__grid { row-gap: var(--s-4); }
+  .hero__headline-line--indent { padding-left: var(--s-4); }
+  .hero__lede { gap: var(--s-3); padding-top: var(--s-3); }
+  .hero__lede p:not(.hero__lede-pull) { font-size: var(--type-body); line-height: 1.5; }
+  .hero__alt { margin-top: 0; }
+  .hero__install { padding-inline: 0; }
 }
 
 /* ============================================================
-   Ticker
+   Workflow — a file example, from source to saved copy
    ============================================================ */
 
-.ticker {
-  border-block: var(--hairline);
-  background: var(--ink-1);
-  padding: var(--s-12) 0 var(--s-8);
-  overflow: hidden;
-}
-
-.ticker__intro {
+.workflow {
   max-width: var(--page-max);
   margin: 0 auto;
-  padding: 0 var(--gutter);
+  padding: clamp(var(--s-12), 6vw, var(--s-24)) var(--gutter);
+  border-block: var(--hairline);
+  background: var(--ink-1);
+}
+
+.workflow__header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-8);
+  margin-bottom: var(--s-8);
+}
+
+.workflow__header > div { max-width: 44rem; }
+
+.workflow__choices {
+  display: flex;
+  flex-wrap: wrap;
+  min-inline-size: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.workflow__choices[hidden],
+[data-workflow-panel][hidden] { display: none; }
+
+.workflow__choices legend {
+  padding: 0 0 var(--s-2);
+  color: var(--paper-3);
+  font-size: var(--type-body-s);
+}
+
+.workflow__choice { position: relative; cursor: pointer; }
+
+.workflow__choice input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+
+.workflow__choice span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: var(--s-3) var(--s-6);
+  border-bottom: var(--hairline-strong);
+  font-family: 'Bricolage Grotesque', system-ui;
+  color: var(--paper-3);
+  transition: color var(--dur-fast) var(--ease-quart);
+}
+
+.workflow__choice:hover span { color: var(--paper); }
+.workflow__choice input:checked + span { color: var(--teal); border-bottom-color: var(--teal); }
+.workflow__choice input:focus-visible + span { outline: 2px solid var(--teal-bright); outline-offset: 3px; }
+
+.workflow__stages {
   display: grid;
-  grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
-  gap: var(--s-6);
-  align-items: baseline;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-block: var(--hairline-strong);
+}
+
+.workflow__stage {
+  min-width: 0;
+  min-height: 272px;
+  padding: var(--s-6) var(--s-8);
+  border-right: var(--hairline);
+}
+
+.workflow__stage:first-child { padding-left: 0; }
+.workflow__stage:last-child { border-right: 0; padding-right: 0; }
+
+.workflow__step {
+  color: var(--paper-3);
+  font-size: var(--type-body-s);
   margin-bottom: var(--s-6);
 }
 
-.ticker__heading {
+.workflow__format {
   font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 500;
-  font-size: clamp(1.05rem, 0.9rem + 0.5vw, 1.25rem);
-  line-height: 1.25;
-  color: var(--paper);
-  letter-spacing: var(--tracking-snug);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6em;
-  align-items: baseline;
+  font-weight: 600;
+  font-size: clamp(2.5rem, 1rem + 4vw, 4.25rem);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.1;
+  margin-bottom: var(--s-3);
 }
 
-.ticker__sub {
-  font-size: var(--type-body-s);
-  line-height: var(--line-normal);
-  color: var(--paper-3);
-  font-style: italic;
-  letter-spacing: var(--tracking-snug);
-}
-
-.ticker__track {
-  max-width: var(--page-max);
-  margin: 0 auto;
-  padding: 0 var(--gutter);
-}
-
-.ticker__list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-3) var(--s-6);
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 500;
-  font-size: clamp(1rem, 0.85rem + 0.5vw, 1.25rem);
-  line-height: var(--line-normal);
-  color: var(--paper);
-  list-style: none;
-}
-
-.ticker__list li {
-  border-bottom: 1px solid var(--ink-3);
-  padding-bottom: var(--s-1);
-}
-
-.ticker__more {
-  font-style: italic;
-  font-weight: 400;
-  color: var(--paper-3);
-}
+.workflow__stage--result .workflow__format { color: var(--teal); }
+.workflow__filename { overflow-wrap: anywhere; color: var(--paper-2); }
+.workflow__setting { font-family: 'Bricolage Grotesque', system-ui; font-size: var(--type-display-m); margin-bottom: var(--s-3); }
+.workflow__note { color: var(--paper-3); font-size: var(--type-body-s); max-width: 28ch; }
+.workflow__filename + .workflow__note { margin-top: var(--s-3); }
+.workflow__caption { color: var(--paper-3); font-size: var(--type-body-s); margin-top: var(--s-4); }
 
 @media (max-width: 720px) {
-  .ticker__intro {
-    grid-template-columns: 1fr;
-    gap: var(--s-2);
+  .workflow__header { gap: var(--s-6); }
+  .workflow__stages { grid-template-columns: 1fr; }
+  .workflow__stage {
+    display: grid;
+    grid-template-columns: minmax(5rem, 0.4fr) minmax(0, 1fr);
+    gap: var(--s-2) var(--s-6);
+    align-items: baseline;
+    min-height: 0;
+    padding: var(--s-6) 0;
+    border-right: 0;
+    border-bottom: var(--hairline);
   }
+  .workflow__stage:last-child { border-bottom: 0; }
+  .workflow__step { grid-column: 1 / -1; margin-bottom: var(--s-2); }
+  .workflow__format, .workflow__setting { margin-bottom: 0; }
+  .workflow__stage--result .workflow__note { grid-column: 2; margin-top: 0; }
+  .workflow__choice span { padding-inline: var(--s-4); }
 }
 
 /* ============================================================
@@ -919,7 +934,7 @@ main {
    ============================================================ */
 
 .dossier {
-  padding: clamp(var(--s-16), 8vw, var(--s-32)) var(--gutter);
+  padding: clamp(var(--s-12), 6vw, var(--s-24)) var(--gutter);
   max-width: var(--page-max);
   margin: 0 auto;
   border-bottom: var(--hairline);
@@ -927,7 +942,7 @@ main {
 
 .dossier__header {
   max-width: 52rem;
-  margin-bottom: clamp(var(--s-12), 5vw, var(--s-24));
+  margin-bottom: var(--s-8);
 }
 
 .dossier__entries {
@@ -937,10 +952,10 @@ main {
 
 .entry {
   display: grid;
-  grid-template-columns: minmax(0, 0.85fr) minmax(0, 2.2fr) minmax(0, 0.95fr);
+  grid-template-columns: minmax(0, 0.35fr) minmax(0, 2.2fr) minmax(0, 1fr);
   column-gap: clamp(var(--s-6), 3vw, var(--s-12));
   align-items: start;
-  padding: clamp(var(--s-8), 4vw, var(--s-16)) 0;
+  padding: var(--s-8) 0;
   border-top: var(--hairline);
   position: relative;
 }
@@ -951,7 +966,7 @@ main {
   font-family: 'Bricolage Grotesque', system-ui;
   font-feature-settings: 'tnum';
   font-weight: 700;
-  font-size: var(--type-display-xxl);
+  font-size: var(--type-display-xl);
   font-variation-settings: 'opsz' 96, 'wght' 700;
   line-height: 0.85;
   letter-spacing: var(--tracking-tight);
@@ -1010,33 +1025,41 @@ main {
 
 @media (max-width: 880px) {
   .entry {
-    /* Same min-content trap as .step — latent here (no unwrappable child
-       today), but a long URL or a code sample in an entry would spring it. */
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--s-4);
+    grid-template-columns: 2.5rem minmax(0, 1fr);
+    gap: var(--s-3) var(--s-4);
   }
-  .entry__numeral { font-size: clamp(3.5rem, 14vw, 6rem); }
-  .entry__margin {
-    border-top: var(--hairline);
-    padding-top: var(--s-3);
-  }
+  .entry__numeral { font-size: 2rem; line-height: 1.1; }
+  .entry__margin { grid-column: 2; border-top: 0; padding-top: 0; margin-top: 0; }
+  .entry__body p { font-size: var(--type-body); }
 }
+
+.entry__margin a { text-decoration: underline; text-underline-offset: 0.25em; }
+.entry__margin a:hover { color: var(--teal); }
 
 /* ============================================================
-   Indexed — "Beneath the surface." (glossary)
+   Details — optional reference beneath the four jobs
    ============================================================ */
 
-.indexed {
-  padding: clamp(var(--s-16), 8vw, var(--s-32)) var(--gutter);
-  max-width: var(--page-max);
-  margin: 0 auto;
-  background: var(--ink-1);
+.details-guide { margin-top: var(--s-6); }
+
+.details-guide > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3) var(--s-6);
+  padding: var(--s-4) 0;
+  min-height: 56px;
+  cursor: pointer;
+  list-style: none;
+  font-family: 'Bricolage Grotesque', system-ui;
+  font-size: var(--type-display-m);
 }
 
-.indexed__header {
-  max-width: 52rem;
-  margin-bottom: clamp(var(--s-8), 4vw, var(--s-16));
-}
+.details-guide > summary::-webkit-details-marker { display: none; }
+.details-guide > summary::after { content: '+'; margin-left: auto; color: var(--teal); }
+.details-guide[open] > summary::after { content: '−'; }
+.details-guide > summary:hover { color: var(--teal); }
+.details-guide__hint { font-family: 'Figtree', system-ui; font-size: var(--type-body-s); color: var(--paper-3); }
 
 .glossary {
   display: grid;
@@ -1104,7 +1127,7 @@ main {
    ============================================================ */
 
 .begin {
-  padding: clamp(var(--s-16), 8vw, var(--s-32)) var(--gutter);
+  padding: clamp(var(--s-12), 6vw, var(--s-24)) var(--gutter);
   max-width: var(--page-max);
   margin: 0 auto;
   border-bottom: var(--hairline);
@@ -1112,7 +1135,7 @@ main {
 
 .begin__header {
   max-width: 52rem;
-  margin-bottom: clamp(var(--s-12), 5vw, var(--s-24));
+  margin-bottom: var(--s-8);
 }
 
 .steps {
@@ -1135,7 +1158,7 @@ main {
   font-family: 'Bricolage Grotesque', system-ui;
   font-feature-settings: 'tnum';
   font-weight: 600;
-  font-size: var(--type-display-xxl);
+  font-size: var(--type-display-xl);
   font-variation-settings: 'opsz' 96;
   line-height: 0.85;
   letter-spacing: var(--tracking-tight);
@@ -1194,84 +1217,23 @@ main {
 }
 
 @media (max-width: 880px) {
-  .step {
-    /* Bare 1fr is minmax(auto, 1fr), so the track floors at min-content — and
-       step 02 holds a white-space:pre <pre> whose min-content is 370.8px. The
-       track froze at that width on every viewport under 430px and dragged all
-       three step rows past the right gutter with it (71px off-screen at 320px,
-       taking the Gatekeeper command with it). minmax(0, ...) lets the track
-       shrink and hands the overflow to the <pre>'s own overflow-x. */
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--s-3);
-  }
-  .step__numeral { font-size: clamp(3.5rem, 14vw, 6rem); }
+  .step { grid-template-columns: 2.5rem minmax(0, 1fr); gap: var(--s-4); padding-block: var(--s-6); }
+  .step__numeral { font-size: 2rem; line-height: 1.15; }
+  .step__body p { font-size: var(--type-body); }
 }
 
-/* ============================================================
-   Aside — "A note on cookies."
-   ============================================================ */
-
-.aside {
-  padding: clamp(var(--s-16), 8vw, var(--s-24)) var(--gutter);
-  max-width: var(--page-max);
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 0.5fr) minmax(0, 1fr);
-  column-gap: clamp(var(--s-6), 3vw, var(--s-16));
-  align-items: start;
-  background: var(--ink-1);
-  border-bottom: var(--hairline);
-}
-
-.aside__eyebrow {
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-style: italic;
-  font-size: clamp(1.25rem, 0.9rem + 1vw, 1.75rem);
-  font-weight: 400;
-  letter-spacing: var(--tracking-snug);
-  color: var(--paper-3);
-  line-height: 1.2;
-}
-
-.aside__quote {
-  margin: 0;
-  border-left: 0; /* no side stripe — banned */
-}
-
-.aside__quote p {
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-style: italic;
-  font-weight: 400;
-  font-size: clamp(1.5rem, 1rem + 1.6vw, 2.25rem);
-  line-height: 1.45;
-  letter-spacing: var(--tracking-snug);
-  color: var(--paper);
-  text-wrap: balance;
-}
-
-.aside__attribution {
-  margin-top: var(--s-4);
-  font-size: var(--type-body-s);
-  color: var(--paper-3);
-  font-style: italic;
-  letter-spacing: var(--tracking-snug);
-  max-width: 32rem;
-}
-
-@media (max-width: 760px) {
-  .aside {
-    grid-template-columns: 1fr;
-    gap: var(--s-3);
-  }
-  .aside__eyebrow { margin-bottom: var(--s-2); }
-}
+.install-help { max-width: 38rem; margin-top: var(--s-4); }
+.install-help summary { cursor: pointer; padding-block: var(--s-3); min-height: 44px; color: var(--paper-2); }
+.install-help summary:hover { color: var(--teal); }
+.install-help[open] summary { margin-bottom: var(--s-2); }
+.step__body .step__note, .install-help p { font-size: var(--type-body-s); }
 
 /* ============================================================
    FAQ — "Frequently raised."
    ============================================================ */
 
 .faq {
-  padding: clamp(var(--s-16), 8vw, var(--s-32)) var(--gutter);
+  padding: clamp(var(--s-12), 6vw, var(--s-24)) var(--gutter);
   max-width: var(--page-max);
   margin: 0 auto;
 }
@@ -1421,7 +1383,7 @@ main {
    ============================================================ */
 
 .archive {
-  padding: clamp(var(--s-16), 8vw, var(--s-32)) var(--gutter);
+  padding: clamp(var(--s-12), 6vw, var(--s-24)) var(--gutter);
   max-width: var(--page-max);
   margin: 0 auto;
   border-top: var(--hairline);
@@ -1523,7 +1485,7 @@ main {
 .archive__skeleton-bar--shorter { width: min(18rem, 75%); }
 .archive__skeleton-bar--shortest { width: min(14rem, 60%); }
 
-/* The stubs standing in for the macOS / Windows / Notes links. They carry
+/* The stub standing in for the release-page link. They carry
    .archive__link's exact box — 44px min-height pulled back by an 11px negative
    margin — so the skeleton row resolves to the same height as a real one and
    the list does not jump when the fetch lands. Widths approximate the three
@@ -1535,8 +1497,6 @@ main {
   background: var(--ink-1);
 }
 
-.archive__skeleton-bar--link-wide { width: 4.75rem; }
-.archive__skeleton-bar--link-narrow { width: 3rem; }
 
 .archive__row {
   display: grid;
@@ -1719,6 +1679,26 @@ main {
   background: var(--ink-3);
 }
 
+.closing-download {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s-8);
+  align-items: center;
+  max-width: var(--page-max);
+  margin: 0 auto var(--s-12);
+  padding-bottom: var(--s-12);
+  border-bottom: var(--hairline);
+}
+
+.closing-download p { color: var(--paper-2); }
+.closing-download__actions { display: flex; flex-direction: column; align-items: start; gap: var(--s-2); }
+
+@media (max-width: 720px) {
+  .closing-download { grid-template-columns: minmax(0, 1fr); }
+  .closing-download__actions { align-items: stretch; }
+  .closing-download .btn { flex: none; width: 100%; }
+}
+
 .colophon-footer__inner {
   max-width: var(--page-max);
   margin: 0 auto;
@@ -1809,9 +1789,8 @@ main {
 .hero__lede,
 .hero__cta,
 .colophon {
-  opacity: 0;
-  transform: translateY(8px);
-  animation: hero-rise var(--dur-hero) var(--ease-expo) forwards;
+  opacity: 1;
+  animation: hero-rise var(--dur-hero) var(--ease-expo) both;
 }
 
 .hero__eyebrow             { animation-delay: 60ms; }
@@ -1822,6 +1801,7 @@ main {
 .colophon                  { animation-delay: 480ms; }
 
 @keyframes hero-rise {
+  from { transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
@@ -1842,6 +1822,7 @@ main {
   .hero__lede,
   .hero__cta,
   .colophon {
+    animation: none;
     opacity: 1;
     transform: none;
   }
