@@ -161,11 +161,23 @@ jobs:
       # upload flow below are untouched. Nothing needs bundling at
       # packaging time because the link is fully static; audit.yml's
       # per-PR link guards enforce that property stays true.
+      #
+      # The stack is built for the declared macOS floor, so the floor is in
+      # the cache key: a new one restores nothing built for the old. The
+      # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
+      # which would also change with every version bump.
+      - name: macOS deployment floor
+        id: macos-floor
+        if: matrix.os == 'macos-14'
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         if: matrix.os == 'macos-14'
         with:
           path: .heif-deps
-          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
       - name: Static HEIC decode stack (macOS)
         if: matrix.os == 'macos-14'
         run: |

@@ -34,10 +34,18 @@ jobs:
       # v0.2.8: static HEIC decode stack. Pinned libde265 + libheif
       # built static by the script (every other codec OFF); apt's
       # libheif-dev is NOT used (it would dynamic-link and drift).
+      # The macOS floor is in the key on every runner: one key format, and
+      # the script refuses to run without a floor anyway.
+      - name: macOS deployment floor
+        id: macos-floor
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: .heif-deps
-          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
       - name: Static HEIC decode stack (libde265 + libheif)
         run: |
           ./scripts/build-static-heif-deps.sh
@@ -108,6 +116,7 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: node --test scripts/release-workflow.test.mjs
+      - run: node --test scripts/heif-deps.test.mjs
       - run: node --test scripts/check-gallery-dl-runtime.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
@@ -164,6 +173,11 @@ jobs:
       - name: Startup and performance harnesses (macOS)
         if: matrix.os == 'macos-14'
         run: node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
+      # Some HEIC stack tests build real Mach-O archives with clang, ar and
+      # otool, so they skip on the Linux web job. This is where CI runs them.
+      - name: HEIC stack tests (macOS)
+        if: matrix.os == 'macos-14'
+        run: node --test scripts/heif-deps.test.mjs
       - name: PERF-01 portable harness tests
         shell: bash
         run: node --test scripts/performance-portable.test.mjs
@@ -258,11 +272,22 @@ jobs:
       # from the Phase 0 spike (.github/workflows/heic-spike.yml,
       # deleted after the gate passed) so every PR re-proves the
       # static-link property the release builders rely on.
+      # The stack is built for the declared macOS floor, so the floor is in
+      # the cache key: a new one restores nothing built for the old. The
+      # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
+      # which would also change with every version bump.
+      - name: macOS deployment floor
+        id: macos-floor
+        if: matrix.os == 'macos-14'
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         if: matrix.os == 'macos-14'
         with:
           path: .heif-deps
-          key: heif-deps-${{ runner.os }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
       - name: Static HEIC stack (macOS)
         if: matrix.os == 'macos-14'
         run: |
