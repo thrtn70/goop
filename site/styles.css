@@ -563,20 +563,6 @@ main {
   align-items: stretch;
 }
 
-.hero__pause {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 16rem;
-  padding: var(--s-4) var(--s-6) var(--s-3);
-  border: 1px solid var(--teal);
-  color: var(--paper);
-  font-family: 'Bricolage Grotesque', system-ui;
-  font-weight: 600;
-  letter-spacing: var(--tracking-snug);
-}
-
 .btn[hidden] { display: none; }
 
 .btn {
@@ -606,12 +592,6 @@ main {
   color: var(--ink-0);
 }
 
-.btn--primary[data-cta="win"] {
-  background: var(--paper);
-  border-color: var(--paper);
-  color: var(--ink-0);
-}
-
 .btn:hover {
   background: var(--ink-0);
   color: var(--paper);
@@ -620,11 +600,6 @@ main {
 .btn--primary[data-cta="mac"]:hover {
   border-color: var(--teal);
   color: var(--teal);
-}
-
-.btn--primary[data-cta="win"]:hover {
-  border-color: var(--paper);
-  color: var(--paper);
 }
 
 .btn__rule {
@@ -671,12 +646,6 @@ main {
 .hero__alt a:hover {
   color: var(--teal);
   border-color: var(--teal);
-}
-
-.hero__alt-meta {
-  font-style: italic;
-  color: var(--paper-3);
-  letter-spacing: var(--tracking-snug);
 }
 
 .hero__archive {

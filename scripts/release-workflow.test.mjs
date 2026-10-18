@@ -460,17 +460,14 @@ test("replacement candidate advances every release version authority to v0.3.6",
   );
 });
 
-test("static website cannot promote an older API release while downloads are paused", () => {
-  assert.match(siteHtml, /data-download-paused/);
-  assert.match(siteHtml, /release downloads are temporarily paused/i);
-  assert.doesNotMatch(
-    siteHtml,
-    /data-(?:cta|mac-url|latest-version)|\/releases\/(?:latest|download)\//,
-  );
-  assert.doesNotMatch(
-    siteScript,
-    /browser_download_url|data-(?:mac-url|latest-version)|\/releases\/latest/,
-  );
+test("static website offers only a macOS installer at or above the minimum safe version", () => {
+  assert.doesNotMatch(siteHtml, /data-download-paused|temporarily paused/i);
+  assert.match(siteHtml, /data-cta="mac"/);
+  assert.doesNotMatch(siteHtml, /data-win-url|\.msi\b|\.exe\b|Download for Windows/);
+  // v0.3.6 is the first build whose bundled gallery-dl carries the patched
+  // urllib3; the site must never promote an older one as current.
+  assert.match(siteScript, /MIN_MAC_VERSION\s*=\s*\[\s*0\s*,\s*3\s*,\s*6\s*\]/);
+  assert.doesNotMatch(siteScript, /\.msi\b|\.exe\b|data-win-url/);
   assert.match(siteScript, /makeLink\(notesURL, 'Release page'\)/);
 });
 

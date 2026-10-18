@@ -4,6 +4,12 @@
   const REPO = 'thrtn70/goop';
   const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=12`;
   const ARCHIVE_LIMIT = 10;
+  // v0.3.6 is the first build whose bundled gallery-dl carries the patched
+  // urllib3. Nothing older is ever promoted as the current download, even if
+  // GitHub still reports it as the latest release.
+  const MIN_MAC_VERSION = [0, 3, 6];
+  const MAC_DMG = /^Goop_(\d+\.\d+\.\d+)_aarch64\.dmg$/;
+  const RELEASE_DOWNLOADS = `https://github.com/${REPO}/releases/download/`;
 
   function isHTTPS(url) {
     try {
@@ -149,10 +155,9 @@
     }
   }
 
-  async function initArchive() {
+  function initArchive(releases) {
     const list = document.querySelector('[data-archive-list]');
     if (!list) return true;
-    const releases = await fetchReleases();
     // An empty array is truthy, so this has to test length too — otherwise a
     // 200 with no releases falls through to renderArchive(), which returns
     // without touching the DOM and leaves the skeleton rows up forever. The
@@ -163,6 +168,57 @@
     }
     renderArchive(releases);
     return true;
+  }
+
+  /* ----------------------------------------------------------------
+   * Current macOS download
+   *
+   * The static markup links the latest-release page. When the release list
+   * loads, the download points straight at the newest stable DMG at or above
+   * MIN_MAC_VERSION, served from this repository's own release downloads.
+   * ---------------------------------------------------------------- */
+
+  function parseVersion(tag) {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(typeof tag === 'string' ? tag : '');
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  }
+
+  function compareVersions(a, b) {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  }
+
+  function macInstaller(release) {
+    if (looksUnstable(release)) return null;
+    const version = parseVersion(release?.tag_name);
+    if (!version || compareVersions(version, MIN_MAC_VERSION) < 0) return null;
+    const assets = Array.isArray(release.assets) ? release.assets : [];
+    for (const asset of assets) {
+      const name = typeof asset?.name === 'string' ? asset.name : '';
+      const match = MAC_DMG.exec(name);
+      if (!match || match[1] !== version.join('.')) continue;
+      // Exactly this release's own download URL, nothing else.
+      if (asset.browser_download_url !== `${RELEASE_DOWNLOADS}${release.tag_name}/${name}`) continue;
+      return { tag: release.tag_name, version, url: asset.browser_download_url };
+    }
+    return null;
+  }
+
+  function applyMacInstaller(releases) {
+    let best = null;
+    for (const release of releases) {
+      const installer = macInstaller(release);
+      if (installer && (!best || compareVersions(installer.version, best.version) > 0)) best = installer;
+    }
+    if (!best) return;
+    document.querySelectorAll('[data-mac-url]').forEach((link) => {
+      link.href = best.url;
+    });
+    document.querySelectorAll('[data-latest-version]').forEach((label) => {
+      label.textContent = `v${best.version.join('.')}`;
+    });
   }
 
   /* ----------------------------------------------------------------
@@ -346,7 +402,11 @@
 
   async function init() {
     initCursorChoreography();
-    const archiveLoaded = await initArchive();
+    const releases = await fetchReleases();
+    // The download link first: an archive rendering problem must not keep
+    // visitors on the fallback link.
+    if (releases) applyMacInstaller(releases);
+    const archiveLoaded = initArchive(releases);
     setFetchStatus(!archiveLoaded);
   }
 

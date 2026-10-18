@@ -6,7 +6,7 @@
     <title>Goop — Take control of your files.</title>
     <meta
       name="description"
-      content="Download, convert, compress, and handle PDFs in one small desktop app. Release downloads are temporarily paused while a patched macOS build is prepared."
+      content="Download, convert, compress, and handle PDFs in one small desktop app. Works with 2,000+ sites. macOS on Apple Silicon, no accounts, no tracking."
     />
     <meta name="color-scheme" content="dark" />
     <!-- Matches --ink-0 exactly. It used to read #0c0e0d, which is several
@@ -80,7 +80,8 @@
         <div class="hero__grid">
           <p class="hero__eyebrow">
             <span class="hero__eyebrow-mark" aria-hidden="true">¶</span>
-            <span>A field guide to <em>Goop</em>, source snapshot v0.3.5</span>
+            <span>A field guide to <em>Goop</em>, issue</span>
+            <span data-latest-version>v0.3.6</span>
           </p>
           <h1 id="hero-headline" class="hero__headline">
             <span class="hero__headline-line">Take&nbsp;control</span>
@@ -96,21 +97,30 @@
           </div>
 
           <div class="hero__cta">
-            <div class="hero__pause" data-download-paused role="status">
+            <a
+              class="btn btn--primary"
+              data-cta="mac"
+              data-mac-url
+              href="https://github.com/thrtn70/goop/releases/latest"
+              rel="noopener"
+            >
               <span class="btn__rule" aria-hidden="true"></span>
-              <span class="btn__label">Release downloads are temporarily paused</span>
-              <span class="btn__meta">Patched macOS build in preparation</span>
-            </div>
-            <p class="hero__alt">
-              Current installer promotion is paused on every platform.
+              <span class="btn__label">Download for macOS</span>
+              <span class="btn__meta">Apple Silicon · .dmg</span>
+            </a>
+            <!-- The static link relies on GitHub's "latest" release being a
+                 macOS build at or above v0.3.6; app.js upgrades it to the
+                 newest such DMG once the release list loads. -->
+            <p class="hero__alt" data-platform-notice>
+              For Macs with Apple Silicon; Intel Macs aren't supported. Windows builds are on hold for now;
               <a
                 data-release-history
                 href="https://github.com/thrtn70/goop/releases"
                 rel="noopener"
               >
-                View release history
+                the release history
               </a>
-              for notes and source records. Windows-specific development remains deferred.
+              keeps the notes for every version.
             </p>
             <p class="hero__archive">
               <a href="#archive">Looking for an older version? See the archive</a>
@@ -120,15 +130,19 @@
           <dl class="colophon">
             <div class="colophon__row">
               <dt>Platform</dt>
-              <dd>Target: macOS 13+ on Apple Silicon</dd>
+              <dd>macOS 13+ on Apple Silicon</dd>
             </div>
             <div class="colophon__row">
               <dt>License</dt>
               <dd>MIT</dd>
             </div>
             <div class="colophon__row">
-              <dt>Availability</dt>
-              <dd>Downloads temporarily paused</dd>
+              <dt>Latest</dt>
+              <dd>
+                <a href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
+                  <span data-latest-version>v0.3.6</span>
+                </a>
+              </dd>
             </div>
             <div class="colophon__row">
               <dt>Source</dt>
@@ -138,8 +152,8 @@
             </div>
           </dl>
           <p class="colophon-status" data-fetch-status hidden>
-            Release history check unavailable.
-            <a href="https://github.com/thrtn70/goop/releases" rel="noopener">Open GitHub release history</a>.
+            Live version check unavailable.
+            <a href="https://github.com/thrtn70/goop/releases" rel="noopener">See GitHub for the latest</a>.
           </p>
         </div>
       </section>
@@ -338,18 +352,12 @@
           <li class="step">
             <span class="step__numeral" aria-hidden="true">01</span>
             <div class="step__body">
-              <h3 class="step__headline">Wait for the patched macOS build.</h3>
+              <h3 class="step__headline">Download the installer.</h3>
               <p>
-                Release downloads are temporarily paused. A patched Apple
-                Silicon macOS build is being prepared. The
-                <a
-                  class="link"
-                  data-release-history
-                  href="https://github.com/thrtn70/goop/releases"
-                  rel="noopener"
-                >GitHub release history</a>
-                remains available for notes and source records. Windows-specific
-                development is deferred.
+                <a class="link" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
+                  macOS, Apple Silicon (.dmg)
+                </a>,
+                straight from GitHub Releases. Windows builds are on hold for now.
               </p>
             </div>
           </li>
@@ -357,10 +365,12 @@
           <li class="step">
             <span class="step__numeral" aria-hidden="true">02</span>
             <div class="step__body">
-              <h3 class="step__headline">Install after downloads resume.</h3>
+              <h3 class="step__headline">Install.</h3>
               <p class="step__os">
-                <em>On macOS,</em> drag the patched <em>Goop.app</em> to <em>Applications</em>.
-                If Gatekeeper blocks the first launch, run this once:
+                Drag <em>Goop.app</em> to <em>Applications</em> and open it. Goop isn't
+                notarized yet, so macOS blocks that first launch: open <em>System Settings →
+                Privacy &amp; Security</em>, choose <em>Open Anyway</em> next to Goop (it appears
+                after the blocked attempt), and confirm. Or run this once in Terminal:
               </p>
               <pre tabindex="0"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
               <p class="step__note">
@@ -433,8 +443,10 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Goop isn't signed by an Apple Developer account yet. After
-                  installing, run this once in Terminal to clear the quarantine flag:
+                  Goop isn't signed by an Apple Developer account yet. After the
+                  first blocked launch, open <em>System Settings → Privacy &amp; Security</em>
+                  and choose <em>Open Anyway</em> next to Goop. Or run this once in
+                  Terminal to clear the quarantine flag:
                 </p>
                 <pre tabindex="0"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
                 <p>That's the standard step for unsigned macOS apps. Signing is on the roadmap.</p>
@@ -526,8 +538,6 @@
           <h2 id="archive-heading" class="section-headline">Release history.</h2>
           <p class="section-lede">
             The last ten public release pages, fetched live from GitHub.
-            Direct installer promotion remains paused while a patched macOS
-            build is prepared.
           </p>
         </header>
 

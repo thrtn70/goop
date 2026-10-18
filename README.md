@@ -43,7 +43,7 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 | **Hardware acceleration** | macOS builds support VideoToolbox, including Hardware required H.264 encoding that never falls back to software. The historical Windows v0.3.4 source supports NVENC / QSV / AMF. |
 | **Cookies from browser** | Pick Chrome / Firefox / Safari / Edge / Brave / Vivaldi / Opera / Chromium / Whale and Goop forwards your existing browser session via `--cookies-from-browser` for sites that require login. Cookies stay local. |
 | **Presets** | Named format + quality combinations applied as chips. Ships with four built-ins (YouTube Upload, Twitter/X Video, Podcast MP3, Web Image). Save your own; export / import as JSON between machines. |
-| **Updates** | One-click in-app updates for the bundled yt-dlp and gallery-dl. The macOS app can check GitHub for new releases; installer availability is currently paused. |
+| **Updates** | One-click in-app updates for the bundled yt-dlp and gallery-dl. The macOS app can check GitHub for new releases. |
 | **Accessibility** | WCAG 2.1 AA audit pass: visible focus rings, full keyboard nav, screen-reader job-state announcements, focus trap inside modals, `prefers-reduced-motion` respected on every animation. |
 | **Performance** | Lazy-loaded route chunks (~16% smaller cold-start payload). Thumbnail generation bounded to 4 concurrent workers. Spring-settled queue ETA so the seconds counter doesn't jitter. |
 
@@ -51,20 +51,15 @@ Goop is a desktop app for grabbing media off the internet and shaping it on disk
 
 ## Installation
 
-### Downloads temporarily paused
+### macOS (Apple Silicon)
 
-Installer downloads are temporarily paused while a patched Apple Silicon macOS build is prepared. No older package is being promoted as a current replacement. The [GitHub release history](https://github.com/thrtn70/goop/releases) remains available for notes and source records.
-
-#### macOS arm64 target
-
-When downloads resume, the packaged build will target macOS 13+ on Apple Silicon. Installation will remain:
-
-1. Open the DMG and drag **Goop.app** into `/Applications`.
-2. Run once in Terminal to clear the Gatekeeper quarantine flag:
+1. Download `Goop_<version>_aarch64.dmg` from the [latest release](https://github.com/thrtn70/goop/releases/latest).
+2. Open the DMG and drag **Goop.app** into `/Applications`.
+3. Open Goop. Because it isn't notarized with an Apple Developer ID, macOS blocks the first launch. Open **System Settings → Privacy & Security**, choose **Open Anyway** next to Goop (it appears after the blocked attempt), and confirm. If macOS instead says the app "is damaged", run this once in Terminal:
    ```bash
    sudo xattr -cr /Applications/Goop.app
    ```
-3. Open Goop from Launchpad or Spotlight.
+4. From then on, open Goop from Launchpad or Spotlight as usual.
 
 #### Windows x64 history
 
@@ -72,14 +67,14 @@ Windows-specific development and installer promotion are deferred. The [Goop v0.
 
 ### System Requirements
 
-- **Next packaged release target:** macOS 13+ on Apple Silicon (M-series). Intel Macs are not a release target.
+- **Current releases:** macOS 13+ on Apple Silicon (M-series). Intel Macs are not a release target.
 - **Historical v0.3.4 source target:** Windows 10+ (x64) with WebView2 Runtime. Windows-specific development remains deferred.
 - ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, and Tesseract).
 - A network connection for requested downloads and any enabled app or tool update checks.
 
 ### Auto-Update
 
-> The macOS app can check GitHub for new releases on launch (toggle in **Settings → Updates**). Installer availability is currently paused; a future patched package requires a separately approved release. Windows-specific packaging remains deferred. The bundled yt-dlp and gallery-dl have their own update buttons in the same section.
+> The macOS app can check GitHub for new releases on launch (toggle in **Settings → Updates**). Windows-specific packaging remains deferred. The bundled yt-dlp and gallery-dl have their own update buttons in the same section.
 
 > **Portable build** — not currently shipped. The underlying Tauri build supports it; [open an issue](https://github.com/thrtn70/goop/issues/new) if you'd like one.
 
@@ -222,7 +217,10 @@ cargo llvm-cov --html
 
 The app is not actually damaged. Goop is signed with an ad-hoc signature rather than a paid Apple Developer ID, so when your browser downloads it, macOS tags it with a quarantine flag and Gatekeeper blocks the first launch. Depending on your macOS version the dialog reads either *"is damaged and can't be opened"* or *"Apple cannot check it for malicious software."*
 
-**Do not click "Move to Trash."** Instead, clear the quarantine flag (the step 3 command from the macOS install section above):
+**Do not click "Move to Trash."** What to do depends on the dialog:
+
+- **"Apple could not verify…" / "cannot check it for malicious software":** open **System Settings → Privacy & Security** and choose **Open Anyway** next to Goop. The button appears only after a blocked launch attempt, for about an hour.
+- **"is damaged and can't be opened":** there is no Open Anyway button for this one. Clear the quarantine flag in Terminal (the step 3 command from the macOS install section above):
 
 ```bash
 sudo xattr -cr /Applications/Goop.app
