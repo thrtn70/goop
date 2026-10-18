@@ -144,7 +144,7 @@ export default function CommandPalette() {
           value={search}
           onValueChange={setSearch}
           placeholder={`Type a command${isMacPlatform() ? " or search…" : "…"}`}
-          className="w-full border-b border-subtle bg-transparent px-4 py-3 text-sm text-fg outline-none placeholder:text-fg-muted"
+          className="w-full border-b border-subtle bg-transparent px-4 py-3 text-sm text-fg placeholder:text-fg-muted"
         />
         <Command.List className="max-h-80 overflow-auto p-2">
           <Command.Empty className="px-3 py-6 text-center text-xs text-fg-muted">

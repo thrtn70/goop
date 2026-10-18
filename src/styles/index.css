@@ -125,9 +125,9 @@ body {
 /* Drop-zone ripple — when a drop lands, a soft circle scales out
  * from zone centre and fades. Single shot; cleaned up by JS. */
 @keyframes dropzone-ripple {
-  0%   { transform: translate(-50%, -50%) scale(0.4); opacity: 0.55; }
+  0%   { transform: scale(0.4); opacity: 0.55; }
   60%  { opacity: 0.25; }
-  100% { transform: translate(-50%, -50%) scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
 }
 
 /* Phase: queue progress flow — a soft lighter wash slides across the

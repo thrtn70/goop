@@ -117,12 +117,14 @@ export default function DropZone({ onFiles, children, compact = false }: DropZon
 
       {/* On-drop ripples. Each ripple is its own absolutely-positioned
        *  span scaling from 0 to ~150% opacity-fading; cleaned up after
-       *  700ms by the setTimeout above. */}
+       *  700ms by the setTimeout above. Centred by layout (inset-0 with
+       *  auto margins) rather than translate, so it stays centred under
+       *  reduced motion, where its animation is switched off. */}
       {ripples.map((id) => (
         <span
           key={id}
           aria-hidden="true"
-          className="dropzone-ripple pointer-events-none absolute left-1/2 top-1/2 h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent/40"
+          className="dropzone-ripple pointer-events-none absolute inset-0 m-auto h-32 w-32 rounded-full bg-accent/40"
         />
       ))}
 
