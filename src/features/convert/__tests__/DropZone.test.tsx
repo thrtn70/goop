@@ -77,6 +77,51 @@ describe("DropZone", () => {
     expect(keyframes?.[1]).toContain("scale(");
     expect(keyframes?.[1]).not.toContain("translate");
   });
+
+  // WebKit (the macOS webview) parses SVG geometry attributes as plain SVG
+  // lengths and rejects calc(), logging "Invalid value for <rect> attribute"
+  // on every mount and leaving the DOM length at 0. Current WebKit still drew
+  // the perimeter through the attribute's CSS mapping; whether WebKit at the
+  // macOS floor does too is unverified, so nothing should depend on it.
+  it("perimeter geometry is plain SVG lengths every webview parses", () => {
+    const svgLength = /^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?(px|%)?$/i;
+    const { container } = render(
+      <DropZone onFiles={() => {}}>
+        <div />
+      </DropZone>,
+    );
+    const rect = container.querySelector("rect");
+    for (const name of ["x", "y", "width", "height", "rx", "ry"]) {
+      const value = rect?.getAttribute(name);
+      if (value !== null && value !== undefined) {
+        expect(value, name).toMatch(svgLength);
+      }
+    }
+    expect(rect?.getAttribute("width")).toBe("100%");
+    expect(rect?.getAttribute("height")).toBe("100%");
+    expect(rect?.getAttribute("style") ?? "").not.toContain("calc(");
+  });
+
+  it("perimeter svg sits 1px inside the zone and leaves the stroke unclipped", () => {
+    const { container } = render(
+      <DropZone onFiles={() => {}}>
+        <div />
+      </DropZone>,
+    );
+    // The rect fills the svg, so the svg box carries the 1px inset the rect
+    // used to. Its 2px stroke straddles the svg edge, so the svg must not
+    // clip the outer half.
+    const svg = container.querySelector("svg");
+    for (const cls of [
+      "left-px",
+      "top-px",
+      "w-[calc(100%-2px)]",
+      "h-[calc(100%-2px)]",
+      "overflow-visible",
+    ]) {
+      expect(svg?.classList.contains(cls), cls).toBe(true);
+    }
+  });
 });
 
 for (const compact of [false, true]) {
