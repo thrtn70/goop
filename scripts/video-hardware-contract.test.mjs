@@ -28,7 +28,7 @@ test("portable gates retain the hardware policy contract checks", () => {
 });
 
 test("platform video-control inventories include Unix readiness guards only on macOS", () => {
-  assert(audit.includes("macOS) expected_video_controls=44"));
+  assert(audit.includes("macOS) expected_video_controls=43"));
   assert(audit.includes("Windows) expected_video_controls=38"));
   assert(audit.includes("hardware_capabilities_are_separate_and_reuse_transform_authority"));
   assert(audit.includes("hardware_required_portable_intent_is_unavailable_on_this_platform"));
@@ -40,10 +40,7 @@ test("platform video-control inventories include Unix readiness guards only on m
   const step = audit.slice(stepStart, stepEnd);
   const { macChecks, windowsChecks } = platformInventoryBranches(step);
 
-  for (const name of [
-    "executable_readiness_probe_does_not_run_the_fixture_body",
-    "executable_readiness_rejects_a_nonzero_probe_exit",
-  ]) {
+  for (const name of ["executable_readiness_probe_does_not_run_the_fixture_body"]) {
     assert(controls.includes(`fn ${name}()`), `missing ${name} source regression`);
     assert(macChecks.includes(name), `macOS inventory does not require ${name}`);
     assert(!windowsChecks.includes(name), `Windows inventory must not require Unix-only ${name}`);

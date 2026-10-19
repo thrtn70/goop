@@ -364,11 +364,7 @@ mod tests {
     // shell-script stand-in and is unix-only (macOS dev + Linux CI).
     #[cfg(unix)]
     fn write_script(path: &Path, version: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\necho {version}\n")).unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
+        goop_core::test_scripts::write_script(path, &format!("echo {version}"));
     }
 
     #[cfg(unix)]

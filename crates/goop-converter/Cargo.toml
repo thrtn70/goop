@@ -90,6 +90,8 @@ sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 goop-queue = { path = "../goop-queue" }
+# goop_core::test_scripts, the stand-in sidecars the backend tests run.
+goop-core = { path = "../goop-core", features = ["test-util"] }
 # Scratch dirs for the `#[ignore]`d real-ffmpeg tests.
 tempfile = "3"
 

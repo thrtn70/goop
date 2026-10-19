@@ -19,6 +19,8 @@ which = "6"
 
 [dev-dependencies]
 tempfile = "3"
+# goop_core::test_scripts, the stand-in binaries the updater tests run.
+goop-core = { path = "../goop-core", features = ["test-util"] }
 # Mock HTTP server for the gallery-dl Codeberg updater tests (latest-release
 # lookup + asset download) so they run without network access.
 wiremock = "0.6"

@@ -28,6 +28,8 @@ pub mod preset;
 pub mod process_registry;
 pub mod publication;
 pub mod signals;
+#[cfg(all(unix, any(test, feature = "test-util")))]
+pub mod test_scripts;
 pub mod tracks;
 pub mod update;
 

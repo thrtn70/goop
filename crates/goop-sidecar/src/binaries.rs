@@ -99,7 +99,7 @@ mod tests {
 
     fn touch(dir: &Path, stem: &str) -> PathBuf {
         let p = dir.join(exe_name(stem));
-        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&p, b"").unwrap();
         p
     }
 

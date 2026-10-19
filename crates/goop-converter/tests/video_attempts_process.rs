@@ -5,6 +5,7 @@ mod common;
 use common::{request, SilentSink};
 use goop_converter::{ConversionBackend, DetectedEncoders, FfmpegBackend};
 use goop_core::publication::PublicationObserver;
+use goop_core::test_scripts::write_script;
 use goop_core::{
     CompressMode, ConvertRequest, GoopError, JobId, JobResult, QualityPreset, TargetFormat,
     VideoAttempt, VideoEncoder, VideoFallback, VideoFallbackReason, VideoSelectionContext,
@@ -24,14 +25,13 @@ struct Fixture {
     ffmpeg: PathBuf,
 }
 
-fn executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
+const PROBE_JSON: &str = r#"{"format":{"duration":"2.0","size":"4096"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":16,"height":16,"pix_fmt":"yuv420p","field_order":"progressive","sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1","time_base":"1/24","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}},{"index":1,"codec_type":"audio","codec_name":"aac","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}}]}"#;
 
 fn fixture_with_probe(mode: &str, probe_json: &str) -> Fixture {
+    fixture_with_ffprobe(mode, &format!("printf '%s' '{probe_json}'"))
+}
+
+fn fixture_with_ffprobe(mode: &str, ffprobe_body: &str) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let bin = directory.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -58,8 +58,8 @@ printf 'encoded media' > "$output"
         mode
     );
     let ffmpeg = bin.join("ffmpeg");
-    executable(&ffmpeg, &script);
-    executable(&bin.join("ffprobe"), &format!("printf '%s' '{probe_json}'"));
+    write_script(&ffmpeg, &script);
+    write_script(&bin.join("ffprobe"), ffprobe_body);
     let input = directory.path().join("in.mp4");
     std::fs::write(&input, b"source").unwrap();
     let output = directory.path().join("out.mp4");
@@ -74,10 +74,12 @@ printf 'encoded media' > "$output"
 }
 
 fn fixture(mode: &str) -> Fixture {
-    fixture_with_probe(
-        mode,
-        r#"{"format":{"duration":"2.0","size":"4096"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":16,"height":16,"pix_fmt":"yuv420p","field_order":"progressive","sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1","time_base":"1/24","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}},{"index":1,"codec_type":"audio","codec_name":"aac","start_time":"0.000000","duration":"2.000000","disposition":{"attached_pic":0}}]}"#,
-    )
+    fixture_with_probe(mode, PROBE_JSON)
+}
+
+/// Like `fixture`, with an ffprobe that answers only after a second.
+fn slow_probe_fixture(mode: &str) -> Fixture {
+    fixture_with_ffprobe(mode, &format!("sleep 1\nprintf '%s' '{PROBE_JSON}'"))
 }
 
 fn attempted_encoders(fixture: &Fixture) -> Vec<String> {
@@ -284,11 +286,7 @@ async fn spawn_io_failure_does_not_retry() {
 
 #[tokio::test]
 async fn cancellation_does_not_retry() {
-    let fixture = fixture("sleep");
-    let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
-    let ffprobe_script = std::fs::read_to_string(&ffprobe).unwrap();
-    let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
-    executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
+    let fixture = slow_probe_fixture("sleep");
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
     let wait_for_ffmpeg = async {
@@ -570,11 +568,7 @@ async fn hardware_required_spawn_failure_never_retries_software() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[tokio::test]
 async fn hardware_required_cancellation_never_retries_software() {
-    let fixture = fixture("sleep");
-    let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
-    let ffprobe_script = std::fs::read_to_string(&ffprobe).unwrap();
-    let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
-    executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
+    let fixture = slow_probe_fixture("sleep");
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
     let wait_for_ffmpeg = async {

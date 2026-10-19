@@ -598,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn download_binary_writes_file_and_cleans_temp() {
         let server = MockServer::start().await;
-        let payload = b"#!/bin/sh\necho hello\n".to_vec();
+        let payload = b"downloaded tool bytes\n".to_vec();
         Mock::given(method("GET"))
             .and(path("/dl/v1.0.0/asset"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
@@ -609,7 +609,7 @@ mod tests {
         download_binary(
             &reqwest::Client::new(),
             &format!("{}/dl/v1.0.0/asset", server.uri()),
-            "bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b",
+            "604dd4817b525fc1a500df462106d7e8a1358d801eac5d1aa4f497119bb43ee7",
             &dest,
             "test update",
         )

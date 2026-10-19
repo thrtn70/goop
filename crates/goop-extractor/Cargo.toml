@@ -33,7 +33,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # Mock HTTP server for the direct-downloader tests (range/resume, filename
 # derivation) so they run without network access.
 wiremock = "0.6"
-# Enables goop-core's RecordingSink for asserting emitted progress events.
+# Enables goop-core's RecordingSink for asserting emitted progress events,
+# and goop_core::test_scripts for the stand-in sidecars in test_fakes.
 goop-core = { path = "../goop-core", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]

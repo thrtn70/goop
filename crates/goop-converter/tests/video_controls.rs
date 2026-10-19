@@ -649,8 +649,8 @@ async fn incomplete_display_matrix_rejected_before_staging() {
         std::fs::create_dir(&bin).unwrap();
         let mut source = source_json();
         source["streams"][0]["side_data_list"] = json!([side]);
-        executable(&bin.join("ffprobe"), &format!("printf '%s' '{}'", source));
-        executable(&bin.join("ffmpeg"), "exit 99");
+        write_script(&bin.join("ffprobe"), &format!("printf '%s' '{}'", source));
+        write_script(&bin.join("ffmpeg"), "exit 99");
         let r = goop_sidecar::BinaryResolver::new(bin);
         for options in [request().video_options.unwrap(), VideoConvertOptions::Copy] {
             let mut req = request();
@@ -1945,63 +1945,14 @@ fn malformed_display_matrix_and_fractional_rotation_are_rejected() {
     }
 }
 #[cfg(unix)]
-const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
-
-#[cfg(unix)]
-fn executable(path: &Path, body: &str) {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut file = std::fs::File::create(path).unwrap();
-    write!(
-        file,
-        "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}\n"
-    )
-    .unwrap();
-    drop(file);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    wait_until_executable(path);
-}
-
-#[cfg(unix)]
-fn wait_until_executable(path: &Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut backoff = std::time::Duration::from_millis(1);
-    loop {
-        let busy = match Command::new(path)
-            .arg(EXEC_PROBE_ARG)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-        {
-            Ok(status) => {
-                assert!(
-                    status.success(),
-                    "fixture readiness probe exited unsuccessfully for {}: {status}",
-                    path.display()
-                );
-                return;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => error,
-            Err(error) => panic!("fixture {} could not be run: {error:?}", path.display()),
-        };
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fixture {} was still held open for writing after 10s: {busy:?}",
-            path.display()
-        );
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(std::time::Duration::from_millis(25));
-    }
-}
+use goop_core::test_scripts::{write_script, EXEC_PROBE_ARG};
 
 #[cfg(unix)]
 #[test]
 fn executable_readiness_probe_does_not_run_the_fixture_body() {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("ffprobe");
-    executable(&binary, "printf 'fixture-body'");
+    write_script(&binary, "printf 'fixture-body'");
 
     let readiness = Command::new(&binary).arg(EXEC_PROBE_ARG).output().unwrap();
     assert!(readiness.status.success());
@@ -2016,51 +1967,6 @@ fn executable_readiness_probe_does_not_run_the_fixture_body() {
 }
 
 #[cfg(unix)]
-#[test]
-#[should_panic(expected = "fixture readiness probe exited unsuccessfully")]
-fn executable_readiness_rejects_a_nonzero_probe_exit() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ffprobe");
-    std::fs::write(&binary, "#!/bin/sh\nexit 7\n").unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    wait_until_executable(&binary);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn executable_waits_out_an_inherited_writer_before_returning() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ffprobe");
-
-    let mut holder = Command::new("/bin/sh")
-        .arg("-c")
-        .arg("exec 9>>\"$0\"; sleep 0.5")
-        .arg(&binary)
-        .spawn()
-        .unwrap();
-    let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !binary.exists() {
-        assert!(
-            std::time::Instant::now() < marker_deadline,
-            "writer holder did not create {} within 2s; child status: {:?}",
-            binary.display(),
-            holder.try_wait().unwrap()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-
-    executable(&binary, "exit 7");
-
-    let status = Command::new(&binary)
-        .status()
-        .expect("a fixture must be runnable once executable returns");
-    assert_eq!(status.code(), Some(7), "the fixture body must still run");
-    holder.wait().unwrap();
-}
-#[cfg(unix)]
 #[tokio::test]
 async fn output_mismatch_never_publishes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2072,8 +1978,8 @@ async fn output_mismatch_never_publishes() {
     let source = source_json();
     let mut wrong = source.clone();
     wrong["streams"][0]["width"] = json!(16);
-    executable(&bin.join("ffprobe"),&format!("for last do :; done\ncase \"$last\" in */input.mp4) printf '%s' '{}' ;; *) printf '%s' '{}' ;; esac",source,wrong));
-    executable(
+    write_script(&bin.join("ffprobe"),&format!("for last do :; done\ncase \"$last\" in */input.mp4) printf '%s' '{}' ;; *) printf '%s' '{}' ;; esac",source,wrong));
+    write_script(
         &bin.join("ffmpeg"),
         "for last do :; done\nprintf 'output' > \"$last\"",
     );
@@ -2218,7 +2124,7 @@ dd if=/dev/zero bs=1100000 count=1 2>/dev/null | tr '\000' ' '
 "#,
         source_json()
     );
-    executable(&binary, &script);
+    write_script(&binary, &script);
     let resolver = goop_sidecar::BinaryResolver::new(dir.path().to_path_buf());
     let legacy = FfmpegBackend::probe(&resolver, Path::new("source.mp4")).await;
     assert!(

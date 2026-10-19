@@ -254,12 +254,9 @@ mod tests {
 #[cfg(all(test, unix))]
 mod reliability_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     fn fixture(body: &str) -> (tempfile::TempDir, BinaryResolver) {
         let dir = tempfile::tempdir().unwrap();
-        let binary = dir.path().join("gs");
-        std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        goop_core::test_scripts::write_script(&dir.path().join("gs"), body);
         let resolver = BinaryResolver::new(dir.path().to_path_buf());
         (dir, resolver)
     }

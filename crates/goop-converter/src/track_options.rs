@@ -489,8 +489,6 @@ mod tests {
     use super::*;
     use goop_core::{SourceKind, TrackInventory};
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     fn probe() -> ProbeResult {
         ProbeResult {
@@ -661,18 +659,15 @@ mod tests {
         fs::write(&source, b"source").unwrap();
         let pid_file = directory.path().join("fallback.pid");
         let state_file = directory.path().join("probe.state");
-        let ffprobe = directory.path().join("ffprobe");
-        fs::write(
-            &ffprobe,
-            format!(
-                "#!/bin/sh\nif [ ! -f '{}' ]; then : > '{}'; head -c 1052672 /dev/zero | tr '\\0' x; exit 0; fi\necho $$ > '{}'\nexec sleep 20\n",
+        goop_core::test_scripts::write_script(
+            &directory.path().join("ffprobe"),
+            &format!(
+                "if [ ! -f '{}' ]; then : > '{}'; head -c 1052672 /dev/zero | tr '\\0' x; exit 0; fi\necho $$ > '{}'\nexec sleep 20",
                 state_file.display(),
                 state_file.display(),
                 pid_file.display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&ffprobe, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let resolver = BinaryResolver::new(directory.path().to_path_buf());
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();

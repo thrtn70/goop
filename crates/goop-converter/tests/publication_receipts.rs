@@ -198,7 +198,6 @@ async fn image_cancellation_after_intent_withholds_move_but_after_receipt_is_don
 #[tokio::test]
 #[cfg(unix)]
 async fn ffmpeg_receipt_matches_returned_result_and_post_move_failure_preserves_file() {
-    use std::os::unix::fs::PermissionsExt;
     for fail_receipt in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -207,9 +206,7 @@ async fn ffmpeg_receipt_matches_returned_result_and_post_move_failure_preserves_
             ("ffmpeg", "for out do :; done; printf 'encoded media' > \"$out\""),
             ("ffprobe", "printf '%s' '{\"format\":{\"duration\":\"1\",\"size\":\"6\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":16,\"height\":16}]}'"),
         ] {
-            let path = bin.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            goop_core::test_scripts::write_script(&bin.join(name), body);
         }
         let input = dir.path().join("in.mp4");
         let output = dir.path().join("out.mp4");

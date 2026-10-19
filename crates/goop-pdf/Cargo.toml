@@ -19,3 +19,5 @@ tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
+# goop_core::test_scripts, the stand-in Ghostscript the compress tests run.
+goop-core = { path = "../goop-core", features = ["test-util"] }

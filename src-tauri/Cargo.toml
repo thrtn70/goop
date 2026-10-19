@@ -54,3 +54,5 @@ tempfile = "3"
 
 [dev-dependencies]
 wiremock = "0.6"
+# goop_core::test_scripts, the stand-in yt-dlp the probe retry tests run.
+goop-core = { path = "../crates/goop-core", features = ["test-util"] }
