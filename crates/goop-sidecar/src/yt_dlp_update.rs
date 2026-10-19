@@ -363,7 +363,7 @@ mod tests {
     // The full download+verify path executes the downloaded file, so it uses a
     // shell-script stand-in and is unix-only (macOS dev + Linux CI).
     #[cfg(unix)]
-    fn write_script(path: &Path, version: &str) {
+    fn write_version_script(path: &Path, version: &str) {
         goop_core::test_scripts::write_script(path, &format!("echo {version}"));
     }
 
@@ -394,7 +394,7 @@ mod tests {
             .await;
 
         let bundled = TempDir::new().unwrap();
-        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
             .with_update_dir(updates.path().to_path_buf());
@@ -432,7 +432,7 @@ mod tests {
         // Intentionally no download mock: hitting it would 404 → expect() fails.
 
         let bundled = TempDir::new().unwrap();
-        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
             .with_update_dir(updates.path().to_path_buf());
@@ -487,7 +487,7 @@ mod tests {
             .await;
 
         let bundled = TempDir::new().unwrap();
-        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
             .with_update_dir(updates.path().to_path_buf());
@@ -543,7 +543,7 @@ mod tests {
             .await;
 
         let bundled = TempDir::new().unwrap();
-        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
             .with_update_dir(updates.path().to_path_buf());

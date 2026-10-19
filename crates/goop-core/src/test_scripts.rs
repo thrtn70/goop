@@ -16,7 +16,6 @@
 //! Unix-only: the stand-ins are shell scripts. The logic they exercise is
 //! platform-independent, so the coverage gap on Windows is acceptable.
 
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -39,13 +38,13 @@ const RUNNABLE_DEADLINE: Duration = Duration::from_secs(10);
 ///
 /// Linux refuses to `execve` a file while any process holds it open for
 /// writing (`ETXTBSY`), and a test binary runs its tests on parallel
-/// threads of one process. The window is between our `File::create` and
-/// our `drop`: a sibling test that spawns a process right then forks a
+/// threads of one process. The window is while our write is in progress:
+/// a sibling test that spawns a process right then forks a
 /// child which inherits a copy of our write descriptor, and that copy
 /// outlives our own close — the kernel only drops it when the child
 /// reaches its `execve`. Our exec, landing in between, is refused.
 ///
-/// Neither of the obvious defences closes that window. `File::create`
+/// Neither of the obvious defences closes that window. `std::fs::write`
 /// already opens `O_CLOEXEC`, but cloexec fires at the child's exec, not
 /// at its fork, and the gap in between is the whole bug. Writing to a
 /// temp name and renaming into place does not help either: the kernel
@@ -65,14 +64,11 @@ const RUNNABLE_DEADLINE: Duration = Duration::from_secs(10);
 /// macOS does not enforce `ETXTBSY` for scripts, so there the wait returns
 /// on its first probe.
 pub fn write_script(path: &Path, body: &str) {
-    let mut file = std::fs::File::create(path)
-        .unwrap_or_else(|e| panic!("could not create script {}: {e}", path.display()));
-    write!(
-        file,
-        "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}\n"
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}\n"),
     )
     .unwrap_or_else(|e| panic!("could not write script {}: {e}", path.display()));
-    drop(file);
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .unwrap_or_else(|e| panic!("could not mark script {} executable: {e}", path.display()));
     wait_until_runnable(path, RUNNABLE_DEADLINE, || {
@@ -135,10 +131,12 @@ mod tests {
     /// reproducing it through that fork would mean hitting a microsecond
     /// window on purpose, and the kernel cannot tell the two apart anyway.
     ///
-    /// This is the only test that proves the wait does anything:
-    /// everywhere else it prevents a race rather than a deterministic
-    /// failure, so deleting it would go unnoticed until CI flaked again.
-    /// On macOS it only checks the helper stays out of the way.
+    /// The `readiness_*` tests below drive the retry loop with injected
+    /// errors; this is the only one that runs it against a real `ETXTBSY`
+    /// from the kernel. Everywhere else the wait prevents a race rather
+    /// than a deterministic failure, so deleting this would go unnoticed
+    /// until CI flaked again. On macOS it only checks the helper stays
+    /// out of the way.
     #[test]
     fn a_script_is_runnable_even_while_another_process_holds_a_writer() {
         let dir = tempfile::tempdir().unwrap();
@@ -155,7 +153,14 @@ mod tests {
             .arg(&path)
             .spawn()
             .unwrap();
+        let holder_deadline = Instant::now() + Duration::from_secs(2);
         while !path.exists() {
+            assert!(
+                Instant::now() < holder_deadline,
+                "writer holder did not create {} within 2s; child status: {:?}",
+                path.display(),
+                holder.try_wait().unwrap()
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -264,18 +269,23 @@ mod tests {
         });
     }
 
-    /// A `/bin/sh` stand-in written any other way skips the wait above,
-    /// and nothing fails locally when it does — macOS never enforces
-    /// `ETXTBSY` — so the gap only shows up as a rare red run on the
-    /// Linux runner. This finds one before it gets there.
+    /// A shell stand-in written any other way skips the wait above, and
+    /// nothing fails locally when it does — macOS does not enforce
+    /// `ETXTBSY` for scripts — so the gap only shows up as a rare red run
+    /// on the Linux runner. This finds one before it gets there, by its
+    /// shebang.
     ///
-    /// Bodies a mock server hands to the updaters are exempt: production
-    /// code downloads and writes those, so no test helper can wrap them.
+    /// Bodies a mock server hands to the updaters (`set_body…`) are exempt
+    /// because no test helper can wrap them: production code downloads and
+    /// writes those, then runs them to check their version. That path is
+    /// still exposed to the race on Linux — a fork during the download's
+    /// write can make the version check fail with `ETXTBSY` — and only the
+    /// updater itself can close it.
     #[test]
     fn scripts_are_written_only_through_write_script() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut sources = Vec::new();
-        for dir in ["crates", "src-tauri/src"] {
+        for dir in ["crates", "src-tauri"] {
             collect_rust_sources(&root.join(dir), &mut sources);
         }
         assert!(
@@ -285,18 +295,19 @@ mod tests {
             root.display()
         );
 
-        let offenders: Vec<String> = sources
+        let mut offenders: Vec<String> = sources
             .iter()
             .filter(|path| !path.ends_with("goop-core/src/test_scripts.rs"))
             .flat_map(|path| {
                 let text = std::fs::read_to_string(path).unwrap();
                 text.lines()
                     .enumerate()
-                    .filter(|(_, line)| line.contains("#!/bin/sh") && !line.contains("set_body"))
+                    .filter(|(_, line)| is_shebang_literal(line) && !line.contains("set_body"))
                     .map(|(index, _)| format!("{}:{}", path.display(), index + 1))
                     .collect::<Vec<_>>()
             })
             .collect();
+        offenders.sort();
         assert!(
             offenders.is_empty(),
             "write test scripts with goop_core::test_scripts::write_script, which waits out \
@@ -305,15 +316,25 @@ mod tests {
         );
     }
 
+    /// `#!/bin/sh`, `#!/usr/bin/env bash`, `#! /bin/sh` — but not an
+    /// inner attribute such as `#![cfg(unix)]`.
+    fn is_shebang_literal(line: &str) -> bool {
+        line.contains("#!/") || line.contains("#! /")
+    }
+
+    /// Skips build output and symlinks: a worktree links in sidecar and
+    /// dependency directories that hold no sources of ours.
     fn collect_rust_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            let path = entry.path();
+            if kind.is_dir() {
                 if path.file_name().is_some_and(|name| name == "target") {
                     continue;
                 }
                 collect_rust_sources(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
                 out.push(path);
             }
         }

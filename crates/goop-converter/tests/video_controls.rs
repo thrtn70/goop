@@ -6,6 +6,8 @@ use goop_converter::{
         validate_output_against_source,
     },
 };
+#[cfg(unix)]
+use goop_core::test_scripts::{write_script, EXEC_PROBE_ARG};
 use goop_core::*;
 use serde_json::{json, Value};
 
@@ -1944,9 +1946,6 @@ fn malformed_display_matrix_and_fractional_rotation_are_rejected() {
         assert!(resolve(&request(), &probe(v), &inventory()).is_err());
     }
 }
-#[cfg(unix)]
-use goop_core::test_scripts::{write_script, EXEC_PROBE_ARG};
-
 #[cfg(unix)]
 #[test]
 fn executable_readiness_probe_does_not_run_the_fixture_body() {
