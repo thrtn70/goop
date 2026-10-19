@@ -85,17 +85,19 @@ export default function DropZone({ onFiles, children, compact = false }: DropZon
     >
       {/* Animated perimeter stroke. SVG sits on top, behind hit-testing,
        *  so the children remain interactive. The dash pattern slides
-       *  via stroke-dashoffset keyframes when `hovering` is on. */}
+       *  via stroke-dashoffset keyframes when `hovering` is on.
+       *  The 1px inset lives on the svg box, not in the rect: WebKit
+       *  rejects calc() in SVG geometry attributes. The rect fills the
+       *  svg and its 2px stroke straddles the svg edge, so the svg must
+       *  not clip the outer half. */}
       <svg
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 h-full w-full"
+        className="pointer-events-none absolute left-px top-px h-[calc(100%-2px)] w-[calc(100%-2px)] overflow-visible"
         preserveAspectRatio="none"
       >
         <rect
-          x="1"
-          y="1"
-          width="calc(100% - 2px)"
-          height="calc(100% - 2px)"
+          width="100%"
+          height="100%"
           rx="8"
           ry="8"
           fill="none"

@@ -3,7 +3,7 @@
 
   const REPO = 'thrtn70/goop';
   const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=12`;
-  const ARCHIVE_LIMIT = 10;
+  const ARCHIVE_LIMIT = 3;
   // v0.3.6 is the first build whose bundled gallery-dl carries the patched
   // urllib3. Nothing older is ever promoted as the current download, even if
   // GitHub still reports it as the latest release.
@@ -101,7 +101,11 @@
       ? release.html_url
       : null;
 
-    if (notesURL) links.appendChild(makeLink(notesURL, 'Release page'));
+    if (notesURL) {
+      const link = makeLink(notesURL, 'Release page');
+      link.setAttribute('aria-label', `Release page for ${release.tag_name || 'Goop'}`);
+      links.appendChild(link);
+    }
 
     const body = document.createElement('div');
     body.className = 'archive__body';
@@ -400,8 +404,24 @@
     if (status) status.hidden = !failed;
   }
 
+  function initWorkflowExamples() {
+    const choices = document.querySelector('[data-workflow-choices]');
+    const panels = document.querySelectorAll('[data-workflow-panel]');
+    if (!choices || !panels.length) return;
+
+    choices.addEventListener('change', (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || !input.matches('[data-workflow-choice]') || !input.checked) return;
+      panels.forEach((panel) => {
+        panel.hidden = panel.dataset.workflowPanel !== input.value;
+      });
+    });
+    choices.hidden = false;
+  }
+
   async function init() {
     initCursorChoreography();
+    initWorkflowExamples();
     const releases = await fetchReleases();
     // The download link first: an archive rendering problem must not keep
     // visitors on the fallback link.

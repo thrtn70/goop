@@ -6,7 +6,7 @@
     <title>Goop — Take control of your files.</title>
     <meta
       name="description"
-      content="Download, convert, compress, and handle PDFs in one small desktop app. Works with 2,000+ sites. macOS on Apple Silicon, no accounts, no tracking."
+      content="Download videos, convert media, shrink files, and work with PDFs. One free app for your Mac. Apple Silicon, no accounts, no tracking."
     />
     <meta name="color-scheme" content="dark" />
     <!-- Matches --ink-0 exactly. It used to read #0c0e0d, which is several
@@ -20,7 +20,7 @@
     <meta property="og:title" content="Goop — Take control of your files." />
     <meta
       property="og:description"
-      content="Download, convert, compress, and handle PDFs in one small desktop app. Works with 2,000+ sites."
+      content="Download videos, convert media, shrink files, and work with PDFs. One free app for your Mac."
     />
     <meta property="og:url" content="https://thrtn70.github.io/goop/" />
     <!-- Absolute: crawlers resolve og:image against their own origin, so a
@@ -34,7 +34,7 @@
     <meta name="twitter:title" content="Goop — Take control of your files." />
     <meta
       name="twitter:description"
-      content="Download, convert, compress, and handle PDFs in one small desktop app. Works with 2,000+ sites."
+      content="Download videos, convert media, shrink files, and work with PDFs. One free app for your Mac."
     />
     <meta name="twitter:image" content="https://thrtn70.github.io/goop/assets/icon.png" />
     <!-- X reads twitter:image:alt, never og:image:alt. -->
@@ -63,10 +63,9 @@
         </a>
         <nav class="masthead__nav" aria-label="Primary">
           <a href="#features"><span class="masthead__index">№ 01</span> Features</a>
-          <a href="#depth"><span class="masthead__index">№ 02</span> Depth</a>
-          <a href="#begin"><span class="masthead__index">№ 03</span> Begin</a>
-          <a href="#faq"><span class="masthead__index">№ 04</span> FAQ</a>
-          <a href="#archive"><span class="masthead__index">№ 05</span> Archive</a>
+          <a href="#begin"><span class="masthead__index">№ 02</span> Install</a>
+          <a href="#faq"><span class="masthead__index">№ 03</span> FAQ</a>
+          <a href="#archive"><span class="masthead__index">№ 04</span> Releases</a>
           <a href="https://github.com/thrtn70/goop" rel="noopener" class="masthead__github">
             GitHub
           </a>
@@ -88,11 +87,10 @@
             <span class="hero__headline-line hero__headline-line--indent">of&nbsp;your&nbsp;files.</span>
           </h1>
           <div class="hero__lede">
-            <p class="hero__lede-pull">Four jobs in one window: download, convert, compress, PDF.</p>
+            <p class="hero__lede-pull">Download, convert, compress. One free app for your Mac.</p>
             <p>
-              Paste a link. Drop a file. Goop pulls from more than two
-              thousand sites and does the work on your own machine. There's no
-              account to make and no telemetry of any kind.
+              Save a video. Change a format. Get a file ready to send.
+              Media and PDF tools in one window, with no account and no tracking.
             </p>
           </div>
 
@@ -106,24 +104,15 @@
             >
               <span class="btn__rule" aria-hidden="true"></span>
               <span class="btn__label">Download for macOS</span>
-              <span class="btn__meta">Apple Silicon · .dmg</span>
+              <span class="btn__meta">macOS 13.3+ · Apple Silicon</span>
             </a>
-            <!-- The static link relies on GitHub's "latest" release being a
-                 macOS build at or above v0.3.6; app.js upgrades it to the
-                 newest such DMG once the release list loads. -->
+            <div class="hero__install">
+              <a class="text-link" href="#begin">Installation &amp; first launch</a>
+              <p>Not notarized yet. macOS needs an extra <em>Open Anyway</em> step.</p>
+            </div>
             <p class="hero__alt" data-platform-notice>
-              For Macs with Apple Silicon; Intel Macs aren't supported. Windows builds are on hold for now;
-              <a
-                data-release-history
-                href="https://github.com/thrtn70/goop/releases"
-                rel="noopener"
-              >
-                the release history
-              </a>
-              keeps the notes for every version.
-            </p>
-            <p class="hero__archive">
-              <a href="#archive">Looking for an older version? See the archive</a>
+              Apple Silicon only; Intel Macs aren't supported. Windows builds are on hold.
+              <a data-release-history href="https://github.com/thrtn70/goop/releases" rel="noopener">Release history</a>.
             </p>
           </div>
 
@@ -158,261 +147,204 @@
         </div>
       </section>
 
-      <section class="ticker" aria-labelledby="ticker-heading">
-        <div class="ticker__intro">
-          <h2 id="ticker-heading" class="ticker__heading">
-            Works with the sites you already use
-          </h2>
-          <p class="ticker__sub">A partial roll-call. Two thousand more behind it.</p>
+      <section id="workflow" class="workflow" aria-labelledby="workflow-heading">
+        <header class="workflow__header">
+          <div>
+            <h2 id="workflow-heading" class="section-headline">Same file. New possibilities.</h2>
+            <p class="section-lede">Pick an example. Follow it from source to saved copy.</p>
+          </div>
+          <fieldset class="workflow__choices" data-workflow-choices hidden>
+            <legend>Choose an example</legend>
+            <label class="workflow__choice">
+              <input type="radio" name="workflow" value="video" data-workflow-choice aria-controls="workflow-video" checked />
+              <span>Video</span>
+            </label>
+            <label class="workflow__choice">
+              <input type="radio" name="workflow" value="audio" data-workflow-choice aria-controls="workflow-audio" />
+              <span>Audio</span>
+            </label>
+            <label class="workflow__choice">
+              <input type="radio" name="workflow" value="image" data-workflow-choice aria-controls="workflow-image" />
+              <span>Image</span>
+            </label>
+          </fieldset>
+        </header>
+        <div class="workflow__examples" aria-live="polite" aria-atomic="true">
+          <div id="workflow-video" data-workflow-panel="video">
+            <h3 class="visually-hidden">Video example: MOV → MP4</h3>
+            <ol class="workflow__stages">
+              <li class="workflow__stage">
+                <p class="workflow__step">01 / Drop your file</p>
+                <p class="workflow__format">MOV</p>
+                <p class="workflow__filename">camera-take.mov</p>
+              </li>
+              <li class="workflow__stage workflow__stage--setting">
+                <p class="workflow__step">02 / Choose an output</p>
+                <p class="workflow__setting">MP4 / H.264</p>
+                <p class="workflow__note">Choose MP4 in Convert, with H.264 for the video.</p>
+              </li>
+              <li class="workflow__stage workflow__stage--result">
+                <p class="workflow__step">03 / Save the new copy</p>
+                <p class="workflow__format">MP4</p>
+                <p class="workflow__filename">camera-take.mp4</p>
+                <p class="workflow__note">An MP4 copy in the folder you choose.</p>
+              </li>
+            </ol>
+          </div>
+          <div id="workflow-audio" data-workflow-panel="audio" hidden>
+            <h3 class="visually-hidden">Audio example: WAV → MP3</h3>
+            <ol class="workflow__stages">
+              <li class="workflow__stage">
+                <p class="workflow__step">01 / Drop your file</p>
+                <p class="workflow__format">WAV</p>
+                <p class="workflow__filename">interview.wav</p>
+              </li>
+              <li class="workflow__stage workflow__stage--setting">
+                <p class="workflow__step">02 / Choose an output</p>
+                <p class="workflow__setting">MP3</p>
+                <p class="workflow__note">Choose MP3 in Convert, then set your audio quality.</p>
+              </li>
+              <li class="workflow__stage workflow__stage--result">
+                <p class="workflow__step">03 / Save the new copy</p>
+                <p class="workflow__format">MP3</p>
+                <p class="workflow__filename">interview.mp3</p>
+                <p class="workflow__note">An MP3 copy, ready for your next listen.</p>
+              </li>
+            </ol>
+          </div>
+          <div id="workflow-image" data-workflow-panel="image" hidden>
+            <h3 class="visually-hidden">Image example: PNG → WebP</h3>
+            <ol class="workflow__stages">
+              <li class="workflow__stage">
+                <p class="workflow__step">01 / Drop your file</p>
+                <p class="workflow__format">PNG</p>
+                <p class="workflow__filename">artwork.png</p>
+              </li>
+              <li class="workflow__stage workflow__stage--setting">
+                <p class="workflow__step">02 / Choose an output</p>
+                <p class="workflow__setting">WebP</p>
+                <p class="workflow__note">Choose WebP in Convert, then set your image quality.</p>
+              </li>
+              <li class="workflow__stage workflow__stage--result">
+                <p class="workflow__step">03 / Save the new copy</p>
+                <p class="workflow__format">WebP</p>
+                <p class="workflow__filename">artwork.webp</p>
+                <p class="workflow__note">A WebP copy for your next web project.</p>
+              </li>
+            </ol>
+          </div>
         </div>
-        <div class="ticker__track">
-          <ul class="ticker__list">
-            <li>YouTube</li>
-            <li>TikTok</li>
-            <li>Instagram</li>
-            <li>X</li>
-            <li>Vimeo</li>
-            <li>SoundCloud</li>
-            <li>Reddit</li>
-            <li>Bunkr</li>
-            <li>Imgur</li>
-            <li>Pixeldrain</li>
-            <li>Kemono</li>
-            <li>RedGifs</li>
-            <li class="ticker__more">and 2,000 more</li>
-          </ul>
-        </div>
+        <p class="workflow__caption">Illustrative examples. No upload here; conversions run in Goop on your Mac.</p>
       </section>
 
       <section id="features" class="dossier" aria-labelledby="dossier-heading">
         <header class="dossier__header">
           <p class="section-eyebrow">№ 01 · The work</p>
-          <h2 id="dossier-heading" class="section-headline">Four jobs.</h2>
-          <p class="section-lede">
-            Goop is a single window with a sidebar of tools, each tuned for a
-            kind of file. Drop something in, hit go, get on with your day.
-          </p>
+          <h2 id="dossier-heading" class="section-headline">Four jobs. One window.</h2>
         </header>
-
         <ol class="dossier__entries">
           <li class="entry">
             <span class="entry__numeral" aria-hidden="true">01</span>
             <div class="entry__body">
-              <h3 class="entry__headline">Download from anywhere.</h3>
-              <p>
-                Paste a URL. Goop probes the page, lists the formats it found
-                with resolution and size, you pick, it pulls. yt-dlp and
-                gallery-dl are bundled, so video sites, audio platforms, and
-                image hosts are all handled out of the box. Cookies from
-                your browser unlock anything else.
-              </p>
+              <h3 class="entry__headline">Save it from a link.</h3>
+              <p>Paste a URL, choose an available format, and download a video, audio track, or image collection.</p>
             </div>
             <aside class="entry__margin">
-              <p>Browser cookies stay local. Goop never uploads them.</p>
+              <p>YouTube, Vimeo, SoundCloud, and more. <a href="#faq-cookies">Need a signed-in session?</a></p>
             </aside>
           </li>
-
           <li class="entry">
             <span class="entry__numeral" aria-hidden="true">02</span>
             <div class="entry__body">
-              <h3 class="entry__headline">Convert anything to anything.</h3>
-              <p>
-                Drop a video, audio file, image, or PDF. Goop reads what
-                came in, suggests a sensible target, and re-encodes through
-                ffmpeg with hardware acceleration when your machine has it.
-                Single file gets a Save-As. A batch of forty gets dumped
-                next to its sources, or to a folder you choose.
-              </p>
+              <h3 class="entry__headline">Give it a new format.</h3>
+              <p>MOV to MP4. WAV to MP3. PNG to WebP. Choose a format for one file or a whole batch.</p>
             </div>
-            <aside class="entry__margin">
-              <p>Smart targets pick remux over re-encode whenever they can.</p>
-            </aside>
+            <aside class="entry__margin"><p>Video, audio, images, and PDFs. Goop shows targets for the file you drop in.</p></aside>
           </li>
-
           <li class="entry">
             <span class="entry__numeral" aria-hidden="true">03</span>
             <div class="entry__body">
-              <h3 class="entry__headline">Shrink files without thinking.</h3>
-              <p>
-                Drag one quality slider, or name a target file size. Works on
-                video (CRF math), audio (bitrate), images (JPEG, WebP, PNG
-                lossless), and PDFs. Goop warns out loud before settings
-                would obviously trash quality, instead of guessing on your
-                behalf.
-              </p>
+              <h3 class="entry__headline">Make room to share.</h3>
+              <p>Reduce video, audio, image, or PDF size. Choose a quality setting, or a target size where available.</p>
             </div>
-            <aside class="entry__margin">
-              <p>No bitrate arithmetic: a slider from 1 to 100, or a size in MB.</p>
-            </aside>
+            <aside class="entry__margin"><p>You choose the trade-off between size and quality.</p></aside>
           </li>
-
           <li class="entry">
             <span class="entry__numeral" aria-hidden="true">04</span>
             <div class="entry__body">
-              <h3 class="entry__headline">Merge, split, compress PDFs.</h3>
-              <p>
-                Drop PDFs onto Convert. Re-order pages by drag, split with
-                a range string like <code>1-3, 7-10</code>, or compress
-                with three Ghostscript presets: Screen, Ebook, Printer.
-                It's bookkeeping, but the kind that finishes in a second.
-              </p>
+              <h3 class="entry__headline">Get PDFs in order.</h3>
+              <p>Combine documents, split out the pages you need, or compress a PDF before sending it.</p>
             </div>
-            <aside class="entry__margin">
-              <p>The PDF tools share the queue with everything else.</p>
-            </aside>
+            <aside class="entry__margin"><p>PDF jobs share the same queue as your media.</p></aside>
           </li>
         </ol>
-      </section>
-
-      <section id="depth" class="indexed" aria-labelledby="indexed-heading">
-        <header class="indexed__header">
-          <p class="section-eyebrow">№ 02 · The depth</p>
-          <h2 id="indexed-heading" class="section-headline">Beneath the surface.</h2>
-          <p class="section-lede">
-            The kind of work a utility quietly does after you stop noticing
-            it. Read it as a glossary.
-          </p>
-        </header>
-
-        <dl class="glossary">
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">i.</span> Live queue</dt>
-            <dd>
-              Per-job progress, throughput, and ETA. Drag rows to reorder.
-              Tick the rows you want gone and hit <em>Cancel selected</em>.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">ii.</span> History, with grid</dt>
-            <dd>
-              Searchable, filterable, multi-selectable. Lazy-loaded
-              thumbnails. Reveal in Finder or Explorer in one click.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">iii.</span> Hardware-accelerated encoding</dt>
-            <dd>
-              macOS builds use VideoToolbox. The historical Windows v0.3.4
-              source supports NVENC, QuickSync, and AMF. Goop probes your
-              machine and picks the right one.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">iv.</span> Pause and resume</dt>
-            <dd>
-              Freeze a long encode mid-flight when something more urgent
-              comes up, then pick it up after lunch. Paused downloads keep
-              their partial files and survive a restart; paused encodes last
-              as long as the app does.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">v.</span> Command palette</dt>
-            <dd>
-              <kbd>⌘ K</kbd> on macOS. The historical Windows v0.3.4 source
-              uses <kbd>Ctrl K</kbd>. Fuzzy search covers every
-              page, plus a handful of actions.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">vi.</span> Cookies from the browser</dt>
-            <dd>
-              Reach age-gated and members-only content using your existing
-              session. No re-login required. Cookies never leave your machine.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">vii.</span> Keyboard-driven</dt>
-            <dd>
-              <kbd>⌘ 1</kbd>–<kbd>⌘ 8</kbd> to jump between pages.
-              <kbd>⌘ N</kbd> for a new URL. <kbd>⌘ O</kbd> for files.
-              <kbd>⌘ ,</kbd> for settings.
-            </dd>
-          </div>
-          <div class="glossary__row">
-            <dt><span class="glossary__roman">viii.</span> Accessible by default</dt>
-            <dd>
-              WCAG 2.1 AA: visible focus, keyboard navigation, screen reader
-              support, motion respected.
-            </dd>
-          </div>
-        </dl>
+        <details id="depth" class="details-guide">
+          <summary><span>The useful details</span><span class="details-guide__hint">Queue, shortcuts &amp; more</span></summary>
+          <dl class="glossary">
+            <div class="glossary__row">
+              <dt>Queue &amp; history</dt>
+              <dd>Follow progress, reorder jobs, and find finished files in History. Reveal an output in Finder with one click.</dd>
+            </div>
+            <div class="glossary__row">
+              <dt>Pause &amp; resume</dt>
+              <dd>Paused downloads keep partial files across restarts. Paused encodes can resume while the app stays open.</dd>
+            </div>
+            <div class="glossary__row">
+              <dt>Encoding choices</dt>
+              <dd>Goop can use VideoToolbox on supported Mac hardware. Compatible formats can be repackaged without re-encoding, a process called remuxing.</dd>
+            </div>
+            <div class="glossary__row">
+              <dt>Keyboard shortcuts</dt>
+              <dd><kbd>⌘ K</kbd> opens the command palette. <kbd>⌘ N</kbd> adds a URL; <kbd>⌘ O</kbd> opens files; <kbd>⌘ ,</kbd> opens settings.</dd>
+            </div>
+            <div class="glossary__row">
+              <dt>Accessibility</dt>
+              <dd>Keyboard navigation, visible focus, screen-reader labels, and reduced-motion support.</dd>
+            </div>
+          </dl>
+        </details>
       </section>
 
       <section id="begin" class="begin" aria-labelledby="begin-heading">
         <header class="begin__header">
-          <p class="section-eyebrow">№ 03 · The setup</p>
-          <h2 id="begin-heading" class="section-headline">Begin.</h2>
-          <p class="section-lede">
-            Three steps. The third one is just "use it."
-          </p>
+          <p class="section-eyebrow">№ 02 · The setup</p>
+          <h2 id="begin-heading" class="section-headline">Your first launch.</h2>
+          <p class="section-lede">One extra macOS step. Then you're in.</p>
         </header>
-
         <ol class="steps">
           <li class="step">
             <span class="step__numeral" aria-hidden="true">01</span>
             <div class="step__body">
-              <h3 class="step__headline">Download the installer.</h3>
-              <p>
-                <a class="link" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
-                  macOS, Apple Silicon (.dmg)
-                </a>,
-                straight from GitHub Releases. Windows builds are on hold for now.
-              </p>
+              <h3 class="step__headline">Download &amp; install.</h3>
+              <p><a class="link" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">Download the macOS installer</a>, open the .dmg, and drag Goop to Applications. Requires macOS 13.3+ and Apple Silicon.</p>
             </div>
           </li>
-
           <li class="step">
             <span class="step__numeral" aria-hidden="true">02</span>
             <div class="step__body">
-              <h3 class="step__headline">Install.</h3>
-              <p class="step__os">
-                Drag <em>Goop.app</em> to <em>Applications</em> and open it. Goop isn't
-                notarized yet, so macOS blocks that first launch: open <em>System Settings →
-                Privacy &amp; Security</em>, choose <em>Open Anyway</em> next to Goop (it appears
-                after the blocked attempt), and confirm. Or run this once in Terminal:
-              </p>
-              <pre tabindex="0"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
-              <p class="step__note">
-                Goop isn't code-signed yet. That's on the roadmap.
-              </p>
+              <h3 class="step__headline">Allow the first launch.</h3>
+              <p>Open Goop once. If macOS blocks it because it can't verify the developer, open <em>System Settings → Privacy &amp; Security</em>. Choose <em>Open Anyway</em> next to Goop, then confirm.</p>
+              <p class="step__note">Goop is ad-hoc signed, but isn't Apple-notarized yet. The option appears after the blocked attempt.</p>
+              <details class="install-help">
+                <summary>If macOS says Goop “is damaged”</summary>
+                <p>For a copy downloaded from this project's GitHub Releases, run this once in Terminal, then open Goop again. It removes extended attributes, including quarantine, from that copy of the app.</p>
+                <pre tabindex="0" aria-label="Terminal command for the damaged-app message"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
+              </details>
             </div>
           </li>
-
           <li class="step">
             <span class="step__numeral" aria-hidden="true">03</span>
             <div class="step__body">
-              <h3 class="step__headline">Use it.</h3>
-              <p>
-                Paste a URL, drop a file, or hit <kbd>⌘ K</kbd>
-                / <kbd>Ctrl K</kbd> for the command palette. That's the
-                whole tutorial.
-              </p>
+              <h3 class="step__headline">Bring your first file.</h3>
+              <p>Paste a link in Extract or drop a file into Convert. Pick your output, then start. <kbd>⌘ K</kbd> gets you around.</p>
             </div>
           </li>
         </ol>
       </section>
 
-      <aside class="aside" aria-labelledby="aside-heading">
-        <p id="aside-heading" class="aside__eyebrow">A note on cookies.</p>
-        <blockquote class="aside__quote">
-          <p>
-            For age-gated, members-only, or paywalled content,
-            Goop can read your existing browser session.
-            Open <em>Settings › General</em>, find
-            <em>Cookies from browser</em>, and pick the browser
-            you're already signed in with.
-          </p>
-        </blockquote>
-        <p class="aside__attribution">
-          Cookies stay on your machine. Goop never uploads them, and there's
-          no telemetry to send anything anywhere.
-        </p>
-      </aside>
-
       <section id="faq" class="faq" aria-labelledby="faq-heading">
         <header class="faq__header">
-          <p class="section-eyebrow">№ 04 · The questions</p>
+          <p class="section-eyebrow">№ 03 · The questions</p>
           <h2 id="faq-heading" class="section-headline">Frequently raised.</h2>
         </header>
 
@@ -428,8 +360,7 @@
                 <p>
                   Yes, MIT licensed, and
                   <a href="https://github.com/thrtn70/goop" rel="noopener">the source is on GitHub</a>.
-                  There's no paid tier and nothing to upgrade to, so nothing
-                  here will ever nag you.
+                  No account, subscription, or paid tier.
                 </p>
               </div>
             </details>
@@ -443,13 +374,10 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Goop isn't signed by an Apple Developer account yet. After the
-                  first blocked launch, open <em>System Settings → Privacy &amp; Security</em>
-                  and choose <em>Open Anyway</em> next to Goop. Or run this once in
-                  Terminal to clear the quarantine flag:
+                  Goop isn't Apple-notarized yet. Follow the
+                  <a href="#begin">first-launch guide</a> for the verification warning
+                  or the “is damaged” message.
                 </p>
-                <pre tabindex="0"><code>sudo xattr -cr /Applications/Goop.app</code></pre>
-                <p>That's the standard step for unsigned macOS apps. Signing is on the roadmap.</p>
               </div>
             </details>
           </li>
@@ -462,9 +390,9 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  Windows-specific development and installer promotion are
-                  deferred. The v0.3.4 release page remains in the history as
-                  a source and release record.
+                  Windows builds are on hold while development focuses on macOS.
+                  <a href="https://github.com/thrtn70/goop/releases" rel="noopener">Past release notes</a>
+                  remain available for reference.
                 </p>
               </div>
             </details>
@@ -473,23 +401,20 @@
             <details>
               <summary>
                 <span class="faq__index">iv.</span>
-                <span class="faq__question">A site stopped working. I'm getting 403s.</span>
+                <span id="faq-cookies" class="faq__question">A download needs a login, or stopped working.</span>
                 <span class="faq__chevron" aria-hidden="true"></span>
               </summary>
               <div class="faq__answer">
                 <p>
-                  A 403 usually means the site now wants a signed-in session.
-                  Turn on <em>Cookies from browser</em> in
-                  <em>Settings › General</em>, pick the browser you use for
-                  that site, and try the link again.
+                  For content you can access in your browser, choose that browser under
+                  <em>Settings → General → Cookies from browser</em>. Goop reads the session
+                  locally; it doesn't upload your cookies.
                 </p>
                 <p>
-                  If that doesn't do it, the site may have changed how it
-                  works. <em>yt-dlp</em> ships fixes constantly and Goop
-                  fetches the latest automatically, so the matching fix often
-                  lands within hours.
-                  <a href="https://github.com/thrtn70/goop/issues" rel="noopener">File an issue</a>
-                  if it persists.
+                  A 403 can also mean a site changed or blocked the request. Check for
+                  downloader updates in <em>Settings → Updates</em>, or
+                  <a href="https://github.com/thrtn70/goop/issues" rel="noopener">report the problem</a>.
+                  Support depends on the site.
                 </p>
               </div>
             </details>
@@ -505,7 +430,7 @@
                 <p>
                   Wherever you point <em>Output folder</em> in
                   <em>Settings › General</em>. From <em>History</em>, hit the
-                  folder icon on any row to show it in Finder or Explorer.
+                  folder icon on a completed item to show it in Finder.
                 </p>
               </div>
             </details>
@@ -519,13 +444,10 @@
               </summary>
               <div class="faq__answer">
                 <p>
-                  No. Every job runs on your own machine, and there's nothing
-                  to log in to. Besides the download you asked for, Goop makes
-                  two checks with GitHub: one for new versions of Goop on
-                  launch, and a daily one to keep yt-dlp current. Both are
-                  switches in <em>Settings › Updates</em>. Updating gallery-dl
-                  fetches from Codeberg, and only when you press the button.
-                  Nothing about you or your files is ever sent anywhere.
+                  Conversions run locally. Goop doesn't upload your files or collect telemetry.
+                  Downloads contact the sites you choose. Optional update checks contact
+                  GitHub; a manual gallery-dl update contacts Codeberg.
+                  Control updates in <em>Settings → Updates</em>.
                 </p>
               </div>
             </details>
@@ -534,16 +456,14 @@
       </section>
       <section id="archive" class="archive" aria-labelledby="archive-heading">
         <header class="archive__header">
-          <p class="section-eyebrow">№ 05 · The archive</p>
-          <h2 id="archive-heading" class="section-headline">Release history.</h2>
+          <p class="section-eyebrow">№ 04 · The archive</p>
+          <h2 id="archive-heading" class="section-headline">Recent releases.</h2>
           <p class="section-lede">
-            The last ten public release pages, fetched live from GitHub.
+            Three recent releases. The full history lives on GitHub.
           </p>
         </header>
 
-        <!-- Ten rows, matching ARCHIVE_LIMIT, each carrying the same links row a
-             resolved row has. The count and the structure both have to match or
-             the list jumps when the fetch lands. -->
+        <!-- Keep the loading preview in step with ARCHIVE_LIMIT. -->
         <ol class="archive__list" data-archive-list>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
             <span class="archive__numeral">01</span>
@@ -553,11 +473,7 @@
             </div>
             <div class="archive__body">
               <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
+              <div class="archive__links"><span class="archive__skeleton-bar archive__skeleton-bar--link"></span></div>
             </div>
           </li>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
@@ -567,12 +483,8 @@
               <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
             </div>
             <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
+              <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
+              <div class="archive__links"><span class="archive__skeleton-bar archive__skeleton-bar--link"></span></div>
             </div>
           </li>
           <li class="archive__row archive__row--skeleton" aria-hidden="true">
@@ -582,121 +494,11 @@
               <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
             </div>
             <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">04</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">05</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
               <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">06</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">07</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">08</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">09</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shortest"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
-            </div>
-          </li>
-          <li class="archive__row archive__row--skeleton" aria-hidden="true">
-            <span class="archive__numeral">10</span>
-            <div class="archive__meta">
-              <span class="archive__skeleton-bar archive__skeleton-bar--tag"></span>
-              <span class="archive__skeleton-bar archive__skeleton-bar--date"></span>
-            </div>
-            <div class="archive__body">
-              <span class="archive__skeleton-bar archive__skeleton-bar--title archive__skeleton-bar--shorter"></span>
-              <div class="archive__links">
-                <span class="archive__skeleton-bar archive__skeleton-bar--link"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-wide"></span>
-                <span class="archive__skeleton-bar archive__skeleton-bar--link archive__skeleton-bar--link-narrow"></span>
-              </div>
+              <div class="archive__links"><span class="archive__skeleton-bar archive__skeleton-bar--link"></span></div>
             </div>
           </li>
         </ol>
-
         <noscript>
           <p class="archive__fallback">
             Version history requires JavaScript. See
@@ -705,9 +507,7 @@
         </noscript>
 
         <p class="archive__more">
-          See
-          <a href="https://github.com/thrtn70/goop/releases" rel="noopener">all releases on GitHub</a>
-          for full notes and source diffs.
+          <a href="https://github.com/thrtn70/goop/releases" rel="noopener">View all releases on GitHub</a>
         </p>
       </section>
     </main>
@@ -715,6 +515,20 @@
     <footer class="colophon-footer" aria-labelledby="footer-heading">
       <h2 id="footer-heading" class="visually-hidden">Colophon</h2>
       <div class="colophon-footer__rule" aria-hidden="true"></div>
+      <section class="closing-download" aria-labelledby="closing-heading">
+        <div>
+          <h2 id="closing-heading" class="section-headline">Ready when you are.</h2>
+          <p>Free &amp; open source. macOS 13.3+ on Apple Silicon.</p>
+        </div>
+        <div class="closing-download__actions">
+          <a class="btn btn--primary" data-cta="mac" data-mac-url href="https://github.com/thrtn70/goop/releases/latest" rel="noopener">
+            <span class="btn__rule" aria-hidden="true"></span>
+            <span class="btn__label">Download for macOS</span>
+            <span class="btn__meta">Apple Silicon · .dmg</span>
+          </a>
+          <a class="text-link" href="#begin">Installation &amp; first launch</a>
+        </div>
+      </section>
       <div class="colophon-footer__inner">
         <p class="colophon-footer__statement">
           Goop is built on
