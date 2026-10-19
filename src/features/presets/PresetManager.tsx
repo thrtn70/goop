@@ -167,7 +167,7 @@ export default function PresetManager() {
             {editingId === p.id ? (
               <input
                 autoFocus
-                className="flex-1 rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-none focus:ring-2 focus:ring-accent"
+                className="flex-1 rounded-md bg-surface-2 px-2 py-1 text-sm text-fg transition duration-fast ease-out focus:outline-hidden focus:ring-2 focus:ring-accent"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onBlur={() => void commitRename(p)}

@@ -150,7 +150,7 @@ export default function Toast({ toast, onDismiss, visuallyHidden = false }: Toas
               {expanded && (
                 <pre
                   tabIndex={visuallyHidden ? -1 : 0}
-                  className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-xs text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                  className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-2 text-xs text-fg-secondary focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
                 >
                   {toast.detail}
                 </pre>

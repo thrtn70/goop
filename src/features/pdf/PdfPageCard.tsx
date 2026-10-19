@@ -84,7 +84,7 @@ export default function PdfPageCard({ state, mode, onChange }: PdfPageCardProps)
             {...attributes}
             {...listeners}
             aria-label={`Drag page ${state.originalPage}`}
-            className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 cursor-grab items-center justify-center rounded-md bg-surface-1/85 text-fg-muted opacity-0 transition duration-fast ease-out group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 cursor-grab items-center justify-center rounded-md bg-surface-1/85 text-fg-muted opacity-0 transition duration-fast ease-out group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
           >
             <GripVertical size={14} strokeWidth={2.5} aria-hidden="true" />
           </button>
@@ -99,7 +99,7 @@ export default function PdfPageCard({ state, mode, onChange }: PdfPageCardProps)
                 : `Delete page ${state.originalPage}`
             }
             aria-pressed={state.deleted}
-            className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-error focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-error focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
           >
             <X size={14} strokeWidth={2.5} aria-hidden="true" />
           </button>
@@ -110,7 +110,7 @@ export default function PdfPageCard({ state, mode, onChange }: PdfPageCardProps)
               type="button"
               onClick={rotateCcw}
               aria-label={`Rotate page ${state.originalPage} counter-clockwise`}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
             >
               <RotateCcw size={14} strokeWidth={2.5} aria-hidden="true" />
             </button>
@@ -118,7 +118,7 @@ export default function PdfPageCard({ state, mode, onChange }: PdfPageCardProps)
               type="button"
               onClick={rotateCw}
               aria-label={`Rotate page ${state.originalPage} clockwise`}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-surface-1/85 text-fg-muted hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
             >
               <RotateCw size={14} strokeWidth={2.5} aria-hidden="true" />
             </button>

@@ -633,7 +633,7 @@ export default function QueueRow({
                 <pre
                   id={detailId}
                   tabIndex={0}
-                  className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-1.5 text-xs leading-snug text-fg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                  className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-1 p-1.5 text-xs leading-snug text-fg-secondary focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent"
                 >
                   {failure.detail}
                 </pre>

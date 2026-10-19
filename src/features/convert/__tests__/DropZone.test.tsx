@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import DropZone from "@/features/convert/DropZone";
+import styles from "@/styles/index.css?raw";
 
 const callbacks: ((event: {
   payload: { type: string; paths?: string[] };
@@ -49,6 +50,32 @@ describe("DropZone", () => {
     const rect = container.querySelector("rect");
     expect(rect?.getAttribute("class")).toContain("dropzone-stroke-static");
     expect(rect?.getAttribute("class")).not.toContain("dropzone-stroke-flow");
+  });
+
+  it("centres the ripple by layout, in and out of reduced motion", async () => {
+    // The ripple has to sit at the zone's centre whether or not its
+    // animation runs: under reduced motion `animation: none` leaves it as a
+    // static circle for the 700ms it stays mounted. So it is centred by
+    // layout (all insets 0, auto margins, fixed size) and the keyframes
+    // only scale it. A translate in either place breaks one of the two:
+    // Tailwind 4's translate classes set the separate `translate` property,
+    // which composes with a keyframe transform instead of being replaced.
+    const { container } = render(
+      <DropZone onFiles={() => {}}>
+        <div />
+      </DropZone>,
+    );
+    await waitFor(() => expect(callbacks).toHaveLength(1));
+    act(() => callbacks[0]({ payload: { type: "drop", paths: ["/source.mp4"] } }));
+    const ripple = container.querySelector(".dropzone-ripple");
+    expect(ripple).not.toBeNull();
+    const classes = ripple?.className.split(/\s+/) ?? [];
+    expect(classes).toEqual(expect.arrayContaining(["absolute", "inset-0", "m-auto"]));
+    expect(classes.filter((c) => /(^|:)-?(translate|left|top)-/.test(c))).toEqual([]);
+    const keyframes = /@keyframes dropzone-ripple\s*\{([\s\S]*?)\n\}/.exec(styles);
+    expect(keyframes).not.toBeNull();
+    expect(keyframes?.[1]).toContain("scale(");
+    expect(keyframes?.[1]).not.toContain("translate");
   });
 
   // WebKit (the macOS webview) parses SVG geometry attributes as plain SVG

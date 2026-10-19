@@ -54,7 +54,7 @@ export default function AudioOptionsPanel({
   const bitrateInvalid = encode != null && bitrateChoices.length > 0
     && (!/^\d+$/.test(bitrateDraft) || !bitrateChoices.includes(Number(bitrateDraft)));
   const className =
-    "rounded-md bg-surface-2 px-2 py-1 text-fg focus:outline-none focus:ring-2 focus:ring-accent";
+    "rounded-md bg-surface-2 px-2 py-1 text-fg focus:outline-hidden focus:ring-2 focus:ring-accent";
 
   function change(next: AudioConvertOptions | null) {
     if (next?.kind === "encode") setSaved(cloneAudioOptions(next) as Encode);

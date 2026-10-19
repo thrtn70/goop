@@ -195,7 +195,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
                 onDraftEdit?.();
               }}
               onBlur={() => commitTargetSize(sizeInput, sizeUnit)}
-              className="w-24 rounded-md bg-surface-1 px-2 py-1 text-sm tabular-nums text-fg focus:outline-none focus:ring-2 focus:ring-accent"
+              className="w-24 rounded-md bg-surface-1 px-2 py-1 text-sm tabular-nums text-fg focus:outline-hidden focus:ring-2 focus:ring-accent"
               aria-label="Target size value"
             />
             <select
@@ -206,7 +206,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
                 onDraftEdit?.();
                 commitTargetSize(sizeInput, u);
               }}
-              className="rounded-md bg-surface-1 px-2 py-1 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent"
+              className="rounded-md bg-surface-1 px-2 py-1 text-sm text-fg focus:outline-hidden focus:ring-2 focus:ring-accent"
               aria-label="Target size unit"
             >
               <option value="kb">KB</option>

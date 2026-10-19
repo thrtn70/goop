@@ -12,7 +12,7 @@ Goop is a Tauri 2 desktop app for downloading URLs and converting media, images,
 - **Engine crates:** `goop-core`, `goop-sidecar`, `goop-extractor`, `goop-queue`, `goop-config`, `goop-converter`, `goop-pdf`, and `goop-metadata`
 - **Persistence:** SQLite via `rusqlite` for queue/history; JSON for settings and presets
 - **Sidecars:** ffmpeg/ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, and Tesseract, fetched by `scripts/fetch-sidecars.sh` and shipped under `src-tauri/bin/`
-- **Frontend:** strict TypeScript, React 18, React Router 7, Vite 8, Tailwind 3, Zustand, and `ts-rs`-generated Rust types
+- **Frontend:** strict TypeScript, React 18, React Router 7, Vite 8, Tailwind 4, Zustand, and `ts-rs`-generated Rust types
 - **Quality checks:** Rust format/clippy/tests, TypeScript project checks, ESLint for `src/` and `site/`, and Vitest
 
 ## Architecture Overview

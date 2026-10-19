@@ -271,9 +271,21 @@ test("reports why npm audit failed", async (t) => {
   });
 });
 
+test("an empty accepted list passes clean reports and still fails a new advisory", () => {
+  // The resting state once nothing needs an exception: the file stays, empty,
+  // and the gate keeps full strength over every dependency.
+  const empty = { advisories: [] };
+  const clean = run({ full: CLEAN, prod: CLEAN, accepted: empty });
+  assert.equal(clean.status, 0, clean.stderr);
+  const found = run({ full: TAILWIND_CHAIN, prod: CLEAN, accepted: empty });
+  assert.equal(found.status, 1);
+  assert.match(found.stdout + found.stderr, new RegExp(BRACES));
+});
+
 test("the repository's accepted list is well formed and explains each entry", () => {
   const { advisories } = JSON.parse(readFileSync(acceptedFile, "utf8"));
-  assert.ok(Array.isArray(advisories) && advisories.length > 0);
+  // Empty is valid: it is what the list should be whenever no exception is needed.
+  assert.ok(Array.isArray(advisories));
   for (const entry of advisories) {
     assert.match(entry.id, /^GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}$/);
     assert.ok(entry.package.length > 0);
