@@ -71,6 +71,38 @@ function installPage(
 const macLinks = () => [...document.querySelectorAll<HTMLAnchorElement>("[data-mac-url]")];
 const versionLabels = () => [...document.querySelectorAll<HTMLElement>("[data-latest-version]")];
 
+function downloadLinksByLocation() {
+  return [
+    document.querySelector<HTMLAnchorElement>('.hero__cta [data-cta="mac"][data-mac-url]'),
+    document.querySelector<HTMLAnchorElement>("#begin [data-mac-url]"),
+    document.querySelector<HTMLAnchorElement>("footer [data-mac-url]"),
+  ];
+}
+
+function expectDownloadLinksByLocation(href: string) {
+  for (const link of downloadLinksByLocation()) {
+    expect(link, "hero, setup, and footer each provide a download link").not.toBeNull();
+    expect(link?.getAttribute("href")).toBe(href);
+  }
+}
+
+function workflowChoice(value: "video" | "audio" | "image") {
+  return document.querySelector<HTMLInputElement>(
+    `input[type="radio"][name="workflow"][value="${value}"][data-workflow-choice]`,
+  );
+}
+
+function workflowPanel(value: "video" | "audio" | "image") {
+  return document.querySelector<HTMLElement>(`[data-workflow-panel="${value}"]`);
+}
+
+function chooseWorkflow(value: "video" | "audio" | "image") {
+  const choice = workflowChoice(value);
+  expect(choice).not.toBeNull();
+  choice!.checked = true;
+  choice!.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 // Every check below requires the elements to exist; an empty list would
 // otherwise pass any per-element expectation vacuously.
 function expectMacLinks(href: string) {
@@ -87,7 +119,8 @@ function expectVersionLabels(check: (text: string | null) => void) {
 
 async function archiveRendered(rows: number) {
   await vi.waitFor(() => {
-    expect(document.querySelectorAll(".archive__row")).toHaveLength(rows);
+    expect(document.querySelectorAll(".archive__row:not(.archive__row--skeleton)")).toHaveLength(rows);
+    expect(document.querySelectorAll(".archive__row--skeleton")).toHaveLength(0);
   });
 }
 
@@ -135,11 +168,24 @@ describe("macOS downloads", () => {
     expect(siteHtml).toMatch(/open anyway/i);
   });
 
+  it("puts first-launch help beside the primary download", () => {
+    document.body.innerHTML = bodyMarkup;
+    const cta = document.querySelector<HTMLElement>(".hero__cta");
+    expect(cta?.textContent).toMatch(/first launch/i);
+    expect(cta?.textContent).toMatch(/open anyway/i);
+  });
+
+  it("ships safe fallback URLs for hero, setup, and footer downloads", () => {
+    document.body.innerHTML = bodyMarkup;
+    expectDownloadLinksByLocation(latestPage);
+  });
+
   it.each(userAgents)("links the newest eligible DMG and its version on %s", async (_os, ua) => {
     installPage(ua, async () => response([v036, v034]));
     await archiveRendered(2);
 
     expectMacLinks(dmgOf(v036));
+    expectDownloadLinksByLocation(dmgOf(v036));
     expectVersionLabels((text) => expect(text).toBe("v0.3.6"));
     expectNoWindowsInstaller();
   });
@@ -193,7 +239,7 @@ describe("macOS downloads", () => {
       v036,
     ];
     installPage("Mozilla/5.0 (Macintosh)", async () => response(releases));
-    await archiveRendered(6);
+    await archiveRendered(3);
 
     expectMacLinks(dmgOf(v036));
   });
@@ -213,7 +259,7 @@ describe("macOS downloads", () => {
     });
     installPage("Mozilla/5.0 (Macintosh)", async () =>
       response([windowsOnly, mismatched, otherTag, foreign, v036]));
-    await archiveRendered(5);
+    await archiveRendered(3);
 
     expectMacLinks(dmgOf(v036));
     expectNoWindowsInstaller();
@@ -230,6 +276,7 @@ describe("macOS downloads", () => {
       expect(document.querySelector<HTMLElement>("[data-fetch-status]")?.hidden).toBe(false);
     });
     expectMacLinks(latestPage);
+    expectDownloadLinksByLocation(latestPage);
     expect(document.querySelector(".archive__fallback-row")).not.toBeNull();
   });
 
@@ -251,5 +298,108 @@ describe("macOS downloads", () => {
     const archiveLinks = [...document.querySelectorAll<HTMLAnchorElement>(".archive__link")];
     expect(archiveLinks.map((link) => link.textContent)).toEqual(["Release page", "Release page"]);
     expect(archiveLinks.map((link) => link.getAttribute("href"))).toEqual([v036.html_url, v034.html_url]);
+  });
+});
+
+describe("workflow examples", () => {
+  it("has a useful no-JavaScript default with enhanced choices hidden", () => {
+    document.body.innerHTML = bodyMarkup;
+
+    const choices = document.querySelector<HTMLFieldSetElement>("fieldset[data-workflow-choices]");
+    expect(choices).not.toBeNull();
+    expect(choices?.hidden).toBe(true);
+
+    const radios = [...document.querySelectorAll<HTMLInputElement>(
+      'input[type="radio"][name="workflow"][data-workflow-choice]',
+    )];
+    expect(radios.map((radio) => radio.value)).toEqual(["video", "audio", "image"]);
+    expect(workflowChoice("video")?.checked).toBe(true);
+    expect(radios.map((radio) => radio.getAttribute("aria-controls"))).toEqual([
+      "workflow-video",
+      "workflow-audio",
+      "workflow-image",
+    ]);
+
+    expect(workflowPanel("video")?.hidden).toBe(false);
+    expect(workflowPanel("audio")?.hidden).toBe(true);
+    expect(workflowPanel("image")?.hidden).toBe(true);
+    expect(workflowPanel("video")?.id).toBe("workflow-video");
+    expect(workflowPanel("audio")?.id).toBe("workflow-audio");
+    expect(workflowPanel("image")?.id).toBe("workflow-image");
+
+    expect(workflowPanel("video")?.textContent).toMatch(/MOV\s*→\s*MP4/i);
+    expect(workflowPanel("audio")?.textContent).toMatch(/WAV\s*→\s*MP3/i);
+    expect(workflowPanel("image")?.textContent).toMatch(/PNG\s*→\s*WebP/i);
+    expect(workflowPanel("video")?.textContent).toMatch(/camera-take\.mov/i);
+    expect(workflowPanel("audio")?.textContent).toMatch(/interview\.wav/i);
+    expect(workflowPanel("image")?.textContent).toMatch(/artwork\.png/i);
+    const workflowSection = choices?.closest("section");
+    expect(workflowSection?.textContent).toMatch(/illustrative/i);
+    expect(workflowSection?.textContent).toMatch(/(?:never|doesn.t|won.t) upload|no upload/i);
+  });
+
+  it("reveals and switches the native radio interface before release loading settles", () => {
+    installPage(
+      "Mozilla/5.0 (Macintosh)",
+      async () => new Promise<Response>(() => {}),
+    );
+
+    expect(document.querySelector<HTMLFieldSetElement>("fieldset[data-workflow-choices]")?.hidden).toBe(false);
+    chooseWorkflow("audio");
+    expect(workflowChoice("audio")?.checked).toBe(true);
+    expect(workflowChoice("video")?.checked).toBe(false);
+    expect(workflowPanel("video")?.hidden).toBe(true);
+    expect(workflowPanel("audio")?.hidden).toBe(false);
+    expect(workflowPanel("image")?.hidden).toBe(true);
+
+    chooseWorkflow("image");
+    expect(workflowChoice("image")?.checked).toBe(true);
+    expect(workflowPanel("audio")?.hidden).toBe(true);
+    expect(workflowPanel("image")?.hidden).toBe(false);
+  });
+
+  it("keeps switching examples after the release request fails", async () => {
+    installPage("Mozilla/5.0 (Macintosh)", async () => {
+      throw new Error("offline");
+    });
+
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("[data-fetch-status]")?.hidden).toBe(false);
+    });
+    chooseWorkflow("image");
+    expect(workflowPanel("video")?.hidden).toBe(true);
+    expect(workflowPanel("image")?.hidden).toBe(false);
+    expectMacLinks(latestPage);
+  });
+});
+
+describe("release archive preview", () => {
+  it("ships exactly three skeleton rows for the three-release preview", () => {
+    document.body.innerHTML = bodyMarkup;
+    expect(document.querySelectorAll(".archive__row--skeleton")).toHaveLength(3);
+  });
+
+  it("renders at most three releases from a larger response", async () => {
+    const releases = [
+      release("v0.3.10"),
+      release("v0.3.9"),
+      release("v0.3.8"),
+      release("v0.3.7"),
+      v036,
+    ];
+    installPage("Mozilla/5.0 (Macintosh)", async () => response(releases));
+    await archiveRendered(3);
+
+    expect([...document.querySelectorAll<HTMLElement>(".archive__tag")].map((tag) => tag.textContent))
+      .toEqual(["v0.3.10", "v0.3.9", "v0.3.8"]);
+    const links = [...document.querySelectorAll<HTMLAnchorElement>(".archive__link")];
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Release page",
+      "Release page",
+      "Release page",
+    ]);
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(
+      releases.slice(0, 3).map((entry) => entry.html_url),
+    );
   });
 });
