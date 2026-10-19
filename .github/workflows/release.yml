@@ -203,8 +203,9 @@ jobs:
       # Hold both to the declared value in the bundle that is about to ship.
       # That proves the declaration reached the package, not that the code
       # runs there: the executable's minos is what the linker was told, and
-      # static libraries built for a newer macOS (the HEIC stack sets no
-      # deployment target) only make the linker warn.
+      # static libraries built for a newer macOS only make the linker warn.
+      # The HEIC stack is built for the declared floor, but the C libraries
+      # that Cargo build scripts compile still target the runner's own macOS.
       #
       # Everything else in Contents/MacOS is reported, not enforced. The
       # sidecars and their dylibs are upstream, Homebrew and PyInstaller

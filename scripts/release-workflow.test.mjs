@@ -688,6 +688,11 @@ function packVersion(version) {
   return (major << 16) | (minor << 8) | patch;
 }
 
+// Real binaries carry an SDK newer than the macOS they require, so every
+// fixture does too: a check that read the SDK instead of the minimum would
+// then report 26.0 and fail, rather than pass by coincidence.
+const FIXTURE_SDK = "26.0";
+
 // [arch, version] writes LC_BUILD_VERSION; [arch, version, "min"] writes the
 // LC_VERSION_MIN_MACOSX that x86_64 slices built for macOS 10.13 still carry.
 function machSlice([arch, version, command = "build"]) {
@@ -697,10 +702,10 @@ function machSlice([arch, version, command = "build"]) {
   if (command === "build") {
     load.writeUInt32LE(1, 8); // PLATFORM_MACOS
     load.writeUInt32LE(packVersion(version), 12); // minos
-    load.writeUInt32LE(packVersion(version), 16); // sdk
+    load.writeUInt32LE(packVersion(FIXTURE_SDK), 16); // sdk
   } else {
-    load.writeUInt32LE(packVersion(version), 8);
-    load.writeUInt32LE(packVersion(version), 12);
+    load.writeUInt32LE(packVersion(version), 8); // version
+    load.writeUInt32LE(packVersion(FIXTURE_SDK), 12); // sdk
   }
   const header = Buffer.alloc(32);
   header.writeUInt32LE(0xfeedfacf, 0); // MH_MAGIC_64
@@ -826,6 +831,9 @@ test("the floor check fails a bundle that does not carry the declared floor", ne
   });
   await t.test("Info.plist has no LSMinimumSystemVersion", () => {
     fails({ plist: {} }, /::error::.*LSMinimumSystemVersion/);
+  });
+  await t.test("Info.plist names a later point release than the floor", () => {
+    fails({ plist: { LSMinimumSystemVersion: "13.3.1" } }, /::error::.*LSMinimumSystemVersion.*13\.3\.1.*13\.3/);
   });
   await t.test("the executable was linked at Rust's 11.0 default", () => {
     fails({ main: [["arm64", "11.0"]] }, /::error::goop .*11\.0.*13\.3/);
