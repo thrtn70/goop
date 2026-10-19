@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 const auditWorkflow = readFileSync(new URL("../.github/workflows/audit.yml", import.meta.url), "utf8");
@@ -385,6 +386,102 @@ test("Windows audit keeps the immutable libheif 1.23 vcpkg tree outside the macO
   assert.match(windowsHeifInstaller, /libheif\[core\]:x64-windows-static/);
   assert.match(auditWorkflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
   assert.doesNotMatch(workflow, /hashFiles\('scripts\/install-windows-heif-deps\.sh'\)/);
+});
+
+// libde265 and libheif are linked statically into the app and built for the
+// macOS floor tauri.conf.json declares (see heif-deps.test.mjs). A cache
+// restore must never hand a build the stack made for another floor.
+const declaredFloor = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
+  .bundle.macOS.minimumSystemVersion;
+const floorCli = fileURLToPath(new URL("./macos-deployment-target.mjs", import.meta.url));
+const heifCacheKey =
+  "heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-" +
+  "${{ hashFiles('scripts/build-static-heif-deps.sh') }}";
+
+function steps(body) {
+  return body.split(/\n(?= {6}- )/).filter((step) => step.startsWith("      - "));
+}
+
+function stepScript(step) {
+  const body = step.split("\n");
+  const start = body.findIndex((line) => line === "        run: |");
+  assert.notEqual(start, -1, "missing run block");
+  const block = [];
+  for (const line of body.slice(start + 1)) {
+    if (line !== "" && !line.startsWith("          ")) break;
+    block.push(line.slice(10));
+  }
+  return block.join("\n");
+}
+
+test("every HEIC cache key carries the macOS floor the stack was built for", () => {
+  // Not hashFiles('src-tauri/tauri.conf.json'): that file also holds the app
+  // version, so every release would throw away a stack that is still good.
+  const jobs = [
+    ["release build", job("build")],
+    ["audit rust", auditJob("rust")],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke")],
+  ];
+  const floorScripts = new Set();
+  for (const [name, body] of jobs) {
+    const list = steps(body);
+    const cacheAt = list.findIndex((step) => /^ {10}path: \.heif-deps$/m.test(step));
+    assert.notEqual(cacheAt, -1, `${name} has no HEIC cache`);
+    const cache = list[cacheAt];
+    assert.ok(cache.split("\n").includes(`          key: ${heifCacheKey}`), `${name} cache key:\n${cache}`);
+    const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
+    assert.ok(floorAt !== -1 && floorAt < cacheAt, `${name} must read the floor before restoring the cache`);
+    const condition = (step) => step.match(/^ {8}if: (.*)$/m)?.[1];
+    assert.equal(condition(list[floorAt]), condition(cache), `${name}: the floor step and the cache run together`);
+    floorScripts.add(stepScript(list[floorAt]));
+  }
+  assert.equal(floorScripts.size, 1, "every job reads the floor the same way");
+  const cached = `${workflow}\n${auditWorkflow}`.match(/^ {10}path: \.heif-deps$/gm) ?? [];
+  assert.equal(cached.length, jobs.length, "a HEIC cache outside these jobs would need the same key");
+});
+
+test("the cache-key floor step fails closed when tauri.conf.json declares no floor", () => {
+  const floorStep = steps(job("build")).find((step) => /^ {8}id: macos-floor$/m.test(step));
+  assert.ok(floorStep, "missing macos-floor step");
+  const script = stepScript(floorStep);
+  const run = (config, helper = readFileSync(floorCli, "utf8")) => {
+    const directory = mkdtempSync(join(tmpdir(), "goop-floor-step-"));
+    try {
+      for (const sub of ["scripts", "src-tauri"]) mkdirSync(join(directory, sub));
+      writeFileSync(join(directory, "scripts", "macos-deployment-target.mjs"), helper);
+      writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify(config));
+      const output = join(directory, "github-output");
+      writeFileSync(output, "");
+      // Unspecified `shell:` on a Linux or macOS runner is `bash -e {0}`: no pipefail.
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", script], {
+        cwd: directory,
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_OUTPUT: output },
+      });
+      return { status: result.status, log: result.stdout + result.stderr, output: readFileSync(output, "utf8") };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  };
+  const declared = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } });
+  assert.equal(declared.status, 0, declared.log);
+  assert.equal(declared.output, `version=${declaredFloor}\n`);
+  const missing = run({ bundle: { macOS: {} } });
+  assert.notEqual(missing.status, 0, missing.log);
+  assert.equal(missing.output, "", "an empty floor must never reach the cache key");
+  const silent = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } }, "// prints nothing, exits 0\n");
+  assert.notEqual(silent.status, 0, silent.log);
+  assert.equal(silent.output, "", "an empty floor must never reach the cache key");
+});
+
+test("both quality gates run the HEIC stack tests, and audit runs them on macOS too", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  assert.match(prePush, /node --test scripts\/heif-deps\.test\.mjs/);
+  assert.match(auditJob("web"), /- run: node --test scripts\/heif-deps\.test\.mjs/);
+  // The web job is Linux, where the tests that build real archives skip.
+  const step = namedStep(auditJob("sidecar-smoke"), "HEIC stack tests (macOS)");
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /^ {8}run: node --test scripts\/heif-deps\.test\.mjs$/m);
 });
 
 test("Windows audit records fresh-process HEIC preview memory evidence", () => {
