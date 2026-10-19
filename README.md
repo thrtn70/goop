@@ -67,7 +67,7 @@ Windows-specific development and installer promotion are deferred. The [Goop v0.
 
 ### System Requirements
 
-- **Current releases:** macOS 13.3+ on Apple Silicon (M-series). Intel Macs are not a release target.
+- **Current releases:** macOS 14+ on Apple Silicon (M-series). Intel Macs are not a release target.
 - **Historical v0.3.4 source target:** Windows 10+ (x64) with WebView2 Runtime. Windows-specific development remains deferred.
 - ~180 MB disk for the app + bundled sidecars (ffmpeg, ffprobe, yt-dlp, gallery-dl, Ghostscript, mutool, and Tesseract).
 - A network connection for requested downloads and any enabled app or tool update checks.

@@ -633,10 +633,12 @@ test("inline publisher validates bytes and release state before mutating a draft
   });
 });
 
-test("the macOS bundle declares the WebKit its stylesheet needs", () => {
+test("the macOS bundle declares the floor its bundled tools need", () => {
   // Tailwind 4's output relies on cascade layers, color-mix() and @property,
-  // all present from Safari 16.4. macOS 13.3 is the first release whose
-  // system WebKit, which the app's web view uses, is that new.
+  // all present from Safari 16.4, which macOS 13.3's system WebKit matches.
+  // The bundled PDF tools set the higher floor: gs, mutool and their
+  // libraries are built for macOS 14.0. The bundled tesseract is built for
+  // 14.8.5, so OCR on earlier 14.x releases remains a known gap.
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(config.bundle.macOS.minimumSystemVersion, "13.3");
+  assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
 });
