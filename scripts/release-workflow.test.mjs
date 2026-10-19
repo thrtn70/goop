@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -285,11 +285,22 @@ test("rehearsal artifacts expire after 3 days; a tag push keeps 90", () => {
   assert.match(build, /^ {10}retention-days: \$\{\{ github\.event_name == 'push' && 90 \|\| 3 \}\}$/m);
 });
 
+// A step's `run: |` block, unindented. It stops at the first line outside the
+// block, so the comments that open the next step are not part of the script.
+function runBlock(step) {
+  const body = step.split("\n");
+  const start = body.findIndex((line) => line === "        run: |");
+  assert.notEqual(start, -1, "missing run block");
+  const block = [];
+  for (const line of body.slice(start + 1)) {
+    if (line !== "" && !line.startsWith("          ")) break;
+    block.push(line.slice(10));
+  }
+  return block.join("\n");
+}
+
 function validateScript() {
-  const step = namedStep(job("validate"), "Release version matches every manifest").split("\n");
-  const start = step.findIndex((line) => line === "        run: |");
-  assert.notEqual(start, -1, "missing validate run block");
-  return step.slice(start + 1).map((line) => (line.startsWith("          ") ? line.slice(10) : line)).join("\n");
+  return runBlock(namedStep(job("validate"), "Release version matches every manifest"));
 }
 
 function runValidate({ eventName, refType, refName, pkg = "0.3.6", tauri = "0.3.6", cargo = "0.3.6" }) {
@@ -738,4 +749,238 @@ test("the macOS bundle declares the floor its bundled tools need", () => {
   // 14.8.5, so OCR on earlier 14.x releases remains a known gap.
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
+});
+
+const floorStep = "Verify the macOS deployment floor";
+
+test("the signed bundle must carry the declared macOS floor before assets are staged", () => {
+  const build = job("build");
+  const step = namedStep(build, floorStep);
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /^ {8}shell: bash$/m);
+  assert.match(step, /^ {10}TARGET: \$\{\{ matrix\.target \}\}$/m);
+  const script = runBlock(step);
+  assert.doesNotMatch(script, /\$\{\{/, "the script takes the target from env, not from an interpolated expression");
+  assert.match(script, /minimumSystemVersion/);
+  assert.match(script, /\/usr\/libexec\/PlistBuddy -c 'Print :LSMinimumSystemVersion'/);
+  assert.match(script, /vtool -show-build/);
+
+  const at = (needle) => {
+    const index = build.indexOf(needle);
+    assert.notEqual(index, -1, `missing ${needle}`);
+    return index;
+  };
+  assert.ok(at("tauri-apps/tauri-action@") < at(`- name: ${floorStep}`), "the check reads the bundle tauri-action built");
+  assert.ok(
+    at(`- name: ${floorStep}`) < at("- name: Verify signed sidecars run (macOS)"),
+    "a failing sidecar smoke test must not swallow the minos report",
+  );
+  assert.ok(at(`- name: ${floorStep}`) < at("- name: Stage release assets"), "assets must not be staged before the check");
+});
+
+// Mach-O fixtures hold only a header and the one load command vtool reads, so
+// each case states its minimum macOS directly.
+const cpuTypes = { arm64: [0x0100000c, 0], x86_64: [0x01000007, 3], x86_64h: [0x01000007, 8] };
+
+function packVersion(version) {
+  const [major, minor = 0, patch = 0] = version.split(".").map(Number);
+  return (major << 16) | (minor << 8) | patch;
+}
+
+// Real binaries carry an SDK newer than the macOS they require, so every
+// fixture does too: a check that read the SDK instead of the minimum would
+// then report 26.0 and fail, rather than pass by coincidence.
+const FIXTURE_SDK = "26.0";
+
+// [arch, version] writes LC_BUILD_VERSION; [arch, version, "min"] writes the
+// LC_VERSION_MIN_MACOSX that x86_64 slices built for macOS 10.13 still carry.
+function machSlice([arch, version, command = "build"]) {
+  const load = Buffer.alloc(command === "build" ? 24 : 16);
+  load.writeUInt32LE(command === "build" ? 0x32 : 0x24, 0);
+  load.writeUInt32LE(load.length, 4);
+  if (command === "build") {
+    load.writeUInt32LE(1, 8); // PLATFORM_MACOS
+    load.writeUInt32LE(packVersion(version), 12); // minos
+    load.writeUInt32LE(packVersion(FIXTURE_SDK), 16); // sdk
+  } else {
+    load.writeUInt32LE(packVersion(version), 8); // version
+    load.writeUInt32LE(packVersion(FIXTURE_SDK), 12); // sdk
+  }
+  const header = Buffer.alloc(32);
+  header.writeUInt32LE(0xfeedfacf, 0); // MH_MAGIC_64
+  header.writeUInt32LE(cpuTypes[arch][0], 4);
+  header.writeUInt32LE(cpuTypes[arch][1], 8);
+  header.writeUInt32LE(2, 12); // MH_EXECUTE
+  header.writeUInt32LE(1, 16);
+  header.writeUInt32LE(load.length, 20);
+  return Buffer.concat([header, load]);
+}
+
+function machO(slices) {
+  if (slices.length === 1) return machSlice(slices[0]);
+  const page = 4096;
+  const fat = Buffer.alloc(page * (slices.length + 1));
+  fat.writeUInt32BE(0xcafebabe, 0); // FAT_MAGIC
+  fat.writeUInt32BE(slices.length, 4);
+  slices.forEach((slice, index) => {
+    const bytes = machSlice(slice);
+    const entry = 8 + 20 * index;
+    const offset = page * (index + 1);
+    fat.writeUInt32BE(cpuTypes[slice[0]][0], entry);
+    fat.writeUInt32BE(cpuTypes[slice[0]][1], entry + 4);
+    fat.writeUInt32BE(offset, entry + 8);
+    fat.writeUInt32BE(bytes.length, entry + 12);
+    fat.writeUInt32BE(12, entry + 16);
+    bytes.copy(fat, offset);
+  });
+  return fat;
+}
+
+function infoPlist(entries) {
+  const body = Object.entries(entries)
+    .map(([key, value]) => `  <key>${key}</key>\n  <string>${value}</string>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+${body}
+</dict>
+</plist>
+`;
+}
+
+// Shaped like the shipped bundle: a static upstream build, a universal
+// PyInstaller binary and Homebrew bottles built on the macOS 14 runner.
+const bundledBinaries = {
+  ffmpeg: [["arm64", "12.0"]],
+  "yt-dlp": [["x86_64", "10.13", "min"], ["arm64", "11.0"]],
+  gs: [["arm64", "14.0"]],
+  "libtiff.6.dylib": [["arm64", "14.0"]],
+};
+
+function runFloorCheck({
+  floor = "13.3",
+  plist = { LSMinimumSystemVersion: "13.3" },
+  main = [["arm64", "13.3"]],
+  bundled = bundledBinaries,
+  bundle = true,
+} = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "goop-release-floor-"));
+  try {
+    mkdirSync(join(directory, "src-tauri"));
+    const macOS = floor === null ? {} : { minimumSystemVersion: floor };
+    writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify({ bundle: { macOS } }));
+    if (bundle) {
+      const contents = join(directory, "target", "aarch64-apple-darwin", "release", "bundle", "macos", "Goop.app", "Contents");
+      mkdirSync(join(contents, "MacOS"), { recursive: true });
+      writeFileSync(join(contents, "Info.plist"), infoPlist({ CFBundleExecutable: "goop", ...plist }));
+      writeFileSync(join(contents, "MacOS", "goop"), Array.isArray(main) ? machO(main) : main);
+      for (const [name, slices] of Object.entries(bundled)) {
+        writeFileSync(join(contents, "MacOS", name), Array.isArray(slices) ? machO(slices) : slices);
+      }
+    }
+    const result = spawnSync(
+      "bash",
+      ["--noprofile", "--norc", "-eo", "pipefail", "-c", runBlock(namedStep(job("build"), floorStep))],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: { ...process.env, TARGET: "aarch64-apple-darwin", PATH: `${dirname(process.execPath)}:${process.env.PATH}` },
+      },
+    );
+    return { status: result.status, log: result.stdout + result.stderr };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const needsMacTools = process.platform === "darwin" ? {} : { skip: "runs the real vtool and PlistBuddy, which only macOS has" };
+
+test("the floor check passes a bundle at the declared floor and reports every other binary", needsMacTools, () => {
+  const run = runFloorCheck();
+  assert.equal(run.status, 0, run.log);
+  assert.doesNotMatch(run.log, /::error::/);
+  assert.match(run.log, /^ffmpeg +12\.0$/m);
+  assert.match(run.log, /^yt-dlp +x86_64 10\.13, arm64 11\.0$/m);
+  assert.match(run.log, /^gs +14\.0 +above the 13\.3 floor$/m);
+  assert.match(run.log, /^libtiff\.6\.dylib +14\.0 +above the 13\.3 floor$/m);
+  assert.doesNotMatch(run.log, /^goop /m, "the main executable is checked, not listed with the sidecars");
+  const warnings = run.log.split("\n").filter((line) => line.startsWith("::warning::"));
+  assert.equal(warnings.length, 1, run.log);
+  assert.match(warnings[0], /declared 13\.3/);
+  assert.match(warnings[0], /gs \(14\.0\), libtiff\.6\.dylib \(14\.0\)$/);
+});
+
+test("the floor check says nothing above the floor when no bundled binary needs more", needsMacTools, () => {
+  const run = runFloorCheck({ bundled: { ffmpeg: bundledBinaries.ffmpeg, "yt-dlp": bundledBinaries["yt-dlp"] } });
+  assert.equal(run.status, 0, run.log);
+  assert.doesNotMatch(run.log, /::warning::|above the/);
+});
+
+test("the floor check fails a bundle that does not carry the declared floor", needsMacTools, async (t) => {
+  const fails = (options, pattern) => {
+    const run = runFloorCheck(options);
+    assert.equal(run.status, 1, run.log);
+    assert.match(run.log, pattern);
+    return run;
+  };
+  await t.test("Info.plist keeps Tauri's 10.13 default", () => {
+    fails({ plist: { LSMinimumSystemVersion: "10.13" } }, /::error::.*LSMinimumSystemVersion.*10\.13.*13\.3/);
+  });
+  await t.test("Info.plist has no LSMinimumSystemVersion", () => {
+    fails({ plist: {} }, /::error::.*LSMinimumSystemVersion/);
+  });
+  await t.test("Info.plist names a later point release than the floor", () => {
+    fails({ plist: { LSMinimumSystemVersion: "13.3.1" } }, /::error::.*LSMinimumSystemVersion.*13\.3\.1.*13\.3/);
+  });
+  await t.test("the executable was linked at Rust's 11.0 default", () => {
+    fails({ main: [["arm64", "11.0"]] }, /::error::goop .*11\.0.*13\.3/);
+  });
+  await t.test("the executable was linked above the declared floor", () => {
+    fails({ main: [["arm64", "14.0"]] }, /::error::goop .*14\.0.*13\.3/);
+  });
+  await t.test("one slice of a universal executable misses the floor", () => {
+    fails({ main: [["x86_64", "13.3"], ["arm64", "11.0"]] }, /::error::goop arm64 .*11\.0/);
+  });
+  await t.test("the executable carries no build version", () => {
+    fails({ main: "#!/bin/sh\n" }, /::error::.*goop.*no macOS build version/);
+  });
+  await t.test("tauri.conf.json declares no floor", () => {
+    fails({ floor: null }, /::error::bundle\.macOS\.minimumSystemVersion is unset/);
+  });
+  await t.test("no bundle was built", () => {
+    fails({ bundle: false }, /::error::no \.app bundle found/);
+  });
+  await t.test("the sidecar report survives a failing check", () => {
+    for (const options of [{ plist: { LSMinimumSystemVersion: "10.13" } }, { main: [["arm64", "11.0"]] }]) {
+      const run = fails(options, /^gs +14\.0 +above the 13\.3 floor$/m);
+      assert.match(run.log, /^::warning::.*gs \(14\.0\)/m);
+    }
+  });
+});
+
+test("only a slice that runs on Apple Silicon can raise the floor warning", needsMacTools, () => {
+  const run = runFloorCheck({
+    bundled: {
+      universal: [["arm64", "11.0"], ["x86_64", "14.0"]],
+      "intel-only": [["x86_64", "14.0"], ["x86_64h", "14.0"]],
+    },
+  });
+  assert.equal(run.status, 0, run.log);
+  assert.match(run.log, /^universal +arm64 11\.0, x86_64 14\.0$/m);
+  assert.match(run.log, /^intel-only +x86_64 14\.0, x86_64h 14\.0 +above the 13\.3 floor$/m);
+  assert.match(run.log, /^::warning::.*: intel-only \(14\.0\)$/m);
+});
+
+test("audit runs the floor check's tests on macOS, where they are not skipped", () => {
+  const step = namedStep(auditJob("sidecar-smoke"), "Release workflow tests (macOS)");
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /node --test scripts\/release-workflow\.test\.mjs/);
+});
+
+test("an unreadable bundled file is reported, never fatal", needsMacTools, () => {
+  const run = runFloorCheck({ bundled: { ...bundledBinaries, "notes.txt": "not a binary\n" } });
+  assert.equal(run.status, 0, run.log);
+  assert.match(run.log, /^notes\.txt +no macOS build version$/m);
 });

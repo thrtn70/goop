@@ -173,6 +173,11 @@ jobs:
       - name: Startup and performance harnesses (macOS)
         if: matrix.os == 'macos-14'
         run: node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
+      # The release build's floor check runs the real vtool and PlistBuddy,
+      # so its tests skip on the Linux web job. This is where CI runs them.
+      - name: Release workflow tests (macOS)
+        if: matrix.os == 'macos-14'
+        run: node --test scripts/release-workflow.test.mjs
       # Some HEIC stack tests build real Mach-O archives with clang, ar and
       # otool, so they skip on the Linux web job. This is where CI runs them.
       - name: HEIC stack tests (macOS)
