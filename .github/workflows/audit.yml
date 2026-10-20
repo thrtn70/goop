@@ -129,6 +129,7 @@ jobs:
       - run: npm run test
       - run: node --test scripts/release-workflow.test.mjs
       - run: node --test scripts/heif-deps.test.mjs
+      - run: node --test scripts/tesseract-build.test.mjs
       - run: node --test scripts/check-gallery-dl-runtime.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
@@ -216,6 +217,10 @@ jobs:
       - name: HEIC stack tests (macOS)
         if: matrix.os == 'macos-14'
         run: node --test scripts/heif-deps.test.mjs
+      # Likewise for the tesseract build, whose fixtures are real Mach-O files.
+      - name: Tesseract build tests (macOS)
+        if: matrix.os == 'macos-14'
+        run: node --test scripts/tesseract-build.test.mjs
       - name: PERF-01 portable harness tests
         shell: bash
         run: node --test scripts/performance-portable.test.mjs
@@ -229,6 +234,24 @@ jobs:
         id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
+      # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
+      # source for the declared floor (scripts/build-tesseract-macos.sh).
+      # The build is cached like the HEIC stack, and the script checks a
+      # restored one before it reuses it. The runner image is in the key as
+      # well: it fixes the Homebrew leptonica and libarchive the build links,
+      # which the script also checks, and a cache restored by its exact key
+      # is never saved again, so a new image would otherwise rebuild on
+      # every run.
+      - name: Runner image
+        id: runner-image
+        if: matrix.os == 'macos-14'
+        run: |
+          echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'macos-14'
+        with:
+          path: .tesseract-deps
+          key: tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-image-${{ steps.runner-image.outputs.version }}-${{ hashFiles('scripts/build-tesseract-macos.sh') }}
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"

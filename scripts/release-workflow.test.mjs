@@ -591,6 +591,53 @@ test("both quality gates run the HEIC stack tests, and audit runs them on macOS 
   assert.match(step, /^ {8}run: node --test scripts\/heif-deps\.test\.mjs$/m);
 });
 
+// scripts/build-tesseract-macos.sh builds tesseract for the floor inside
+// fetch-sidecars.sh, so its cache must be restored before that step runs, and
+// keyed like the HEIC stack: a new floor or a changed script restores nothing.
+// It is keyed on the runner image too, because the image fixes the Homebrew
+// leptonica and libarchive the build links. The script rebuilds when they
+// change, and actions/cache never re-saves a key it restored, so without the
+// image a new one would rebuild on every run.
+const tesseractCacheKey =
+  "tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-" +
+  "image-${{ steps.runner-image.outputs.version }}-" +
+  "${{ hashFiles('scripts/build-tesseract-macos.sh') }}";
+
+test("every tesseract cache carries the floor and the build script, and is restored before the sidecars are fetched", () => {
+  const jobs = [
+    ["release build", job("build"), "Fetch sidecars"],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke"), "Fetch sidecars"],
+  ];
+  for (const [name, body, fetchName] of jobs) {
+    const list = steps(body);
+    const cacheAt = list.findIndex((step) => /^ {10}path: \.tesseract-deps$/m.test(step));
+    assert.notEqual(cacheAt, -1, `${name} has no tesseract cache`);
+    const cache = list[cacheAt];
+    assert.ok(cache.split("\n").includes(`          key: ${tesseractCacheKey}`), `${name} cache key:\n${cache}`);
+    assert.match(cache, /^ {8}if: matrix\.os == 'macos-14'$/m);
+    const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
+    assert.ok(floorAt !== -1 && floorAt < cacheAt, `${name} must read the floor before restoring the cache`);
+    const imageAt = list.findIndex((step) => /^ {8}id: runner-image$/m.test(step));
+    assert.ok(imageAt !== -1 && imageAt < cacheAt, `${name} must read the runner image before restoring the cache`);
+    assert.match(list[imageAt], /^ {8}if: matrix\.os == 'macos-14'$/m);
+    assert.match(stepScript(list[imageAt]), /^echo "version=\$\{ImageVersion:-unknown\}" >> "\$GITHUB_OUTPUT"$/m);
+    const fetchAt = list.findIndex((step) => step.includes(`      - name: ${fetchName}\n`));
+    assert.ok(fetchAt !== -1 && cacheAt < fetchAt, `${name} must restore the build before fetch-sidecars.sh runs`);
+  }
+  const cached = `${workflow}\n${auditWorkflow}`.match(/^ {10}path: \.tesseract-deps$/gm) ?? [];
+  assert.equal(cached.length, jobs.length, "a tesseract cache outside these jobs would need the same key");
+});
+
+test("both quality gates run the tesseract build tests, and audit runs them on macOS too", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  assert.match(prePush, /node --test scripts\/tesseract-build\.test\.mjs/);
+  assert.match(auditJob("web"), /- run: node --test scripts\/tesseract-build\.test\.mjs/);
+  // The web job is Linux, where the tests that build real Mach-O files skip.
+  const step = namedStep(auditJob("sidecar-smoke"), "Tesseract build tests (macOS)");
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /^ {8}run: node --test scripts\/tesseract-build\.test\.mjs$/m);
+});
+
 test("Windows audit records fresh-process HEIC preview memory evidence", () => {
   const smoke = auditJob("sidecar-smoke");
   const handoff = smoke.match(
@@ -841,8 +888,9 @@ test("the macOS bundle declares the floor its bundled tools need", () => {
   // Tailwind 4's output relies on cascade layers, color-mix() and @property,
   // all present from Safari 16.4, which macOS 13.3's system WebKit matches.
   // The bundled PDF tools set the higher floor: gs, mutool and their
-  // libraries are built for macOS 14.0. The bundled tesseract is built for
-  // 14.8.5, so OCR on earlier 14.x releases remains a known gap.
+  // libraries are built for macOS 14.0. Homebrew's tesseract is built for
+  // 14.8.5, so fetch-sidecars.sh bundles one built here for the floor
+  // instead (see tesseract-build.test.mjs).
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
 });

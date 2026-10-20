@@ -53,6 +53,7 @@ run_step "release workflow"  node --test scripts/release-workflow.test.mjs
 run_step "HEIC stack floor"  node --test scripts/heif-deps.test.mjs
 run_step "gallery-dl runtime check" node --test scripts/check-gallery-dl-runtime.test.mjs
 run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
+run_step "tesseract build"   node --test scripts/tesseract-build.test.mjs
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   run_step "macOS baselines" node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
