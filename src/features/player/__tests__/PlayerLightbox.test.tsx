@@ -2,6 +2,7 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PlayerLightbox, { type PlayerLightboxProps } from "@/features/player/PlayerLightbox";
+import { FOCUS_SENTINEL_ATTR } from "@/lib/focusTrap";
 
 const SRC = "asset://localhost/%2FUsers%2Fa%2Fmy%20clip%20%231.mov";
 
@@ -102,16 +103,45 @@ describe("PlayerLightbox focus", () => {
     opener.remove();
   });
 
-  it("wraps Tab from the last control to the first", () => {
+  it("leaves a forward Tab from the video to the browser so it can reach the native controls", () => {
     render(<PlayerLightbox {...baseProps()} />);
     videoOf().focus();
     expect(document.activeElement).toBe(videoOf());
     const notPrevented = fireEvent.keyDown(videoOf(), { key: "Tab" });
-    expect(notPrevented).toBe(false);
+    expect(notPrevented).toBe(true);
+    expect(document.activeElement).toBe(videoOf());
+  });
+
+  it("leaves a forward Tab from the audio element to the browser too", () => {
+    render(<PlayerLightbox {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3" })} />);
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+    audio.focus();
+    expect(fireEvent.keyDown(audio, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(audio);
+  });
+
+  it("renders a hidden focus sentinel after the media that sends focus back to Close preview", () => {
+    render(<PlayerLightbox {...baseProps()} />);
+    const sentinel = document.querySelector(`[${FOCUS_SENTINEL_ATTR}]`) as HTMLElement;
+    expect(sentinel).toBeTruthy();
+    expect(sentinel.tabIndex).toBe(0);
+    expect(sentinel.getAttribute("aria-hidden")).toBe("true");
+    expect(videoOf().compareDocumentPosition(sentinel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(dialog().contains(sentinel)).toBe(true);
+    sentinel.focus();
     expect(document.activeElement).toBe(closeButton());
   });
 
-  it("wraps Shift+Tab from the first control to the last", () => {
+  it("puts the sentinel after the audio element as well", () => {
+    render(<PlayerLightbox {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3" })} />);
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+    const sentinel = document.querySelector(`[${FOCUS_SENTINEL_ATTR}]`) as HTMLElement;
+    expect(audio.compareDocumentPosition(sentinel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    sentinel.focus();
+    expect(document.activeElement).toBe(closeButton());
+  });
+
+  it("sends Shift+Tab from Close preview to the video, not to the sentinel", () => {
     render(<PlayerLightbox {...baseProps()} />);
     expect(document.activeElement).toBe(closeButton());
     const notPrevented = fireEvent.keyDown(closeButton(), { key: "Tab", shiftKey: true });

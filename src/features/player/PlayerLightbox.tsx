@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import type { PlayablePlan } from "@/features/player/previewPlan";
 import { releaseMedia } from "@/features/player/releaseMedia";
-import { trapTab } from "@/lib/focusTrap";
+import { FOCUS_SENTINEL_ATTR, trapTab } from "@/lib/focusTrap";
 
 export type PlayerLightboxProps = {
   plan: PlayablePlan;
@@ -28,7 +28,9 @@ const MEDIA_CLASS = "pointer-events-auto max-h-full max-w-full rounded-md object
 /**
  * Fills the Goop window with the selected source. Esc, the close button and a click on the scrim all leave;
  * the click has to start on the scrim too, so a scrub released beside the video stays open.
- * The media carries tabIndex 0 so Tab can reach its native controls and the focus trap counts it as a stop.
+ * The media carries tabIndex 0 so it is a Tab stop of its own; the browser may add its native controls
+ * after it, which is why the trap lets a forward Tab leave the media and the trailing sentinel brings
+ * focus back to Close once Tab has carried it past them.
  */
 export default function PlayerLightbox({ plan, src, name, startAt, playing, onClose }: PlayerLightboxProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -139,6 +141,13 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
           />
         )}
       </div>
+      <span
+        {...{ [FOCUS_SENTINEL_ATTR]: "" }}
+        tabIndex={0}
+        aria-hidden="true"
+        onFocus={() => closeRef.current?.focus()}
+        className="sr-only"
+      />
     </div>,
     document.body,
   );
