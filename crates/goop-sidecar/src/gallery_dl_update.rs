@@ -302,6 +302,56 @@ mod tests {
         assert!(status.message.contains("9.99.0"));
     }
 
+    /// gallery-dl's copy of the yt-dlp updater's regression test of the same
+    /// name: a download another process still holds a writer on (the state a
+    /// forked child leaves behind on Linux) is installed, not reverted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_still_held_open_by_another_process_is_installed_not_reverted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"v9.99.0"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/v9.99.0/SHA256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "c24fc0875a10bc40f65c57887a92af4ba77c4011863311dbaf7d79f07f6ad0a4  gallery-dl.bin\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/v9.99.0/gallery-dl.bin"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 9.99.0\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_version_script(&bundled.path().join("gallery-dl"), "1.0.0");
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf());
+        let _holder = crate::test_support::WriterHolder::hold(
+            &updates.path().join("gallery-dl.tmp-download"),
+            &updates.path().join("gallery-dl"),
+        );
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("gallery-dl.bin"),
+        )
+        .await
+        .expect("a download another process still holds open must be waited for, not reverted");
+
+        assert_eq!(status.new_version.as_deref(), Some("9.99.0"));
+        assert!(updates.path().join("gallery-dl").is_file());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn update_with_reports_up_to_date_and_skips_download() {

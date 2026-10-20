@@ -418,6 +418,67 @@ mod tests {
         assert!(status.message.contains("2026.07.04"));
     }
 
+    /// Regression for the updater's half of the Linux `ETXTBSY` race whose
+    /// test half `goop_core::test_scripts::write_script` waits out: a job
+    /// that spawns a process while the download is being written forks a
+    /// child holding a copy of the writer, and until that child reaches its
+    /// own exec the kernel refuses to run the new binary. The version check
+    /// read that refusal as "the download does not run" and deleted a good
+    /// update.
+    ///
+    /// Provoked by an unrelated process holding a writer on the downloaded
+    /// inode — reproducing it through a real fork would mean hitting a
+    /// microsecond window on purpose. On macOS, which does not enforce
+    /// `ETXTBSY` for scripts, it only checks the wait stays out of the way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_still_held_open_by_another_process_is_installed_not_reverted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.04\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf());
+        let _holder = crate::test_support::WriterHolder::hold(
+            &updates.path().join("yt-dlp.tmp-download"),
+            &updates.path().join("yt-dlp"),
+        );
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect("a download another process still holds open must be waited for, not reverted");
+
+        assert_eq!(status.new_version.as_deref(), Some("2026.07.04"));
+        assert!(updates.path().join("yt-dlp").is_file());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn update_with_reports_up_to_date_and_skips_download() {
