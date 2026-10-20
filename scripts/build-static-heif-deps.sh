@@ -20,9 +20,11 @@
 # (encode-only → no GPL-2.0 component), no aom (AVIF is handled natively
 # by the `image` crate). See LICENSING.md for the static-LGPL rationale.
 #
-# Used by: audit.yml (ubuntu rust job + macos smoke leg), release.yml
-# (macOS builder), and local dev (idempotent — skips when the prefix is
-# already populated, which also makes a CI cache restore a no-op).
+# Used by: audit.yml (the heif-deps job, which alone saves the CI cache, and
+# the ubuntu rust job + macos smoke leg, which restore it), release.yml
+# (macOS builder, always from scratch: it restores no cache), and local dev
+# (idempotent — skips when the prefix is already populated, which also makes
+# a CI cache restore a no-op).
 #
 # macOS deployment target: both libraries are linked statically into the
 # app, so they are built for the oldest macOS the app declares,
