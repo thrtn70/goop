@@ -36,29 +36,84 @@ function clockAfter(readyPath){
  }};
  return clock;
 }
+// Child code that ignores TERM and then renames its pid into `path`, so the
+// file existing means TERM can no longer stop that process.
+const ignoreTermThenArm=path=>`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
+// A TERM-resistant process the run fails to kill can hold its pipes open
+// forever. Unless the test passed, kill the pid in `armed` after it, so such a
+// regression fails at the test's timeout instead of hanging the gate.
+function killArmedAfter(t,dir,armed){
+ const guard={passed:false};
+ t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!guard.passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(dir,{recursive:true,force:true});});
+ return guard;
+}
+// Polls for `path`, giving up after 3000 polls so a process that never arms
+// cannot keep the test runner alive.
+async function waitForPath(path){for(let polls=0;polls<3000&&!existsSync(path);polls++)await new Promise(resolve=>setTimeout(resolve,5));return existsSync(path);}
+// SIGKILL cannot be ignored, but a loaded kernel may not have finished the kill
+// when the run returns. Reads the process state ('' once gone, Z or E while it
+// exits) for up to 100 polls before reporting what is still there.
+async function stateAfterKill(pid){
+ let state='';
+ for(let polls=0;polls<100;polls++){
+  try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim();}catch{return '';}
+  if(state===''||/[ZE]/.test(state))return state;
+  await new Promise(resolve=>setTimeout(resolve,10));
+ }
+ return state;
+}
 test('timeout escalates for a process ignoring TERM',{timeout:5000},async t=>{
  const clockDir=mkdtempSync(join(tmpdir(),'goop-term-clock-'));
  const armed=join(clockDir,'armed');
- let passed=false;
- // A run that never escalates waits on the runner's pipes forever. Kill it here
- // so the test fails at its timeout instead of hanging the gate.
- t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(clockDir,{recursive:true,force:true});});
+ const guard=killArmedAfter(t,clockDir,armed);
  // The timeout starts only once TERM can no longer stop the runner, so the run
  // can return only by escalating to SIGKILL.
  const clock=clockAfter(armed);
- const result=await fakeRunner(`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:30,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ const result=await fakeRunner(`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:30,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
  assert.equal(clock.missed,false);
  assert.equal(result.success,false);
  assert.equal(result.timed_out,true);
  assert.deepEqual(clock.sleeps,[200,30]);
  assert.equal(result.lifetime_ms,230);
- passed=true;
+ guard.passed=true;
 });
-test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
-test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
- const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:50});
- let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(result.descendant_pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}
- try{assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}finally{try{process.kill(result.descendant_pid,'SIGKILL');}catch{/* Already gone. */}}
+test('single conversion abort reaps the owned process group',{timeout:5000},async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-abort-'));
+ const armed=join(dir,'armed');
+ const guard=killArmedAfter(t,dir,armed);
+ const controller=new AbortController();
+ // The run's own timeout stays at its 120 s default, far past this test's, so
+ // only the abort can end it. The abort is sent once TERM can no longer stop
+ // the runner, so the run can return only by escalating to SIGKILL.
+ const running=fakeRunner(`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`,{killGraceMs:30,abortSignal:controller.signal});
+ running.catch(()=>{/* Rethrown by the await below. */});
+ const armedInTime=await waitForPath(armed);
+ controller.abort();
+ const result=await running;
+ assert.equal(armedInTime,true);
+ assert.equal(result.success,false);
+ assert.equal(result.aborted,true);
+ assert.equal(result.timed_out,false);
+ guard.passed=true;
+});
+test('single conversion timeout kills a TERM-resistant descendant before returning',{timeout:5000},async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-descendant-clock-'));
+ const armed=join(dir,'armed');
+ const guard=killArmedAfter(t,dir,armed);
+ // The timeout starts only once the descendant ignores TERM, so only the group
+ // SIGKILL after the grace can stop it. The runner itself dies of TERM.
+ const clock=clockAfter(armed);
+ const descendant=`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+ const result=await fakeRunner(`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:50,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ assert.equal(clock.missed,false);
+ assert.equal(result.timed_out,true);
+ assert.deepEqual(clock.sleeps,[200,50]);
+ assert.equal(result.lifetime_ms,250);
+ const pid=Number(readFileSync(armed,'utf8'));
+ assert.ok(Number.isSafeInteger(pid)&&pid>1,`invalid descendant pid ${pid}`);
+ const state=await stateAfterKill(pid);
+ assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);
+ guard.passed=true;
 });
 test('single conversion failure kills a TERM-resistant descendant before returning',async()=>{
  const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:false,process_ms:1,descendant_pid:c.pid}));process.exitCode=1;",{timeoutMs:2000,killGraceMs:50});
