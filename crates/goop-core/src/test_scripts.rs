@@ -277,10 +277,12 @@ mod tests {
     ///
     /// Bodies a mock server hands to the updaters (`set_body…`) are exempt
     /// because no test helper can wrap them: production code downloads and
-    /// writes those, then runs them to check their version. That path is
-    /// still exposed to the race on Linux — a fork during the download's
-    /// write can make the version check fail with `ETXTBSY` — and only the
-    /// updater itself can close it.
+    /// writes those, then runs them to check their version. The updater
+    /// closes the race on that path itself — its post-install version check,
+    /// `UpdateChecker::version_after_install` in goop-sidecar, waits out
+    /// `ETXTBSY` the same way `write_script` does — and goop-sidecar's
+    /// `a_download_still_held_open_by_another_process_is_installed_not_reverted`
+    /// tests pin it.
     #[test]
     fn scripts_are_written_only_through_write_script() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

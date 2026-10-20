@@ -142,7 +142,7 @@ async fn update_with(
     // so it can't shadow the working bundled copy. (Updates are user-initiated
     // and serialized through the single IPC handler, so nothing else races us
     // for `dest`.)
-    match current_version(resolver).await {
+    match installed_version(resolver).await {
         Some(v) => {
             let message = match &previous {
                 Some(p) => format!("Updated gallery-dl {p} → {v}."),
@@ -175,6 +175,19 @@ async fn current_version(resolver: &BinaryResolver) -> Option<String> {
     UpdateChecker::for_gallery_dl(resolver)
         .current_version()
         .await
+        .ok()
+}
+
+/// [`current_version`] for the binary this update just installed, which
+/// waits out a writer the download may have left behind on Linux — see
+/// `UpdateChecker::version_after_install`.
+async fn installed_version(resolver: &BinaryResolver) -> Option<String> {
+    UpdateChecker::for_gallery_dl(resolver)
+        .version_after_install()
+        .await
+        .inspect_err(|e| {
+            tracing::warn!("gallery-dl update: the downloaded binary did not run: {e}")
+        })
         .ok()
 }
 

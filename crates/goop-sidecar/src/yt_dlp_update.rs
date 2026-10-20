@@ -165,7 +165,7 @@ async fn update_with(
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
     // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
     // so it can't shadow the working bundled copy.
-    match current_version(resolver).await {
+    match installed_version(resolver).await {
         Some(v) => {
             let message = match &previous {
                 Some(p) => format!("Updated yt-dlp {p} → {v}."),
@@ -199,6 +199,17 @@ async fn current_version(resolver: &BinaryResolver) -> Option<String> {
     UpdateChecker::for_yt_dlp(resolver)
         .current_version()
         .await
+        .ok()
+}
+
+/// [`current_version`] for the binary this update just installed, which
+/// waits out a writer the download may have left behind on Linux — see
+/// `UpdateChecker::version_after_install`.
+async fn installed_version(resolver: &BinaryResolver) -> Option<String> {
+    UpdateChecker::for_yt_dlp(resolver)
+        .version_after_install()
+        .await
+        .inspect_err(|e| tracing::warn!("yt-dlp update: the downloaded binary did not run: {e}"))
         .ok()
 }
 
