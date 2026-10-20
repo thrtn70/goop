@@ -111,6 +111,19 @@ describe("SourcePlayer media", () => {
     expect(img.getAttribute("decoding")).toBe("async");
   });
 
+  it("marks out its bar and media body, which index.css lets shrink in a short panel", () => {
+    const { container } = render(<SourcePlayer {...baseProps()} />);
+    const root = container.firstElementChild;
+    const bar = screen.getByRole("button", { name: "Hide preview" }).closest(".source-player-bar");
+    const body = mediaElement(container, "video").parentElement;
+
+    expect(root?.classList.contains("source-player")).toBe(true);
+    expect(bar?.parentElement).toBe(root);
+    expect(bar?.contains(screen.getByRole("button", { name: "Enlarge preview" }))).toBe(true);
+    expect(body?.classList.contains("source-player-body")).toBe(true);
+    expect(body?.parentElement).toBe(root);
+  });
+
   it("takes the alt text from the last segment of a Windows path", () => {
     render(<SourcePlayer {...baseProps({ path: "C:\\Users\\a\\Pictures\\p.heic", state: imageProbe, homeDir: "C:\\Users\\a" })} />);
     expect(screen.getByRole("img", { name: "Preview of p.heic" })).toBeTruthy();

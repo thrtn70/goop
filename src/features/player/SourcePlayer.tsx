@@ -114,8 +114,8 @@ export default function SourcePlayer({
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
+    <div className="source-player">
+      <div className="source-player-bar flex items-center justify-between">
         <span className="text-xs font-medium text-fg-muted">Preview</span>
         <div className="flex items-center gap-1">
           <button
@@ -139,7 +139,7 @@ export default function SourcePlayer({
         </div>
       </div>
       {!collapsed && (
-        <div key={path}>
+        <div key={path} className="source-player-body">
           {view.kind === "image" && (
             <img
               src={src}
