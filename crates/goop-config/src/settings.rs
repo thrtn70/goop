@@ -610,6 +610,37 @@ mod tests {
     }
 
     #[test]
+    fn media_player_off_survives_save_then_load() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("x.json");
+        let s = Settings {
+            media_player_enabled: false,
+            ..Settings::default()
+        };
+        save(&p, &s).unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(!loaded.media_player_enabled);
+        assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn unrelated_patch_keeps_media_player_off() {
+        let off = Settings {
+            media_player_enabled: false,
+            ..Settings::default()
+        };
+        let patched = apply_patch(
+            &off,
+            SettingsPatch {
+                theme: Some(Theme::Dark),
+                ..Default::default()
+            },
+        );
+        assert_eq!(patched.theme, Theme::Dark);
+        assert!(!patched.media_player_enabled);
+    }
+
+    #[test]
     fn output_dir_extract_defaults_to_none() {
         assert!(Settings::default().output_dir_extract.is_none());
     }

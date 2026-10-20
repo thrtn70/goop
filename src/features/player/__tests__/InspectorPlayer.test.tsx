@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import InspectorPlayer from "@/features/player/InspectorPlayer";
 import { UNAVAILABLE_MESSAGES } from "@/features/player/previewPlan";
 import type { HomeDirState } from "@/hooks/useHomeDir";
@@ -56,6 +57,7 @@ const ready = (p: ProbeResult): ProbeState => ({
 
 const videoState = ready(probe({ has_video: true, has_audio: true, video_codec: "h264", audio_codec: "aac" }));
 const pdfState = ready(probe({ source_kind: "pdf" }));
+const subtitleState = ready(probe({ source_kind: "subtitle" }));
 const PATH = "/Users/a/clip.mp4";
 const srcOf = (path: string) => "asset://localhost/" + encodeURIComponent(path);
 
@@ -134,6 +136,32 @@ describe("InspectorPlayer gating", () => {
   it("renders nothing visible for a source with nothing to show", () => {
     const { container } = render(<InspectorPlayer path="/Users/a/doc.pdf" state={pdfState} />);
     expect(container.innerHTML).toBe("");
+  });
+});
+
+describe("InspectorPlayer in the inspector's media slot", () => {
+  const slotWith = (path: string | null, state: ProbeState) => {
+    render(
+      <WorkspaceInspector title="Output settings" media={<InspectorPlayer path={path} state={state} />}>
+        <input aria-label="Quality" />
+      </WorkspaceInspector>,
+    );
+    return document.querySelector(".workspace-inspector-media") as HTMLElement;
+  };
+
+  // index.css hides an :empty slot; anything left inside it would hold a gap above the settings.
+  it.each<[string, string | null, ProbeState]>([
+    ["no source is selected", null, videoState],
+    ["the source is a PDF", "/Users/a/doc.pdf", pdfState],
+    ["the source is a subtitle file", "/Users/a/s.srt", subtitleState],
+  ])("leaves the slot :empty while the player is on and %s", (_case, path, state) => {
+    const slot = slotWith(path, state);
+    expect(slot).not.toBeNull();
+    expect(slot.matches(":empty")).toBe(true);
+  });
+
+  it("fills the slot for a source it can show", () => {
+    expect(slotWith(PATH, videoState).matches(":empty")).toBe(false);
   });
 });
 
