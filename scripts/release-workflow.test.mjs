@@ -485,6 +485,57 @@ test("the cache-key floor step fails closed when tauri.conf.json declares no flo
   assert.equal(silent.output, "", "an empty floor must never reach the cache key");
 });
 
+// A rust-cache entry is 0.2-2.2 GB per job. One saved from a pull request is
+// scoped to refs/pull/N/merge, where no other run can restore it, and a few
+// open PRs filled the 10 GB repository quota until LRU eviction dropped
+// main's caches, the only ones every run can restore. A tag's entry is
+// scoped to that tag, where no later release or audit run can restore it.
+const mainOnlySave = "${{ github.ref == 'refs/heads/main' }}";
+
+// Every `uses:` line, counted from the raw text so that a step the parser
+// below misreads still counts against it.
+function rustCacheUses(body) {
+  return body.match(/^[ -]*uses: Swatinem\/rust-cache@/gm)?.length ?? 0;
+}
+
+function rustCacheSteps(body) {
+  return steps(body).filter((step) => /^ {6}- uses: Swatinem\/rust-cache@|^ {8}uses: Swatinem\/rust-cache@/m.test(step));
+}
+
+// Deliberately exact: block-style `with:`, the value as the workflows write it.
+function saveIf(step) {
+  return step.match(/^ {10}save-if: (.*)$/m)?.[1];
+}
+
+test("audit saves the Rust cache from main only, so PR runs restore main's", () => {
+  const jobs = ["rust", "legal", "sidecar-smoke"];
+  for (const name of jobs) {
+    const cached = rustCacheSteps(auditJob(name));
+    assert.equal(cached.length, 1, `audit ${name} has one rust-cache step`);
+    assert.equal(saveIf(cached[0]), mainOnlySave, `audit ${name}:\n${cached[0]}`);
+  }
+  assert.equal(rustCacheUses(auditWorkflow), jobs.length, "a rust-cache step outside these jobs needs the same save-if");
+});
+
+test("release restores the Rust cache but never saves one", () => {
+  const jobs = ["build", "legal"];
+  for (const name of jobs) {
+    const cached = rustCacheSteps(job(name));
+    assert.equal(cached.length, 1, `release ${name} has one rust-cache step`);
+    assert.equal(saveIf(cached[0]), '"false"', `release ${name}:\n${cached[0]}`);
+  }
+  assert.equal(rustCacheUses(workflow), jobs.length, "a rust-cache step outside these jobs needs the same save-if");
+});
+
+test("no workflow saves a Rust cache outside main", () => {
+  for (const { name, body } of workflows) {
+    assert.equal(rustCacheSteps(body).length, rustCacheUses(body), `${name}: a rust-cache step the parser missed`);
+    for (const step of rustCacheSteps(body)) {
+      assert.ok([mainOnlySave, '"false"'].includes(saveIf(step)), `${name}:\n${step}`);
+    }
+  }
+});
+
 test("both quality gates run the HEIC stack tests, and audit runs them on macOS too", () => {
   const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
   assert.match(prePush, /node --test scripts\/heif-deps\.test\.mjs/);
