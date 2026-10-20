@@ -1,7 +1,7 @@
 //! Shared fixtures for the updater tests.
 
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// An unrelated process holding a writer on the inode an update downloads,
@@ -20,8 +20,10 @@ pub(crate) struct WriterHolder(Child);
 impl WriterHolder {
     pub(crate) fn hold(temp: &Path, installed: &Path) -> Self {
         // `>>` rather than `>`: the holder must not truncate what the
-        // updater writes. The wait for `installed` is bounded so a test
-        // that fails before installing anything does not leave it behind.
+        // updater writes. A failing test kills the holder on drop; the wait
+        // for `installed` is bounded (10s or more of polling) only for a
+        // test process that dies without unwinding. Null stdio, so a `sleep`
+        // outliving a killed shell holds none of the harness's pipes.
         let child = Command::new("/bin/sh")
             .arg("-c")
             .arg(
@@ -31,6 +33,9 @@ impl WriterHolder {
             )
             .arg(temp)
             .arg(installed)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let holder = Self(child);

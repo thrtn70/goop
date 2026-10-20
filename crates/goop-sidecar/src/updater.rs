@@ -13,7 +13,7 @@ use ts_rs::TS;
 /// A forked child gives up its copy of the writer at its own `execve`,
 /// microseconds after the fork, so reaching this means something else has
 /// the file open.
-const INSTALL_BUSY_DEADLINE: Duration = Duration::from_secs(5);
+const INSTALL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Longest pause between those retries.
 const INSTALL_BUSY_MAX_BACKOFF: Duration = Duration::from_millis(25);
@@ -154,11 +154,11 @@ impl<'a> UpdateChecker<'a> {
     /// file — nothing reopens it for writing, and a fork only copies
     /// descriptors its parent still holds — so the set of writers only
     /// shrinks, and waiting for it to empty is enough. Only that error is
-    /// retried, and only until [`INSTALL_BUSY_DEADLINE`]; anything else is
+    /// retried, and for no longer than [`INSTALL_BUSY_TIMEOUT`]; anything else is
     /// returned at once, so a download that genuinely can't run still fails
     /// fast.
     pub(crate) async fn version_after_install(&self) -> Result<String, GoopError> {
-        retry_while_busy(INSTALL_BUSY_DEADLINE, || self.current_version()).await
+        retry_while_busy(INSTALL_BUSY_TIMEOUT, || self.current_version()).await
     }
 }
 
@@ -309,6 +309,25 @@ mod tests {
             "the last busy error must come back once the deadline passes"
         );
         assert_eq!(attempts, 1, "an expired deadline must not retry");
+    }
+
+    /// A file that stays busy is retried through several backoff rounds and
+    /// then given up on, not waited for forever.
+    #[tokio::test]
+    async fn busy_retry_stops_retrying_a_file_that_stays_busy() {
+        let mut attempts = 0;
+        let result = retry_while_busy(Duration::from_millis(40), || {
+            attempts += 1;
+            async { Err::<(), _>(busy()) }
+        })
+        .await;
+        assert!(
+            matches!(result, Err(GoopError::Io(ref e)) if e.kind() == ErrorKind::ExecutableFileBusy)
+        );
+        assert!(
+            attempts > 1,
+            "a live deadline must retry; got {attempts} attempt(s)"
+        );
     }
 
     #[test]
