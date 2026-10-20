@@ -10,6 +10,7 @@ import {
   type PreviewUnavailableReason,
 } from "@/features/player/previewPlan";
 import { releaseMedia } from "@/features/player/releaseMedia";
+import { sourceName } from "@/features/workspace/SourceRow";
 
 export type SourcePlayerProps = {
   path: string;
@@ -27,14 +28,11 @@ const unavailable = (reason: PreviewUnavailableReason): PreviewPlan => ({ kind: 
 const FORMAT_REFUSED = unavailable("format");
 const PLAYBACK_FAILED = unavailable("playback");
 
-const MEDIA_CLASS = "max-h-64 w-full rounded-md bg-surface-0";
 const ICON_BUTTON_CLASS =
   "rounded p-1.5 text-fg-secondary hover:text-fg focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-fg-secondary";
 
 const isPlayable = (plan: PreviewPlan): plan is PlayablePlan =>
   plan.kind === "image" || plan.kind === "video" || plan.kind === "audio";
-
-const fileNameOf = (path: string): string => path.replace(/\\/g, "/").split("/").pop() || path;
 
 export default function SourcePlayer({
   path,
@@ -104,7 +102,7 @@ export default function SourcePlayer({
   const view: PreviewPlan = formatRefused ? FORMAT_REFUSED : playbackFailed && isPlayable(plan) ? PLAYBACK_FAILED : plan;
   const markFailed = () => setFailedPath(path);
   // The photo's alt and the players' accessible name: the same words for every kind.
-  const label = "Preview of " + fileNameOf(path);
+  const label = "Preview of " + sourceName(path);
 
   const enlarge = () => {
     if (!isPlayable(view)) return;
@@ -148,7 +146,6 @@ export default function SourcePlayer({
               alt={label}
               decoding="async"
               onError={markFailed}
-              className={`${MEDIA_CLASS} object-contain`}
             />
           )}
           {view.kind === "video" && (
@@ -160,7 +157,6 @@ export default function SourcePlayer({
               playsInline
               aria-label={label}
               onError={markFailed}
-              className={MEDIA_CLASS}
             />
           )}
           {view.kind === "audio" && (
@@ -171,7 +167,6 @@ export default function SourcePlayer({
               preload="metadata"
               aria-label={label}
               onError={markFailed}
-              className="w-full"
             />
           )}
           {view.kind === "unavailable" && (

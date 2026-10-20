@@ -134,6 +134,17 @@ describe("SourcePlayer media", () => {
     expect(body?.parentElement).toBe(root);
   });
 
+  it.each<[string, Partial<SourcePlayerProps>, string]>([
+    ["video", {}, "video"],
+    ["audio", { path: AUDIO_PATH, state: audioProbe }, "audio"],
+    ["photo", { path: IMAGE_PATH, state: imageProbe }, "img"],
+  ])("leaves the %s's size and look to index.css", (_kind, props, selector) => {
+    // A utility here loses to the unlayered panel rules anyway, so it could only ever mislead (max-h-64 did).
+    const { container } = render(<SourcePlayer {...baseProps(props)} />);
+    const tokens = [...(container.querySelector(selector)?.classList ?? [])];
+    expect(tokens.filter((token) => /^(w-|h-|max-h-|min-h-|rounded|bg-|object-)/.test(token))).toEqual([]);
+  });
+
   it("takes the alt text from the last segment of a Windows path", () => {
     render(<SourcePlayer {...baseProps({ path: "C:\\Users\\a\\Pictures\\p.heic", state: imageProbe, homeDir: "C:\\Users\\a" })} />);
     expect(screen.getByRole("img", { name: "Preview of p.heic" })).toBeTruthy();
