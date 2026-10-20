@@ -26,7 +26,7 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, environment = process.env, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, environment = process.env, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }), nowMs = () => performance.now(), sleepMs = sleep }) {
   if (abortSignal?.aborted) throw Error('Startup run aborted before launch');
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
@@ -40,7 +40,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   if (!['dark', 'light', 'system'].includes(theme) || ![extractConcurrency, convertConcurrency].every(value => Number.isSafeInteger(value) && value > 0 && value <= 16)) throw Error('Invalid measurement settings');
   writeFileSync(join(directory, 'config', 'settings.json'), JSON.stringify({ theme, extract_concurrency: extractConcurrency, convert_concurrency: convertConcurrency, yt_dlp_last_update_ms: null, output_dir: join(directory, 'outputs'), auto_check_updates: false, yt_dlp_auto_update: false, notifications_enabled: false, has_seen_onboarding: true }, null, 2));
   seedQueue(join(directory, 'data', 'queue.db'), jobs);
-  const start = performance.now();
+  const start = nowMs();
   const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
   const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...environment, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
   let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false;
@@ -74,29 +74,29 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
       const root = snapshot.trim().split('\n').map(line => line.trim().split(/\s+/)).find(row => Number(row[0]) === child.pid);
       if (!root || !Number.isFinite(Number(root[2])) || Number(root[2]) <= 0) return null;
       const tree = { ...treeRss(snapshot, child.pid), root_pid: child.pid, root_rss_KiB: Number(root[2]) };
-      samples.push({ elapsed_ms: performance.now() - start, ...tree });
+      samples.push({ elapsed_ms: nowMs() - start, ...tree });
       return tree;
     } catch { return null; }
   };
   const sampling = setInterval(sample, 100);
   let marker = null, launchMs = null, idleRss = null, timedOut = false;
   try {
-    while (!exited && !aborted && performance.now() < activeDeadline) {
+    while (!exited && !aborted && nowMs() < activeDeadline) {
       try {
         if (lstatSync(reportPath).isFile() && statSync(reportPath).size < 4096) {
           const value = JSON.parse(readFileSync(reportPath, 'utf8'));
           if (value.schema_version === 1 && value.pid === child.pid && Number.isFinite(value.backend_ready_ms) && value.backend_ready_ms >= 0) {
-            marker = value; launchMs = performance.now() - start; break;
+            marker = value; launchMs = nowMs() - start; break;
           }
         }
       } catch { /* Writer may still be writing the newly-created marker. */ }
-      await sleep(10);
+      await sleepMs(10);
     }
     timedOut = !marker && !exited && !aborted;
     if (marker && !aborted) {
-      const idleStart = performance.now();
-      while (!exited && !aborted && performance.now() - idleStart < idleMs && performance.now() < activeDeadline) await sleep(Math.min(50, idleMs));
-      const idleComplete = performance.now() - idleStart >= idleMs;
+      const idleStart = nowMs();
+      while (!exited && !aborted && nowMs() - idleStart < idleMs && nowMs() < activeDeadline) await sleepMs(Math.min(50, idleMs));
+      const idleComplete = nowMs() - idleStart >= idleMs;
       if (!exited && idleComplete) idleRss = sample()?.rssKiB ?? null;
       if (!idleComplete && !exited) timedOut = true;
     }
@@ -108,7 +108,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     signal('SIGTERM');
     // Always finish the grace period before returning: descendants may outlive
     // a parent that handles TERM. Each run owns its detached process group.
-    await sleep(killGraceMs);
+    await sleepMs(killGraceMs);
     signal('SIGKILL');
     await closed;
   }
@@ -119,7 +119,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   }
   const createdSymlinks=ownedSymlinks(directory);let outputError=createdSymlinks.length?`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`:null;
   for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
-  const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
+  const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: nowMs() - start };
   writeFileSync(join(directory, 'stdout.log'), stdout);
   writeFileSync(join(directory, 'stderr.log'), stderr);
   writeFileSync(join(directory, 'sample.json'), JSON.stringify(result, null, 2));

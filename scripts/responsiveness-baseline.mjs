@@ -1323,11 +1323,11 @@ export function createAccessibilityDriver({ platform = process.platform, appName
 
 const throwIfAborted = abortSignal => { if (abortSignal?.aborted) throw Error('Responsiveness operation aborted'); };
 
-async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate = null, abortSignal = null }) {
+async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate = null, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep }) {
   if (!isAbsolute(path)) throw Error(`${label} path must be absolute`);
-  const deadline = performance.now() + timeoutMs;
+  const deadline = nowMs() + timeoutMs;
   let mismatch = false;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     if (existsSync(path)) {
       try {
@@ -1339,7 +1339,7 @@ async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate 
         if (!/JSON|byte limit/.test(error.message)) throw error;
       }
     }
-    await sleep(pollMs);
+    await sleepMs(pollMs);
   }
   throwIfAborted(abortSignal);
   if (mismatch) throw Error(`${label} identity mismatch`);
@@ -1355,8 +1355,8 @@ function validateReadinessMarker(value, kind) {
   if (value.native_clock.domain !== 'native_monotonic' || value.native_clock.unit !== 'us' || !Number.isSafeInteger(value.native_clock.elapsed_us) || value.native_clock.elapsed_us < 0) throw Error('Invalid readiness native clock');
 }
 
-export function waitForRecorderReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
-  return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, label: 'Recorder readiness marker', validate: value => validateReadinessMarker(value, 'recorder_ready') });
+export function waitForRecorderReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null, nowMs, sleepMs } = {}) {
+  return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, nowMs, sleepMs, label: 'Recorder readiness marker', validate: value => validateReadinessMarker(value, 'recorder_ready') });
 }
 
 export function waitForControlReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {

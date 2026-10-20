@@ -17,7 +17,43 @@ test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:1},0,true),false);
 });
 async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeMarker?": > '"+options.probeMarker+"'\n":''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeMarker;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
-test('timeout escalates for a process ignoring TERM',async()=>{const start=performance.now();const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:30});assert.equal(result.success,false);assert.equal(result.timed_out,true);assert.ok(performance.now()-start<3000);});
+// Each sleep first really waits until the runner has created `readyPath`, then
+// advances virtual time by its duration without yielding. The caps only keep
+// the clock itself finite: a runner that never gets ready stops being waited
+// for after 3000 polls (`missed`), and sleep 1000 throws. The test's own
+// timeout and after hook are what keep a run that never escalates from
+// hanging the gate.
+function clockAfter(readyPath){
+ const sleeps=[];let now=0,polls=0;
+ const clock={sleeps,missed:false,nowMs:()=>now,sleepMs:async(ms,{signal}={})=>{
+  while(!existsSync(readyPath)&&!clock.missed){
+   if(signal?.aborted)throw signal.reason;
+   if(++polls>=3000)clock.missed=true;else await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  if(signal?.aborted)throw signal.reason;
+  if(sleeps.length>=1000)throw Error('Virtual clock: run never stopped sleeping');
+  sleeps.push(ms);now+=ms;
+ }};
+ return clock;
+}
+test('timeout escalates for a process ignoring TERM',{timeout:5000},async t=>{
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-term-clock-'));
+ const armed=join(clockDir,'armed');
+ let passed=false;
+ // A run that never escalates waits on the runner's pipes forever. Kill it here
+ // so the test fails at its timeout instead of hanging the gate.
+ t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(clockDir,{recursive:true,force:true});});
+ // The timeout starts only once TERM can no longer stop the runner, so the run
+ // can return only by escalating to SIGKILL.
+ const clock=clockAfter(armed);
+ const result=await fakeRunner(`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:30,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ assert.equal(clock.missed,false);
+ assert.equal(result.success,false);
+ assert.equal(result.timed_out,true);
+ assert.deepEqual(clock.sleeps,[200,30]);
+ assert.equal(result.lifetime_ms,230);
+ passed=true;
+});
 test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
 test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
  const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:50});
