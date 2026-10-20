@@ -161,6 +161,21 @@ command -v cmake >/dev/null || { echo "[heif-deps] cmake not found" >&2; exit 1;
 # stack (see .cargo/config.toml) is unlinked here, not written through.
 rm -rf "${PREFIX}"
 
+# One make job per core, two when the count can't be read. `cmake --build
+# --parallel` with no count runs `make -j`, which starts every compile at
+# once. Built that way, libheif took 37 minutes on the 3-core, 7 GB macOS
+# runner in two runs, against 90 seconds on the 4-core, 16 GB Linux one;
+# memory pressure from that many compilers is the likely cause.
+build_jobs() {
+  local cores
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null)" || cores=""
+  case "${cores}" in
+    "" | *[!0-9]* | 0) echo 2 ;;
+    *) echo "${cores}" ;;
+  esac
+}
+JOBS="$(build_jobs)"
+
 # --- libde265 (static, lib only — example apps off) -------------------
 echo "[heif-deps] libde265: building static..."
 cmake -S "${WORK}/libde265-${DE265_VERSION}" -B "${WORK}/de265-build" \
@@ -176,7 +191,7 @@ cmake -S "${WORK}/libde265-${DE265_VERSION}" -B "${WORK}/de265-build" \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
   -DCMAKE_INSTALL_LIBDIR=lib \
   >/dev/null
-cmake --build "${WORK}/de265-build" --parallel >/dev/null
+cmake --build "${WORK}/de265-build" --parallel "${JOBS}" >/dev/null
 cmake --install "${WORK}/de265-build" >/dev/null
 
 # --- libheif (static, decode-only: libde265 is the sole codec) --------
@@ -225,7 +240,7 @@ cmake -S "${WORK}/libheif-${HEIF_VERSION}" -B "${WORK}/heif-build" \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
   -DCMAKE_INSTALL_LIBDIR=lib \
   >/dev/null
-cmake --build "${WORK}/heif-build" --parallel >/dev/null
+cmake --build "${WORK}/heif-build" --parallel "${JOBS}" >/dev/null
 cmake --install "${WORK}/heif-build" >/dev/null
 
 stale="$(floor_report)" || {
