@@ -24,7 +24,15 @@ function Trap({ controls }: { controls: "none" | "two" | "disabled-first" }) {
 type MediaKind = "video-controls" | "video-bare" | "audio-controls";
 
 /** A button followed by a media element that is the last control, optionally with a trailing sentinel. */
-function MediaTrap({ media, sentinel = false }: { media: MediaKind; sentinel?: boolean }) {
+function MediaTrap({
+  media,
+  sentinel = false,
+  leadingSentinel = false,
+}: {
+  media: MediaKind;
+  sentinel?: boolean;
+  leadingSentinel?: boolean;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
   return (
     <div
@@ -34,6 +42,7 @@ function MediaTrap({ media, sentinel = false }: { media: MediaKind; sentinel?: b
       tabIndex={-1}
       onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => ref.current && trapTab(event, ref.current)}
     >
+      {leadingSentinel && <span tabIndex={0} aria-hidden="true" {...{ [FOCUS_SENTINEL_ATTR]: "" }} />}
       <button>first</button>
       {media === "video-controls" && <video controls tabIndex={0} />}
       {media === "video-bare" && <video tabIndex={0} />}
@@ -139,5 +148,17 @@ describe("trapTab", () => {
     first.focus();
     expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
     expect(document.activeElement).toBe(document.querySelector("audio"));
+  });
+
+  it("does not count a leading focus sentinel as the first control", () => {
+    render(<MediaTrap media="video-controls" leadingSentinel sentinel />);
+    const first = screen.getByRole("button", { name: "first" });
+    first.focus();
+    expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(document.querySelector("video"));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    video.focus();
+    expect(fireEvent.keyDown(video, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(video);
   });
 });

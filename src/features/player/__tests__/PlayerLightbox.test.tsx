@@ -42,6 +42,10 @@ afterEach(() => {
 const videoOf = () => document.querySelector("video") as HTMLVideoElement;
 const closeButton = () => screen.getByRole("button", { name: "Close preview" });
 const dialog = () => screen.getByRole("dialog");
+const sentinels = () => Array.from(document.querySelectorAll<HTMLElement>(`[${FOCUS_SENTINEL_ATTR}]`));
+const leadingSentinel = () => sentinels()[0];
+const trailingSentinel = () => sentinels()[sentinels().length - 1];
+const isBefore = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
 /** jsdom has no media pipeline, so report loaded metadata, a playback position and a state by hand. */
 const setPlayback = (media: HTMLMediaElement, currentTime: number, paused: boolean) => {
@@ -122,11 +126,11 @@ describe("PlayerLightbox focus", () => {
 
   it("renders a hidden focus sentinel after the media that sends focus back to Close preview", () => {
     render(<PlayerLightbox {...baseProps()} />);
-    const sentinel = document.querySelector(`[${FOCUS_SENTINEL_ATTR}]`) as HTMLElement;
+    const sentinel = trailingSentinel();
     expect(sentinel).toBeTruthy();
     expect(sentinel.tabIndex).toBe(0);
     expect(sentinel.getAttribute("aria-hidden")).toBe("true");
-    expect(videoOf().compareDocumentPosition(sentinel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(isBefore(videoOf(), sentinel)).toBe(true);
     expect(dialog().contains(sentinel)).toBe(true);
     sentinel.focus();
     expect(document.activeElement).toBe(closeButton());
@@ -135,10 +139,45 @@ describe("PlayerLightbox focus", () => {
   it("puts the sentinel after the audio element as well", () => {
     render(<PlayerLightbox {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3" })} />);
     const audio = document.querySelector("audio") as HTMLAudioElement;
-    const sentinel = document.querySelector(`[${FOCUS_SENTINEL_ATTR}]`) as HTMLElement;
-    expect(audio.compareDocumentPosition(sentinel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(isBefore(audio, trailingSentinel())).toBe(true);
+    trailingSentinel().focus();
+    expect(document.activeElement).toBe(closeButton());
+  });
+
+  it("renders a hidden focus sentinel before Close preview that sends focus to it", () => {
+    render(<PlayerLightbox {...baseProps()} />);
+    expect(sentinels()).toHaveLength(2);
+    const sentinel = leadingSentinel();
+    expect(sentinel.tabIndex).toBe(0);
+    expect(sentinel.getAttribute("aria-hidden")).toBe("true");
+    expect(dialog().contains(sentinel)).toBe(true);
+    expect(isBefore(sentinel, closeButton())).toBe(true);
+    // Reached by Shift+Tab from the media when Close is not a tab stop: the user lands on Close, not outside.
+    videoOf().focus();
     sentinel.focus();
     expect(document.activeElement).toBe(closeButton());
+  });
+
+  it("renders the leading sentinel for audio and image previews too", () => {
+    const { unmount } = render(
+      <PlayerLightbox {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3" })} />,
+    );
+    expect(isBefore(leadingSentinel(), closeButton())).toBe(true);
+    unmount();
+    render(<PlayerLightbox {...baseProps({ plan: { kind: "image" }, name: "p.heic" })} />);
+    expect(sentinels()).toHaveLength(2);
+    leadingSentinel().focus();
+    expect(document.activeElement).toBe(closeButton());
+  });
+
+  it("does not let either sentinel into the trap", () => {
+    render(<PlayerLightbox {...baseProps()} />);
+    expect(sentinels()).toHaveLength(2);
+    // Close is the first control and the media the last, even with a sentinel on each side.
+    expect(fireEvent.keyDown(closeButton(), { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(videoOf());
+    expect(fireEvent.keyDown(videoOf(), { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(videoOf());
   });
 
   it("sends Shift+Tab from Close preview to the video, not to the sentinel", () => {

@@ -22,6 +22,9 @@ export type PlayerLightboxProps = {
   onClose: (state: { startAt: number; playing: boolean }) => void;
 };
 
+// Both guards are invisible Tab stops that hand focus to Close; the trap leaves them out of its control list.
+const SENTINEL_PROPS = { [FOCUS_SENTINEL_ATTR]: "", tabIndex: 0, "aria-hidden": true, className: "sr-only" } as const;
+
 // The wrapper ignores the pointer so a click beside the media lands on the scrim; the media takes it back.
 const MEDIA_CLASS = "pointer-events-auto max-h-full max-w-full rounded-md object-contain";
 
@@ -30,7 +33,8 @@ const MEDIA_CLASS = "pointer-events-auto max-h-full max-w-full rounded-md object
  * the click has to start on the scrim too, so a scrub released beside the video stays open.
  * The media carries tabIndex 0 so it is a Tab stop of its own; the browser may add its native controls
  * after it, which is why the trap lets a forward Tab leave the media and the trailing sentinel brings
- * focus back to Close once Tab has carried it past them.
+ * focus back to Close once Tab has carried it past them. The leading sentinel does the same for Shift+Tab
+ * from the media when Close is not a tab stop and the browser's previous stop lies outside the dialog.
  */
 export default function PlayerLightbox({ plan, src, name, startAt, playing, onClose }: PlayerLightboxProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -66,6 +70,8 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
       onClose({ startAt: media.currentTime, playing: !media.paused });
     }
   };
+
+  const focusClose = () => closeRef.current?.focus();
 
   const handleScrimClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     const pressedHere = pressOnScrim.current !== false;
@@ -106,6 +112,7 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
       onClick={handleScrimClick}
       className="fixed inset-0 z-50 bg-scrim/80 p-6"
     >
+      <span {...SENTINEL_PROPS} onFocus={focusClose} />
       <button
         ref={closeRef}
         type="button"
@@ -141,13 +148,7 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
           />
         )}
       </div>
-      <span
-        {...{ [FOCUS_SENTINEL_ATTR]: "" }}
-        tabIndex={0}
-        aria-hidden="true"
-        onFocus={() => closeRef.current?.focus()}
-        className="sr-only"
-      />
+      <span {...SENTINEL_PROPS} onFocus={focusClose} />
     </div>,
     document.body,
   );
