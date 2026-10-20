@@ -42,11 +42,16 @@ const videoOf = () => document.querySelector("video") as HTMLVideoElement;
 const closeButton = () => screen.getByRole("button", { name: "Close preview" });
 const dialog = () => screen.getByRole("dialog");
 
-/** jsdom has no media pipeline, so report a playback position and state by hand. */
+/** jsdom has no media pipeline, so report loaded metadata, a playback position and a state by hand. */
 const setPlayback = (media: HTMLMediaElement, currentTime: number, paused: boolean) => {
+  Object.defineProperty(media, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_METADATA });
   Object.defineProperty(media, "currentTime", { configurable: true, writable: true, value: currentTime });
   Object.defineProperty(media, "paused", { configurable: true, value: paused });
 };
+
+/** An element that has not loaded its metadata yet (jsdom's default, stated so no test leans on it). */
+const setNotLoaded = (media: HTMLMediaElement) =>
+  Object.defineProperty(media, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
 
 describe("PlayerLightbox markup", () => {
   it("is a modal dialog labelled with the file name, rendered into document.body", () => {
@@ -221,6 +226,36 @@ describe("PlayerLightbox closing", () => {
     render(<PlayerLightbox {...baseProps({ plan: { kind: "image" }, name: "p.heic", onClose })} />);
     fireEvent.keyDown(dialog(), { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledWith({ startAt: 0, playing: false });
+  });
+});
+
+describe("PlayerLightbox closing before the media is ready", () => {
+  it("hands back the position it was given when Escape comes before the metadata", () => {
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ startAt: 42, playing: true, onClose })} />);
+    setNotLoaded(videoOf());
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledWith({ startAt: 42, playing: true });
+  });
+
+  it("hands back a paused position from the close button for audio too", () => {
+    const onClose = vi.fn();
+    render(
+      <PlayerLightbox
+        {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3", startAt: 3.5, playing: false, onClose })}
+      />,
+    );
+    setNotLoaded(document.querySelector("audio") as HTMLAudioElement);
+    fireEvent.click(closeButton());
+    expect(onClose).toHaveBeenCalledWith({ startAt: 3.5, playing: false });
+  });
+
+  it("reports the start of an image whatever it was handed", () => {
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ plan: { kind: "image" }, name: "p.heic", startAt: 9, playing: true, onClose })} />);
+    fireEvent.keyDown(dialog(), { key: "Escape" });
     expect(onClose).toHaveBeenCalledWith({ startAt: 0, playing: false });
   });
 });

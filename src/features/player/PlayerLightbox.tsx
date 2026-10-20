@@ -55,7 +55,14 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
 
   const close = () => {
     const media = mediaRef.current;
-    onClose({ startAt: media?.currentTime ?? 0, playing: media !== null && !media.paused });
+    if (plan.kind === "image") {
+      onClose({ startAt: 0, playing: false });
+    } else if (media === null || media.readyState < HTMLMediaElement.HAVE_METADATA) {
+      // Not loaded yet, so it never seeked to startAt: hand the panel's own position straight back.
+      onClose({ startAt, playing });
+    } else {
+      onClose({ startAt: media.currentTime, playing: !media.paused });
+    }
   };
 
   const handleScrimClick = (event: ReactMouseEvent<HTMLDivElement>) => {

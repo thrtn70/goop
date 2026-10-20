@@ -59,8 +59,9 @@ const pdfState = ready(probe({ source_kind: "pdf" }));
 const PATH = "/Users/a/clip.mp4";
 const srcOf = (path: string) => "asset://localhost/" + encodeURIComponent(path);
 
-/** jsdom has no media pipeline, so report a playback position and state by hand. */
+/** jsdom has no media pipeline, so report loaded metadata, a playback position and a state by hand. */
 const setPlayback = (media: HTMLMediaElement, currentTime: number, paused: boolean) => {
+  Object.defineProperty(media, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_METADATA });
   Object.defineProperty(media, "currentTime", { configurable: true, writable: true, value: currentTime });
   Object.defineProperty(media, "paused", { configurable: true, value: paused });
 };
@@ -291,6 +292,21 @@ describe("InspectorPlayer enlarge", () => {
 
     expect(panel.currentTime).toBe(15);
     expect(mediaSpies.play).not.toHaveBeenCalled();
+  });
+
+  it("leaves the panel where it was when the lightbox closes before its media loads", () => {
+    const { container } = render(<InspectorPlayer path={PATH} state={videoState} />);
+    const panel = panelVideo(container);
+    setPlayback(panel, 7, false);
+    enlarge();
+    const lightboxVideo = screen.getByRole("dialog").querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(lightboxVideo, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
+    mediaSpies.play.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+
+    expect(panel.currentTime).toBe(7);
+    expect(mediaSpies.play).toHaveBeenCalledTimes(1);
   });
 
   it("never carries a position over to a different source", () => {
