@@ -165,7 +165,7 @@ async fn update_with(
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
     // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
     // so it can't shadow the working bundled copy.
-    match current_version(resolver).await {
+    match installed_version(resolver).await {
         Some(v) => {
             let message = match &previous {
                 Some(p) => format!("Updated yt-dlp {p} → {v}."),
@@ -199,6 +199,17 @@ async fn current_version(resolver: &BinaryResolver) -> Option<String> {
     UpdateChecker::for_yt_dlp(resolver)
         .current_version()
         .await
+        .ok()
+}
+
+/// [`current_version`] for the binary this update just installed, which
+/// waits out a writer the download may have left behind on Linux — see
+/// `UpdateChecker::version_after_install`.
+async fn installed_version(resolver: &BinaryResolver) -> Option<String> {
+    UpdateChecker::for_yt_dlp(resolver)
+        .version_after_install()
+        .await
+        .inspect_err(|e| tracing::warn!("yt-dlp update: the downloaded binary did not run: {e}"))
         .ok()
 }
 
@@ -416,6 +427,67 @@ mod tests {
             "updated binary must land in the update dir, never in the bundle"
         );
         assert!(status.message.contains("2026.07.04"));
+    }
+
+    /// Regression for the updater's half of the Linux `ETXTBSY` race whose
+    /// test half `goop_core::test_scripts::write_script` waits out: a job
+    /// that spawns a process while the download is being written forks a
+    /// child holding a copy of the writer, and until that child reaches its
+    /// own exec the kernel refuses to run the new binary. The version check
+    /// read that refusal as "the download does not run" and deleted a good
+    /// update.
+    ///
+    /// Provoked by an unrelated process holding a writer on the downloaded
+    /// inode — reproducing it through a real fork would mean hitting a
+    /// microsecond window on purpose. On macOS, which does not enforce
+    /// `ETXTBSY` for scripts, it only checks the wait stays out of the way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_still_held_open_by_another_process_is_installed_not_reverted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.04\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_version_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf());
+        let _holder = crate::test_support::WriterHolder::hold(
+            &updates.path().join("yt-dlp.tmp-download"),
+            &updates.path().join("yt-dlp"),
+        );
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect("a download another process still holds open must be waited for, not reverted");
+
+        assert_eq!(status.new_version.as_deref(), Some("2026.07.04"));
+        assert!(updates.path().join("yt-dlp").is_file());
     }
 
     #[cfg(unix)]

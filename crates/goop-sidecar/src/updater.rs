@@ -1,8 +1,22 @@
 use crate::binaries::BinaryResolver;
 use goop_core::GoopError;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::io::ErrorKind;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::Instant;
 use ts_rs::TS;
+
+/// How long [`UpdateChecker::version_after_install`] keeps retrying a binary
+/// the kernel won't run because something still holds it open for writing.
+/// A forked child gives up its copy of the writer at its own `execve`,
+/// microseconds after the fork, so reaching this means something else has
+/// the file open.
+const INSTALL_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Longest pause between those retries.
+const INSTALL_BUSY_MAX_BACKOFF: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../shared/types/")]
@@ -124,6 +138,50 @@ impl<'a> UpdateChecker<'a> {
         };
         Ok(normalize_version(self.binary_name, raw))
     }
+
+    /// [`Self::current_version`] for a binary this process has only just
+    /// downloaded, which on Linux may not be runnable yet.
+    ///
+    /// Linux refuses to `execve` a file while any process holds it open for
+    /// writing (`ETXTBSY`), and the download's writer can outlive our own
+    /// close: another thread that spawns a process (a running job, say) while
+    /// the download is being written forks a child holding a copy of the
+    /// descriptor, and the kernel only drops that copy when the child reaches
+    /// its own exec. A version check landing in between would report a good
+    /// download as one that does not run.
+    ///
+    /// Once our descriptor is closed nothing can gain a new writer on the
+    /// file — nothing reopens it for writing, and a fork only copies
+    /// descriptors its parent still holds — so the set of writers only
+    /// shrinks, and waiting for it to empty is enough. Only that error is
+    /// retried, and for no longer than [`INSTALL_BUSY_TIMEOUT`]; anything else is
+    /// returned at once, so a download that genuinely can't run still fails
+    /// fast.
+    pub(crate) async fn version_after_install(&self) -> Result<String, GoopError> {
+        retry_while_busy(INSTALL_BUSY_TIMEOUT, || self.current_version()).await
+    }
+}
+
+/// Runs `attempt` until it stops failing with `ETXTBSY` or `timeout` passes,
+/// and returns its last result.
+async fn retry_while_busy<T, F, Fut>(timeout: Duration, mut attempt: F) -> Result<T, GoopError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, GoopError>>,
+{
+    let deadline = Instant::now() + timeout;
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match attempt().await {
+            Err(GoopError::Io(e))
+                if e.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(INSTALL_BUSY_MAX_BACKOFF);
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Strip per-binary preamble from the `--version` / `-v` stdout so
@@ -188,6 +246,88 @@ mod tests {
         }
         let checker = UpdateChecker::for_gallery_dl(&r);
         assert!(checker.current_version().await.is_err());
+    }
+
+    fn busy() -> GoopError {
+        GoopError::Io(std::io::Error::from(ErrorKind::ExecutableFileBusy))
+    }
+
+    #[tokio::test]
+    async fn busy_retry_waits_out_etxtbsy() {
+        let mut attempts = 0;
+        let result = retry_while_busy(Duration::from_secs(1), || {
+            attempts += 1;
+            let busy_still = attempts < 3;
+            async move {
+                if busy_still {
+                    Err(busy())
+                } else {
+                    Ok("2026.07.04")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "2026.07.04");
+        assert_eq!(attempts, 3);
+    }
+
+    /// A download that can't run for any other reason — wrong arch, corrupt,
+    /// exits non-zero — must fail on the first try, as it did before the
+    /// retry existed.
+    #[tokio::test]
+    async fn busy_retry_returns_every_other_error_at_once() {
+        let other_errors: [fn() -> GoopError; 2] = [
+            || GoopError::Io(std::io::Error::from(ErrorKind::PermissionDenied)),
+            || GoopError::SubprocessFailed {
+                binary: "yt-dlp".into(),
+                stderr: String::new(),
+            },
+        ];
+        for make_error in other_errors {
+            let mut attempts = 0;
+            let result = retry_while_busy(Duration::from_secs(1), || {
+                attempts += 1;
+                async move { Err::<(), _>(make_error()) }
+            })
+            .await;
+            let error = result.expect_err("the attempt's error must come back");
+            assert_eq!(error.to_string(), make_error().to_string());
+            assert_eq!(attempts, 1, "a non-busy error must not be retried");
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_retry_gives_up_at_its_deadline() {
+        let mut attempts = 0;
+        let result = retry_while_busy(Duration::ZERO, || {
+            attempts += 1;
+            async { Err::<(), _>(busy()) }
+        })
+        .await;
+        assert!(
+            matches!(result, Err(GoopError::Io(ref e)) if e.kind() == ErrorKind::ExecutableFileBusy),
+            "the last busy error must come back once the deadline passes"
+        );
+        assert_eq!(attempts, 1, "an expired deadline must not retry");
+    }
+
+    /// A file that stays busy is retried through several backoff rounds and
+    /// then given up on, not waited for forever.
+    #[tokio::test]
+    async fn busy_retry_stops_retrying_a_file_that_stays_busy() {
+        let mut attempts = 0;
+        let result = retry_while_busy(Duration::from_millis(40), || {
+            attempts += 1;
+            async { Err::<(), _>(busy()) }
+        })
+        .await;
+        assert!(
+            matches!(result, Err(GoopError::Io(ref e)) if e.kind() == ErrorKind::ExecutableFileBusy)
+        );
+        assert!(
+            attempts > 1,
+            "a live deadline must retry; got {attempts} attempt(s)"
+        );
     }
 
     #[test]
