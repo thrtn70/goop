@@ -111,6 +111,15 @@ function planAudio(path: string): PreviewPlan {
   return mime === undefined ? UNAVAILABLE_FORMAT : { kind: "audio", mime };
 }
 
+/**
+ * Embedded cover art is reported as a video stream, so a tagged .mp3/.flac/.m4a arrives as video-kind.
+ * It plays as audio when its extension is an audio one and not also a video one (.mp4 keeps the video branch).
+ */
+function isCoverArtAudio(path: string, probe: ProbeResult): boolean {
+  const extension = extensionOf(path);
+  return probe.has_audio && !VIDEO_MIME_BY_EXTENSION.has(extension) && AUDIO_MIME_BY_EXTENSION.has(extension);
+}
+
 /** homeDir null = home unknown: skip the home check and rely on the runtime error fallback. */
 export function planPreview(path: string, probe: ProbeResult, homeDir: string | null): PreviewPlan {
   if (homeDir !== null && !isInsideHome(path, homeDir)) {
@@ -126,6 +135,6 @@ export function planPreview(path: string, probe: ProbeResult, homeDir: string | 
     case "audio":
       return planAudio(path);
     case "video":
-      return probe.has_video ? planVideo(path, probe) : planAudio(path);
+      return probe.has_video && !isCoverArtAudio(path, probe) ? planVideo(path, probe) : planAudio(path);
   }
 }

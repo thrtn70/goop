@@ -107,6 +107,20 @@ describe("planPreview", () => {
       probe({ source_kind: "video", has_video: false, has_audio: true, audio_codec: "aac" }), HOME,
       { kind: "unavailable", reason: "format" }],
 
+    // embedded cover art is reported as a video stream, so tagged audio arrives as video-kind
+    ["mp3 with cover art", "/Users/a/s.mp3", video("mjpeg", "mp3"), HOME,
+      { kind: "audio", mime: "audio/mpeg" }],
+    ["flac with cover art", "/Users/a/s.flac", video("png", "flac"), HOME,
+      { kind: "audio", mime: "audio/flac" }],
+    ["m4a with cover art", "/Users/a/s.m4a", video("mjpeg", "aac"), HOME,
+      { kind: "audio", mime: "audio/mp4" }],
+    ["cover art in a container neither table knows", "/Users/a/x.mkv", video("mjpeg", "aac"), HOME,
+      { kind: "unavailable", reason: "format" }],
+    ["audio extension with a video stream and no audio", "/Users/a/s.mp3", video("mjpeg"), HOME,
+      { kind: "unavailable", reason: "format" }],
+    ["video extensions keep the video branch", "/Users/a/x.mp4", video("mjpeg", "aac"), HOME,
+      { kind: "unavailable", reason: "format" }],
+
     // nothing to show
     ["pdf", "/Users/a/d.pdf", probe({ source_kind: "pdf" }), HOME, { kind: "none" }],
     ["subtitle", "/Users/a/s.srt", probe({ source_kind: "subtitle" }), HOME, { kind: "none" }],
