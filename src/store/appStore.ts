@@ -81,6 +81,8 @@ export interface AppVersionInfo {
 export interface UiState {
   /** When true, QueueSidebar renders a narrow tab instead of the full panel. */
   queueCollapsed: boolean;
+  /** When true, the Convert/Compress source player shows only its header row. */
+  playerCollapsed: boolean;
   /** Currently-selected queued job IDs for batch operations. */
   queueSelectedIds: Set<string>;
   /** Count of jobs that finished today. Refreshed when the queue changes. */
@@ -200,6 +202,8 @@ type AppStoreState = {
   loadVersions: (force?: boolean) => Promise<AppVersionInfo>;
   /** Toggle the QueueSidebar's collapsed state. Session-only; does not persist. */
   toggleQueueCollapsed: () => void;
+  /** Toggle the source player's collapsed state. Session-only; does not persist. */
+  togglePlayerCollapsed: () => void;
   toggleQueueSelection: (jobId: JobId) => void;
   clearQueueSelection: () => void;
   reorderQueue: (orderedIds: JobId[]) => Promise<void>;
@@ -339,7 +343,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   history: emptyHistory,
   thumbnailsById: {},
   versions: null,
-  ui: { queueCollapsed: true, queueSelectedIds: new Set(), doneToday: 0 },
+  ui: { queueCollapsed: true, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
   paletteOpen: false,
   pendingFocusUrlInput: 0,
   pendingFilePicker: 0,
@@ -656,6 +660,9 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
   toggleQueueCollapsed() {
     set((s) => ({ ui: { ...s.ui, queueCollapsed: !s.ui.queueCollapsed } }));
+  },
+  togglePlayerCollapsed() {
+    set((s) => ({ ui: { ...s.ui, playerCollapsed: !s.ui.playerCollapsed } }));
   },
   toggleQueueSelection(jobId) {
     const key = jobIdKey(jobId);

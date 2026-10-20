@@ -99,7 +99,7 @@ describe("app store queue and settings operations", () => {
       toasts: [],
       thumbnailsById: {},
       versions: null,
-      ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
+      ui: { queueCollapsed: false, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
       history: {
         search: "",
         kind: null,
