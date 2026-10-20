@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_NATIVE_IMAGE_BYTES,
   MAX_NATIVE_IMAGE_PIXELS,
   UNAVAILABLE_MESSAGES,
   planPreview,
@@ -133,6 +134,31 @@ describe("planPreview", () => {
     expect(planPreview("/Users/a/p.png", image(MAX_NATIVE_IMAGE_PIXELS + 1, 1), HOME)).toEqual(
       unavailable("too-large"),
     );
+  });
+
+  it("allows exactly the byte cap and rejects one byte more, whatever the pixel count", () => {
+    const sized = (bytes: number) => probe({ source_kind: "image", width: 1, height: 1, file_size: BigInt(bytes) });
+    expect(planPreview("/Users/a/p.png", sized(MAX_NATIVE_IMAGE_BYTES), HOME)).toEqual({ kind: "image" });
+    expect(planPreview("/Users/a/p.png", sized(MAX_NATIVE_IMAGE_BYTES + 1), HOME)).toEqual(unavailable("too-large"));
+  });
+
+  it("reads a file size that arrives as a plain JSON number", () => {
+    // ts-rs types it as bigint, but the IPC layer hands over a number.
+    const size = (MAX_NATIVE_IMAGE_BYTES + 1) as unknown as bigint;
+    const tiff = probe({ source_kind: "image", width: 1, height: 1, file_size: size });
+    expect(planPreview("/Users/a/layers.tif", tiff, HOME)).toEqual(unavailable("too-large"));
+  });
+
+  it("leaves video and audio sizes alone, since they stream", () => {
+    const huge = BigInt(MAX_NATIVE_IMAGE_BYTES) * BigInt(8);
+    expect(planPreview("/Users/a/x.mp4", { ...video("h264"), file_size: huge }, HOME)).toEqual({
+      kind: "video",
+      mime: 'video/mp4; codecs="avc1"',
+    });
+    expect(planPreview("/Users/a/s.flac", { ...audio("flac"), file_size: huge }, HOME)).toEqual({
+      kind: "audio",
+      mime: "audio/flac",
+    });
   });
 });
 

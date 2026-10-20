@@ -7,6 +7,12 @@ export type PreviewPlan = PlayablePlan | { kind: "none" } | { kind: "unavailable
 /** A 48 MP photo (8064x6048) is 48,771,072 pixels and must still preview. */
 export const MAX_NATIVE_IMAGE_PIXELS = 50_000_000;
 
+/**
+ * A photo is read into memory whole (no ranged reads for images), and pixels alone don't bound that:
+ * a layered TIFF under the pixel cap can still run to gigabytes.
+ */
+export const MAX_NATIVE_IMAGE_BYTES = 256 * 1024 * 1024;
+
 export const UNAVAILABLE_MESSAGES: Record<PreviewUnavailableReason, string> = {
   "outside-home": "Files outside your home folder can't be previewed yet.",
   format: "This format can't be previewed here yet.",
@@ -82,6 +88,8 @@ function isInsideHome(path: string, homeDir: string): boolean {
 
 function planImage(path: string, probe: ProbeResult): PreviewPlan {
   if (!IMAGE_EXTENSIONS.has(extensionOf(path))) return UNAVAILABLE_FORMAT;
+  // Typed bigint, but it crosses IPC as a JSON number; Number() takes either.
+  if (Number(probe.file_size) > MAX_NATIVE_IMAGE_BYTES) return { kind: "unavailable", reason: "too-large" };
   const { width, height } = probe;
   if (width !== null && height !== null && width * height > MAX_NATIVE_IMAGE_PIXELS) {
     return { kind: "unavailable", reason: "too-large" };
