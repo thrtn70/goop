@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import type { PlayablePlan } from "@/features/player/previewPlan";
@@ -20,13 +26,17 @@ export type PlayerLightboxProps = {
 const MEDIA_CLASS = "pointer-events-auto max-h-full max-w-full rounded-md object-contain";
 
 /**
- * Fills the Goop window with the selected source. Esc, the close button and a click on the scrim all leave.
+ * Fills the Goop window with the selected source. Esc, the close button and a click on the scrim all leave;
+ * the click has to start on the scrim too, so a scrub released beside the video stays open.
  * The media carries tabIndex 0 so Tab can reach its native controls and the focus trap counts it as a stop.
  */
 export default function PlayerLightbox({ plan, src, name, startAt, playing, onClose }: PlayerLightboxProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const mediaRef = useRef<HTMLMediaElement | null>(null);
+  // Where the last press began: a scrub that starts on the video and ends over the scrim clicks the scrim.
+  // null when no press was seen, as with a click sent by assistive tech.
+  const pressOnScrim = useRef<boolean | null>(null);
   // One callback for both element kinds: a RefObject<HTMLMediaElement> is not assignable to a <video> ref.
   // Closing reads the position first (close below), then the unmount releases the element.
   const setMedia = useCallback((element: HTMLMediaElement | null) => {
@@ -46,6 +56,12 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
   const close = () => {
     const media = mediaRef.current;
     onClose({ startAt: media?.currentTime ?? 0, playing: media !== null && !media.paused });
+  };
+
+  const handleScrimClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const pressedHere = pressOnScrim.current !== false;
+    pressOnScrim.current = null;
+    if (pressedHere && event.target === event.currentTarget) close();
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -75,9 +91,10 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
       aria-label={"Preview of " + name}
       tabIndex={-1}
       onKeyDown={handleKeyDown}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
+      onPointerDown={(event) => {
+        pressOnScrim.current = event.target === event.currentTarget;
       }}
+      onClick={handleScrimClick}
       className="fixed inset-0 z-50 bg-scrim/80 p-6"
     >
       <button

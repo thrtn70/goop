@@ -165,6 +165,41 @@ describe("PlayerLightbox closing", () => {
     expect(onClose).toHaveBeenCalledWith({ startAt: 4, playing: false });
   });
 
+  it("closes once when a press starts and ends on the scrim", () => {
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ onClose })} />);
+    fireEvent.pointerDown(dialog());
+    fireEvent.click(dialog());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays open when a scrub that started on the video is released over the scrim", () => {
+    // The browser sends that click to the nearest shared ancestor, which is the scrim.
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ onClose })} />);
+    fireEvent.pointerDown(videoOf());
+    fireEvent.click(dialog());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stays open when a press on the close button is dragged off onto the scrim", () => {
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ onClose })} />);
+    fireEvent.pointerDown(closeButton());
+    fireEvent.click(dialog());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("judges each press on its own", () => {
+    const onClose = vi.fn();
+    render(<PlayerLightbox {...baseProps({ onClose })} />);
+    fireEvent.pointerDown(videoOf());
+    fireEvent.click(dialog());
+    fireEvent.pointerDown(dialog());
+    fireEvent.click(dialog());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("does not close when the media is clicked", () => {
     const onClose = vi.fn();
     render(<PlayerLightbox {...baseProps({ onClose })} />);
