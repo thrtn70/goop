@@ -76,9 +76,12 @@ function extensionOf(path: string): string {
   return dot === -1 ? "" : name.slice(dot + 1).toLowerCase();
 }
 
+/** A UX pre-filter only: the asset protocol scope is the access control. Unsure answers say "outside". */
 function isInsideHome(path: string, homeDir: string): boolean {
   const home = normalizeSlashes(homeDir).replace(/\/+$/, "");
   const target = normalizeSlashes(path);
+  // An empty home would prefix every path, and a `..` step can climb out after the prefix matched.
+  if (home === "" || target.split("/").includes("..")) return false;
   // Windows paths compare case-insensitively; POSIX ones stay exact.
   const fold = /^[A-Za-z]:/.test(home) ? (value: string) => value.toLowerCase() : (value: string) => value;
   const foldedHome = fold(home);
