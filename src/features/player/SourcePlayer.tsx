@@ -103,6 +103,8 @@ export default function SourcePlayer({
 
   const view: PreviewPlan = formatRefused ? FORMAT_REFUSED : playbackFailed && isPlayable(plan) ? PLAYBACK_FAILED : plan;
   const markFailed = () => setFailedPath(path);
+  // The photo's alt and the players' accessible name: the same words for every kind.
+  const label = "Preview of " + fileNameOf(path);
 
   const enlarge = () => {
     if (!isPlayable(view)) return;
@@ -143,7 +145,7 @@ export default function SourcePlayer({
           {view.kind === "image" && (
             <img
               src={src}
-              alt={"Preview of " + fileNameOf(path)}
+              alt={label}
               decoding="async"
               onError={markFailed}
               className={`${MEDIA_CLASS} object-contain`}
@@ -156,12 +158,21 @@ export default function SourcePlayer({
               controls
               preload="metadata"
               playsInline
+              aria-label={label}
               onError={markFailed}
               className={MEDIA_CLASS}
             />
           )}
           {view.kind === "audio" && (
-            <audio ref={setMedia} src={src} controls preload="metadata" onError={markFailed} className="w-full" />
+            <audio
+              ref={setMedia}
+              src={src}
+              controls
+              preload="metadata"
+              aria-label={label}
+              onError={markFailed}
+              className="w-full"
+            />
           )}
           {view.kind === "unavailable" && (
             <p role="status" className="rounded-md bg-surface-0 px-3 py-2 text-xs text-fg-muted">

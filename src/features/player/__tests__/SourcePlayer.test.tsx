@@ -104,6 +104,16 @@ describe("SourcePlayer media", () => {
     expect(container.querySelector("video")).toBeNull();
   });
 
+  it("names the video after the file for assistive tech", () => {
+    const { container } = render(<SourcePlayer {...baseProps()} />);
+    expect(screen.getByLabelText("Preview of my clip #1 %é.mov")).toBe(mediaElement(container, "video"));
+  });
+
+  it("names the audio after the file for assistive tech", () => {
+    const { container } = render(<SourcePlayer {...baseProps({ path: "C:\\Users\\a\\Music\\song.mp3", state: audioProbe, homeDir: "C:\\Users\\a" })} />);
+    expect(mediaElement(container, "audio").getAttribute("aria-label")).toBe("Preview of song.mp3");
+  });
+
   it("renders an image with a file-name alt", () => {
     render(<SourcePlayer {...baseProps({ path: IMAGE_PATH, state: imageProbe })} />);
     const img = screen.getByRole("img", { name: "Preview of p.heic" });
