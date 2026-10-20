@@ -628,6 +628,23 @@ test('AX driver focuses one exact launched-process text field and verifies its p
   }
 });
 
+// Time advances only when an AX wait loop sleeps, so retries and deadlines are
+// exact however long each attempt takes on a loaded machine. These sleeps never
+// yield to the event loop, so a loop that ignores its deadline must fail here
+// rather than spin forever.
+function virtualClock() {
+  const sleeps = [];
+  let now = 0;
+  return {
+    sleeps,
+    nowMs: () => now,
+    sleepMs: async ms => {
+      if (sleeps.length >= 1000) throw Error('Virtual clock: wait loop never reached its deadline');
+      sleeps.push(ms); now += ms;
+    },
+  };
+}
+
 test('AX activation retries only while the exact process or main window is still mounting', async () => {
   let attempts = 0;
   const driver = {
@@ -637,9 +654,18 @@ test('AX activation retries only while the exact process or main window is still
       return { frontmost_pid: 42, window_count: 1 };
     },
   };
-  assert.deepEqual(await waitForAxActivation(driver, { timeoutMs: 100, pollMs: 1 }), { frontmost_pid: 42, window_count: 1 });
+  const clock = virtualClock();
+  assert.deepEqual(await waitForAxActivation(driver, { timeoutMs: 100, pollMs: 1, ...clock }), { frontmost_pid: 42, window_count: 1 });
   assert.equal(attempts, 2);
-  await assert.rejects(() => waitForAxActivation({ activate: async () => { throw Error('Accessibility permission is not granted'); } }, { timeoutMs: 100, pollMs: 1 }), /permission/i);
+  assert.deepEqual(clock.sleeps, [1]);
+  let mounting = 0;
+  const bounded = virtualClock();
+  await assert.rejects(() => waitForAxActivation({ activate: async () => { mounting += 1; throw Error('Accessibility process is not ready'); } }, { timeoutMs: 100, pollMs: 25, ...bounded }), /process is not ready/);
+  assert.equal(mounting, 4);
+  assert.deepEqual(bounded.sleeps, [25, 25, 25, 25]);
+  const denied = virtualClock();
+  await assert.rejects(() => waitForAxActivation({ activate: async () => { throw Error('Accessibility permission is not granted'); } }, { timeoutMs: 100, pollMs: 1, ...denied }), /permission/i);
+  assert.deepEqual(denied.sleeps, []);
 });
 
 test('AX driver fails closed on permission, focus, modal, and missing labels', async () => {
@@ -915,9 +941,18 @@ test('AX preflight retries only while a recorder-ready target is still mounting'
       return { ok: true };
     },
   };
-  assert.deepEqual(await waitForAxPreflight(driver, ['Convert'], { timeoutMs: 100, pollMs: 1 }), { ok: true });
+  const clock = virtualClock();
+  assert.deepEqual(await waitForAxPreflight(driver, ['Convert'], { timeoutMs: 100, pollMs: 1, ...clock }), { ok: true });
   assert.equal(attempts, 2);
-  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { throw Error('Frontmost process changed'); } }, ['Convert'], { timeoutMs: 100, pollMs: 1 }), /Frontmost process changed/);
+  assert.deepEqual(clock.sleeps, [1]);
+  let mounting = 0;
+  const bounded = virtualClock();
+  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { mounting += 1; throw Error('Required accessibility label is missing: Convert'); } }, ['Convert'], { timeoutMs: 100, pollMs: 25, ...bounded }), /label is missing/);
+  assert.equal(mounting, 4);
+  assert.deepEqual(bounded.sleeps, [25, 25, 25, 25]);
+  const changed = virtualClock();
+  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { throw Error('Frontmost process changed'); } }, ['Convert'], { timeoutMs: 100, pollMs: 1, ...changed }), /Frontmost process changed/);
+  assert.deepEqual(changed.sleeps, []);
 });
 
 test('action sequence waits for initial readiness before setup and each next-action marker before dispatch', async () => {

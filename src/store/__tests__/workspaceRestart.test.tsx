@@ -1,7 +1,13 @@
 import { createElement, type ReactNode } from "react";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "../workspacePersistence";
+// Loads the page's module graph while the file is collected, outside any test
+// timeout: transforming it on a busy machine takes seconds. Each test still
+// evaluates a fresh copy after vi.resetModules().
+import "@/pages/ConvertPage";
 beforeEach(() => {
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -38,9 +44,6 @@ vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { childr
 vi.mock("@/features/presets/PresetChips", () => ({ default: () => null }));
 
 it("restores empty image width in a fresh store and blocks submission even while another inspector is selected", async () => {
-  const { render, screen, fireEvent, waitFor } = await import("@testing-library/react");
-  const { default: userEvent } = await import("@testing-library/user-event");
-  const { MemoryRouter } = await import("react-router-dom");
   const descriptor = { available: true, reason: null, quality_min: 1, quality_max: 100, default_quality: 75, max_dimension: 32768, max_output_pixels: 100000000, fit_within: true, upscale: false, preview_original_available: false, preview_fit_within: false, preview_unavailable_reason: "No preview" };
   jpegMocks.inspect.mockResolvedValue({ probe: { source_kind: "image", image_format: "dng", width: 6048, height: 8064, duration_ms: 0, file_size: 100, audio_codecs: [], subtitle_codecs: [] }, capabilities: { targets: [{ target: "jpeg", available: true, reason: null, image_settings: descriptor }], compression: { quality: false, target_size: false, lossless: false, reason: null } } });
   jpegMocks.open.mockResolvedValue(["/a.dng", "/b.dng"]);
@@ -68,8 +71,6 @@ it("restores empty image width in a fresh store and blocks submission even while
 });
 
 it("keeps preexisting GIF text drafts at their established scope after adding identity-scoped image controls", async () => {
-  const { render, screen } = await import("@testing-library/react");
-  const { MemoryRouter } = await import("react-router-dom");
   const file = { id: "existing-video", revision: 2, optionsReady: true, path: "/movie.mp4", sourceDir: "/", target: "gif", gifOptions: { size_preset: "medium", trim_start_ms: null, trim_end_ms: null }, subtitle: null, metadataPolicy: "preserve", qualityPreset: null, resolutionCap: null };
   window.localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries: {
     [JSON.stringify(["convert", "ConvertPage.files"])]: { value: [file] },

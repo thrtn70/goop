@@ -29,7 +29,7 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now()}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
@@ -53,10 +53,10 @@ export async function run(binary,sidecars,request,stem,options={}) {
   } catch {/* A process or output can disappear between snapshots. */}
  },100);
  const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
- const start=performance.now();let code;
+ const start=nowMs();let code;
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
  finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
-  const lifetimeMs=performance.now()-start;
+  const lifetimeMs=nowMs()-start;
   writeFileSync(`${stem}.stdout`,stdout);writeFileSync(`${stem}.stderr`,stderr);
  let metrics={success:false,error:'No metrics produced'};
  const metricsPath=`${stem}.metrics.json`;
@@ -67,7 +67,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  // A clean root exit is not a clean sample if owned descendants remain.
  stop();
  if(killEscalation)await killEscalation;else clearTimeout(killTimer);
- const verificationStart=performance.now();
+ const verificationStart=nowMs();
  const createdSymlinks=ownedSymlinks(directory).filter(path=>!initialSymlinks.has(path));
  let outputError=createdSymlinks.length?`Owned conversion created symbolic-link output: ${createdSymlinks.map(path=>basename(path)).join(', ')}`:null;
  for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
@@ -88,7 +88,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
   const effective=effectiveHardware(metrics,hardwareEnabled);
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput)try{validateEffectiveExecution(metrics.result?.video_execution,request);}catch(error){metrics.success=false;verification={...verification,execution_error:error.message};}
  const timePeak=stderr.toString().match(/(\d+)\s+maximum resident set size/);
- const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
+ const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:nowMs()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
  writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
  // The request output is created uniquely inside this suite. Preserve measurements
  // before dropping only that owned media when it caused the storage limit.

@@ -16,7 +16,7 @@ test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:-1},0,false),false);
  assert.equal(normalizeSuccess({success:true,process_ms:1},0,true),false);
 });
-async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeDelay?'sleep '+options.probeDelay+'\n':''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeDelay;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
+async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeMarker?": > '"+options.probeMarker+"'\n":''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeMarker;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
 test('timeout escalates for a process ignoring TERM',async()=>{const start=performance.now();const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:30});assert.equal(result.success,false);assert.equal(result.timed_out,true);assert.ok(performance.now()-start<3000);});
 test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
 test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
@@ -75,10 +75,17 @@ test('storage budget catches an oversized output written immediately before exit
 test('directory byte count includes only files in suite',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{writeFileSync(join(dir,'one'),'1234');assert.equal(directoryBytes(dir),4);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('bounded atomic JSON refuses the temporary replacement high-water peak',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-atomic-budget-'));try{const path=join(dir,'state.json');writeFileSync(path,'{"old":true}\n');const value={next:'x'.repeat(1000)};const nextBytes=Buffer.byteLength(`${JSON.stringify(value)}\n`);const budget=directoryBytes(dir)+nextBytes-1;assert.throws(()=>writeJsonAtomic(path,value,{budgetDirectory:dir,budgetBytes:budget}),/atomic.*budget/i);assert.equal(readFileSync(path,'utf8'),'{"old":true}\n');assert.deepEqual(readdirSync(dir),['state.json']);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('child lifetime excludes subsequent output verification',async()=>{
- const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[{codec_type:'video',codec_name:'mjpeg'}],format:{format_name:'image2'}},probeDelay:0.5,expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
- assert.equal(result.success,true);
- assert.ok(result.verification_ms >= 400);
- assert.ok(result.lifetime_ms < result.verification_ms);
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-probe-clock-'));
+ try{
+  // The clock moves only when the independent probe runs, so the child's own
+  // runtime (however slow under load) cannot reorder the two windows.
+  const probed=join(clockDir,'probed');
+  const nowMs=()=>existsSync(probed)?500:0;
+  const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[{codec_type:'video',codec_name:'mjpeg'}],format:{format_name:'image2'}},probeMarker:probed,nowMs,expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
+  assert.equal(result.success,true);
+  assert.equal(result.lifetime_ms,0);
+  assert.equal(result.verification_ms,500);
+ }finally{rmSync(clockDir,{recursive:true,force:true});}
 });
 test('single conversion rejects an independent probe with no usable stream',async()=>{
  const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[],format:{}},expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
