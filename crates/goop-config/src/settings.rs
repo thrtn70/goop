@@ -83,6 +83,10 @@ pub struct Settings {
     /// the in-app toast) if the goop window does not have focus.
     #[serde(default)]
     pub notifications_enabled: bool,
+    /// Shows the selected source at the top of Convert's and Compress's
+    /// settings panel. On by default; off restores the panel without it.
+    #[serde(default = "default_media_player_enabled")]
+    pub media_player_enabled: bool,
     /// Optional override for where URL extracts land. `None` means use
     /// `output_dir` (the global default). Useful for users who want
     /// downloads kept separate from conversions.
@@ -135,6 +139,10 @@ fn default_hw_acceleration_enabled() -> bool {
     true
 }
 
+fn default_media_player_enabled() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -154,6 +162,7 @@ impl Default for Settings {
             cookies_from_browser: None,
             has_seen_onboarding: false,
             notifications_enabled: false,
+            media_player_enabled: default_media_player_enabled(),
             output_dir_extract: None,
             extract_naming_scheme: ExtractNamingScheme::default(),
             default_metadata_policy: MetadataPolicy::default(),
@@ -208,6 +217,7 @@ pub struct SettingsPatch {
     /// re-show the welcome screen.
     pub has_seen_onboarding: Option<bool>,
     pub notifications_enabled: Option<bool>,
+    pub media_player_enabled: Option<bool>,
     /// Tri-state on the wire (see `double_option` helper):
     /// - field absent → `None` (no change)
     /// - `null`       → `Some(None)` (clear the override)
@@ -292,6 +302,9 @@ pub fn apply_patch(current: &Settings, patch: SettingsPatch) -> Settings {
     }
     if let Some(v) = patch.notifications_enabled {
         next.notifications_enabled = v;
+    }
+    if let Some(v) = patch.media_player_enabled {
+        next.media_player_enabled = v;
     }
     if let Some(v) = patch.output_dir_extract {
         next.output_dir_extract = v.map(|p| expand(&p).to_string_lossy().into_owned());
@@ -556,6 +569,44 @@ mod tests {
             },
         );
         assert!(!reset.notifications_enabled);
+    }
+
+    #[test]
+    fn media_player_enabled_defaults_to_true() {
+        assert!(Settings::default().media_player_enabled);
+    }
+
+    #[test]
+    fn legacy_settings_without_media_player_field_load_enabled() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"output_dir":"/tmp","theme":"system","yt_dlp_last_update_ms":null,"extract_concurrency":2,"convert_concurrency":1}"#,
+        )
+        .unwrap();
+        let loaded = load(&p).unwrap();
+        assert!(loaded.media_player_enabled);
+    }
+
+    #[test]
+    fn apply_patch_can_flip_media_player_flag() {
+        let off = apply_patch(
+            &Settings::default(),
+            SettingsPatch {
+                media_player_enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!off.media_player_enabled);
+        let on = apply_patch(
+            &off,
+            SettingsPatch {
+                media_player_enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(on.media_player_enabled);
     }
 
     #[test]
