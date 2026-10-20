@@ -23,6 +23,8 @@ export type PlayerLightboxProps = {
 };
 
 // Both guards are invisible Tab stops that hand focus to Close; the trap leaves them out of its control list.
+// aria-hidden on a focusable element is deliberate: focus never rests on a guard (it moves straight to Close),
+// and hiding them keeps them out of VoiceOver's own cursor.
 const SENTINEL_PROPS = { [FOCUS_SENTINEL_ATTR]: "", tabIndex: 0, "aria-hidden": true, className: "sr-only" } as const;
 
 // The wrapper ignores the pointer so a click beside the media lands on the scrim; the media takes it back.
@@ -33,8 +35,10 @@ const MEDIA_CLASS = "pointer-events-auto max-h-full max-w-full rounded-md object
  * the click has to start on the scrim too, so a scrub released beside the video stays open.
  * The media carries tabIndex 0 so it is a Tab stop of its own; the browser may add its native controls
  * after it, which is why the trap lets a forward Tab leave the media and the trailing sentinel brings
- * focus back to Close once Tab has carried it past them. The leading sentinel does the same for Shift+Tab
- * from the media when Close is not a tab stop and the browser's previous stop lies outside the dialog.
+ * focus back to Close once Tab has carried it past them. The native controls are reached by Tabbing
+ * forward; Shift+Tab from Close goes to the media element itself, not into its controls (a known limit).
+ * The leading sentinel catches Shift+Tab from the media when Close is not a tab stop and the browser's
+ * previous stop lies outside the dialog.
  */
 export default function PlayerLightbox({ plan, src, name, startAt, playing, onClose }: PlayerLightboxProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);

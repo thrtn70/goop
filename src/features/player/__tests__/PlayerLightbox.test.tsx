@@ -152,8 +152,8 @@ describe("PlayerLightbox focus", () => {
     expect(sentinel.getAttribute("aria-hidden")).toBe("true");
     expect(dialog().contains(sentinel)).toBe(true);
     expect(isBefore(sentinel, closeButton())).toBe(true);
-    // Reached by Shift+Tab from the media when Close is not a tab stop: the user lands on Close, not outside.
-    videoOf().focus();
+    // jsdom cannot steer Tab, so this only proves the guard sends focus to Close; the browser is what
+    // reaches it, by Shift+Tab from the media when Close is not a tab stop.
     sentinel.focus();
     expect(document.activeElement).toBe(closeButton());
   });
