@@ -68,12 +68,13 @@ const setPlayback = (media: HTMLMediaElement, currentTime: number, paused: boole
 const setEnabled = (media_player_enabled: boolean) =>
   act(() => useAppStore.setState({ settings: { media_player_enabled } as Settings }));
 
-// jsdom has no media pipeline: report every codec as playable and make play/pause inert.
+// jsdom has no media pipeline: report every codec as playable and make play/pause/load inert.
 // Created per test and restored after it, so no stub leaks into other suites' elements.
 let mediaSpies: {
   canPlayType: MockInstance<HTMLMediaElement["canPlayType"]>;
   play: MockInstance<HTMLMediaElement["play"]>;
   pause: MockInstance<HTMLMediaElement["pause"]>;
+  load: MockInstance<HTMLMediaElement["load"]>;
 };
 
 beforeEach(() => {
@@ -82,6 +83,7 @@ beforeEach(() => {
     canPlayType: vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably"),
     play: vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined),
     pause: vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {}),
+    load: vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {}),
   };
   useAppStore.setState((s) => ({ settings: { media_player_enabled: true } as Settings, ui: { ...s.ui, playerCollapsed: false } }));
 });

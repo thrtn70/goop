@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PlayerLightbox, { type PlayerLightboxProps } from "@/features/player/PlayerLightbox";
@@ -17,11 +18,19 @@ const baseProps = (overrides: Partial<PlayerLightboxProps> = {}): PlayerLightbox
 const mediaSpies = {
   play: vi.spyOn(HTMLMediaElement.prototype, "play"),
   pause: vi.spyOn(HTMLMediaElement.prototype, "pause"),
+  load: vi.spyOn(HTMLMediaElement.prototype, "load"),
 };
 
+/** Whether each element still had a src attribute when load() was called on it. */
+let srcAtLoad: Map<HTMLMediaElement, boolean>;
+
 beforeEach(() => {
+  srcAtLoad = new Map();
   mediaSpies.play.mockResolvedValue(undefined);
   mediaSpies.pause.mockImplementation(() => {});
+  mediaSpies.load.mockImplementation(function (this: HTMLMediaElement) {
+    srcAtLoad.set(this, this.hasAttribute("src"));
+  });
 });
 
 afterEach(() => {
@@ -215,5 +224,58 @@ describe("PlayerLightbox hand-over from the panel", () => {
     mediaSpies.play.mockReturnValue(undefined as unknown as Promise<void>);
     render(<PlayerLightbox {...baseProps({ startAt: 5, playing: true })} />);
     expect(() => fireEvent.loadedMetadata(videoOf())).not.toThrow();
+  });
+});
+
+/** Unmounts the lightbox from its own onClose, as the inspector does. */
+function ClosingHost({ onClose, ...props }: PlayerLightboxProps) {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  return (
+    <PlayerLightbox
+      {...props}
+      onClose={(state) => {
+        onClose(state);
+        setOpen(false);
+      }}
+    />
+  );
+}
+
+describe("PlayerLightbox releases media", () => {
+  it("lets go of its element once onClose has the position", () => {
+    const onClose = vi.fn();
+    render(<ClosingHost {...baseProps({ onClose })} />);
+    const video = videoOf();
+    setPlayback(video, 30, false);
+
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClose).toHaveBeenCalledWith({ startAt: 30, playing: true });
+    expect(mediaSpies.pause.mock.contexts).toContain(video);
+    expect(mediaSpies.load.mock.contexts).toContain(video);
+    expect(srcAtLoad.get(video)).toBe(false);
+    expect(video.hasAttribute("src")).toBe(false);
+    expect(onClose.mock.invocationCallOrder[0]).toBeLessThan(mediaSpies.pause.mock.invocationCallOrder[0]);
+  });
+
+  it("lets go of an audio element when it unmounts", () => {
+    const view = render(<PlayerLightbox {...baseProps({ plan: { kind: "audio", mime: "audio/mpeg" }, name: "song.mp3" })} />);
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+
+    view.unmount();
+
+    expect(mediaSpies.load.mock.contexts).toContain(audio);
+    expect(srcAtLoad.get(audio)).toBe(false);
+    expect(audio.hasAttribute("src")).toBe(false);
+  });
+
+  it("leaves the element alone while it stays open", () => {
+    const view = render(<PlayerLightbox {...baseProps()} />);
+    view.rerender(<PlayerLightbox {...baseProps({ startAt: 9 })} />);
+
+    expect(mediaSpies.load).not.toHaveBeenCalled();
+    expect(videoOf().getAttribute("src")).toBe(SRC);
   });
 });

@@ -64,12 +64,20 @@ const mediaSpies = {
   canPlayType: vi.spyOn(HTMLMediaElement.prototype, "canPlayType"),
   play: vi.spyOn(HTMLMediaElement.prototype, "play"),
   pause: vi.spyOn(HTMLMediaElement.prototype, "pause"),
+  load: vi.spyOn(HTMLMediaElement.prototype, "load"),
 };
 
+/** Whether each element still had a src attribute when load() was called on it. */
+let srcAtLoad: Map<HTMLMediaElement, boolean>;
+
 beforeEach(() => {
+  srcAtLoad = new Map();
   mediaSpies.canPlayType.mockReturnValue("probably");
   mediaSpies.play.mockResolvedValue(undefined);
   mediaSpies.pause.mockImplementation(() => {});
+  mediaSpies.load.mockImplementation(function (this: HTMLMediaElement) {
+    srcAtLoad.set(this, this.hasAttribute("src"));
+  });
 });
 
 afterEach(() => {
@@ -182,8 +190,16 @@ describe("SourcePlayer probe states", () => {
   });
 });
 
+/** Paused, emptied of its src, then reloaded so the webview drops the decoder and buffer now. */
+const expectReleased = (element: HTMLMediaElement) => {
+  expect(mediaSpies.pause.mock.contexts).toContain(element);
+  expect(mediaSpies.load.mock.contexts).toContain(element);
+  expect(srcAtLoad.get(element)).toBe(false);
+  expect(element.hasAttribute("src")).toBe(false);
+};
+
 describe("SourcePlayer remount", () => {
-  it("renders a fresh element for a new source, with no pause needed on the old one", () => {
+  it("renders a fresh element for a new source and lets go of the old one", () => {
     const view = render(<SourcePlayer {...baseProps()} />);
     const first = mediaElement(view.container, "video");
 
@@ -192,7 +208,46 @@ describe("SourcePlayer remount", () => {
 
     expect(second).not.toBe(first);
     expect(first.isConnected).toBe(false);
-    expect(mediaSpies.pause).not.toHaveBeenCalled();
+    expectReleased(first);
+    expect(second.getAttribute("src")).toBe(srcOf("/Users/a/other.mov"));
+    expect(mediaSpies.load.mock.contexts).not.toContain(second);
+  });
+
+  it("lets go of an audio element replaced by a video", () => {
+    const view = render(<SourcePlayer {...baseProps({ path: AUDIO_PATH, state: audioProbe })} />);
+    const audio = mediaElement(view.container, "audio");
+
+    view.rerender(<SourcePlayer {...baseProps()} />);
+
+    expectReleased(audio);
+    expect(mediaSpies.load.mock.contexts).not.toContain(mediaElement(view.container, "video"));
+  });
+
+  it("lets go of an element that failed to play", () => {
+    const { container } = render(<SourcePlayer {...baseProps()} />);
+    const video = mediaElement(container, "video");
+
+    fireEvent.error(video);
+
+    expect(container.querySelector("video")).toBeNull();
+    expectReleased(video);
+  });
+
+  it("lets go of the element when the player goes away", () => {
+    const view = render(<SourcePlayer {...baseProps()} />);
+    const video = mediaElement(view.container, "video");
+
+    view.unmount();
+
+    expectReleased(video);
+  });
+
+  it("leaves the element alone while it stays", () => {
+    const view = render(<SourcePlayer {...baseProps()} />);
+    view.rerender(<SourcePlayer {...baseProps({ resume: { startAt: 3, playing: false } })} />);
+
+    expect(mediaSpies.load).not.toHaveBeenCalled();
+    expect(mediaElement(view.container, "video").getAttribute("src")).toBe(srcOf(VIDEO_PATH));
   });
 });
 
@@ -212,6 +267,16 @@ describe("SourcePlayer collapse", () => {
     render(<SourcePlayer {...baseProps()} />);
     const toggle = screen.getByRole("button", { name: "Hide preview" });
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("lets go of the element when the preview collapses", () => {
+    const view = render(<SourcePlayer {...baseProps()} />);
+    const video = mediaElement(view.container, "video");
+
+    view.rerender(<SourcePlayer {...baseProps({ collapsed: true })} />);
+
+    expect(view.container.querySelector("video")).toBeNull();
+    expectReleased(video);
   });
 
   it("hides an unavailable message while collapsed", () => {

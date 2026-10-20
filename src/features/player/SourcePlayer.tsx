@@ -9,6 +9,7 @@ import {
   type PreviewPlan,
   type PreviewUnavailableReason,
 } from "@/features/player/previewPlan";
+import { releaseMedia } from "@/features/player/releaseMedia";
 
 export type SourcePlayerProps = {
   path: string;
@@ -48,6 +49,8 @@ export default function SourcePlayer({
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   // One callback for both element kinds: a RefObject<HTMLMediaElement> is not assignable to a <video> ref.
   const setMedia = useCallback((element: HTMLMediaElement | null) => {
+    const previous = mediaRef.current;
+    if (previous !== null && previous !== element) releaseMedia(previous);
     mediaRef.current = element;
   }, []);
 

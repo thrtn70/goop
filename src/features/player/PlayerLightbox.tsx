@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, type KeyboardEvent as ReactKeyboardEven
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import type { PlayablePlan } from "@/features/player/previewPlan";
+import { releaseMedia } from "@/features/player/releaseMedia";
 import { trapTab } from "@/lib/focusTrap";
 
 export type PlayerLightboxProps = {
@@ -27,7 +28,10 @@ export default function PlayerLightbox({ plan, src, name, startAt, playing, onCl
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   // One callback for both element kinds: a RefObject<HTMLMediaElement> is not assignable to a <video> ref.
+  // Closing reads the position first (close below), then the unmount releases the element.
   const setMedia = useCallback((element: HTMLMediaElement | null) => {
+    const previous = mediaRef.current;
+    if (previous !== null && previous !== element) releaseMedia(previous);
     mediaRef.current = element;
   }, []);
 
