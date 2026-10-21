@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { release as osRelease, version as osVersion } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 export const sha256Text = text => createHash('sha256').update(text).digest('hex');
@@ -454,14 +455,20 @@ export async function runBoundedProcess({
   logLimitBytes,
   storageBudgetBytes,
   abortSignal = null,
+  samplingIntervalMs = 100,
+  nowMs = () => performance.now(),
+  sleepMs = (ms, wait) => delay(ms, undefined, wait),
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
+  // Node turns an interval below 1 ms or above 2^31-1 ms into 1 ms, so a bad
+  // value would sample nonstop.
+  if (!Number.isSafeInteger(samplingIntervalMs) || samplingIntervalMs < 1 || samplingIntervalMs > 2 ** 31 - 1) throw Error('Sampling interval must be a whole number of milliseconds from 1 to 2147483647');
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
   if (symlinksBelow(outputDirectory).length > 0) throw Error('Owned output directory must not contain symbolic links');
   const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null, killTimer;
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
   let stopRequested = false, childSettled = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
   const windowsCleanupPids = new Set();
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
@@ -499,9 +506,9 @@ export async function runBoundedProcess({
     const softSignalSent = signal('SIGTERM');
     const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
     if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
-    killEscalation = new Promise(resolveKill => {
-      killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
-    });
+    // A grace the sleep rejects (a delay that is not a number) escalates at once.
+    const kill = () => { signal('SIGKILL'); };
+    killEscalation = sleepMs(killGraceMs).then(kill, kill);
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
@@ -519,15 +526,19 @@ export async function runBoundedProcess({
         stop('budget');
       }
     } catch { /* A just-exited child can race a directory snapshot. */ }
-  }, 100);
-  const timeout = setTimeout(() => stop('timeout'), timeoutMs);
-  const start = performance.now();
+  }, samplingIntervalMs);
+  // sleepMs(ms, { signal }) must reject once signal aborts, as the default does,
+  // so a run that closes first cancels its timeout instead of stopping a dead group.
+  // Any other rejection (a delay that is not a number) times the run out at once.
+  const timeout = new AbortController();
+  sleepMs(timeoutMs, { signal: timeout.signal }).then(() => stop('timeout'), () => { if (!timeout.signal.aborted) stop('timeout'); });
+  const start = nowMs();
   const code = await new Promise(resolve => {
     child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
     child.once('close', value => { childSettled = true; resolve(value); });
   });
   clearInterval(monitor);
-  clearTimeout(timeout);
+  timeout.abort();
   abortSignal?.removeEventListener('abort', abort);
   try {
     budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
@@ -537,8 +548,7 @@ export async function runBoundedProcess({
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
   stop();
-  if (killEscalation) await killEscalation;
-  else clearTimeout(killTimer);
+  await killEscalation;
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
@@ -569,9 +579,9 @@ export async function runBoundedProcess({
     cleanup_error: cleanupError,
     output_error: outputError,
     removed_staging_directories: removedStagingDirectories,
-    lifetime_ms: performance.now() - start,
+    lifetime_ms: nowMs() - start,
     sampled_tree_peak_KiB: sampledTreePeakKiB,
-    sampling_interval_ms: 100,
+    sampling_interval_ms: samplingIntervalMs,
     observed_children: observedChildren,
     time_peak_bytes: timePeakMatch ? Number(timePeakMatch[1]) : null,
     log_bytes_retained: retainedLogBytes,
