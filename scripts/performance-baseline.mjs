@@ -30,6 +30,7 @@ export function effectiveHardware(metrics,hardwareEnabled) {
 export async function run(binary,sidecars,request,stem,options={}) {
  const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
+ const {measureBytes=directoryBytes,readSnapshot=()=>execFileSync('ps',['-axo','pid=,ppid=,rss=,comm='],{encoding:'utf8',timeout:1000})}=options;
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
  const initialSymlinks=new Set(ownedSymlinks(directory));
@@ -44,12 +45,15 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
  const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=new Promise(resolveKill=>{killTimer=setTimeout(()=>{signal('SIGKILL');resolveKill();},killGraceMs);});};
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
+ // Vanished entries count zero, so a throw from the count is a real read
+ // failure that would leave the live budget blind for the rest of the run.
+ const overBudget=()=>{try{return measureBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4);}catch{return true;}};
  const timer=setInterval(()=>{
   try {
-   const sample=treeRss(execFileSync('ps',['-axo','pid=,ppid=,rss=,comm='],{encoding:'utf8',timeout:1000}),child.pid);
+   const sample=treeRss(readSnapshot(),child.pid);
    if(sample.rssKiB>0){rssKiB=Math.max(rssKiB??0,sample.rssKiB);children=Math.max(children??0,sample.children);}
-   if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
-  } catch {/* A process or output can disappear between snapshots. */}
+  } catch {/* ps can time out under load or race an exiting process; a missed sample is not an overrun. */}
+  if(overBudget()){budgetExceeded=true;stop();}
  },100);
  const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
  const start=performance.now();let code;
@@ -62,7 +66,8 @@ export async function run(binary,sidecars,request,stem,options={}) {
  if(existsSync(metricsPath)&&statSync(metricsPath).size<Math.min(1024*1024,budgetBytes/4)) {
   try{metrics=JSON.parse(readFileSync(metricsPath));}catch{metrics.error='Invalid metrics JSON';}
  }
- budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
+ // A failed count fails closed here too, and must not skip the reap below.
+ try{budgetExceeded ||= measureBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);}catch{budgetExceeded=true;}
  // A clean root exit is not a clean sample if owned descendants remain.
  stop();
  if(killEscalation)await killEscalation;else clearTimeout(killTimer);

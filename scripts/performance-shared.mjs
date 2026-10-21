@@ -474,6 +474,8 @@ export async function runBoundedProcess({
   logLimitBytes,
   storageBudgetBytes,
   abortSignal = null,
+  readSnapshot = () => execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }),
+  measureBytes = directoryBytes,
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
@@ -525,20 +527,25 @@ export async function runBoundedProcess({
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
+  // Vanished entries count zero, so a throw from the count is a real read
+  // failure that would leave the live budget blind for the rest of the run.
+  const overBudget = () => {
+    try { return measureBytes(outputDirectory) + stdout.length + stderr.length > storageBudgetBytes; } catch { return true; }
+  };
   const monitor = setInterval(() => {
-    try {
-      if (process.platform !== 'win32') {
-        const sample = processTreeRss(execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }), child.pid);
+    if (process.platform !== 'win32') {
+      try {
+        const sample = processTreeRss(readSnapshot(), child.pid);
         if (sample) {
           sampledTreePeakKiB = Math.max(sampledTreePeakKiB ?? 0, sample.rssKiB);
           observedChildren = Math.max(observedChildren ?? 0, sample.children);
         }
-      }
-      if (directoryBytes(outputDirectory) + stdout.length + stderr.length > storageBudgetBytes) {
-        budgetExceeded = true;
-        stop('budget');
-      }
-    } catch { /* A just-exited child can race a directory snapshot. */ }
+      } catch { /* ps can time out under load; a missed sample is not an overrun. */ }
+    }
+    if (overBudget()) {
+      budgetExceeded = true;
+      stop('budget');
+    }
   }, 100);
   const timeout = setTimeout(() => stop('timeout'), timeoutMs);
   const start = performance.now();
@@ -550,7 +557,7 @@ export async function runBoundedProcess({
   clearTimeout(timeout);
   abortSignal?.removeEventListener('abort', abort);
   try {
-    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
+    budgetExceeded ||= measureBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
   } catch {
     budgetExceeded = true;
   }
