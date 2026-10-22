@@ -1,10 +1,10 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeRss, summarize, directoryBytes, ownedSymlinks } from './performance-baseline.mjs';
-import { withTerminationSignals } from './performance-shared.mjs';
+import { readChildFile, withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -83,8 +83,11 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   try {
     while (!exited && !aborted && performance.now() < activeDeadline) {
       try {
-        if (lstatSync(reportPath).isFile() && statSync(reportPath).size < 4096) {
-          const value = JSON.parse(readFileSync(reportPath, 'utf8'));
+        // The child is still running, so the check and the read share one
+        // descriptor: a swap after the check can neither redirect nor block it.
+        const report = readChildFile(reportPath, 4095);
+        if (report.length > 0) {
+          const value = JSON.parse(report.toString('utf8'));
           if (value.schema_version === 1 && value.pid === child.pid && Number.isFinite(value.backend_ready_ms) && value.backend_ready_ms >= 0) {
             marker = value; launchMs = performance.now() - start; break;
           }
