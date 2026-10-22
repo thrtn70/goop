@@ -483,15 +483,30 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
   };
 }
 
+// Windows process creation times, in 100 ns ticks since 1601 (a FILETIME).
+const windowsFileTime = ms => (BigInt(ms) + 11644473600000n) * 10000n;
+// The root's stand-in creation is read once spawn() returns, so it can lag the
+// root's real creation (a descheduled thread, a slow process start), and
+// Windows stamps processes from a clock that may tick only every ~16 ms. A
+// direct child of the root can therefore carry an earlier stamp than the
+// stand-in, and a second covers that. Further down, each stamp is compared with
+// its parent's from the same clock, which assumes the clock is not stepped back
+// in between; a child it misses is left running, never an unrelated process
+// killed.
+const WINDOWS_ROOT_CREATION_SLACK = 1000n * 10000n;
+
 /**
  * Stop one owned process group, once: SIGTERM, then SIGKILL after the grace.
  * POSIX signals the whole group. Windows has none, and taskkill /t walks only
  * from a live root, so once the root is gone its descendants come from the
  * process table, where an orphan keeps its dead parent's id (one whose own
- * parent died too is out of reach). Console processes refuse a soft taskkill,
- * so the forced one follows whenever the root may still be running or the walk
- * found descendants. stop() returns one promise for every caller, settled once
- * any forced kill is sent. `sleep`, `platform` and `execFile` are for tests.
+ * parent died too is out of reach). Windows never clears that id, and pids are
+ * reused, so a process counts only if it was created at or after the parent it
+ * names (for the root, when this stopper is made right after the spawn, less a
+ * second). Console processes refuse a soft taskkill, so the forced one follows
+ * whenever the root may still be running or the walk found descendants. stop()
+ * returns one promise for every caller, settled once any forced kill is sent.
+ * `sleep`, `platform` and `execFile` are for tests.
  */
 export function createOwnedGroupStopper(child, {
   killGraceMs,
@@ -500,6 +515,7 @@ export function createOwnedGroupStopper(child, {
   execFile = execFileSync,
 }) {
   let rootSettled = false, stopping = null;
+  const launchedAt = windowsFileTime(Date.now());
   child.once('close', () => { rootSettled = true; });
   child.once('error', () => { rootSettled = true; });
   const windowsCleanupPids = new Set();
@@ -513,10 +529,11 @@ export function createOwnedGroupStopper(child, {
           return true;
         } catch {
           if (windowsCleanupPids.size === 0) {
-            const rows = execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { Write-Output (('{0} {1}' -f $_.ProcessId,$_.ParentProcessId)) }"], { encoding: 'utf8', timeout: 5000 }).trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
-            const ids = new Set([child.pid]); let changed = true;
-            while (changed) { changed = false; for (const [pid, parentPid] of rows) if (ids.has(parentPid) && !ids.has(pid)) { ids.add(pid); changed = true; } }
-            ids.delete(child.pid); for (const pid of ids) windowsCleanupPids.add(pid);
+            const rows = execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { $created = if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }; Write-Output ('{0} {1} {2}' -f $_.ProcessId,$_.ParentProcessId,$created) }"], { encoding: 'utf8', timeout: 5000 }).split('\n').map(line => line.trim().match(/^(\d+) (\d+) (\d+)$/)).filter(Boolean).map(([, pid, parentPid, created]) => [Number(pid), Number(parentPid), BigInt(created)]);
+            // Each owned pid with its creation; the root's stand-in is the launch.
+            const owned = new Map([[child.pid, launchedAt]]); let changed = true;
+            while (changed) { changed = false; for (const [pid, parentPid, created] of rows) if (owned.has(parentPid) && !owned.has(pid) && created + (parentPid === child.pid ? WINDOWS_ROOT_CREATION_SLACK : 0n) >= owned.get(parentPid)) { owned.set(pid, created); changed = true; } }
+            owned.delete(child.pid); for (const pid of owned.keys()) windowsCleanupPids.add(pid);
           }
           let sent = false;
           for (const pid of windowsCleanupPids) try { execFile('taskkill', ['/pid', String(pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) }); sent = true; } catch { /* Already gone. */ }

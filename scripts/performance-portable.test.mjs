@@ -225,18 +225,22 @@ test('portable bounded runner rejects and removes child-created symlinks without
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-// Stands in for taskkill and the process table, given as [pid, parent pid].
-// Console processes refuse a soft taskkill, as real ones do; a forced one with
-// /t ends the pid and everything below it.
+// Stands in for taskkill and the process table, given as [pid, parent pid,
+// creation in ms]. A creation left out is a minute from now, so after any
+// launch in the test; null is a process Windows reports no creation for.
+// Console processes refuse a soft taskkill, as real ones do. A forced one ends
+// that pid only: whatever /t adds is Windows' own walk, so only the pids the
+// stopper picks are under test.
+const windowsFileTime = ms => ms === null ? 0n : (BigInt(Math.round(ms)) + 11644473600000n) * 10000n;
 function fakeWindows(table) {
-  const live = new Map(table), calls = [];
-  const below = pid => { const ids = new Set([pid]); let changed = true; while (changed) { changed = false; for (const [id, parent] of live) if (ids.has(parent) && !ids.has(id)) { ids.add(id); changed = true; } } return ids; };
+  const later = Date.now() + 60000;
+  const live = new Map(table.map(([pid, parent, created = later]) => [pid, { parent, created }])), calls = [];
   const execFile = (command, args) => {
-    if (command === 'powershell.exe') { calls.push('process table'); return `${[...live].map(([pid, parent]) => `${pid} ${parent}`).join('\r\n')}\r\n`; }
+    if (command === 'powershell.exe') { calls.push('process table'); return `${[...live].map(([pid, { parent, created }]) => `${pid} ${parent} ${windowsFileTime(created)}`).join('\r\n')}\r\n`; }
     const pid = Number(args[args.indexOf('/pid') + 1]), forced = args.includes('/f');
     calls.push(`taskkill ${pid}${forced ? ' /f' : ''}`);
     if (!forced || !live.has(pid)) throw Error('taskkill refused');
-    for (const id of below(pid)) live.delete(id);
+    live.delete(pid);
     return '';
   };
   return { live, calls, execFile };
@@ -259,6 +263,24 @@ test('owned group stopper reaps the orphans of an exited Windows root from the p
   await stopped;
   assert.deepEqual([...windows.live.keys()], [400, 500]);
   assert.ok(!windows.calls.some(call => /^taskkill (400|500)/.test(call)), `unowned process signalled: ${windows.calls}`);
+});
+
+test('owned group stopper leaves processes whose Windows parent id is stale', { timeout: 10000 }, async () => {
+  const launch = Date.now(), hourBefore = launch - 3600000;
+  // Windows never clears a parent id, so these only look owned: 250 and 215 were
+  // made under earlier holders of the root's pid (215 just past the slack), 300,
+  // 320 and 330 are older than the 200 and 310 they name, and 270 has no stamp.
+  // 260 is reached only through 250. 210's stamp precedes the launch read, as a
+  // coarse clock can stamp a child made right after the spawn.
+  const windows = fakeWindows([[200, 100, launch + 50000], [210, 100, launch - 100], [310, 200, launch + 60000], [250, 100, hourBefore], [215, 100, launch - 1500], [260, 250, launch + 60000], [270, 100, null], [300, 200, hourBefore], [320, 310, launch + 30000], [330, 310, launch + 59990]]);
+  const grace = heldGrace(), root = fakeRoot(100);
+  const group = createOwnedGroupStopper(root, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32', execFile: windows.execFile });
+  root.emit('close', 0);
+  const stopped = group.stop();
+  grace.waits[0].resolve();
+  await stopped;
+  assert.deepEqual([...windows.live.keys()].sort((a, b) => a - b), [215, 250, 260, 270, 300, 320, 330]);
+  assert.ok(!windows.calls.some(call => /^taskkill (215|250|260|270|300|320|330)\b/.test(call)), `unowned process signalled: ${windows.calls}`);
 });
 
 test('owned group stopper forces a live Windows root that refuses the soft stop', { timeout: 10000 }, async () => {
