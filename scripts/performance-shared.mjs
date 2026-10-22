@@ -1,9 +1,13 @@
 import { spawn, execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
   lstatSync,
+  openSync,
   realpathSync,
   readFileSync,
   readlinkSync,
@@ -335,6 +339,28 @@ export function replaceEvidenceFile(path, data) {
   createEvidenceFile(path, data);
 }
 
+/**
+ * Read a small file the measured child left in a directory it shares. Only a
+ * regular file with one link under maxBytes is read; anything else returns null.
+ * Windows has no O_NOFOLLOW, so the entry is checked unopened first: a link
+ * already there is never opened. The descriptor must then be that same file,
+ * so an entry swapped in after the check is opened but refused. A FIFO never
+ * blocks. Throws when the entry is missing or cannot be opened; `open` is for
+ * tests.
+ */
+export function readOwnedRegularFile(path, maxBytes, open = openSync) {
+  const entry = lstatSync(path, { bigint: true });
+  if (!entry.isFile()) return null;
+  const fd = open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || !opened.isFile() || opened.nlink !== 1n || Number(opened.size) >= maxBytes) return null;
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export async function withTerminationSignals(operation) {
   const controller = new AbortController();
   let receivedSignal = null;
@@ -457,6 +483,62 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
   };
 }
 
+/**
+ * Stop one owned process group, once: SIGTERM, then SIGKILL after the grace.
+ * POSIX signals the whole group. Windows has none, and taskkill /t walks only
+ * from a live root, so once the root is gone its descendants come from the
+ * process table, where an orphan keeps its dead parent's id (one whose own
+ * parent died too is out of reach). Console processes refuse a soft taskkill,
+ * so the forced one follows whenever the root may still be running or the walk
+ * found descendants. stop() returns one promise for every caller, settled once
+ * any forced kill is sent. `sleep`, `platform` and `execFile` are for tests.
+ */
+export function createOwnedGroupStopper(child, {
+  killGraceMs,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  platform = process.platform,
+  execFile = execFileSync,
+}) {
+  let rootSettled = false, stopping = null;
+  child.once('close', () => { rootSettled = true; });
+  child.once('error', () => { rootSettled = true; });
+  const windowsCleanupPids = new Set();
+  const signal = name => {
+    try {
+      if (platform === 'win32') {
+        const force = name === 'SIGKILL' ? ['/f'] : [];
+        try {
+          execFile('taskkill', ['/pid', String(child.pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) });
+          windowsCleanupPids.add(child.pid);
+          return true;
+        } catch {
+          if (windowsCleanupPids.size === 0) {
+            const rows = execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { Write-Output (('{0} {1}' -f $_.ProcessId,$_.ParentProcessId)) }"], { encoding: 'utf8', timeout: 5000 }).trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
+            const ids = new Set([child.pid]); let changed = true;
+            while (changed) { changed = false; for (const [pid, parentPid] of rows) if (ids.has(parentPid) && !ids.has(pid)) { ids.add(pid); changed = true; } }
+            ids.delete(child.pid); for (const pid of ids) windowsCleanupPids.add(pid);
+          }
+          let sent = false;
+          for (const pid of windowsCleanupPids) try { execFile('taskkill', ['/pid', String(pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) }); sent = true; } catch { /* Already gone. */ }
+          return sent;
+        }
+      }
+      process.kill(-child.pid, name);
+      return true;
+    } catch { return false; }
+  };
+  const stop = () => {
+    if (stopping) return stopping;
+    const softSignalSent = signal('SIGTERM');
+    const windowsNeedsForcedCleanup = platform === 'win32' && (!rootSettled || windowsCleanupPids.size > 0);
+    // A grace the sleep rejects escalates at once.
+    const kill = () => { signal('SIGKILL'); };
+    stopping = (softSignalSent || windowsNeedsForcedCleanup) ? sleep(killGraceMs).then(kill, kill) : Promise.resolve();
+    return stopping;
+  };
+  return { stop };
+}
+
 /** Run one owned process group with bounded retained logs, lifetime, and suite storage. */
 export async function runBoundedProcess({
   command,
@@ -476,47 +558,20 @@ export async function runBoundedProcess({
   const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null, killTimer;
-  let stopRequested = false, childSettled = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
-  const windowsCleanupPids = new Set();
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
+  let stopRequested = false, sampledTreePeakKiB = null, observedChildren = null;
+  const group = createOwnedGroupStopper(child, { killGraceMs });
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
   child.stderr.on('data', chunk => { stderr = retain(stderr, chunk); });
-  const signal = name => {
-    try {
-      if (process.platform === 'win32') {
-        const force = name === 'SIGKILL' ? ['/f'] : [];
-        try {
-          execFileSync('taskkill', ['/pid', String(child.pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) });
-          windowsCleanupPids.add(child.pid);
-          return true;
-        } catch {
-          if (windowsCleanupPids.size === 0) {
-            const rows = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { Write-Output (('{0} {1}' -f $_.ProcessId,$_.ParentProcessId)) }"], { encoding: 'utf8', timeout: 5000 }).trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
-            const ids = new Set([child.pid]); let changed = true;
-            while (changed) { changed = false; for (const [pid, parentPid] of rows) if (ids.has(parentPid) && !ids.has(pid)) { ids.add(pid); changed = true; } }
-            ids.delete(child.pid); for (const pid of ids) windowsCleanupPids.add(pid);
-          }
-          let sent = false;
-          for (const pid of windowsCleanupPids) try { execFileSync('taskkill', ['/pid', String(pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) }); sent = true; } catch { /* Already gone. */ }
-          return sent;
-        }
-      }
-      process.kill(-child.pid, name);
-      return true;
-    } catch { return false; }
-  };
+  // The first stop names the cause; every later call waits on the same stop.
   const stop = reason => {
-    if (stopRequested) return;
-    stopRequested = true;
-    aborted = reason === 'abort';
-    timedOut = reason === 'timeout';
-    const softSignalSent = signal('SIGTERM');
-    const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
-    if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
-    killEscalation = new Promise(resolveKill => {
-      killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
-    });
+    if (!stopRequested) {
+      stopRequested = true;
+      aborted = reason === 'abort';
+      timedOut = reason === 'timeout';
+    }
+    return group.stop();
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
@@ -538,8 +593,8 @@ export async function runBoundedProcess({
   const timeout = setTimeout(() => stop('timeout'), timeoutMs);
   const start = performance.now();
   const code = await new Promise(resolve => {
-    child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
-    child.once('close', value => { childSettled = true; resolve(value); });
+    child.once('error', error => { spawnError = error.message; resolve(null); });
+    child.once('close', value => resolve(value));
   });
   clearInterval(monitor);
   clearTimeout(timeout);
@@ -551,9 +606,7 @@ export async function runBoundedProcess({
   }
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
-  stop();
-  if (killEscalation) await killEscalation;
-  else clearTimeout(killTimer);
+  await stop();
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
