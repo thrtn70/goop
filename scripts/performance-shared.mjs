@@ -18,7 +18,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { release as osRelease, version as osVersion } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 export const sha256Text = text => createHash('sha256').update(text).digest('hex');
@@ -481,6 +482,31 @@ export function captureIdentity({ cwd = process.cwd(), manifestText, bindingsTex
       disk_available_bytes: diskAvailableBytes(cwd),
     },
   };
+}
+
+/**
+ * The Windows launcher (crates/goop-owned-run) that runs each owned process in
+ * a job ending with it, from GOOP_OWNED_RUN or this checkout's debug build.
+ * Without it a Windows stop could only name pids, so its absence is refused,
+ * and so is a link, as for the suite's other executables.
+ */
+export function ownedRunPath(environment = process.env) {
+  const path = resolve(environment.GOOP_OWNED_RUN || join(dirname(fileURLToPath(import.meta.url)), '..', 'target', 'debug', 'goop-owned-run.exe'));
+  let found = false;
+  try { found = lstatSync(path).isFile(); } catch { /* Missing: refused below. */ }
+  if (!found) throw Error(`Windows runs need the owned-process launcher, a regular file, at ${path}: build it with \`cargo build -p goop-owned-run\` or set GOOP_OWNED_RUN`);
+  return path;
+}
+
+/**
+ * How to launch one owned process: under /usr/bin/time -l on macOS (for its
+ * peak memory), inside the launcher's job on Windows, and as given elsewhere.
+ * The launcher's stdin is its stop request, so it is a pipe the stop closes.
+ */
+export function ownedLaunch(command, args, { platform = process.platform, environment = process.env } = {}) {
+  if (platform === 'darwin') return { command: '/usr/bin/time', args: ['-l', command, ...args], stdin: 'ignore' };
+  if (platform === 'win32') return { command: ownedRunPath(environment), args: [command, ...args], stdin: 'pipe' };
+  return { command, args, stdin: 'ignore' };
 }
 
 // Windows process creation times, in 100 ns ticks since 1601 (a FILETIME).
