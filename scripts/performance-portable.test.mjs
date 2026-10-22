@@ -383,14 +383,20 @@ const running = pid => {
   try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim(); } catch (error) { if (error.status !== 1) throw error; }
   return state !== '' && !/[ZE]/.test(state);
 };
-// A process nothing killed never leaves, so a bounded wait cannot turn a
-// survivor into a pass.
-async function outlives(pid) {
-  for (let polls = 0; running(pid) && polls < 250; polls++) await new Promise(resolve => setTimeout(resolve, 20));
-  return running(pid);
-}
 const recordedPid = path => { try { const pid = Number(readFileSync(path, 'utf8')); return Number.isInteger(pid) && pid > 1 ? pid : null; } catch { return null; } };
-// Only a survivor is killed, so a pid reused after a clean reap is left alone.
+// Whether the process a pid file names is still running. A process nothing
+// killed never leaves, so a bounded wait cannot turn a survivor into a pass.
+// Once the process is seen gone its pid file goes too, so no cleanup can
+// signal whoever reuses that pid.
+async function outlives(path) {
+  const pid = recordedPid(path);
+  for (let polls = 0; running(pid) && polls < 250; polls++) await new Promise(resolve => setTimeout(resolve, 20));
+  const alive = running(pid);
+  if (!alive) rmSync(path, { force: true });
+  return alive;
+}
+// Only a survivor still on record is killed, so a pid reused after a test saw
+// its process gone is left alone.
 const killRecorded = path => { const pid = recordedPid(path); if (pid && running(pid)) try { process.kill(pid, 'SIGKILL'); } catch { /* Already gone. */ } };
 // A pid file published by rename, so a reader never sees a partial pid.
 const publishPid = path => `require('node:fs').writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));require('node:fs').renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
@@ -418,7 +424,7 @@ test('single conversion reaps a descendant that outlives a clean root exit', { t
   assert.equal(result.success, true);
   const pid = recordedPid(armed);
   assert.ok(pid, 'descendant never armed');
-  assert.equal(await outlives(pid), false, 'descendant outlived the run');
+  assert.equal(await outlives(armed), false, 'descendant outlived the run');
 });
 
 test('single conversion stop forces a root that survives the soft stop', { timeout: 60000 }, async t => {
@@ -432,7 +438,7 @@ test('single conversion stop forces a root that survives the soft stop', { timeo
   assert.equal(result.success, false);
   const pid = recordedPid(armed);
   assert.ok(pid, 'root never armed');
-  assert.equal(await outlives(pid), false, 'root outlived the run');
+  assert.equal(await outlives(armed), false, 'root outlived the run');
 });
 
 test('single conversion never reads metrics through a child-made symbolic link', { timeout: 60000 }, async t => {
@@ -463,7 +469,7 @@ test('single conversion reaps a grandchild whose detached parent exited first', 
   assert.equal(result.success, true);
   const pid = recordedPid(armed);
   assert.ok(pid, 'grandchild never armed');
-  assert.equal(await outlives(pid), false, 'grandchild outlived the run');
+  assert.equal(await outlives(armed), false, 'grandchild outlived the run');
 });
 
 // On Windows the middle process sits in the root's own Node job, which lets
@@ -474,7 +480,7 @@ test('single conversion reaps a grandchild whose parent in the root\'s Node job 
   assert.equal(result.success, true);
   const pid = recordedPid(armed);
   assert.ok(pid, 'grandchild never armed');
-  assert.equal(await outlives(pid), false, 'grandchild outlived the run');
+  assert.equal(await outlives(armed), false, 'grandchild outlived the run');
 });
 
 const windowsOnly = process.platform !== 'win32' && 'only Windows runs owned processes through the launcher';
@@ -498,7 +504,7 @@ test('a Windows harness that dies mid-run takes its owned tree with it', { skip:
   assert.ok(await armedWithin(armed), 'descendant never armed');
   child.kill();
   await closed;
-  assert.equal(await outlives(recordedPid(armed)), false, 'descendant outlived its harness');
+  assert.equal(await outlives(armed), false, 'descendant outlived its harness');
 });
 
 test('a Windows run refuses to start without the owned-process launcher', { skip: windowsOnly, timeout: 60000 }, async t => {
@@ -538,7 +544,7 @@ test('the owned-process launcher ends what its command left running', { skip: wi
   assert.equal((await launched([process.execPath, '-e', command]).done).code, 0);
   const pid = recordedPid(armed);
   assert.ok(pid, 'descendant never armed');
-  assert.equal(await outlives(pid), false, 'descendant outlived the launcher');
+  assert.equal(await outlives(armed), false, 'descendant outlived the launcher');
 });
 
 test('closing the owned-process launcher stdin ends its command and everything it started', { skip: windowsOnly, timeout: 60000 }, async t => {
@@ -549,6 +555,23 @@ test('closing the owned-process launcher stdin ends its command and everything i
   assert.ok(await armedWithin(rootArmed) && await armedWithin(armed), 'command or descendant never armed');
   launcher.stdin.destroy();
   assert.notEqual((await done).code, 0);
-  assert.equal(await outlives(recordedPid(rootArmed)), false, 'command outlived the stop');
-  assert.equal(await outlives(recordedPid(armed)), false, 'descendant outlived the stop');
+  assert.equal(await outlives(rootArmed), false, 'command outlived the stop');
+  assert.equal(await outlives(armed), false, 'descendant outlived the stop');
+});
+
+// The harness's last resort: the launcher killed while its stdin stays open,
+// so nothing but the job closing with it can end the command.
+test('killing the owned-process launcher ends its command and everything it started', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const [rootArmed, armed] = pidDirectory(t, 'root.pid', 'descendant.pid');
+  const command = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`${publishPid(armed)}setInterval(()=>{},1000);`)}],{stdio:'ignore',detached:true}).unref();${publishPid(rootArmed)}setInterval(()=>{},1000);`;
+  const { launcher, done } = launched([process.execPath, '-e', command]);
+  // A command that survives keeps the launcher's stderr open, so wait for the
+  // exit, not the close; `done` still reports a launcher that failed to start.
+  const exited = new Promise(resolve => launcher.once('exit', resolve));
+  t.after(() => { launcher.kill(); });
+  assert.ok(await armedWithin(rootArmed) && await armedWithin(armed), 'command or descendant never armed');
+  launcher.kill();
+  await Promise.race([exited, done]);
+  assert.equal(await outlives(rootArmed), false, 'command outlived the killed launcher');
+  assert.equal(await outlives(armed), false, 'descendant outlived the killed launcher');
 });
