@@ -502,6 +502,8 @@ export function ownedRunPath(environment = process.env) {
  * How to launch one owned process: under /usr/bin/time -l on macOS (for its
  * peak memory), inside the launcher's job on Windows, and as given elsewhere.
  * The launcher's stdin is its stop request, so it is a pipe the stop closes.
+ * Spawned without `detached`, the launcher also sits in Node's own job, so a
+ * harness that dies takes it, and with it the whole job, along.
  */
 export function ownedLaunch(command, args, { platform = process.platform, environment = process.env } = {}) {
   if (platform === 'darwin') return { command: '/usr/bin/time', args: ['-l', command, ...args], stdin: 'ignore' };
@@ -509,74 +511,48 @@ export function ownedLaunch(command, args, { platform = process.platform, enviro
   return { command, args, stdin: 'ignore' };
 }
 
-// Windows process creation times, in 100 ns ticks since 1601 (a FILETIME).
-const windowsFileTime = ms => (BigInt(ms) + 11644473600000n) * 10000n;
-// The root's stand-in creation is read once spawn() returns, so it can lag the
-// root's real creation (a descheduled thread, a slow process start), and
-// Windows stamps processes from a clock that may tick only every ~16 ms. A
-// direct child of the root can therefore carry an earlier stamp than the
-// stand-in, and a second covers that. Further down, each stamp is compared with
-// its parent's from the same clock, which assumes the clock is not stepped back
-// in between; a child it misses is left running, never an unrelated process
-// killed.
-const WINDOWS_ROOT_CREATION_SLACK = 1000n * 10000n;
-
 /**
- * Stop one owned process group, once: SIGTERM, then SIGKILL after the grace.
- * POSIX signals the whole group. Windows has none, and taskkill /t walks only
- * from a live root, so once the root is gone its descendants come from the
- * process table, where an orphan keeps its dead parent's id (one whose own
- * parent died too is out of reach). Windows never clears that id, and pids are
- * reused, so a process counts only if it was created at or after the parent it
- * names (for the root, when this stopper is made right after the spawn, less a
- * second). Console processes refuse a soft taskkill, so the forced one follows
- * whenever the root may still be running or the walk found descendants. stop()
- * returns one promise for every caller, settled once any forced kill is sent.
- * `sleep`, `platform` and `execFile` are for tests.
+ * Stop one owned process group, once. POSIX signals the whole group: SIGTERM,
+ * then SIGKILL after the grace. On Windows the child is the launcher from
+ * ownedLaunch, which holds the group in a job: closing its stdin asks it to
+ * end the job, and it exits only once the job is empty. A launcher still
+ * running after the grace is killed through Node's own handle, which closes
+ * the job and so ends the rest. No pid is ever named, and nothing is done once
+ * Node has seen the launcher exit, since its pid may by then be anyone's.
+ * stop() returns one promise for every caller: on POSIX it settles once the
+ * forced signal is sent, on Windows once the launcher exits (at most a second
+ * grace after the kill). `sleep` and `platform` are for tests.
  */
 export function createOwnedGroupStopper(child, {
   killGraceMs,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   platform = process.platform,
-  execFile = execFileSync,
 }) {
-  let rootSettled = false, stopping = null;
-  const launchedAt = windowsFileTime(Date.now());
-  child.once('close', () => { rootSettled = true; });
-  child.once('error', () => { rootSettled = true; });
-  const windowsCleanupPids = new Set();
+  let stopping = null;
+  // Node keeps the child's handle, and with it the pid, until it reports the exit.
+  const held = () => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
   const signal = name => {
     try {
-      if (platform === 'win32') {
-        const force = name === 'SIGKILL' ? ['/f'] : [];
-        try {
-          execFile('taskkill', ['/pid', String(child.pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) });
-          windowsCleanupPids.add(child.pid);
-          return true;
-        } catch {
-          if (windowsCleanupPids.size === 0) {
-            const rows = execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { $created = if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }; Write-Output ('{0} {1} {2}' -f $_.ProcessId,$_.ParentProcessId,$created) }"], { encoding: 'utf8', timeout: 5000 }).split('\n').map(line => line.trim().match(/^(\d+) (\d+) (\d+)$/)).filter(Boolean).map(([, pid, parentPid, created]) => [Number(pid), Number(parentPid), BigInt(created)]);
-            // Each owned pid with its creation; the root's stand-in is the launch.
-            const owned = new Map([[child.pid, launchedAt]]); let changed = true;
-            while (changed) { changed = false; for (const [pid, parentPid, created] of rows) if (owned.has(parentPid) && !owned.has(pid) && created + (parentPid === child.pid ? WINDOWS_ROOT_CREATION_SLACK : 0n) >= owned.get(parentPid)) { owned.set(pid, created); changed = true; } }
-            owned.delete(child.pid); for (const pid of owned.keys()) windowsCleanupPids.add(pid);
-          }
-          let sent = false;
-          for (const pid of windowsCleanupPids) try { execFile('taskkill', ['/pid', String(pid), '/t', ...force], { stdio: 'ignore', timeout: Math.max(1000, killGraceMs) }); sent = true; } catch { /* Already gone. */ }
-          return sent;
-        }
-      }
       process.kill(-child.pid, name);
       return true;
     } catch { return false; }
   };
   const stop = () => {
     if (stopping) return stopping;
-    const softSignalSent = signal('SIGTERM');
-    const windowsNeedsForcedCleanup = platform === 'win32' && (!rootSettled || windowsCleanupPids.size > 0);
+    if (platform === 'win32') {
+      if (!held()) return (stopping = Promise.resolve());
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.stdin?.destroy();
+      // A grace the sleep rejects ends at once, and never fails the stop.
+      const grace = () => sleep(killGraceMs).then(() => {}, () => {});
+      const kill = () => { try { if (held()) child.kill('SIGKILL'); } catch { /* Its job closes when it goes. */ } };
+      // The killed launcher's exit means its job is closed; a second grace bounds that wait.
+      stopping = Promise.race([exited, grace().then(kill).then(() => held() ? Promise.race([exited, grace()]) : undefined)]);
+      return stopping;
+    }
     // A grace the sleep rejects escalates at once.
     const kill = () => { signal('SIGKILL'); };
-    stopping = (softSignalSent || windowsNeedsForcedCleanup) ? sleep(killGraceMs).then(kill, kill) : Promise.resolve();
+    stopping = signal('SIGTERM') ? sleep(killGraceMs).then(kill, kill) : Promise.resolve();
     return stopping;
   };
   return { stop };
@@ -596,11 +572,10 @@ export async function runBoundedProcess({
   abortSignal = null,
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
+  const launch = ownedLaunch(command, args);
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
   if (symlinksBelow(outputDirectory).length > 0) throw Error('Owned output directory must not contain symbolic links');
-  const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
-  const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
-  const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(launch.command, launch.args, { cwd, env, detached: process.platform !== 'win32', stdio: [launch.stdin, 'pipe', 'pipe'] });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
   let stopRequested = false, sampledTreePeakKiB = null, observedChildren = null;
   const group = createOwnedGroupStopper(child, { killGraceMs });
