@@ -168,6 +168,77 @@ test('single conversion refuses a planted request path before launch',async()=>{
   assert.equal(readFileSync(target,'utf8'),'outside');assert.equal(existsSync(launched),false);
  }finally{rmSync(dir,{recursive:true,force:true});rmSync(outside,{recursive:true,force:true});}
 });
+import { drainChildOutput } from './performance-shared.mjs';
+import { PassThrough } from 'node:stream';
+// A holder that leaves the owned group (detached is setsid) keeps the run's
+// stdout and stderr open. It writes one marker before it publishes its pid, never
+// writes again, and outlives any guard, so only the test's finally ends it. The
+// runner runs `after` once the holder is armed.
+const escapedHolder=(armed,after)=>{const holder=`const fs=require('node:fs');fs.writeSync(1,'escaped-marker\\n');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setTimeout(()=>{},120000)`;return `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(holder)}],{detached:true,stdio:['ignore','inherit','inherit']}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;};
+// Waiting for the holder's EOF would hang, so the harness runs in a subprocess
+// whose timeout turns that into a failure. With `abort`, the run is aborted once
+// the holder is armed. The holder's state is read the moment the harness resolves.
+const heldPipesRun=(harness,dir,body,armed,abort)=>JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`import {run} from ${JSON.stringify(new URL('./performance-baseline.mjs',import.meta.url).href)};import {runBoundedProcess} from ${JSON.stringify(new URL('./performance-shared.mjs',import.meta.url).href)};import fs from 'node:fs';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
+const [harness,dir,body,armed,abort]=process.argv.slice(1),runner=join(dir,'runner');fs.writeFileSync(runner,'#!/usr/bin/env node\\n'+body);fs.chmodSync(runner,0o700);
+const controller=new AbortController();if(abort==='abort'){const t=setInterval(()=>{if(fs.existsSync(armed)){clearInterval(t);controller.abort();}},5);}
+let result,log;
+if(harness==='run'){result=await run(runner,dir,{output_path:join(dir,'result')},join(dir,'run'),{timeoutMs:30000,killGraceMs:200,abortSignal:controller.signal});log=fs.readFileSync(join(dir,'run.stdout'),'utf8');}
+else{const output=join(dir,'output');fs.mkdirSync(output);result=await runBoundedProcess({command:runner,outputDirectory:output,timeoutMs:30000,killGraceMs:200,logLimitBytes:4096,storageBudgetBytes:1048576,abortSignal:controller.signal});log=result.stdout.toString();}
+let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',fs.readFileSync(armed,'utf8')],{encoding:'utf8'}).trim();}catch{/* Gone. */}
+process.stdout.write(JSON.stringify({success:result.success,stdio_error:result.stdio_error,exit_code:result.exit_code,timed_out:result.timed_out,aborted:result.aborted,log,holder_state:state}));`,harness,dir,body,armed,abort?'abort':'exit'],{encoding:'utf8',timeout:60000,killSignal:'SIGKILL'}));
+const resistTerm="process.on('SIGTERM',()=>{});setInterval(()=>{},10);";
+for(const [harness,name,after,abort] of [['run','single conversion',"fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));",false],['run','single conversion',resistTerm,true],['bounded','bounded process','',false],['bounded','bounded process',resistTerm,true]]){
+ const label=abort?'aborted':'root exited';
+ test(`${name} stops waiting for output pipes held outside the owned group (${label})`,{skip:harness==='bounded'&&process.platform==='win32'},()=>{
+  const dir=mkdtempSync(join(tmpdir(),'goop-bench-held-')),pidDir=mkdtempSync(join(tmpdir(),'goop-bench-held-pid-')),armed=join(pidDir,'holder.pid');
+  try{
+   const result=heldPipesRun(harness,dir,escapedHolder(armed,after),armed,abort);
+   // The holder is still alive, so the harness resolved without its EOF.
+   assert.ok(result.holder_state!==''&&!/[ZE]/.test(result.holder_state),`holder state '${result.holder_state}'`);
+   assert.equal(result.success,false);assert.match(result.stdio_error??'',/output pipes/i);assert.match(result.log,/escaped-marker/);
+   if(abort)assert.equal(result.aborted,true);else{assert.equal(result.exit_code,0);assert.equal(result.timed_out,false);}
+  }finally{
+   const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}
+   rmSync(dir,{recursive:true,force:true});rmSync(pidDir,{recursive:true,force:true});
+  }
+ });
+}
+test('a pipe holder inside the owned group is reaped, not reported as held',async()=>{
+ // The runner holds the pipes and survives TERM, so only the reap's SIGKILL ends
+ // it. The drain starts after that reap and sees its EOF.
+ for(const harness of ['run','bounded']){
+  const dir=mkdtempSync(join(tmpdir(),'goop-bench-group-held-')),resisting=join(dir,'resisting'),runner=join(dir,'runner'),controller=new AbortController();
+  const poll=setInterval(()=>{if(existsSync(resisting)){clearInterval(poll);controller.abort();}},5);
+  try{
+   writeFileSync(runner,`#!/usr/bin/env node\nprocess.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(resisting)},'1');setInterval(()=>{},10);`);chmodSync(runner,0o700);
+   let result;
+   if(harness==='run')result=await run(runner,dir,{output_path:join(dir,'result')},join(dir,'run'),{timeoutMs:30000,killGraceMs:1000,abortSignal:controller.signal});
+   else{const output=join(dir,'output');mkdirSync(output);result=await runBoundedProcess({command:runner,outputDirectory:output,timeoutMs:30000,killGraceMs:1000,logLimitBytes:1024,storageBudgetBytes:1024*1024,abortSignal:controller.signal});}
+   assert.equal(result.aborted,true,harness);assert.equal(result.stdio_error,null,harness);
+  }finally{clearInterval(poll);rmSync(dir,{recursive:true,force:true});}
+ }
+});
+test('clean single conversion and bounded runs record no held pipes and keep trailing output',async()=>{
+ // /usr/bin/time writes its report just before the root exits, so the report is
+ // still in the pipe when the exit arrives and survives only a drain to EOF.
+ const result=await fakeRunner("require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));",{killGraceMs:200});
+ assert.equal(result.success,true);assert.equal(result.stdio_error,null);assert.ok(result.time_peak_bytes>0);
+ const output=mkdtempSync(join(tmpdir(),'goop-process-clean-'));
+ try{
+  const bounded=await runBoundedProcess({command:process.execPath,args:['-e',''],outputDirectory:output,timeoutMs:30000,killGraceMs:200,logLimitBytes:1024*1024,storageBudgetBytes:1024*1024});
+  assert.equal(bounded.success,true);assert.equal(bounded.stdio_error,null);assert.ok(bounded.time_peak_bytes>0);
+ }finally{rmSync(output,{recursive:true,force:true});}
+});
+test('output drain gives a pending close one more turn and destroys pipes still held',async()=>{
+ const pending=[new PassThrough(),new PassThrough()],drained=drainChildOutput(pending,5);
+ // Due in the same timers phase as the drain's deadline, and run just after it.
+ setTimeout(()=>{for(const stream of pending)stream.destroy();},5);
+ assert.equal(await drained,null);
+ const held=[new PassThrough(),new PassThrough()];
+ assert.match(await drainChildOutput(held,5),/output pipes/i);assert.ok(held.every(stream=>stream.destroyed));
+ const ended=new PassThrough();ended.resume();ended.end();await new Promise(resolve=>ended.once('end',resolve));
+ assert.equal(await drainChildOutput([ended,null],60000),null);
+});
 test('single conversion treats metrics that are not an object as invalid',async()=>{
  for(const text of ['null','5','"done"','[1,2]']){
   const result=await fakeRunner(`require('node:fs').writeFileSync(process.argv[4],${JSON.stringify(text)});`);

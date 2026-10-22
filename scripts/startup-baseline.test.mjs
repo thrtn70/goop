@@ -27,6 +27,59 @@ test('abort kills a TERM-resistant startup process before returning', async () =
   assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);
   assert.throws(()=>process.kill(result.pid,0),{code:'ESRCH'});
 });
+import { readFileSync } from 'node:fs';
+const readyApp = "fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10);";
+for (const [label, after, abort] of [['root exited', '', false], ['ready', readyApp, false], ['aborted', "process.on('SIGTERM',()=>{});setInterval(()=>{},10);", true]]) {
+  test(`startup stops waiting for output pipes held outside the owned group (${label})`, () => {
+    const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-')), armed = join(root, 'holder.pid');
+    // The holder leaves the owned group (detached is setsid) and keeps stdout and
+    // stderr open. It writes one marker before it publishes its pid, never writes
+    // again, and outlives the guard, so only the finally below ends it.
+    const holder = `const fs=require('node:fs');fs.writeSync(1,'escaped-marker\\n');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setTimeout(()=>{},120000)`;
+    const app = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(holder)}],{detached:true,stdio:['ignore','inherit','inherit']}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;
+    try {
+      writeFileSync(join(root, 'app.cjs'), app);
+      // Waiting for the holder's EOF would hang, so the run happens in a
+      // subprocess whose timeout turns that into a failure. The holder's state is
+      // read the moment runStartup resolves.
+      const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `import {runStartup} from ${JSON.stringify(new URL('./startup-baseline.mjs', import.meta.url).href)};import fs from 'node:fs';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
+const [root,armed,abort]=process.argv.slice(1),controller=new AbortController();
+if(abort==='abort'){const t=setInterval(()=>{if(fs.existsSync(armed)){clearInterval(t);controller.abort();}},5);}
+const result=await runStartup({binary:process.execPath,args:[join(root,'app.cjs')],directory:join(root,'run'),settings:{},readinessTimeoutMs:30000,idleMs:30,killGraceMs:200,abortSignal:controller.signal});
+let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',fs.readFileSync(armed,'utf8')],{encoding:'utf8'}).trim();}catch{/* Gone. */}
+process.stdout.write(JSON.stringify({success:result.success,stdio_error:result.stdio_error,exit_code:result.exit_code,timed_out:result.timed_out,aborted:result.aborted,ready:result.marker!==null&&result.idle_tree_rss_KiB!==null,log:fs.readFileSync(join(root,'run','stdout.log'),'utf8'),holder_state:state}));`, root, armed, abort ? 'abort' : 'exit'], { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL' }));
+      // The holder is still alive, so runStartup resolved without its EOF.
+      assert.ok(result.holder_state !== '' && !/[ZE]/.test(result.holder_state), `holder state '${result.holder_state}'`);
+      assert.equal(result.success, false);
+      assert.match(result.stdio_error ?? '', /output pipes/i);
+      assert.match(result.log, /escaped-marker/);
+      if (abort) assert.equal(result.aborted, true);
+      else assert.equal(result.timed_out, false);
+      // A ready app's sample fails only because of the held pipes.
+      if (label === 'ready') assert.equal(result.ready, true);
+      if (label === 'root exited') assert.equal(result.exit_code, 0);
+    } finally {
+      try { process.kill(Number(readFileSync(armed, 'utf8')), 'SIGKILL'); } catch { /* Never armed or already gone. */ }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+test('clean startup records no held pipes', async () => {
+  const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)");
+  assert.equal(result.success, true);
+  assert.equal(result.stdio_error, null);
+});
+test('a startup binary that cannot launch returns without waiting for readiness', { timeout: 20000 }, async () => {
+  // A failed spawn emits error and close but never exit.
+  const root = mkdtempSync(join(tmpdir(), 'goop-startup-missing-'));
+  try {
+    const result = await runStartup({ binary: join(root, 'missing'), directory: join(root, 'run'), settings: {}, readinessTimeoutMs: 30000, idleMs: 30, killGraceMs: 30 });
+    assert.equal(result.success, false);
+    assert.match(result.spawn_error, /ENOENT/);
+    assert.equal(result.timed_out, false);
+    assert.equal(result.stdio_error, null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 test('invalid and failed readiness excluded from medians', async () => {
   const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:-1,pid:process.pid}));setInterval(()=>{},10)");
   assert.equal(result.success, false);

@@ -4,7 +4,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeRss, summarize, directoryBytes, ownedSymlinks } from './performance-baseline.mjs';
-import { withTerminationSignals } from './performance-shared.mjs';
+import { drainChildOutput, withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -43,10 +43,14 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const start = performance.now();
   const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
   const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...environment, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
-  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false;
-  const closed = new Promise(resolve => {
+  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false, stdioError = null;
+  // The root's exit, not its pipes' EOF: a process that left the group can hold
+  // the pipes open for as long as it lives. A failed spawn emits close, not exit.
+  const rootExited = new Promise(resolve => {
+    const settle = (code, signal) => { if (exited) return; exited = true; exitCode = code; exitSignal = signal; resolve(); };
     child.once('error', error => { spawnError = error.message; });
-    child.once('close', (code, signal) => { exited = true; exitCode = code; exitSignal = signal; resolve(); });
+    child.once('exit', settle);
+    child.once('close', settle);
   });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, budgetExceeded = false;
   const retain = (buffer, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([buffer,kept]); };
@@ -110,7 +114,8 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     // a parent that handles TERM. Each run owns its detached process group.
     await sleep(killGraceMs);
     signal('SIGKILL');
-    await closed;
+    await rootExited;
+    stdioError = await drainChildOutput([child.stdout, child.stderr], killGraceMs);
   }
   try {
     budgetExceeded ||= directoryBytes(directory) + retainedLogBytes > budgetBytes;
@@ -120,6 +125,8 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const createdSymlinks=ownedSymlinks(directory);let outputError=createdSymlinks.length?`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`:null;
   for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
   const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: performance.now() - start };
+  result.stdio_error = stdioError;
+  if (stdioError !== null) result.success = false;
   writeFileSync(join(directory, 'stdout.log'), stdout);
   writeFileSync(join(directory, 'stderr.log'), stderr);
   writeFileSync(join(directory, 'sample.json'), JSON.stringify(result, null, 2));

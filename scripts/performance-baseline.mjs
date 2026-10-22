@@ -4,7 +4,7 @@ import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,drainChildOutput,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -56,7 +56,9 @@ export async function run(binary,sidecars,request,stem,options={}) {
  },100);
  const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
  const start=performance.now();let code;
- try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
+ // The root's exit, not its pipes' EOF: a process that left the group can hold
+ // the pipes open for as long as it lives.
+ try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('exit',res);});}
  finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
   const lifetimeMs=performance.now()-start;
  // A clean root exit is not a clean sample if owned descendants remain. Reap
@@ -64,6 +66,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  // and every check below sees a tree the child can no longer change.
  stop();
  if(killEscalation)await killEscalation;else clearTimeout(killTimer);
+ const stdioError=await drainChildOutput([child.stdout,child.stderr],killGraceMs);
  // The child shared this directory, so whatever it left at an evidence path is
  // refused rather than followed or opened, and the refusal fails the sample.
  let evidenceError=null;
@@ -110,6 +113,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
  const evidenceFailed=message=>{sample.evidence_error??=message;sample.success=false;};
  sample.evidence_error=null;if(evidenceError!==null)evidenceFailed(evidenceError);
+ sample.stdio_error=stdioError;if(stdioError!==null)sample.success=false;
  const saveSample=write=>{try{write(`${stem}.sample.json`,JSON.stringify(sample,null,2));}catch(error){evidenceFailed(error.message);}};
  saveSample(createEvidenceFile);
  // The request output is created uniquely inside this suite. Preserve measurements
