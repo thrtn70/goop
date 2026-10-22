@@ -73,7 +73,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const sample = () => {
     try {
       const snapshot = readSnapshot();
-      // close events cannot run while ps blocks. Validate liveness in this
+      // exit events cannot run while ps blocks. Validate liveness in this
       // very snapshot instead of accepting a missing root as zero idle RSS.
       const root = snapshot.trim().split('\n').map(line => line.trim().split(/\s+/)).find(row => Number(row[0]) === child.pid);
       if (!root || !Number.isFinite(Number(root[2])) || Number(root[2]) <= 0) return null;

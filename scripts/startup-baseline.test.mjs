@@ -29,9 +29,12 @@ test('abort kills a TERM-resistant startup process before returning', async () =
 });
 import { readFileSync } from 'node:fs';
 const readyApp = "fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10);";
-for (const [label, after, abort] of [['root exited', '', false], ['ready', readyApp, false], ['aborted', "process.on('SIGTERM',()=>{});setInterval(()=>{},10);", true]]) {
+for (const [label, abort] of [['root exited', false], ['ready', false], ['aborted', true]]) {
   test(`startup stops waiting for output pipes held outside the owned group (${label})`, () => {
-    const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-')), armed = join(root, 'holder.pid');
+    const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-')), armed = join(root, 'holder.pid'), resisting = join(root, 'resisting');
+    // An aborted app survives TERM and says so, so the abort lands only once the
+    // reap's SIGKILL is the one thing that can end it.
+    const after = label === 'ready' ? readyApp : abort ? `process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(resisting)},'1');setInterval(()=>{},10);` : '';
     // The holder leaves the owned group (detached is setsid) and keeps stdout and
     // stderr open. It writes one marker before it publishes its pid, never writes
     // again, and outlives the guard, so only the finally below ends it.
@@ -43,11 +46,11 @@ for (const [label, after, abort] of [['root exited', '', false], ['ready', ready
       // subprocess whose timeout turns that into a failure. The holder's state is
       // read the moment runStartup resolves.
       const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `import {runStartup} from ${JSON.stringify(new URL('./startup-baseline.mjs', import.meta.url).href)};import fs from 'node:fs';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
-const [root,armed,abort]=process.argv.slice(1),controller=new AbortController();
-if(abort==='abort'){const t=setInterval(()=>{if(fs.existsSync(armed)){clearInterval(t);controller.abort();}},5);}
+const [root,armed,abortWhen]=process.argv.slice(1),controller=new AbortController();
+if(abortWhen){const t=setInterval(()=>{if(fs.existsSync(abortWhen)){clearInterval(t);controller.abort();}},5);}
 const result=await runStartup({binary:process.execPath,args:[join(root,'app.cjs')],directory:join(root,'run'),settings:{},readinessTimeoutMs:30000,idleMs:30,killGraceMs:200,abortSignal:controller.signal});
 let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',fs.readFileSync(armed,'utf8')],{encoding:'utf8'}).trim();}catch{/* Gone. */}
-process.stdout.write(JSON.stringify({success:result.success,stdio_error:result.stdio_error,exit_code:result.exit_code,timed_out:result.timed_out,aborted:result.aborted,ready:result.marker!==null&&result.idle_tree_rss_KiB!==null,log:fs.readFileSync(join(root,'run','stdout.log'),'utf8'),holder_state:state}));`, root, armed, abort ? 'abort' : 'exit'], { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL' }));
+process.stdout.write(JSON.stringify({success:result.success,stdio_error:result.stdio_error,exit_code:result.exit_code,timed_out:result.timed_out,aborted:result.aborted,ready:result.marker!==null&&result.idle_tree_rss_KiB!==null,log:fs.readFileSync(join(root,'run','stdout.log'),'utf8'),holder_state:state}));`, root, armed, abort ? resisting : ''], { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL' }));
       // The holder is still alive, so runStartup resolved without its EOF.
       assert.ok(result.holder_state !== '' && !/[ZE]/.test(result.holder_state), `holder state '${result.holder_state}'`);
       assert.equal(result.success, false);

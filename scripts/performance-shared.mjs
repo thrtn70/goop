@@ -339,8 +339,8 @@ export function replaceEvidenceFile(path, data) {
  * Give a reaped child's output pipes `graceMs` to reach EOF. A process that left
  * the owned group can hold them open for as long as it lives, so after the grace
  * and one more event-loop turn (which reads an EOF that is already pending) both
- * are destroyed. Resolves null once both ended, or the error that records them
- * as held.
+ * are destroyed. Resolves null once both ended, or a message recording them as
+ * held.
  */
 export function drainChildOutput(streams, graceMs) {
   const open = streams.filter(stream => stream && !stream.readableEnded && !stream.closed);
@@ -353,7 +353,7 @@ export function drainChildOutput(streams, graceMs) {
       settled = true;
       clearTimeout(deadline);
       if (!drained) for (const stream of open) stream.destroy();
-      resolveDrain(drained ? null : 'A process outside the owned group still held the output pipes after the reap');
+      resolveDrain(drained ? null : 'The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group');
     };
     const settleIfEnded = () => { if (ended()) settle(true); };
     for (const stream of open) { stream.once('end', settleIfEnded); stream.once('close', settleIfEnded); }
@@ -572,17 +572,19 @@ export async function runBoundedProcess({
   clearInterval(monitor);
   clearTimeout(timeout);
   abortSignal?.removeEventListener('abort', abort);
-  try {
-    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
-  } catch {
-    budgetExceeded = true;
-  }
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
   stop();
   if (killEscalation) await killEscalation;
   else clearTimeout(killTimer);
   const stdioError = await drainChildOutput([child.stdout, child.stderr], killGraceMs);
+  // Counted after the reap and the drain, so whatever the group wrote during its
+  // kill grace, and the output read since the exit, are included.
+  try {
+    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
+  } catch {
+    budgetExceeded = true;
+  }
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
