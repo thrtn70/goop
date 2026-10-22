@@ -320,6 +320,21 @@ export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetByt
   }
 }
 
+/**
+ * Write one harness evidence file in a directory the measured child shares.
+ * Exclusive creation never follows a link, never opens a FIFO, and refuses
+ * anything already at the path, so a child can neither stall nor redirect it.
+ */
+export function createEvidenceFile(path, data) {
+  writeFileSync(path, data, { flag: 'wx' });
+}
+
+/** Rewrite an evidence file the harness owns: drop the entry unopened (a directory is refused), then create it anew. */
+export function replaceEvidenceFile(path, data) {
+  rmSync(path, { force: true });
+  createEvidenceFile(path, data);
+}
+
 export async function withTerminationSignals(operation) {
   const controller = new AbortController();
   let receivedSignal = null;

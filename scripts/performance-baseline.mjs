@@ -1,10 +1,10 @@
 import {spawn,execFileSync} from 'node:child_process';
-import {readFileSync,writeFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
+import {readFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -32,9 +32,11 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
+ // Tests inject a failing symbolic-link scan here; no caller passes one.
+ const {listSymlinks=ownedSymlinks}=options;
  const existingEntries=new Set(readdirSync(directory));
- const initialSymlinks=new Set(ownedSymlinks(directory));
- writeFileSync(`${stem}.request.json`,JSON.stringify(request,null,2));
+ const initialSymlinks=new Set(listSymlinks(directory));
+ createEvidenceFile(`${stem}.request.json`,JSON.stringify(request,null,2));
  const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
  const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
  const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
@@ -62,7 +64,10 @@ export async function run(binary,sidecars,request,stem,options={}) {
  // and every check below sees a tree the child can no longer change.
  stop();
  if(killEscalation)await killEscalation;else clearTimeout(killTimer);
-  writeFileSync(`${stem}.stdout`,stdout);writeFileSync(`${stem}.stderr`,stderr);
+ // The child shared this directory, so whatever it left at an evidence path is
+ // refused rather than followed or opened, and the refusal fails the sample.
+ let evidenceError=null;
+ for(const [path,data] of [[`${stem}.stdout`,stdout],[`${stem}.stderr`,stderr]])try{createEvidenceFile(path,data);}catch(error){evidenceError??=error.message;}
  let metrics={success:false,error:'No metrics produced'};
  const metricsPath=`${stem}.metrics.json`;
  // One descriptor for the check and the read, so the child can neither redirect
@@ -73,14 +78,17 @@ export async function run(binary,sidecars,request,stem,options={}) {
   metricsFd=openSync(metricsPath,constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0));
   const metricsStats=fstatSync(metricsFd);
   if(metricsStats.isFile()&&metricsStats.nlink===1&&metricsStats.size<Math.min(1024*1024,budgetBytes/4)) {
-   try{metrics=JSON.parse(readFileSync(metricsFd));}catch{metrics.error='Invalid metrics JSON';}
+   try{const parsed=JSON.parse(readFileSync(metricsFd));if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Metrics must be an object');metrics=parsed;}catch{metrics.error='Invalid metrics JSON';}
   }
  } catch {/* Missing, a link, or not openable: no metrics. */}
  finally{if(metricsFd!==null)closeSync(metricsFd);}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
  const verificationStart=performance.now();
- const createdSymlinks=ownedSymlinks(directory).filter(path=>!initialSymlinks.has(path));
- let outputError=createdSymlinks.length?`Owned conversion created symbolic-link output: ${createdSymlinks.map(path=>basename(path)).join(', ')}`:null;
+ // A scan that cannot read the tree fails the sample instead of rejecting the
+ // run and skipping its cleanup.
+ let createdSymlinks=[],outputError=null;
+ try{createdSymlinks=listSymlinks(directory).filter(path=>!initialSymlinks.has(path));}catch(error){outputError=`Owned output could not be checked for symbolic links: ${error.message}`;}
+ if(createdSymlinks.length)outputError=`Owned conversion created symbolic-link output: ${createdSymlinks.map(path=>basename(path)).join(', ')}`;
  for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
  let verification={checked:false,...(outputError?{error:outputError}:{})};
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput) {
@@ -100,7 +108,10 @@ export async function run(binary,sidecars,request,stem,options={}) {
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput)try{validateEffectiveExecution(metrics.result?.video_execution,request);}catch(error){metrics.success=false;verification={...verification,execution_error:error.message};}
  const timePeak=stderr.toString().match(/(\d+)\s+maximum resident set size/);
  const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
- writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
+ const evidenceFailed=message=>{sample.evidence_error??=message;sample.success=false;};
+ sample.evidence_error=null;if(evidenceError!==null)evidenceFailed(evidenceError);
+ const saveSample=write=>{try{write(`${stem}.sample.json`,JSON.stringify(sample,null,2));}catch(error){evidenceFailed(error.message);}};
+ saveSample(createEvidenceFile);
  // The request output is created uniquely inside this suite. Preserve measurements
  // before dropping only that owned media when it caused the storage limit.
  // The group is already reaped, so a cleanup failure is an obstacle the child
@@ -113,7 +124,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
    try{rmSync(join(directory,entry.name),{recursive:true});sample.removed_staging_directories++;}catch(error){cleanupFailed(error);}
   }
  }}catch(error){cleanupFailed(error);}
- writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
+ saveSample(replaceEvidenceFile);
  return sample;
 }
 async function main(abortSignal){
@@ -125,8 +136,8 @@ async function main(abortSignal){
  const cases=[['png-jpeg',inputs[0],'jpeg',null],['heic-jpeg',inputs[1],'jpeg',null],['mp4-mp3',inputs[2],'mp3',null],['mp4-h264',inputs[2],'mp4',null,'balanced'],['mp4-quality',inputs[2],'mp4',{kind:'quality',value:50}],['mp4-compress',inputs[2],'mp4',{kind:'target_size_bytes',value:104858}],['malformed',inputs[3],'jpeg',null]];
  if(options.raw&&existsSync(options.raw))cases.push(['raw-jpeg',resolve(options.raw),'jpeg',null]);
  const sources=Object.fromEntries([...new Set(cases.map(c=>c[1]))].map(path=>[path,{sha256:hash(path),bytes:statSync(path).size}]));
- writeFileSync(join(out,'identity.json'),JSON.stringify({binary,binary_sha256:hash(binary),node:process.version,sources,repeat,warmup:1,label:'Fresh process with warm filesystem cache',head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()},null,2));
- const summary={};for(const [name,input,target,compress,quality] of cases){const samples=[];for(let i=-1;i<repeat;i++){const stem=join(out,`${name}-${i<0?'warmup':i}`);const request={input_path:input,output_path:join(out,outputName(name,i,target==='jpeg'?'jpg':target)),target,quality_preset:quality??null,resolution_cap:null,gif_options:null,compress_mode:compress,batch_id:null,metadata_policy:'preserve',subtitle:null};const sample=await run(binary,sidecars,request,stem,{abortSignal,environment:runtimeSidecarEnvironment(sidecars)});if(sample.budget_exceeded)throw Error("Suite storage budget exceeded; owned oversized media removed after recording metrics");if(i>=0)samples.push(sample);}summary[name]=summarize(samples);writeFileSync(join(out,'summary.json'),JSON.stringify(summary,null,2));}
+ createEvidenceFile(join(out,'identity.json'),JSON.stringify({binary,binary_sha256:hash(binary),node:process.version,sources,repeat,warmup:1,label:'Fresh process with warm filesystem cache',head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()},null,2));
+ const summary={};for(const [name,input,target,compress,quality] of cases){const samples=[];for(let i=-1;i<repeat;i++){const stem=join(out,`${name}-${i<0?'warmup':i}`);const request={input_path:input,output_path:join(out,outputName(name,i,target==='jpeg'?'jpg':target)),target,quality_preset:quality??null,resolution_cap:null,gif_options:null,compress_mode:compress,batch_id:null,metadata_policy:'preserve',subtitle:null};const sample=await run(binary,sidecars,request,stem,{abortSignal,environment:runtimeSidecarEnvironment(sidecars)});if(sample.budget_exceeded)throw Error("Suite storage budget exceeded; owned oversized media removed after recording metrics");if(i>=0)samples.push(sample);}summary[name]=summarize(samples);replaceEvidenceFile(join(out,'summary.json'),JSON.stringify(summary,null,2));}
  for(const [path,identity] of Object.entries(sources))if(hash(path)!==identity.sha256)throw Error(`Source changed: ${basename(path)}`);
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))withTerminationSignals(main).catch(error=>{console.error(error);process.exitCode=1;});
