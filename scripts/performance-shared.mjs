@@ -335,6 +335,32 @@ export function replaceEvidenceFile(path, data) {
   createEvidenceFile(path, data);
 }
 
+/**
+ * Give a reaped child's output pipes `graceMs` to reach EOF. A process that left
+ * the owned group can hold them open for as long as it lives, so after the grace
+ * and one more event-loop turn (which reads an EOF that is already pending) both
+ * are destroyed. Resolves null once both ended, or a message recording them as
+ * held.
+ */
+export function drainChildOutput(streams, graceMs) {
+  const open = streams.filter(stream => stream && !stream.readableEnded && !stream.closed);
+  const ended = () => open.every(stream => stream.readableEnded || stream.closed);
+  if (ended()) return Promise.resolve(null);
+  return new Promise(resolveDrain => {
+    let settled = false, deadline = null;
+    const settle = drained => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (!drained) for (const stream of open) stream.destroy();
+      resolveDrain(drained ? null : 'The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group');
+    };
+    const settleIfEnded = () => { if (ended()) settle(true); };
+    for (const stream of open) { stream.once('end', settleIfEnded); stream.once('close', settleIfEnded); }
+    deadline = setTimeout(() => setImmediate(() => settle(ended())), graceMs);
+  });
+}
+
 export async function withTerminationSignals(operation) {
   const controller = new AbortController();
   let receivedSignal = null;
@@ -537,23 +563,28 @@ export async function runBoundedProcess({
   }, 100);
   const timeout = setTimeout(() => stop('timeout'), timeoutMs);
   const start = performance.now();
+  // The root's exit, not its pipes' EOF: a process that left the group can hold
+  // the pipes open for as long as it lives.
   const code = await new Promise(resolve => {
     child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
-    child.once('close', value => { childSettled = true; resolve(value); });
+    child.once('exit', value => { childSettled = true; resolve(value); });
   });
   clearInterval(monitor);
   clearTimeout(timeout);
   abortSignal?.removeEventListener('abort', abort);
-  try {
-    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
-  } catch {
-    budgetExceeded = true;
-  }
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
   stop();
   if (killEscalation) await killEscalation;
   else clearTimeout(killTimer);
+  const stdioError = await drainChildOutput([child.stdout, child.stderr], killGraceMs);
+  // Counted after the reap and the drain, so whatever the group wrote during its
+  // kill grace, and the output read since the exit, are included.
+  try {
+    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
+  } catch {
+    budgetExceeded = true;
+  }
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
@@ -575,7 +606,7 @@ export async function runBoundedProcess({
   }
   const timePeakMatch = process.platform === 'darwin' ? stderr.toString().match(/(\d+)\s+maximum resident set size/) : null;
   return {
-    success: code === 0 && !timedOut && !budgetExceeded && !aborted && spawnError === null && cleanupError === null && outputError === null,
+    success: code === 0 && !timedOut && !budgetExceeded && !aborted && spawnError === null && cleanupError === null && outputError === null && stdioError === null,
     exit_code: code,
     timed_out: timedOut,
     budget_exceeded: budgetExceeded,
@@ -583,6 +614,7 @@ export async function runBoundedProcess({
     spawn_error: spawnError,
     cleanup_error: cleanupError,
     output_error: outputError,
+    stdio_error: stdioError,
     removed_staging_directories: removedStagingDirectories,
     lifetime_ms: performance.now() - start,
     sampled_tree_peak_KiB: sampledTreePeakKiB,
