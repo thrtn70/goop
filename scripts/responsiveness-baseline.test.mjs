@@ -890,7 +890,12 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     const template = join(root, 'component.json'); writeFileSync(template, JSON.stringify(component));
     const binary = process.execPath;
     const fakeApp = join(root, 'fake-app.cjs');
-    writeFileSync(fakeApp, `const fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;fs.writeFileSync(path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,'frontend-'+value.component_role+'-'+value.page_instance_id+'.json'),JSON.stringify(value),{flag:'wx'});setInterval(()=>{},1000);\n`);
+    // Like the app, publish the component complete: write a temporary file, then
+    // hard-link it into place (create-new). The harness reads a component as soon
+    // as it exists and rejects one that is not valid JSON. The temporary file
+    // sits beside the template, outside the directories the storage monitor
+    // scans, so its removal cannot be read as a vanished output.
+    writeFileSync(fakeApp, `const fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;const name='frontend-'+value.component_role+'-'+value.page_instance_id+'.json',temp=path.join(path.dirname(process.argv[2]),'.'+name+'.tmp');fs.writeFileSync(temp,JSON.stringify(value),{flag:'wx'});fs.linkSync(temp,path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,name));fs.unlinkSync(temp);setInterval(()=>{},1000);\n`);
     const manifest = {
       schema_version: 2, token: 'pre-ready-token', ...activationFields(),
       descriptor: { componentRole: 'primary', sessionId: component.session_id, sampleId: component.sample_id, pageInstanceId: component.page_instance_id, lane: 'inspection', scenario: { id: component.scenario?.id ?? component.frontend_trace.scenario.id, manifestSha256: component.frontend_trace.scenario.manifest_sha256 }, workload: component.frontend_trace.workload, phase: 'measured', repetition: 0 },
@@ -928,7 +933,10 @@ test('readiness markers require the exact native clock envelope', async () => {
   try {
     const path = join(root, `action-ready-2-${uuid('2')}.json`);
     writeFileSync(path, JSON.stringify({ schema_version: 2, component_kind: 'action_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }));
-    await assert.rejects(() => waitForActionReady(root, { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }, { timeoutMs: 20, pollMs: 5 }), /native clock|fields/i);
+    const clock = virtualClock();
+    await assert.rejects(() => waitForActionReady(root, { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }, { timeoutMs: 20, pollMs: 5, ...clock }), /native clock|fields/i);
+    // A malformed envelope fails at the first read instead of being retried.
+    assert.deepEqual(clock.sleeps, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -937,8 +945,14 @@ test('startup readiness wait binds the launched PID before AX preflight', async 
   try {
     const path = join(root, 'startup.json');
     writeFileSync(path, JSON.stringify({ schema_version: 1, pid: 42, backend_ready_ms: 5 }));
-    assert.equal((await waitForStartupReady(path, 42, { timeoutMs: 20, pollMs: 5 })).backend_ready_ms, 5);
-    await assert.rejects(() => waitForStartupReady(path, 99, { timeoutMs: 20, pollMs: 5 }), /identity/i);
+    const ready = virtualClock();
+    assert.equal((await waitForStartupReady(path, 42, { timeoutMs: 20, pollMs: 5, ...ready })).backend_ready_ms, 5);
+    assert.deepEqual(ready.sleeps, []);
+    // Another PID's marker is never accepted: the wait polls to its deadline,
+    // however slow each poll is, and then reports the mismatch.
+    const mismatched = virtualClock();
+    await assert.rejects(() => waitForStartupReady(path, 99, { timeoutMs: 20, pollMs: 5, ...mismatched }), /identity/i);
+    assert.deepEqual(mismatched.sleeps, [5, 5, 5, 5]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

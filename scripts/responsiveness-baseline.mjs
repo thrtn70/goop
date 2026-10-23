@@ -1365,11 +1365,11 @@ export function waitForControlReady(path, identity, { timeoutMs = 30_000, pollMs
 
 export function waitForActionReady(reportDirectory, { session_id, sample_id, page_instance_id, action_id, pid }, options = {}) {
   const path = join(reportDirectory, `action-ready-${action_id}-${page_instance_id}.json`);
-  return waitForJson(path, { schema_version: 2, component_kind: 'action_ready', session_id, sample_id, page_instance_id, action_id, pid }, { timeoutMs: options.timeoutMs ?? 2_000, pollMs: options.pollMs ?? 10, abortSignal: options.abortSignal ?? null, label: 'Action readiness marker', validate: value => validateReadinessMarker(value, 'action_ready') });
+  return waitForJson(path, { schema_version: 2, component_kind: 'action_ready', session_id, sample_id, page_instance_id, action_id, pid }, { timeoutMs: options.timeoutMs ?? 2_000, pollMs: options.pollMs ?? 10, abortSignal: options.abortSignal ?? null, nowMs: options.nowMs, sleepMs: options.sleepMs, label: 'Action readiness marker', validate: value => validateReadinessMarker(value, 'action_ready') });
 }
 
-export function waitForStartupReady(path, pid, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
-  return waitForJson(path, { schema_version: 1, pid }, { timeoutMs, pollMs, abortSignal, label: 'Startup readiness marker' });
+export function waitForStartupReady(path, pid, { timeoutMs = 30_000, pollMs = 10, abortSignal = null, nowMs, sleepMs } = {}) {
+  return waitForJson(path, { schema_version: 1, pid }, { timeoutMs, pollMs, abortSignal, nowMs, sleepMs, label: 'Startup readiness marker' });
 }
 
 export async function waitForRecorderOrFailedPage({ recorderPath, reportDirectory, identity, descriptor, timeoutMs = 30_000, pollMs = 10, abortSignal = null }) {
