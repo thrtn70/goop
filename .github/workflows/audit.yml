@@ -298,10 +298,11 @@ jobs:
         env:
           GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
         run: node scripts/check-gallery-dl-runtime.mjs --binary "./src-tauri/bin/gallery-dl-$TARGET" --python "$GALLERY_DL_PYTHON"
-      # yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only
-      # with its version pin. Ask the fetched binary which ones it imported and
-      # hold them to the floors. Both runners: the Windows exe freezes its own
-      # dependency set. release.yml repeats this on the signed macOS copy.
+      # yt-dlp is downloaded prebuilt, so the bundled copy's certifi and
+      # urllib3 change only with its version pin. Ask the fetched binary which
+      # ones it imported and hold them to the floors. Both runners: the Windows
+      # exe freezes its own dependency set. release.yml repeats this on the
+      # signed macOS copy.
       - name: yt-dlp runtime clears the certifi and urllib3 floors
         shell: bash
         run: node scripts/check-yt-dlp-runtime.mjs --binary "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}"

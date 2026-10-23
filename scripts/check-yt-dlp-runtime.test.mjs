@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -67,6 +67,7 @@ function fakeBinary(dir, { stderrLines = [...report(), ...NO_URL], exitCode = 2,
     "#!/bin/sh",
     `printf '%s\\n' "$@" > '${record}.args'`,
     `printf '%s' "$HOME" > '${record}.home'`,
+    `pwd -P > '${record}.cwd'`,
     `printf '%s' "\${GOOP_LEAK_PROBE-unset}" > '${record}.leak'`,
     hang ? "exec sleep 10" : "",
     "cat >&2 <<'EOF'",
@@ -192,6 +193,16 @@ test("fails closed when a debug line is missing or repeated", async (t) => {
     ["missing version line", without("yt-dlp version"), /::error::.*"yt-dlp version/],
     ["missing libraries line", without("Optional libraries"), /::error::.*"Optional libraries/],
     ["repeated libraries line", [...report(), `[debug] Optional libraries: ${libraries({ certifi: "2026.07.22", urllib3: "2.7.0" })}`, ...NO_URL], /::error::.*more than once/],
+    [
+      "a library listed twice",
+      report().map((line) => line.replace("certifi-2026.10.19", "certifi-2026.07.22, certifi-2026.10.19")).concat(NO_URL),
+      /::error::.*certifi more than once/,
+    ],
+    [
+      "an unparseable version line",
+      report().map((line) => line.replace("yt-dlp version stable@", "yt-dlp version  stable@")).concat(NO_URL),
+      /::error::unrecognised "yt-dlp version" line/,
+    ],
     ["no debug output at all", NO_URL, /::error::/],
   ]) {
     await t.test(name, () => {
@@ -218,6 +229,17 @@ test("fails unless yt-dlp ends on its no-URL usage error", async (t) => {
       });
     });
   }
+});
+
+test("the binary's own output cannot issue workflow commands", () => {
+  withDir((dir) => {
+    const forged = ["::warning::forged annotation", "::add-mask::2026.10.19"];
+    const result = run(dir, fakeBinary(dir, { stderrLines: [...report(), ...forged], exitCode: 1 }));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /^::error::yt-dlp exited with status 1/m);
+    assert.doesNotMatch(result.stderr, /^::(?:warning|add-mask)::/m);
+    assert.match(result.stderr, /forged annotation/, "the output is still shown, just not as a command");
+  });
 });
 
 test("fails when the binary hangs past the timeout", () => {
@@ -254,17 +276,36 @@ test("refuses a fetch script that does not pin yt-dlp exactly once", async (t) =
   }
 });
 
-test("runs with no user config, no URL, an isolated home and a scrubbed environment", () => {
+test("runs with no user config, no plugins, no URL, an isolated home and a scrubbed environment", () => {
   withDir((dir) => {
     const bin = fakeBinary(dir);
     const result = check(["--binary", bin.path, "--fetch-script", pins(dir)], { GOOP_LEAK_PROBE: "leaked" });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(readFileSync(`${bin.record}.args`, "utf8").trim().split("\n"), ["--ignore-config", "-v"]);
+    assert.deepEqual(
+      readFileSync(`${bin.record}.args`, "utf8").trim().split("\n"),
+      ["--ignore-config", "--no-plugin-dirs", "-v"],
+    );
     const isolatedHome = readFileSync(`${bin.record}.home`, "utf8");
     assert.notEqual(isolatedHome, "");
     assert.notEqual(isolatedHome, homedir());
+    assert.equal(
+      readFileSync(`${bin.record}.cwd`, "utf8").trim(),
+      join(realpathSync(dirname(isolatedHome)), basename(isolatedHome)),
+      "the binary runs in the isolated home, not the checkout, so no yt-dlp.conf or plugin there is in reach",
+    );
     assert.equal(existsSync(isolatedHome), false, "the isolated home must be removed after the run");
     assert.equal(readFileSync(`${bin.record}.leak`, "utf8"), "unset");
+  });
+});
+
+test("resolves a relative --binary against the caller's directory, as audit.yml passes it", () => {
+  withDir((dir) => {
+    fakeBinary(dir);
+    const result = spawnSync(process.execPath, [checker, "--binary", "./yt-dlp", "--fetch-script", pins(dir)], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
   });
 });
 

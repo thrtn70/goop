@@ -36,9 +36,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
 # immutable URL (the osxexperts arm64 builds) is still content-pinned: an
 # upstream replacement fails the build until its bytes are reviewed and this
 # digest is deliberately updated.
-# yt-dlp's frozen binaries carry their own certifi and urllib3, which change
-# only with this pin. scripts/check-yt-dlp-runtime.mjs asks the fetched binary
-# which ones it imports and holds them to Goop's floors.
+# The bundled yt-dlp binaries carry their own certifi and urllib3, which
+# change only with this pin. scripts/check-yt-dlp-runtime.mjs asks the fetched
+# binary which ones it imports and holds them to Goop's floors.
 YT_DLP_VERSION="2026.10.21"
 YT_DLP_WINDOWS_SHA256="33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
 YT_DLP_MACOS_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
@@ -382,7 +382,7 @@ case "$TARGET" in
     # ffmpeg/ffprobe are the known offender (evermeet.cx's getrelease silently
     # served x86_64, which is why the fetch above moved to osxexperts.net) and
     # they appear in no verification loop anywhere. But they are not the only
-    # unpinned arch: yt-dlp_macos comes from releases/latest/download, and
+    # arch we do not choose: yt-dlp_macos is upstream's prebuilt binary, and
     # gallery-dl is PyInstaller-frozen against whatever python3 the runner
     # resolves, so it inherits the INTERPRETER's arch, not the runner's.
     # Assert on the artefacts rather than trusting any of that.

@@ -2,14 +2,14 @@
 // Prove that a downloaded yt-dlp binary is the pinned release and that the
 // certifi and urllib3 it actually imports clear Goop's security floors.
 //
-// yt-dlp is fetched prebuilt (scripts/fetch-sidecars.sh), so its bundled
-// libraries change only with YT_DLP_VERSION, and upstream's recipe is no
-// proof the binary carries them. With -v and no URL, yt-dlp logs its version
+// yt-dlp is fetched prebuilt (scripts/fetch-sidecars.sh), so the bundled
+// binary's libraries change only with YT_DLP_VERSION, and upstream's recipe
+// is no proof the binary carries them. With -v and no URL, yt-dlp logs its version
 // and the versions of the optional libraries it really imported, then stops
 // on its no-URL usage error (exit 2) without touching the network.
-// --ignore-config keeps a user config out of the run. The child gets a
-// throwaway HOME/TMPDIR (PyInstaller unpacks there) and nothing else from
-// this environment.
+// --ignore-config and --no-plugin-dirs keep user config and plugin code out
+// of the run. The child runs in a throwaway HOME/TMPDIR (PyInstaller unpacks
+// there) and gets nothing else from this environment.
 //
 // Usage:
 //   node scripts/check-yt-dlp-runtime.mjs --binary <path>
@@ -21,13 +21,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const DEFAULT_FETCH_SCRIPT = fileURLToPath(new URL("./fetch-sidecars.sh", import.meta.url));
 const DEFAULT_TIMEOUT_MS = 30_000;
-const YT_DLP_ARGS = ["--ignore-config", "-v"];
+const YT_DLP_ARGS = ["--ignore-config", "--no-plugin-dirs", "-v"];
 // Lowest versions a shipped yt-dlp may import.
 //   certifi 2026.10.19 drops "emSign ECC Root CA - G3", whose intermediate CA
 //   keys were compromised (GHSA-6q48-6c7w-9gw2).
@@ -64,7 +64,8 @@ function parseOptions(argv) {
     throw new UsageError(`--timeout-ms must be a positive integer, got "${values["timeout-ms"]}"`);
   }
   return {
-    binary: values.binary,
+    // Absolute, because the child runs in its throwaway home.
+    binary: resolve(values.binary),
     fetchScript: values["fetch-script"] ?? DEFAULT_FETCH_SCRIPT,
     timeoutMs,
   };
@@ -84,9 +85,12 @@ function readPin(path) {
   return matches[0][1];
 }
 
+// Indented so that no line of the binary's output can start with "::" and be
+// read by the Actions runner as a workflow command.
 function stderrContext(stderr) {
   const text = (stderr ?? "").trim();
-  return text.length > STDERR_CONTEXT_CHARS ? `…${text.slice(-STDERR_CONTEXT_CHARS)}` : text;
+  const tail = text.length > STDERR_CONTEXT_CHARS ? `…${text.slice(-STDERR_CONTEXT_CHARS)}` : text;
+  return tail.split(/\r?\n/).map((line) => `  ${line}`).join("\n");
 }
 
 // Windows needs SystemRoot to start Python and TEMP/TMP for the PyInstaller
@@ -118,6 +122,7 @@ function runYtDlp(binary, timeoutMs) {
   const home = mkdtempSync(join(tmpdir(), "goop-yt-dlp-home-"));
   try {
     const result = spawnSync(binary, YT_DLP_ARGS, {
+      cwd: home,
       encoding: "utf8",
       timeout: timeoutMs,
       killSignal: "SIGKILL",
@@ -143,7 +148,18 @@ function runYtDlp(binary, timeoutMs) {
     }
     return result.stderr;
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    removeHome(home);
+  }
+}
+
+// On Windows an orphaned unpacked child or an antivirus scan can hold files
+// in the home for a moment. A leftover temp directory on an ephemeral runner
+// must not mask the check's own result.
+function removeHome(home) {
+  try {
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (error) {
+    console.error(`::warning::could not remove ${home}: ${error.message}`);
   }
 }
 
@@ -151,7 +167,9 @@ function parseLibraries(text) {
   const libraries = new Map();
   for (const entry of text.split(", ")) {
     const match = /^(.+?)(?:-(\S+))?$/.exec(entry.trim());
-    if (match) libraries.set(match[1], match[2]);
+    if (!match) continue;
+    if (libraries.has(match[1])) throw new CheckError(`yt-dlp listed ${match[1]} more than once`);
+    libraries.set(match[1], match[2]);
   }
   return libraries;
 }
@@ -167,6 +185,7 @@ function parseReport(stderr) {
   const versionLine = found.get("yt-dlp version");
   if (versionLine === undefined) throw new CheckError('yt-dlp did not report a "yt-dlp version …" debug line');
   const version = /^(?:([\w.-]+)@)?(\S+)/.exec(versionLine);
+  if (!version) throw new CheckError(`unrecognised "yt-dlp version" line: ${versionLine}`);
   const librariesLine = found.get("Optional libraries");
   if (librariesLine === undefined) throw new CheckError('yt-dlp did not report an "Optional libraries: …" debug line');
   return {
