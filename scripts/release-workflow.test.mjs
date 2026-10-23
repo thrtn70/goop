@@ -513,38 +513,134 @@ test("every HEIC cache key carries the macOS floor the stack was built for", () 
   assert.equal(cached.length, jobs.length, "a HEIC cache outside these jobs would need the same key");
 });
 
-test("the cache-key floor step fails closed when tauri.conf.json declares no floor", () => {
+// Runs the macos-floor step the way a runner does, against a scratch checkout
+// holding only the helper and a tauri.conf.json, and returns what it wrote to
+// $GITHUB_OUTPUT and $GITHUB_ENV.
+function runFloorStep(config, { helper = readFileSync(floorCli, "utf8"), runnerOs = "macOS" } = {}) {
   const floorStep = steps(job("build")).find((step) => /^ {8}id: macos-floor$/m.test(step));
   assert.ok(floorStep, "missing macos-floor step");
-  const script = stepScript(floorStep);
-  const run = (config, helper = readFileSync(floorCli, "utf8")) => {
-    const directory = mkdtempSync(join(tmpdir(), "goop-floor-step-"));
-    try {
-      for (const sub of ["scripts", "src-tauri"]) mkdirSync(join(directory, sub));
-      writeFileSync(join(directory, "scripts", "macos-deployment-target.mjs"), helper);
-      writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify(config));
-      const output = join(directory, "github-output");
-      writeFileSync(output, "");
-      // Unspecified `shell:` on a Linux or macOS runner is `bash -e {0}`: no pipefail.
-      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", script], {
-        cwd: directory,
-        encoding: "utf8",
-        env: { ...process.env, GITHUB_OUTPUT: output },
-      });
-      return { status: result.status, log: result.stdout + result.stderr, output: readFileSync(output, "utf8") };
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  };
-  const declared = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } });
+  const directory = mkdtempSync(join(tmpdir(), "goop-floor-step-"));
+  try {
+    for (const sub of ["scripts", "src-tauri"]) mkdirSync(join(directory, sub));
+    writeFileSync(join(directory, "scripts", "macos-deployment-target.mjs"), helper);
+    writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify(config));
+    const output = join(directory, "github-output");
+    const env = join(directory, "github-env");
+    writeFileSync(output, "");
+    writeFileSync(env, "");
+    // Unspecified `shell:` on a Linux or macOS runner is `bash -e {0}`: no pipefail.
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", stepScript(floorStep)], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_ENV: env, RUNNER_OS: runnerOs },
+    });
+    return {
+      status: result.status,
+      log: result.stdout + result.stderr,
+      output: readFileSync(output, "utf8"),
+      env: readFileSync(env, "utf8"),
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("the cache-key floor step fails closed when tauri.conf.json declares no floor", () => {
+  const declared = runFloorStep({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } });
   assert.equal(declared.status, 0, declared.log);
   assert.equal(declared.output, `version=${declaredFloor}\n`);
-  const missing = run({ bundle: { macOS: {} } });
+  const missing = runFloorStep({ bundle: { macOS: {} } });
   assert.notEqual(missing.status, 0, missing.log);
   assert.equal(missing.output, "", "an empty floor must never reach the cache key");
-  const silent = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } }, "// prints nothing, exits 0\n");
+  const silent = runFloorStep(
+    { bundle: { macOS: { minimumSystemVersion: declaredFloor } } },
+    { helper: "// prints nothing, exits 0\n" },
+  );
   assert.notEqual(silent.status, 0, silent.log);
   assert.equal(silent.output, "", "an empty floor must never reach the cache key");
+});
+
+test("on a macOS runner the floor step makes the floor every later build's deployment target", () => {
+  // cc and cmake build scripts compile for MACOSX_DEPLOYMENT_TARGET and fall
+  // back to the SDK's own version without it, so `cargo test` would build
+  // sqlite, ring, libjxl and raw.m for a newer macOS than the release does.
+  const config = { bundle: { macOS: { minimumSystemVersion: declaredFloor } } };
+  const mac = runFloorStep(config);
+  assert.equal(mac.status, 0, mac.log);
+  assert.equal(mac.env, `MACOSX_DEPLOYMENT_TARGET=${declaredFloor}\n`);
+  for (const runnerOs of ["Linux", "Windows"]) {
+    const other = runFloorStep(config, { runnerOs });
+    assert.equal(other.status, 0, other.log);
+    assert.equal(other.env, "", `a ${runnerOs} runner builds no Mach-O and gets no macOS deployment target`);
+  }
+  const missing = runFloorStep({ bundle: { macOS: {} } });
+  assert.notEqual(missing.status, 0, missing.log);
+  assert.equal(missing.env, "", "an empty floor must never become the deployment target");
+  const silent = runFloorStep(config, { helper: "// prints nothing, exits 0\n" });
+  assert.notEqual(silent.status, 0, silent.log);
+  assert.equal(silent.env, "", "an empty floor must never become the deployment target");
+});
+
+// A step's own lines, without the comments above the next step that
+// steps() leaves at its end.
+function stepCode(step) {
+  return step
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("macOS jobs export the floor before any Rust cache or native build, and key the cache on it", () => {
+  // Only setup that compiles nothing may come first. Everything else, the
+  // Rust cache included, runs after the floor is exported.
+  const setup = /^ {6}- uses: (?:actions\/checkout|dtolnay\/rust-toolchain|actions\/setup-python|actions\/setup-node)@/m;
+  const jobs = [
+    ["release build", job("build")],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke")],
+  ];
+  for (const [name, body] of jobs) {
+    const list = steps(body).map(stepCode);
+    const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
+    assert.notEqual(floorAt, -1, `${name} has no macos-floor step`);
+    assert.match(list[floorAt], /^ {8}if: matrix\.os == 'macos-14'$/m, `${name}: the floor step runs on macOS`);
+    for (const step of list.slice(0, floorAt)) {
+      assert.match(step, setup, `${name}: this step runs before the floor is exported:\n${step}`);
+    }
+    const caches = list.filter((step) => /Swatinem\/rust-cache@/.test(step));
+    assert.equal(caches.length, 1, `${name} restores one Rust cache`);
+    // rust-cache hashes the variables it is told about into the key, and only
+    // when they are set, so the Windows leg's key is untouched.
+    assert.match(caches[0], /^ {10}env-vars: MACOSX_DEPLOYMENT_TARGET$/m, `${name}: a new floor must start a new Rust cache`);
+  }
+});
+
+test("audit relinks libheif-sys against the HEIC stack the job just built or restored", () => {
+  // libheif-sys's rlib carries a copy of libheif.a and libde265.a, and
+  // nothing in its fingerprint tracks .heif-deps. A Rust cache built against
+  // an earlier stack would otherwise link that stack's objects, whatever the
+  // floor or version of the one in .heif-deps.
+  const stacks = [
+    ["audit rust", auditJob("rust"), "Static HEIC decode stack (libde265 + libheif)"],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke"), "Static HEIC stack (macOS)"],
+  ];
+  for (const [name, body, stepName] of stacks) {
+    const script = runBlock(namedStep(body, stepName)).split("\n");
+    const built = script.indexOf("./scripts/build-static-heif-deps.sh");
+    assert.notEqual(built, -1, `${name} does not build the HEIC stack in "${stepName}"`);
+    // `cargo clean -p` without a profile only empties target/debug.
+    for (const clean of ["cargo clean -p libheif-sys", "cargo clean -p libheif-sys --release"]) {
+      assert.ok(script.indexOf(clean) > built, `${name}: "${clean}" must follow the stack build`);
+    }
+  }
+  // The release build needs no clean because its Rust cache is always cold:
+  // it restores without saving, and only a job with the same id could save
+  // under its key.
+  const releaseCache = steps(job("build")).find((step) => /Swatinem\/rust-cache@/.test(step));
+  assert.match(releaseCache, /^ {10}save-if: "false"$/m);
+  for (const { name, body } of workflows) {
+    if (name === "release.yml") continue;
+    assert.doesNotMatch(body, /^ {2}build:$/m, `${name} has a job named build, whose Rust cache the release build would restore`);
+  }
 });
 
 test("both quality gates run the HEIC stack tests, and audit runs them on macOS too", () => {
