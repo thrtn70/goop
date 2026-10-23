@@ -1,11 +1,11 @@
 import {spawn,execFileSync} from 'node:child_process';
-import {readFileSync,writeFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {directoryBytes,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -18,9 +18,8 @@ const hash=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 export function normalizeSuccess(metrics, code, timedOut) {
  return metrics.success === true && code === 0 && !timedOut && Number.isFinite(metrics.process_ms) && metrics.process_ms >= 0;
 }
-export function directoryBytes(directory) {
- return readdirSync(directory).reduce((sum,name)=>{const path=join(directory,name),stats=lstatSync(path);return sum+(stats.isDirectory()?directoryBytes(path):stats.size);},0);
-}
+// One byte count for every storage monitor, so they agree on vanished entries.
+export {directoryBytes};
 export function ownedSymlinks(directory){const links=[];for(const name of readdirSync(directory)){const path=join(directory,name),stats=lstatSync(path);if(stats.isSymbolicLink())links.push(path);else if(stats.isDirectory())links.push(...ownedSymlinks(path));}return links;}
 export function effectiveHardware(metrics,hardwareEnabled) {
  const summary=metrics.result?.video_execution;
@@ -30,7 +29,9 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(ms,undefined,wait)}=options;
+ // The default sleep coerces its delay as setTimeout does, so a numeric-string
+ // limit still fires instead of rejecting and leaving the run without a timer.
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
@@ -61,16 +62,27 @@ export async function run(binary,sidecars,request,stem,options={}) {
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
  finally{clearInterval(timer);timeout.abort();abortSignal?.removeEventListener('abort',abort);}
   const lifetimeMs=nowMs()-start;
+ // A clean root exit is not a clean sample if owned descendants remain. Reap
+ // before any post-exit file I/O, so no throw below can leave the group running
+ // and every check below sees a tree the child can no longer change.
+ stop();
+ if(killEscalation)await killEscalation;
   writeFileSync(`${stem}.stdout`,stdout);writeFileSync(`${stem}.stderr`,stderr);
  let metrics={success:false,error:'No metrics produced'};
  const metricsPath=`${stem}.metrics.json`;
- if(existsSync(metricsPath)&&statSync(metricsPath).size<Math.min(1024*1024,budgetBytes/4)) {
-  try{metrics=JSON.parse(readFileSync(metricsPath));}catch{metrics.error='Invalid metrics JSON';}
- }
+ // One descriptor for the check and the read, so the child can neither redirect
+ // nor stall it: a FIFO never blocks, a hard link is refused, and so is a symbolic
+ // link wherever the platform has O_NOFOLLOW (Windows does not).
+ let metricsFd=null;
+ try {
+  metricsFd=openSync(metricsPath,constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0));
+  const metricsStats=fstatSync(metricsFd);
+  if(metricsStats.isFile()&&metricsStats.nlink===1&&metricsStats.size<Math.min(1024*1024,budgetBytes/4)) {
+   try{metrics=JSON.parse(readFileSync(metricsFd));}catch{metrics.error='Invalid metrics JSON';}
+  }
+ } catch {/* Missing, a link, or not openable: no metrics. */}
+ finally{if(metricsFd!==null)closeSync(metricsFd);}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
- // A clean root exit is not a clean sample if owned descendants remain.
- stop();
- if(killEscalation)await killEscalation;
  const verificationStart=nowMs();
  const createdSymlinks=ownedSymlinks(directory).filter(path=>!initialSymlinks.has(path));
  let outputError=createdSymlinks.length?`Owned conversion created symbolic-link output: ${createdSymlinks.map(path=>basename(path)).join(', ')}`:null;
@@ -96,13 +108,16 @@ export async function run(binary,sidecars,request,stem,options={}) {
  writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
  // The request output is created uniquely inside this suite. Preserve measurements
  // before dropping only that owned media when it caused the storage limit.
- if(budgetExceeded && dirname(request.output_path)===directory && existsSync(request.output_path))unlinkSync(request.output_path);
- sample.removed_staging_directories=0;
- if(timedOut||budgetExceeded||aborted)for(const entry of readdirSync(directory,{withFileTypes:true})){
+ // The group is already reaped, so a cleanup failure is an obstacle the child
+ // left behind; record it with the sample instead of rejecting the run.
+ sample.removed_staging_directories=0;sample.cleanup_error=null;
+ const cleanupFailed=error=>{sample.cleanup_error??=error.message;};
+ if(budgetExceeded && dirname(request.output_path)===directory && existsSync(request.output_path))try{unlinkSync(request.output_path);}catch(error){cleanupFailed(error);}
+ if(timedOut||budgetExceeded||aborted)try{for(const entry of readdirSync(directory,{withFileTypes:true})){
   if(entry.isDirectory() && !existingEntries.has(entry.name) && /^\.goop-output-\d+-\d+$/.test(entry.name)){
-   rmSync(join(directory,entry.name),{recursive:true});sample.removed_staging_directories++;
+   try{rmSync(join(directory,entry.name),{recursive:true});sample.removed_staging_directories++;}catch(error){cleanupFailed(error);}
   }
- }
+ }}catch(error){cleanupFailed(error);}
  writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
  return sample;
 }

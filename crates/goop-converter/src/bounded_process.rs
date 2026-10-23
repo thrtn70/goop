@@ -139,37 +139,28 @@ mod tests {
         let result = output(Command::new("sh").args(["-c", "while :; do printf '1234567890123456789012345678901234567890123456789012345678901234567890'; done"]), "fixture", &CancellationToken::new()).await;
         assert!(result.unwrap_err().user_message().contains("1 MiB"));
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cancellation_and_deadline_reap_child() {
         for cancel_early in [true, false] {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
             let cancel = CancellationToken::new();
-            let trigger = cancel.clone();
             let mut command = Command::new("sh");
-            command
-                .args(["-c", "echo $$ > \"$1\"; exec sleep 20", "fixture"])
-                .arg(&pid_file);
-            let trigger_task = async move {
-                if cancel_early {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    trigger.cancel();
-                }
-            };
-            let (result, _) = tokio::join!(output(&mut command, "fixture", &cancel), trigger_task);
-            let error = result.unwrap_err();
+            command.args(["-c", &crate::armed_child::script(&pid_file)]);
+            let started = tokio::time::Instant::now();
+            let error = crate::armed_child::assert_reaps_armed_child(
+                pid_file,
+                cancel_early.then_some(&cancel),
+                output(&mut command, "fixture", &cancel),
+            )
+            .await
+            .unwrap_err();
             if cancel_early {
                 assert!(matches!(error, GoopError::Cancelled));
             } else {
                 assert!(error.user_message().contains("5 second"));
+                assert!(started.elapsed() >= QUERY_DEADLINE);
             }
-            let pid = std::fs::read_to_string(pid_file).unwrap();
-            assert!(!std::process::Command::new("kill")
-                .args(["-0", pid.trim()])
-                .output()
-                .unwrap()
-                .status
-                .success());
         }
     }
 }

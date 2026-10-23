@@ -276,3 +276,13 @@ test('total timeout includes idle observation and cleanup grace', async () => {
   assert.deepEqual(clock.sleeps, [50, 50, 30]);
   assert.equal(result.lifetime_ms, 130);
 });
+test('startup live storage check fails closed when the owned tree cannot be read', async () => {
+  // Vanished entries no longer throw, so a throw is a real read failure; ignoring it would leave the live budget blind.
+  const unreadable = () => { throw Object.assign(Error('owned tree unreadable'), { code: 'EACCES' }); };
+  const result = await fake("setInterval(()=>{},10)", { readinessTimeoutMs: 30000, measureBytes: unreadable, readSnapshot: () => '' });
+  assert.equal(result.success, false);
+  assert.equal(result.budget_exceeded, true);
+  assert.equal(result.timed_out, false);
+  // The harness ended the child; which signal lands first depends on scheduling.
+  assert.ok(['SIGTERM', 'SIGKILL'].includes(result.exit_signal));
+});

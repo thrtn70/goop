@@ -260,12 +260,32 @@ export function validateCapturedIdentity(identity, label = 'identity') {
   return identity;
 }
 
-export function directoryBytes(directory) {
-  if (!existsSync(directory)) return 0;
-  return readdirSync(directory, { withFileTypes: true }).reduce((sum, entry) => {
-    const path = join(directory, entry.name);
-    const stats = lstatSync(path);
-    return sum + (stats.isDirectory() ? directoryBytes(path) : stats.size);
+// Live storage checks race removals: the app publishes reports through a temp
+// file it then removes, and SQLite deletes its rollback journal after each
+// write. A vanished entry holds no bytes, so ENOENT counts zero and every other
+// error reaches the caller. Names that are not valid UTF-8 list as U+FFFD: such
+// a name never stats, and it can shadow a twin, so neither case is a vanish.
+const vanished = error => error?.code === 'ENOENT';
+
+export function directoryBytes(directory, filesystem = { readdirSync, lstatSync }) {
+  let names;
+  try {
+    names = filesystem.readdirSync(directory);
+  } catch (error) {
+    if (vanished(error)) return 0;
+    throw error;
+  }
+  if (new Set(names).size !== names.length) throw Error(`Entry names collide after decoding in ${directory}`);
+  return names.reduce((sum, name) => {
+    const path = join(directory, name);
+    let stats;
+    try {
+      stats = filesystem.lstatSync(path);
+    } catch (error) {
+      if (vanished(error) && !name.includes('\uFFFD')) return sum;
+      throw error;
+    }
+    return sum + (stats.isDirectory() ? directoryBytes(path, filesystem) : stats.size);
   }, 0);
 }
 
