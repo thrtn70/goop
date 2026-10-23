@@ -76,7 +76,8 @@ test('portable bounded runner terminates its descendant tree', { timeout: 30_000
   releaseClockAfter(t, clock);
   const guard = killArmedAfter(t, root, armed);
   const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
-  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
+  // The runner exits with its descendant, so the guard's kill also ends the run.
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).on('exit',()=>process.exit(1));setInterval(()=>{},10);`);
   const running = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
   running.catch(() => { /* Rethrown by the await below. */ });
   // The timeout falls due only once TERM can no longer stop the descendant, so
@@ -100,10 +101,14 @@ test('portable bounded runner terminates its descendant tree', { timeout: 30_000
 // Child code that ignores TERM and then renames its pid into `path`, so the
 // file existing means TERM can no longer stop that process.
 const ignoreTermThenArm = path => `process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
-// A TERM-resistant process the run fails to kill outlives the test. Unless the
-// test saw it gone, kill the pid in `armed` after the test, so such a regression
-// fails at the test's timeout instead of leaving that process behind. Once it is
-// gone the OS may reuse its pid, so the test marks it reaped.
+// Child code that renames its pid into `path` and changes nothing else, so a
+// guard can find a runner that holds the run's pipes.
+const recordPid = path => `{const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});}`;
+// A process the run fails to kill outlives the test, and one that holds the
+// run's pipes keeps the run from returning. Unless the test saw it gone, kill
+// the pid in `armed` after the test, so such a regression fails at the test's
+// timeout instead of leaving that process behind or hanging the file. Once it
+// is gone the OS may reuse its pid, so the test marks it reaped.
 function killArmedAfter(t, dir, armed) {
   const guard = { reaped: false };
   t.after(() => {
@@ -177,9 +182,10 @@ test('an abort remains the stop cause when the deadline passes during descendant
   releaseClockAfter(t, clock);
   const guard = killArmedAfter(t, root, armed);
   // The descendant inherits the runner's pipes, so the root does not close, and
-  // its timeout stays armed, until the forced kill reaps the descendant.
+  // its timeout stays armed, until the forced kill reaps the descendant. The
+  // runner exits with its descendant, so the guard's kill also ends the run.
   const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10);`;
-  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'});setInterval(()=>{},10);`);
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'}).on('exit',()=>process.exit(1));setInterval(()=>{},10);`);
   const controller = new AbortController();
   const running = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 2000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
   running.catch(() => { /* Rethrown by the await below. */ });
@@ -235,14 +241,15 @@ test('portable bounded runner removes only newly owned staging after timeout', {
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-staging-'));
   const clock = manualClock();
   releaseClockAfter(t, clock);
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runnerPid = join(root, 'runner.pid');
+  const guard = killArmedAfter(t, root, runnerPid);
   const output = join(root, 'output');
   mkdirSync(output);
   const preserved = join(output, '.goop-output-1-0');
   mkdirSync(preserved);
   const created = join(output, `.goop-output-${process.pid}-1`);
   const runner = join(root, 'runner.cjs');
-  writeFileSync(runner, "require('node:fs').mkdirSync(process.env.GOOP_TEST_STAGING);setInterval(()=>{},10);");
+  writeFileSync(runner, `${recordPid(runnerPid)}require('node:fs').mkdirSync(process.env.GOOP_TEST_STAGING);setInterval(()=>{},10);`);
   const running = runBoundedProcess({ command: process.execPath, args: [runner], env: { ...process.env, GOOP_TEST_STAGING: created }, outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
   running.catch(() => { /* Rethrown by the await below. */ });
   // The timeout falls due only once the runner has created its staging.
@@ -252,6 +259,7 @@ test('portable bounded runner removes only newly owned staging after timeout', {
   assert.deepEqual(clock.sleeps, [1500, 100]);
   await clock.advance(100);
   const result = await running;
+  guard.reaped = true;
   assert.equal(result.timed_out, true);
   assert.equal(result.removed_staging_directories, 1);
   assert.equal(result.cleanup_error, null);
@@ -337,10 +345,12 @@ test('portable bounded runner fails closed on a delay its timers reject', { time
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-bad-delay-')), output = join(root, 'output'); mkdirSync(output);
   const controller = new AbortController();
   t.after(() => controller.abort());
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runnerPid = join(root, 'runner.pid');
+  const guard = killArmedAfter(t, root, runnerPid);
   const runner = join(root, 'runner.cjs');
-  writeFileSync(runner, 'setInterval(()=>{},10);');
+  writeFileSync(runner, `${recordPid(runnerPid)}setInterval(()=>{},10);`);
   const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: null, killGraceMs: null, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal });
+  guard.reaped = true;
   assert.equal(result.timed_out, true);
   assert.equal(result.aborted, false);
 });
