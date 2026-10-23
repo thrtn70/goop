@@ -54,6 +54,18 @@ test('timeout escalates for a process ignoring TERM',{timeout:5000},async t=>{
  assert.equal(result.lifetime_ms,230);
  passed=true;
 });
+test('run coerces its limits the way setTimeout does',{timeout:5000},async t=>{
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-coerced-limits-'));
+ const armed=join(clockDir,'armed');
+ let passed=false;
+ t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(clockDir,{recursive:true,force:true});});
+ // Both limits once went to setTimeout, which coerces its delay. A run given
+ // numeric strings must still time out and escalate rather than lose a timer.
+ const result=await fakeRunner(`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`,{timeoutMs:'200',killGraceMs:'30'});
+ assert.equal(result.success,false);
+ assert.equal(result.timed_out,true);
+ passed=true;
+});
 test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
 test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
  const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:50});
