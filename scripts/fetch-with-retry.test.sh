@@ -16,6 +16,9 @@ SCRIPT_DIR="$PWD"
 
 # shellcheck disable=SC1091
 source ./fetch-with-retry.sh
+# A cache inherited from the caller could serve checks 1-11 offline, so they
+# would pass without exercising a download. The cache checks set their own.
+unset GOOP_SIDECAR_CACHE
 
 command -v python3 >/dev/null 2>&1 || {
   echo "FAIL: python3 is required for the local test server" >&2
@@ -285,6 +288,244 @@ if [ -n "$bare_curl" ]; then
 else
   echo "  ok   every download under scripts/ goes through fetch_url"
 fi
+
+# 12-22. The download cache. CI points GOOP_SIDECAR_CACHE at a directory it
+# restores between runs, so an upstream outage cannot fail a build that
+# already holds the pinned bytes. Entries are named by their SHA-256, and a
+# restored entry goes through the same digest check as a fresh download.
+# The fetch_url stubs below record any network attempt instead of making one.
+CACHE="$WORK/download-cache"
+UPPER_SHA256="$(printf '%s' "$PAYLOAD_SHA256" | tr '[:lower:]' '[:upper:]')"
+
+# 12. A miss downloads, verifies and installs as before, and keeps the
+#     verified bytes under their lowercase digest.
+if (
+  export GOOP_SIDECAR_CACHE="$CACHE"
+  fetch_verified "$BASE/payload" "$UPPER_SHA256" "$WORK/cache-miss.bin" >/dev/null 2>&1
+) && [ "$(cat "$WORK/cache-miss.bin")" = "$PAYLOAD" ] \
+    && [ "$(cat "$CACHE/$PAYLOAD_SHA256" 2>/dev/null)" = "$PAYLOAD" ]; then
+  echo "  ok   a cache miss installs the download and caches it by digest"
+else
+  echo "  FAIL a cache miss did not install and cache the verified download"
+  fail=1
+fi
+
+# 13. A hit installs the cached bytes without touching the network, still
+#     verifies them, and says so in the log. The installed file must look like
+#     a download too: same mode, whatever mode the restored entry carries.
+rm -f "$WORK/net-called"
+chmod 600 "$CACHE/$PAYLOAD_SHA256"
+if hit_log="$(
+  fetch_url() { : > "$WORK/net-called"; return 1; }
+  export GOOP_SIDECAR_CACHE="$CACHE"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/cache-hit.bin" 2>&1
+)" && [ ! -e "$WORK/net-called" ] \
+    && [ "$(cat "$WORK/cache-hit.bin")" = "$PAYLOAD" ] \
+    && [ "$(ls -l "$WORK/cache-hit.bin" | cut -c1-10)" = "$(ls -l "$WORK/cache-miss.bin" | cut -c1-10)" ] \
+    && ! staging_exists cache-hit.bin \
+    && printf '%s' "$hit_log" | grep -q "verified cache-hit.bin from the download cache (sha256 $PAYLOAD_SHA256)"; then
+  echo "  ok   a cache hit installs verified bytes without a download"
+else
+  echo "  FAIL a cache hit did not install verified bytes offline"
+  printf '%s\n' "${hit_log:-}" | sed 's/^/       /'
+  fail=1
+fi
+
+# 14. A cached entry whose bytes do not match its name fails closed: no
+#     install, no silent re-download, the existing destination preserved and
+#     an error that points at the cache rather than at the pin.
+POISONED_CACHE="$WORK/poisoned-cache"
+mkdir -p "$POISONED_CACHE"
+printf 'poisoned' > "$POISONED_CACHE/$PAYLOAD_SHA256"
+printf 'known-good' > "$WORK/poisoned.bin"
+rm -f "$WORK/net-called"
+if poison_log="$(
+  fetch_url() { : > "$WORK/net-called"; return 1; }
+  export GOOP_SIDECAR_CACHE="$POISONED_CACHE"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/poisoned.bin" 2>&1
+)"; then
+  echo "  FAIL a poisoned cache entry was accepted"
+  fail=1
+elif [ -e "$WORK/net-called" ]; then
+  echo "  FAIL a poisoned cache entry fell back to a download instead of failing"
+  fail=1
+elif [ "$(cat "$WORK/poisoned.bin")" != "known-good" ] || staging_exists poisoned.bin; then
+  echo "  FAIL a poisoned cache entry did not preserve the destination and clean up"
+  fail=1
+elif ! printf '%s' "$poison_log" | grep -q "download cache"; then
+  echo "  FAIL a poisoned cache entry failed without naming the download cache"
+  fail=1
+else
+  echo "  ok   a poisoned cache entry fails closed"
+fi
+
+# 15. A download that fails verification never enters the cache, so a bad
+#     upstream payload cannot be replayed into later runs.
+MISMATCH_CACHE="$WORK/mismatch-cache"
+if (
+  export GOOP_SIDECAR_CACHE="$MISMATCH_CACHE"
+  fetch_verified "$BASE/payload" "${PAYLOAD_SHA256%?}0" "$WORK/mismatch.bin" >/dev/null 2>&1
+); then
+  echo "  FAIL a mismatched download was accepted with the cache enabled"
+  fail=1
+elif [ -n "$(ls -A "$MISMATCH_CACHE" 2>/dev/null)" ]; then
+  echo "  FAIL a mismatched download was written to the cache"
+  fail=1
+else
+  echo "  ok   a mismatched download is never cached"
+fi
+
+# 16. With GOOP_SIDECAR_CACHE unset there is no cache anywhere: a local run
+#     writes nothing beyond its destination.
+mkdir -p "$WORK/no-cache"
+if (
+  unset GOOP_SIDECAR_CACHE
+  cd "$WORK/no-cache"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/no-cache/out.bin" >/dev/null 2>&1
+) && [ "$(ls -A "$WORK/no-cache")" = "out.bin" ]; then
+  echo "  ok   no cache is written unless GOOP_SIDECAR_CACHE is set"
+else
+  echo "  FAIL an unset GOOP_SIDECAR_CACHE still wrote cache files"
+  fail=1
+fi
+
+# 17. The cache is an optimisation. If it cannot be written, the verified
+#     download still installs, with a warning.
+printf 'not a directory' > "$WORK/cache-is-a-file"
+if unwritable_log="$(
+  export GOOP_SIDECAR_CACHE="$WORK/cache-is-a-file"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/unwritable.bin" 2>&1
+)" && [ "$(cat "$WORK/unwritable.bin")" = "$PAYLOAD" ] \
+    && printf '%s' "$unwritable_log" | grep -q "could not add .* to the download cache"; then
+  echo "  ok   an unwritable cache warns and still installs the download"
+else
+  echo "  FAIL an unwritable cache broke the download or said nothing"
+  printf '%s\n' "${unwritable_log:-}" | sed 's/^/       /'
+  fail=1
+fi
+
+# 18. Pruning keeps only what this run verified. A restore from an older
+#     snapshot would otherwise carry every superseded pin forward forever.
+#     It removes stale digests and stray partial writes, never anything else.
+PRUNE_CACHE="$WORK/prune-cache"
+STALE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+mkdir -p "$PRUNE_CACHE"
+printf '%s' "$PAYLOAD" > "$PRUNE_CACHE/$PAYLOAD_SHA256"
+printf 'old pin' > "$PRUNE_CACHE/$STALE_SHA256"
+printf 'partial' > "$PRUNE_CACHE/.$STALE_SHA256.Ab12Cd"
+# Decoys: digest-like names the cache never creates must survive.
+UPPER_STALE_SHA256="ABCDEF0000000000000000000000000000000000000000000000000000000000"
+for decoy in notes.txt "$STALE_SHA256.zip" ".$STALE_SHA256" "$UPPER_STALE_SHA256"; do
+  printf 'unrelated' > "$PRUNE_CACHE/$decoy"
+done
+if (
+  fetch_url() { return 1; }
+  export GOOP_SIDECAR_CACHE="$PRUNE_CACHE"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/prune.bin" >/dev/null 2>&1
+  prune_download_cache
+) && [ -f "$PRUNE_CACHE/$PAYLOAD_SHA256" ] \
+    && [ ! -e "$PRUNE_CACHE/$STALE_SHA256" ] \
+    && [ ! -e "$PRUNE_CACHE/.$STALE_SHA256.Ab12Cd" ] \
+    && [ -f "$PRUNE_CACHE/notes.txt" ] \
+    && [ -f "$PRUNE_CACHE/$STALE_SHA256.zip" ] \
+    && [ -f "$PRUNE_CACHE/.$STALE_SHA256" ] \
+    && [ -f "$PRUNE_CACHE/$UPPER_STALE_SHA256" ]; then
+  echo "  ok   pruning keeps this run's digests and removes only stale entries"
+else
+  echo "  FAIL pruning removed the wrong cache entries:"
+  ls -A "$PRUNE_CACHE" | sed 's/^/       /'
+  fail=1
+fi
+if ( unset GOOP_SIDECAR_CACHE; prune_download_cache ); then
+  echo "  ok   pruning is a no-op without a cache"
+else
+  echo "  FAIL pruning failed without a cache"
+  fail=1
+fi
+
+# 19. The digest becomes a file name inside the cache, so it must be
+#     validated before the cache or the network is touched.
+rm -f "$WORK/net-called"
+if (
+  fetch_url() { : > "$WORK/net-called"; return 1; }
+  export GOOP_SIDECAR_CACHE="$CACHE"
+  fetch_verified "$BASE/payload" "../../$PAYLOAD_SHA256" "$WORK/traversal.bin" >/dev/null 2>&1
+); then
+  echo "  FAIL a malformed digest was accepted"
+  fail=1
+elif [ -e "$WORK/net-called" ] || [ -e "$WORK/traversal.bin" ]; then
+  echo "  FAIL a malformed digest reached the network or the destination"
+  fail=1
+else
+  echo "  ok   a malformed digest is rejected before any lookup"
+fi
+
+# 20. Only a regular file counts as a cache entry. A directory under a
+#     digest's name (what a tampered restore could plant) is a miss, and
+#     storing must not move the download into it.
+ODD_CACHE="$WORK/odd-cache"
+mkdir -p "$ODD_CACHE/$PAYLOAD_SHA256"
+if odd_log="$(
+  export GOOP_SIDECAR_CACHE="$ODD_CACHE"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/odd.bin" 2>&1
+)" && [ "$(cat "$WORK/odd.bin")" = "$PAYLOAD" ] \
+    && [ -z "$(ls -A "$ODD_CACHE/$PAYLOAD_SHA256")" ] \
+    && printf '%s' "$odd_log" | grep -q "could not add .* to the download cache"; then
+  echo "  ok   a non-file cache entry is a miss and is never written through"
+else
+  echo "  FAIL a non-file cache entry was trusted or written through"
+  ls -A "$ODD_CACHE/$PAYLOAD_SHA256" | sed 's/^/       /'
+  fail=1
+fi
+
+# 21. A symlink under a digest's name is never read, even when it points at
+#     the right bytes, and the verified download replaces the link itself.
+#     Left in place, it would survive pruning and cost that pin its outage
+#     protection on every run.
+LINK_CACHE="$WORK/link-cache"
+mkdir -p "$LINK_CACHE"
+printf '%s' "$PAYLOAD" > "$WORK/link-target"
+ln -s "$WORK/link-target" "$LINK_CACHE/$PAYLOAD_SHA256"
+rm -f "$WORK/net-called"
+if (
+  fetch_url() { : > "$WORK/net-called"; printf '%s' "$PAYLOAD" > "$2"; }
+  export GOOP_SIDECAR_CACHE="$LINK_CACHE"
+  fetch_verified "$BASE/payload" "$PAYLOAD_SHA256" "$WORK/link.bin" >/dev/null 2>&1
+) && [ -e "$WORK/net-called" ] \
+    && [ ! -L "$LINK_CACHE/$PAYLOAD_SHA256" ] \
+    && [ "$(cat "$LINK_CACHE/$PAYLOAD_SHA256")" = "$PAYLOAD" ] \
+    && [ "$(cat "$WORK/link-target")" = "$PAYLOAD" ] \
+    && [ "$(cat "$WORK/link.bin")" = "$PAYLOAD" ]; then
+  echo "  ok   a symlinked cache entry is a miss and is replaced, not followed"
+else
+  echo "  FAIL a symlinked cache entry was read, followed, or left in place"
+  fail=1
+fi
+
+# 22. Pruning is best effort too. The helper is sourced into errexit scripts,
+#     so a failed removal must warn rather than abort a fetch that has
+#     already installed every sidecar.
+LOCKED_CACHE="$WORK/locked-cache"
+mkdir -p "$LOCKED_CACHE"
+printf 'old pin' > "$LOCKED_CACHE/$STALE_SHA256"
+chmod 555 "$LOCKED_CACHE"
+if [ -w "$LOCKED_CACHE" ]; then
+  echo "  skip a read-only cache directory is still writable here (running as root?)"
+# A separate process: errexit is suspended inside an if condition, which would
+# let this pass even if the prune aborted a real fetch-sidecars.sh run.
+elif locked_log="$(
+  GOOP_SIDECAR_CACHE="$LOCKED_CACHE" bash -c \
+    'set -euo pipefail; source "$1"; prune_download_cache; echo "after prune"' \
+    _ "$SCRIPT_DIR/fetch-with-retry.sh" 2>&1
+)" && printf '%s' "$locked_log" | grep -q "after prune" \
+    && printf '%s' "$locked_log" | grep -q "could not prune"; then
+  echo "  ok   a failed prune warns instead of aborting the fetch"
+else
+  echo "  FAIL a failed prune aborted the caller or said nothing"
+  printf '%s\n' "${locked_log:-}" | sed 's/^/       /'
+  fail=1
+fi
+chmod 755 "$LOCKED_CACHE"
 
 if [ "$fail" != "0" ]; then
   echo "FAIL"
