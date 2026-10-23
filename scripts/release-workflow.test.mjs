@@ -166,6 +166,68 @@ test("only the no-build publish job can write release state", () => {
   assert.doesNotMatch(publish, /draft: false/);
 });
 
+// The repository's default workflow token can write, and main has no branch
+// protection, so a workflow that names no permissions inherits a token that
+// can push to main. Audit compiles freshly resolved crates (Cargo.lock is not
+// committed), so any build script it runs could read a token left behind.
+// YAML allows blank lines and comments inside the block, so read past them
+// rather than stopping early and missing a scope added after one.
+function topLevelPermissions(body) {
+  const block = body.match(/^permissions:[ \t]*\n((?:(?:[ \t]+.*|#.*)?\n)*)/m)?.[1];
+  return block?.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+}
+
+// Every checkout `uses:` line, counted from the raw text so that a step the
+// parser below misreads still counts against it.
+function checkoutUses(body) {
+  return body.match(/\buses:\s*["']?actions\/checkout@/g)?.length ?? 0;
+}
+
+function checkoutSteps(body) {
+  return steps(body).filter((step) => /^ {6}- uses: actions\/checkout@|^ {8}uses: actions\/checkout@/m.test(step));
+}
+
+test("every workflow declares its own token permissions", () => {
+  for (const { name, body } of workflows) {
+    assert.ok(/^permissions:/m.test(body), `${name} inherits the repository's default token`);
+  }
+  const pages = workflows.find(({ name }) => name === "pages.yml");
+  assert.deepEqual(topLevelPermissions(pages.body), ["contents: read", "pages: write", "id-token: write"]);
+});
+
+test("audit runs with a read-only token", () => {
+  assert.deepEqual(topLevelPermissions(auditWorkflow), ["contents: read"]);
+  assert.doesNotMatch(auditWorkflow, /^ +permissions:/m, "no audit job may widen the token");
+});
+
+test("no workflow leaves its token in the checkout's git config", () => {
+  let checked = 0;
+  for (const { name, body } of workflows) {
+    const checkouts = checkoutSteps(body);
+    assert.equal(checkouts.length, checkoutUses(body), `${name}: a checkout step the parser missed`);
+    for (const step of checkouts) {
+      // Deliberately exact: block-style `with:`, the form release.yml uses.
+      assert.match(step, /^ {8}with:\n(?: {10}.*\n)*? {10}persist-credentials: false$/m, `${name}:\n${step}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 0, "no checkout steps found to validate");
+});
+
+test("every workflow pins each action to a full commit SHA", () => {
+  let pinned = 0;
+  for (const { name, body } of workflows) {
+    const refs = [...body.matchAll(/^[ -]*uses: (\S+)$/gm)].map((match) => match[1]);
+    assert.equal(refs.length, body.match(/\buses:/g)?.length ?? 0, `${name}: a uses: line the parser missed (the ref must end the line)`);
+    for (const ref of refs) {
+      if (ref.startsWith("./")) continue;
+      assert.match(ref, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${name} uses ${ref} by a mutable ref`);
+      pinned += 1;
+    }
+  }
+  assert.ok(pinned > 0, "no actions found to validate");
+});
+
 test("the macOS arm64 build stages one immutable workflow artifact before publication", () => {
   const build = job("build");
   assert.match(build, /os: macos-14/);
