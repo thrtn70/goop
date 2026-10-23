@@ -289,11 +289,13 @@ test("fails unless yt-dlp ends on its no-URL usage error", async (t) => {
 
 test("the binary's own output cannot issue workflow commands", () => {
   withDir((dir) => {
-    const forged = ["::warning::forged annotation", "::add-mask::2026.10.19"];
+    // A lone CR ends a line for the runner too.
+    const forged = ["::warning::forged annotation", "::add-mask::2026.10.19", "boom\r::notice::after a lone CR"];
     const result = run(dir, fakeBinary(dir, { stderrLines: [...report(), ...forged], exitCode: 1 }));
     assert.equal(result.status, 1);
     assert.match(result.stderr, /^::error::yt-dlp exited with status 1/m);
-    assert.doesNotMatch(result.stderr, /^::(?:warning|add-mask)::/m);
+    const lines = result.stderr.split(/\r\n|\r|\n/);
+    assert.deepEqual(lines.filter((line) => /^::(?:warning|add-mask|notice)::/.test(line)), []);
     assert.match(result.stderr, /forged annotation/, "the output is still shown, just not as a command");
   });
 });

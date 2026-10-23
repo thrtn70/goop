@@ -87,11 +87,12 @@ function readPin(path) {
 }
 
 // Indented so that no line of the binary's output can start with "::" and be
-// read by the Actions runner as a workflow command.
+// read by the Actions runner as a workflow command. A lone CR ends a line for
+// the runner too.
 function stderrContext(stderr) {
   const text = (stderr ?? "").trim();
   const tail = text.length > STDERR_CONTEXT_CHARS ? `…${text.slice(-STDERR_CONTEXT_CHARS)}` : text;
-  return tail.split(/\r?\n/).map((line) => `  ${line}`).join("\n");
+  return tail.split(/\r\n|\r|\n/).map((line) => `  ${line}`).join("\n");
 }
 
 function runYtDlp(binary, timeoutMs) {
