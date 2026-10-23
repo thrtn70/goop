@@ -9,7 +9,8 @@ import type { PreviewRequest, PreviewResult, ProbeResult, Settings, Preset } fro
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease, responsiveness } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease, responsiveness, sourcePlayer } = vi.hoisted(() => ({
+  sourcePlayer: { throws: false },
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
@@ -226,6 +227,18 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `asset://${path}`,
+}));
+
+vi.mock("@tauri-apps/api/path", () => ({
+  homeDir: () => Promise.resolve("/tmp"),
+}));
+
+// The real player is covered on its own; here it only has to show up, or fall over on demand.
+vi.mock("@/features/player/SourcePlayer", () => ({
+  default: ({ path }: { path: string }) => {
+    if (sourcePlayer.throws) throw new Error("player exploded");
+    return <div data-testid="source-player">{path}</div>;
+  },
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -1901,5 +1914,89 @@ describe("explicit video inspector", () => {
     resolve("/tmp/out.mp4"); await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());
     expect(mockFromFile.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},speed:"medium",processor:"software"}});
     expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+  });
+});
+
+describe("media player slot", () => {
+  const convertButton = () => screen.getByRole("button", { name: /^Convert \d+ files?$/ }) as HTMLButtonElement;
+  const slot = () => document.querySelector(".workspace-inspector-media");
+  const setPlayerSetting = (media_player_enabled: boolean | null) =>
+    useAppStore.setState({ settings: media_player_enabled === null ? null : ({ media_player_enabled } as Settings) });
+  async function stage() {
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await screen.findByLabelText("Processing");
+    await waitFor(() => expect(convertButton().disabled).toBe(false));
+  }
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    clearWorkspaceDrafts("convert");
+    sourcePlayer.throws = false;
+    useAppStore.setState({ presets: [], settings: null });
+    mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockSave.mockResolvedValue("/tmp/out.mp4");
+    mockFromFile.mockResolvedValue("job");
+  });
+  afterEach(() => {
+    cleanup();
+    sourcePlayer.throws = false;
+    useAppStore.setState({ settings: null });
+  });
+
+  it("adds no media element at all while the player is off", async () => {
+    setPlayerSetting(false);
+    await stage();
+    expect(slot()).toBeNull();
+    expect(screen.queryByTestId("source-player")).toBeNull();
+  });
+
+  it("adds none before settings have loaded", async () => {
+    setPlayerSetting(null);
+    await stage();
+    expect(slot()).toBeNull();
+  });
+
+  it("pins the player above the scrolling settings when it is on", async () => {
+    setPlayerSetting(true);
+    await stage();
+    const media = slot();
+    const scroll = document.querySelector(".workspace-inspector-scroll");
+    expect(media).not.toBeNull();
+    expect((await screen.findByTestId("source-player")).textContent).toBe("/tmp/test-video.mp4");
+    expect(media!.contains(screen.getByTestId("source-player"))).toBe(true);
+    expect(media!.compareDocumentPosition(scroll!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(scroll!.contains(media)).toBe(false);
+  });
+
+  it("keeps the settings and the Convert button working when the player throws", async () => {
+    setPlayerSetting(false);
+    await stage();
+    const withPlayerOff = convertButton().disabled;
+    cleanup();
+    clearWorkspaceDrafts("convert");
+
+    // React and the boundary both report the caught error, and jsdom prints it as "Uncaught"; the output is expected here.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const claimExpectedError = (event: ErrorEvent) => {
+      if (event.error?.message === "player exploded") event.preventDefault();
+    };
+    window.addEventListener("error", claimExpectedError);
+    try {
+      sourcePlayer.throws = true;
+      setPlayerSetting(true);
+      await stage();
+      expect(await screen.findByText("Preview unavailable.")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Output settings" })).toBeTruthy();
+      expect(convertButton().disabled).toBe(withPlayerOff);
+
+      await userEvent.click(convertButton());
+      await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(1));
+      expect(mockFromFile.mock.calls[0][0]).toMatchObject({ input_path: "/tmp/test-video.mp4" });
+    } finally {
+      window.removeEventListener("error", claimExpectedError);
+      consoleError.mockRestore();
+    }
   });
 });

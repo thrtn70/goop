@@ -87,6 +87,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    media_player_enabled: true,
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",
@@ -343,5 +344,30 @@ describe("SettingsPage log folder", () => {
     expect(
       await screen.findByText(/Check that the selected folder exists/),
     ).toBeTruthy();
+  });
+});
+
+describe("SettingsPage media player switch", () => {
+  it("is on by default and turning it off patches the setting", async () => {
+    // The kill switch for the panel player: if the player ever misbehaves on
+    // someone's files, this is how they get today's inspector back.
+    const patchSettings = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ patchSettings });
+    renderPage();
+
+    // The DOM property, not the `checked` attribute (see the yt-dlp case above).
+    const box = screen.getByRole("checkbox", { name: "Media player" }) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+
+    await userEvent.click(box);
+
+    expect(patchSettings).toHaveBeenCalledWith({ media_player_enabled: false });
+  });
+
+  it("reflects the stored value rather than defaulting the checkbox on", () => {
+    useAppStore.setState({ settings: makeSettings({ media_player_enabled: false }) });
+    renderPage();
+    const box = screen.getByRole("checkbox", { name: "Media player" }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
   });
 });

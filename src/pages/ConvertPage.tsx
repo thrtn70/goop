@@ -12,6 +12,7 @@ import { useAudioPlans, useVideoPlans } from "@/features/convert/useVideoPlan";
 import { audioExecutionText, videoExecutionText } from "@/features/preview/outputSummary";
 import SettingsPreview from "@/features/preview/SettingsPreview";
 import RecognizeChip from "@/features/recognize/RecognizeChip";
+import InspectorPlayer, { useMediaPlayerEnabled } from "@/features/player/InspectorPlayer";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import WorkspaceList from "@/components/workspace/WorkspaceList";
@@ -230,6 +231,7 @@ function ConvertPage() {
   }, [byId, setFiles]);
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
+  const mediaPlayerEnabled = useMediaPlayerEnabled();
   const selectedVideo = videoFiles.find(file => file.id === selected?.id);
   useEffect(() => {
     const pending = pendingResponsivenessAction.current;
@@ -724,6 +726,7 @@ function ConvertPage() {
       }
       inspector={
         <WorkspaceInspector
+          media={mediaPlayerEnabled ? <InspectorPlayer path={selected?.path ?? null} state={selectedState} /> : undefined}
           title="Output settings"
           description={
             selected
