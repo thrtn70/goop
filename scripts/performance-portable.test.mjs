@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { directoryBytes, runBoundedProcess } from './performance-shared.mjs';
+import { directoryBytes as baselineDirectoryBytes } from './performance-baseline.mjs';
 import { resolveRuntimeSidecars } from './performance-suite.mjs';
 
 test('portable runtime-sidecar names are exact for Unix and Windows', () => {
@@ -373,4 +374,137 @@ test('portable bounded runner rejects and removes child-created symlinks without
     const result=await runBoundedProcess({command:process.execPath,args:[runner],env:{...process.env,GOOP_TEST_EXTERNAL:external,GOOP_TEST_OUTPUT:output},outputDirectory:output,timeoutMs:20_000,killGraceMs:50,logLimitBytes:128,storageBudgetBytes:1024});
     assert.equal(result.success,false);assert.match(result.output_error,/symbolic-link/i);assert.equal(existsSync(join(output,'link')),false);assert.equal(existsSync(external),true);
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+// Hooks reproduce the app removing a publication temp file or SQLite journal mid-scan.
+const fsError = code => Object.assign(Error(`injected ${code}`), { code });
+
+test('storage scan skips an entry removed between listing and lstat', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-vanished-entry-'));
+  try {
+    const temporary = '.frontend.json.1.0.tmp';
+    writeFileSync(join(root, 'kept'), '1234');
+    writeFileSync(join(root, temporary), 'x'.repeat(100));
+    let listed = [];
+    const listThenRemove = (path, options) => {
+      const entries = readdirSync(path, options);
+      if (path === root) { listed = entries; unlinkSync(join(root, temporary)); }
+      return entries;
+    };
+    assert.equal(directoryBytes(root, { readdirSync: listThenRemove, lstatSync }), 4);
+    assert.ok(listed.includes(temporary), 'the removed entry was listed before its lstat');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const removeThenList = target => (path, options) => {
+  if (path === target) rmSync(target, { recursive: true });
+  return readdirSync(path, options);
+};
+
+test('storage scan counts a subdirectory removed just before it is listed as empty', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-vanished-directory-'));
+  try {
+    const sub = join(root, 'sub');
+    writeFileSync(join(root, 'kept'), '1234');
+    mkdirSync(sub);
+    writeFileSync(join(sub, 'inner'), 'x'.repeat(100));
+    assert.equal(directoryBytes(root, { readdirSync: removeThenList(sub), lstatSync }), 4);
+    assert.equal(existsSync(sub), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan counts a missing or just-removed root as empty', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-missing-root-'));
+  try {
+    assert.equal(directoryBytes(join(root, 'absent')), 0);
+    const owned = join(root, 'owned');
+    mkdirSync(owned);
+    writeFileSync(join(owned, 'large'), Buffer.alloc(10000));
+    assert.equal(directoryBytes(owned, { readdirSync: removeThenList(owned), lstatSync }), 0);
+    assert.equal(existsSync(owned), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan fails on a root it cannot reach instead of counting it empty', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-unreachable-root-'));
+  const parent = join(root, 'parent'), owned = join(parent, 'owned');
+  mkdirSync(owned, { recursive: true });
+  writeFileSync(join(owned, 'large'), Buffer.alloc(10000));
+  chmodSync(parent, 0o000);
+  try {
+    assert.throws(() => directoryBytes(owned), { code: 'EACCES' });
+  } finally { chmodSync(parent, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan still fails on every error other than a vanished entry', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-other-errors-'));
+  try {
+    const sub = join(root, 'sub');
+    writeFileSync(join(root, 'kept'), '1234');
+    mkdirSync(sub);
+    for (const code of ['EACCES', 'EPERM', 'EIO', 'ENOTDIR', 'EMFILE', undefined]) {
+      const failing = () => { throw code === undefined ? Error('uncoded failure') : fsError(code); };
+      const lstatFails = path => path === join(root, 'kept') ? failing() : lstatSync(path);
+      const listingFails = (path, options) => path === sub ? failing() : readdirSync(path, options);
+      const expected = code === undefined ? /uncoded failure/ : { code };
+      assert.throws(() => directoryBytes(root, { readdirSync, lstatSync: lstatFails }), expected, `lstat ${code}`);
+      assert.throws(() => directoryBytes(root, { readdirSync: listingFails, lstatSync }), expected, `subdirectory listing ${code}`);
+      assert.throws(() => directoryBytes(root, { readdirSync: failing, lstatSync }), expected, `root listing ${code}`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan fails on a listed name that can never be stated', () => {
+  // Bytes that are not valid UTF-8 list as U+FFFD and then miss on every lstat;
+  // treating that ENOENT as a vanish would hide the file for the whole run.
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-lossy-name-'));
+  try {
+    writeFileSync(join(root, 'kept'), '1234');
+    const listLossy = path => path === root ? [...readdirSync(path), 'queue.db-journal\uFFFD'] : readdirSync(path);
+    assert.throws(() => directoryBytes(root, { readdirSync: listLossy, lstatSync }), { code: 'ENOENT' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan fails when two listed names decode alike', () => {
+  // A non-UTF-8 name and its U+FFFD twin both list as one string, so lstat would
+  // measure the twin twice and never see the other file.
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-name-collision-'));
+  try {
+    writeFileSync(join(root, 'a\uFFFD'), 'x');
+    const listTwins = path => path === root ? [...readdirSync(path), 'a\uFFFD'] : readdirSync(path);
+    assert.throws(() => directoryBytes(root, { readdirSync: listTwins, lstatSync }), /collide/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan trusts a vanish under a parent whose own name holds U+FFFD', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-\uFFFD-parent-'));
+  try {
+    const temporary = '.frontend.json.1.0.tmp';
+    writeFileSync(join(root, 'kept'), '1234');
+    writeFileSync(join(root, temporary), 'x'.repeat(100));
+    const listThenRemove = path => {
+      const names = readdirSync(path);
+      if (path === root) unlinkSync(join(root, temporary));
+      return names;
+    };
+    assert.equal(directoryBytes(root, { readdirSync: listThenRemove, lstatSync }), 4);
+    assert.equal(directoryBytes(join(root, 'absent')), 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('storage scan counts a symlink itself and never follows it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-scan-symlink-'));
+  try {
+    const owned = join(root, 'owned'), target = join(root, 'target');
+    mkdirSync(owned);
+    writeFileSync(target, Buffer.alloc(10000));
+    symlinkSync(target, join(owned, 'link'));
+    const linkBytes = lstatSync(join(owned, 'link')).size;
+    assert.ok(linkBytes < 10000);
+    assert.equal(directoryBytes(owned), linkBytes);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('startup and conversion monitors share the one storage scan', () => {
+  assert.equal(baselineDirectoryBytes, directoryBytes);
 });
