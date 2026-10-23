@@ -1399,32 +1399,32 @@ export async function waitForRecorderOrFailedPage({ recorderPath, reportDirector
   throw Error('Page startup timed out before recorder readiness or a failed component');
 }
 
-export async function waitForAxPreflight(driver, labels, { timeoutMs = 5000, pollMs = 25, abortSignal = null } = {}) {
-  const deadline = performance.now() + timeoutMs;
+export async function waitForAxPreflight(driver, labels, { timeoutMs = 5000, pollMs = 25, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep } = {}) {
+  const deadline = nowMs() + timeoutMs;
   let lastError = null;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     try { return await driver.preflight(labels); }
     catch (error) {
       if (!/accessibility label is missing/i.test(error.message)) throw error;
-      lastError = error; await sleep(pollMs);
+      lastError = error; await sleepMs(pollMs);
     }
   }
   throwIfAborted(abortSignal);
   throw lastError ?? Error('Accessibility targets did not mount before timeout');
 }
 
-export async function waitForAxActivation(driver, { timeoutMs = 5000, pollMs = 25, abortSignal = null } = {}) {
+export async function waitForAxActivation(driver, { timeoutMs = 5000, pollMs = 25, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep } = {}) {
   if (!driver || typeof driver.activate !== 'function') throw Error('Invalid accessibility activation driver');
-  const deadline = performance.now() + timeoutMs;
+  const deadline = nowMs() + timeoutMs;
   let lastError = null;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     try { return await driver.activate(); }
     catch (error) {
       if (!/(process|main window) is not ready|main window is not frontmost yet/i.test(error.message)) throw error;
       lastError = error;
-      await sleep(pollMs);
+      await sleepMs(pollMs);
     }
   }
   throwIfAborted(abortSignal);
