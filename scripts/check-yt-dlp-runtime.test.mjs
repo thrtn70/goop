@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { scrubbedEnv } from "./check-yt-dlp-runtime.mjs";
+import { scrubbedEnv } from "./sidecar-child-env.mjs";
 
 const checker = fileURLToPath(new URL("./check-yt-dlp-runtime.mjs", import.meta.url));
 const fetchScript = fileURLToPath(new URL("./fetch-sidecars.sh", import.meta.url));
@@ -387,6 +387,13 @@ test("reports usage errors and a missing binary distinctly", async (t) => {
       assert.match(result.stderr, /::error::.*absent/);
     });
   });
+});
+
+test("the checker runs whenever it is executed, with no is-main guard that could skip it", () => {
+  const source = readFileSync(checker, "utf8");
+  assert.match(source, /^process\.exitCode = main\(process\.argv\.slice\(2\)\);$/m);
+  assert.doesNotMatch(source, /import\.meta\.url\)\)? *\) *\{?\s*process\.exitCode/);
+  assert.match(source, /^import \{ scrubbedEnv \} from "\.\/sidecar-child-env\.mjs";$/m);
 });
 
 test("the default fetch script is scripts/fetch-sidecars.sh and its pin is what a binary must report", () => {

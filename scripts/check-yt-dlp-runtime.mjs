@@ -19,11 +19,12 @@
 // a library below its floor, or the binary could not report. 2: usage error.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { scrubbedEnv } from "./sidecar-child-env.mjs";
 
 const DEFAULT_FETCH_SCRIPT = fileURLToPath(new URL("./fetch-sidecars.sh", import.meta.url));
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -91,30 +92,6 @@ function stderrContext(stderr) {
   const text = (stderr ?? "").trim();
   const tail = text.length > STDERR_CONTEXT_CHARS ? `…${text.slice(-STDERR_CONTEXT_CHARS)}` : text;
   return tail.split(/\r?\n/).map((line) => `  ${line}`).join("\n");
-}
-
-// Windows needs SystemRoot to start Python and TEMP/TMP for the PyInstaller
-// unpack directory; USERPROFILE is what expanduser reads there.
-export function scrubbedEnv(home, { platform = process.platform, env = process.env } = {}) {
-  const posix = {
-    HOME: home,
-    TMPDIR: home,
-    XDG_CACHE_HOME: join(home, "cache"),
-    XDG_CONFIG_HOME: join(home, "config"),
-    XDG_DATA_HOME: join(home, "data"),
-  };
-  if (platform !== "win32") return { ...posix, PATH: "/usr/bin:/bin" };
-  const systemRoot = env.SystemRoot ?? "C:\\Windows";
-  return {
-    ...posix,
-    USERPROFILE: home,
-    APPDATA: join(home, "appdata"),
-    LOCALAPPDATA: join(home, "localappdata"),
-    TEMP: home,
-    TMP: home,
-    SystemRoot: systemRoot,
-    PATH: `${systemRoot}\\System32;${systemRoot}`,
-  };
 }
 
 function runYtDlp(binary, timeoutMs) {
@@ -266,6 +243,4 @@ function main(argv) {
   }
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  process.exitCode = main(process.argv.slice(2));
-}
+process.exitCode = main(process.argv.slice(2));
