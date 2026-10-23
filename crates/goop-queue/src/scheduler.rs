@@ -688,7 +688,7 @@ mod tests {
     use super::*;
     use goop_core::events::RecordingSink;
     use goop_core::{Job, JobKind, ResultKind};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -895,6 +895,62 @@ mod tests {
         );
     }
 
+    /// Done is the scheduler's last word on a job, so whoever sees it may take
+    /// the completion hook's work as finished: the app's hook removes the
+    /// job's recovery workspace. The hook is held open on a gate, so an event
+    /// sent before the hook is called, or while it waits, finds it unfinished.
+    #[tokio::test]
+    async fn done_event_is_emitted_only_after_the_completion_hook_returns() {
+        let (mut scheduler, _, store, _dir) = make_scheduler();
+        let hook_returned = Arc::new(AtomicBool::new(false));
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        Arc::get_mut(&mut scheduler).unwrap().sink = Arc::new(HookOrderSink {
+            hook_returned: hook_returned.clone(),
+            events,
+        });
+        let (hook_entered, hook_release) = (entered.clone(), release.clone());
+        Arc::get_mut(&mut scheduler).unwrap().completion_hook = Some(Arc::new(move |_| {
+            let (entered, release) = (hook_entered.clone(), hook_release.clone());
+            let returned = hook_returned.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                returned.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+        let job = Job::new(JobKind::Extract, serde_json::json!({}));
+        store.insert(&job).unwrap();
+        let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
+
+        tokio::time::timeout(LIVENESS_LIMIT, entered.notified())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("the completion hook did not start within {LIVENESS_LIMIT:?}")
+            });
+        release.notify_one();
+        let (state, hook_had_returned) = tokio::time::timeout(LIVENESS_LIMIT, async {
+            loop {
+                match received.recv().await {
+                    Some((JobState::Running, _)) => continue,
+                    Some(outcome) => break outcome,
+                    None => panic!("the scheduler dropped its sink"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no terminal event within {LIVENESS_LIMIT:?}"));
+        task.abort();
+
+        assert_eq!(state, JobState::Done);
+        assert!(
+            hook_had_returned,
+            "Done was emitted before the completion hook returned"
+        );
+    }
+
     #[test]
     fn terminal_outcomes_are_logged_at_info() {
         let done_id = JobId::new();
@@ -986,6 +1042,32 @@ mod tests {
 
     fn state_of(store: &QueueStore, id: JobId) -> JobState {
         store.get_by_id(id).unwrap().unwrap().state
+    }
+
+    /// Real time a scheduler test waits on its job. Correct code needs well
+    /// under a second, even on a loaded runner; this only stops a broken run
+    /// from hanging its test. It is counted on tokio's clock, so a test that
+    /// uses it must not pause that clock.
+    const LIVENESS_LIMIT: Duration = Duration::from_secs(60);
+
+    /// Passes on each queue event's state, paired with whether the completion
+    /// hook had returned at the instant the scheduler emitted it.
+    struct HookOrderSink {
+        hook_returned: Arc<AtomicBool>,
+        events: tokio::sync::mpsc::UnboundedSender<(JobState, bool)>,
+    }
+
+    impl EventSink for HookOrderSink {
+        fn emit_progress(&self, _: goop_core::ProgressEvent) {}
+
+        fn emit_queue(&self, event: QueueEvent) {
+            let hook_returned = self.hook_returned.load(Ordering::SeqCst);
+            // Unbounded because emit_queue cannot wait. A send fails only
+            // once the test has dropped its receiver, and then nobody reads.
+            let _ = self.events.send((event.state, hook_returned));
+        }
+
+        fn emit_sidecar(&self, _: goop_core::SidecarEvent) {}
     }
 
     #[test]
