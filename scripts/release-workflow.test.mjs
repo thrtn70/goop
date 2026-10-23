@@ -328,6 +328,43 @@ test("both quality gates run the gallery-dl runtime checker tests", () => {
   assert.match(auditJob("web"), /- run: node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
 });
 
+// yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only with
+// its version pin. These checks ask the binary which ones it imported.
+const ytDlpRuntimeCheck = /node scripts\/check-yt-dlp-runtime\.mjs --binary "([^"]+)"/;
+const ytDlpRuntimeStep = "yt-dlp runtime clears the certifi and urllib3 floors";
+
+test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on macOS and Windows", () => {
+  const smoke = auditJob("sidecar-smoke");
+  assert.match(smoke, /^ {8}os: \[macos-14, windows-latest\]$/m);
+  const step = namedStep(smoke, ytDlpRuntimeStep);
+  assert.doesNotMatch(step, /^ {8}if:/m, "every sidecar-smoke runner must run the check");
+  assert.match(step, /^ {8}shell: bash$/m);
+  assert.equal(
+    step.match(ytDlpRuntimeCheck)?.[1],
+    "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}",
+  );
+  assert.ok(
+    smoke.indexOf("- name: Fetch sidecars") < smoke.indexOf(`- name: ${ytDlpRuntimeStep}`),
+    "the runtime check must run on the freshly fetched binary",
+  );
+});
+
+test("the signed in-bundle yt-dlp must clear the floors before assets are staged", () => {
+  const build = job("build");
+  const verify = namedStep(build, "Verify signed sidecars run (macOS)");
+  assert.equal(verify.match(ytDlpRuntimeCheck)?.[1], "$APP/Contents/MacOS/yt-dlp");
+  assert.ok(
+    build.indexOf("- name: Verify signed sidecars run (macOS)") < build.indexOf("- name: Stage release assets"),
+    "assets must not be staged before the in-bundle runtime check",
+  );
+});
+
+test("both quality gates run the yt-dlp runtime checker tests", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  assert.match(prePush, /node --test scripts\/check-yt-dlp-runtime\.test\.mjs/);
+  assert.match(auditJob("web"), /- run: node --test scripts\/check-yt-dlp-runtime\.test\.mjs/);
+});
+
 test("a manual rehearsal builds the signed package but can never publish", () => {
   const triggers = workflow.split("\npermissions:", 1)[0];
   assert.match(triggers, /^on:\n {2}push:\n {4}tags: \["v\*"\]\n(?: {2}#.*\n)* {2}workflow_dispatch:$/m);

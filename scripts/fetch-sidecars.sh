@@ -36,10 +36,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
 # immutable URL (the osxexperts arm64 builds) is still content-pinned: an
 # upstream replacement fails the build until its bytes are reviewed and this
 # digest is deliberately updated.
-YT_DLP_VERSION="2026.08.19"
-YT_DLP_WINDOWS_SHA256="66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
-YT_DLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
-YT_DLP_PORTABLE_SHA256="1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6"
+# yt-dlp's frozen binaries carry their own certifi and urllib3, which change
+# only with this pin. scripts/check-yt-dlp-runtime.mjs asks the fetched binary
+# which ones it imports and holds them to Goop's floors.
+YT_DLP_VERSION="2026.10.21"
+YT_DLP_WINDOWS_SHA256="33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
+YT_DLP_MACOS_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
+YT_DLP_PORTABLE_SHA256="b7af77f686e95f7845ce8d09d21957718febb8b48b30555adb9dd2292ad7bf14"
 
 # Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
 # binary and its own `--update` targets GitHub (which no longer hosts the

@@ -158,6 +158,7 @@ jobs:
       - run: node --test scripts/release-workflow.test.mjs
       - run: node --test scripts/heif-deps.test.mjs
       - run: node --test scripts/check-gallery-dl-runtime.test.mjs
+      - run: node --test scripts/check-yt-dlp-runtime.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs
@@ -297,6 +298,13 @@ jobs:
         env:
           GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
         run: node scripts/check-gallery-dl-runtime.mjs --binary "./src-tauri/bin/gallery-dl-$TARGET" --python "$GALLERY_DL_PYTHON"
+      # yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only
+      # with its version pin. Ask the fetched binary which ones it imported and
+      # hold them to the floors. Both runners: the Windows exe freezes its own
+      # dependency set. release.yml repeats this on the signed macOS copy.
+      - name: yt-dlp runtime clears the certifi and urllib3 floors
+        shell: bash
+        run: node scripts/check-yt-dlp-runtime.mjs --binary "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}"
       # Every sidecar must stay owner-writable. Tauri's bundler clears extended
       # attributes across Contents/ before signing, `cp` carries the mode in
       # from src-tauri/bin, and a read-only binary fails that step with
