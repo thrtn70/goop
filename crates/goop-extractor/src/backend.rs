@@ -615,10 +615,11 @@ mod fake_sidecar_tests {
     use super::*;
     use crate::test_fakes::write_fake;
     use goop_core::events::RecordingSink;
-    use goop_core::{SidecarEvent, WarningCode};
+    use goop_core::{JobState, ProgressEvent, QueueEvent, SidecarEvent, WarningCode};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
+    use tokio::sync::watch;
 
     #[test]
     fn recovered_gallery_classified_job_does_not_sweep_shared_partials() {
@@ -1252,7 +1253,7 @@ exit 0
     #[tokio::test]
     async fn reopened_store_retry_reuses_completed_sources() {
         use crate::recovery::{ExtractRecovery, RECOVERY_PAYLOAD_KEY};
-        use goop_core::{Job, JobKind, JobState};
+        use goop_core::{Job, JobKind};
         use goop_queue::QueueStore;
         for paused in [false, true] {
             let bins = TempDir::new().unwrap();
@@ -1351,10 +1352,11 @@ exit 0
                         recovery,
                     )
                     .await?;
-                    assert!(
-                        std::path::Path::new(&out.output_path).is_file(),
-                        "worker success requires public output"
-                    );
+                    if !std::path::Path::new(&out.output_path).is_file() {
+                        return Err(GoopError::Queue(
+                            "worker success requires public output".into(),
+                        ));
+                    }
                     Ok(goop_core::JobResult {
                         video_attempt: None,
                         track_execution: None,
@@ -1375,9 +1377,10 @@ exit 0
                     })
                 })
             });
+            let sink = OutcomeSink::new(job.id);
             let scheduler = goop_queue::Scheduler::new(
                 store.clone(),
-                Arc::new(RecordingSink::default()),
+                sink.clone(),
                 1,
                 1,
                 1,
@@ -1390,18 +1393,10 @@ exit 0
                 worker,
             );
             let runner = tokio::spawn(scheduler.run_kind(JobKind::Extract));
-            let row = tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    let row = store.get_by_id(job.id).unwrap().unwrap();
-                    if row.is_terminal() {
-                        break row;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+            let event = sink.outcome().await;
             runner.abort();
+            assert_eq!(event.state, JobState::Done, "{event:?}");
+            let row = store.get_by_id(job.id).unwrap().unwrap();
             assert_eq!(row.state, JobState::Done, "{:?}", row.state);
             let restored: crate::recovery::RecoveryCheckpoint =
                 serde_json::from_value(row.payload[RECOVERY_PAYLOAD_KEY].clone()).unwrap();
@@ -1751,7 +1746,7 @@ exit 0
 
     #[tokio::test]
     async fn durable_done_cleans_exact_workspace_after_real_dispatch() {
-        use goop_core::{Job, JobKind, JobState, ResultKind};
+        use goop_core::{Job, JobKind, ResultKind};
         use goop_queue::{QueueStore, Scheduler, WorkerFn};
         let bins = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
@@ -1773,7 +1768,7 @@ exit 0
                         store.patch_payload_field(
                             id,
                             crate::recovery::RECOVERY_PAYLOAD_KEY,
-                            serde_json::to_value(cp).unwrap(),
+                            serde_json::to_value(cp)?,
                         )
                     }),
                 )?;
@@ -1808,14 +1803,16 @@ exit 0
                 })
             })
         });
-        let sink = Arc::new(RecordingSink::default());
+        let sink = OutcomeSink::new(job.id);
         let hook: goop_queue::CompletionHook = Arc::new(|job| {
             Box::pin(async move {
                 tokio::task::spawn_blocking(move || {
                     crate::recovery::cleanup_completed_recovery(&job)
                 })
                 .await
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    Err(GoopError::Queue(format!("cleanup task failed: {error}")))
+                })
             })
         });
         let scheduler = Scheduler::with_pids_and_completion(
@@ -1835,17 +1832,9 @@ exit 0
             Some(hook),
         );
         let task = tokio::spawn(scheduler.run_kind(JobKind::Extract));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if sink.queue.lock().iter().any(|e| e.state == JobState::Done) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let event = sink.outcome().await;
         task.abort();
+        assert_eq!(event.state, JobState::Done, "{event:?}");
         let row = store.get_by_id(job.id).unwrap().unwrap();
         assert_eq!(row.state, JobState::Done);
         let cp: crate::recovery::RecoveryCheckpoint =
@@ -2393,6 +2382,66 @@ exit 0
         std::fs::read_to_string(counter)
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+
+    /// Real time a scheduler test waits for its job's outcome. Correct code
+    /// needs well under a second, even on a loaded runner; this only stops a
+    /// broken run from hanging its test. It is counted on tokio's clock, so
+    /// these tests must not pause it: a paused clock would reach the limit as
+    /// soon as the runtime waits on a child.
+    const LIVENESS_LIMIT: Duration = Duration::from_secs(60);
+
+    /// A scheduler sink that hands a test its job's outcome: the first queue
+    /// event for that job that is neither Queued nor Running.
+    ///
+    /// The scheduler emits that event last, after the durable state write and
+    /// after the completion hook, so awaiting it waits for exactly the work
+    /// these tests assert on, however slowly the machine runs it. A job that
+    /// failed reports its error at once instead of looking like a timeout.
+    struct OutcomeSink {
+        job: JobId,
+        outcome: watch::Sender<Option<QueueEvent>>,
+    }
+
+    impl OutcomeSink {
+        fn new(job: JobId) -> Arc<Self> {
+            Arc::new(Self {
+                job,
+                outcome: watch::Sender::new(None),
+            })
+        }
+
+        async fn outcome(&self) -> QueueEvent {
+            let mut receiver = self.outcome.subscribe();
+            let event = tokio::time::timeout(LIVENESS_LIMIT, receiver.wait_for(Option::is_some))
+                .await
+                .unwrap_or_else(|_| panic!("no job outcome after {LIVENESS_LIMIT:?} of real time"))
+                .expect("the sender lives as long as the sink");
+            event
+                .clone()
+                .expect("wait_for returns only once an outcome is set")
+        }
+    }
+
+    impl EventSink for OutcomeSink {
+        fn emit_progress(&self, _: ProgressEvent) {}
+
+        fn emit_queue(&self, event: QueueEvent) {
+            if event.job_id != self.job
+                || matches!(event.state, JobState::Queued | JobState::Running)
+            {
+                return;
+            }
+            self.outcome.send_if_modified(|outcome| {
+                let first = outcome.is_none();
+                if first {
+                    *outcome = Some(event);
+                }
+                first
+            });
+        }
+
+        fn emit_sidecar(&self, _: SidecarEvent) {}
     }
 
     /// Replaces a fake in place the way a real update does — via rename, so

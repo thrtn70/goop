@@ -23,40 +23,93 @@ test('portable runtime-sidecar names are exact for Unix and Windows', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('portable bounded runner terminates its descendant tree', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'goop-portable-tree-'));
-  const output = join(root, 'output');
-  mkdirSync(output);
-  const pidPath = join(root, 'descendant.pid');
-  const runner = join(root, 'runner.cjs');
-  const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
-  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
-  let descendantPid = null;
-  try {
-    const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-    descendantPid = Number(readFileSync(pidPath, 'utf8'));
-    assert.equal(result.timed_out, true);
-    assert.equal(result.aborted, false);
-    if (process.platform === 'win32') {
-      assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' });
-    } else {
-      let state = '';
-      try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
-      assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
-    }
-  } finally {
-    if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already gone. */ } }
-    rmSync(root, { recursive: true, force: true });
-  }
+// Virtual time for runBoundedProcess's run timeout and kill grace. Time moves
+// only when the test calls advance(): each sleep that falls due resolves in
+// deadline order, and the run reacts to it (signals its group, starts its
+// grace) before the next one falls due. A sleep whose signal aborts rejects, as
+// the default does. `sleeps` lists every sleep requested, `fired` those that fell due.
+function manualClock() {
+  let now = 0;
+  const due = [];
+  const earliest = () => due.reduce((first, sleep) => (first === undefined || sleep.at < first.at ? sleep : first), undefined);
+  const clock = {
+    sleeps: [],
+    fired: [],
+    nowMs: () => now,
+    sleepMs: (ms, { signal } = {}) => new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(signal.reason); return; }
+      const sleep = { ms, at: now + ms, resolve };
+      clock.sleeps.push(ms);
+      due.push(sleep);
+      signal?.addEventListener('abort', () => {
+        const index = due.indexOf(sleep);
+        if (index === -1) return;
+        due.splice(index, 1);
+        reject(signal.reason);
+      }, { once: true });
+    }),
+    async advance(ms) {
+      const until = now + ms;
+      for (let next = earliest(); next !== undefined && next.at <= until; next = earliest()) {
+        due.splice(due.indexOf(next), 1);
+        now = next.at;
+        clock.fired.push(next.ms);
+        next.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      now = until;
+    },
+  };
+  return clock;
+}
+// A run the test left waiting on its clock still holds live processes, so after
+// the test let every pending sleep fall due: the run then stops its group.
+function releaseClockAfter(t, clock) {
+  t.after(() => clock.advance(Infinity));
+}
+
+// The test timeout is long because windows-latest runs this file, and its
+// timeout path starts PowerShell before the forced taskkill.
+test('portable bounded runner terminates its descendant tree', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-tree-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const clock = manualClock();
+  releaseClockAfter(t, clock);
+  const guard = killArmedAfter(t, root, armed);
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  // The runner exits with its descendant, so the guard's kill also ends the run.
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).on('exit',()=>process.exit(1));setInterval(()=>{},10);`);
+  const running = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+  running.catch(() => { /* Rethrown by the await below. */ });
+  // The timeout falls due only once TERM can no longer stop the descendant, so
+  // only the forced kill after the grace can.
+  const armedInTime = await waitForPath(armed);
+  await clock.advance(1500);
+  assert.equal(armedInTime, true, 'descendant never armed');
+  assert.deepEqual(clock.sleeps, [1500, 100]);
+  await clock.advance(100);
+  const result = await running;
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.timed_out, true);
+  assert.equal(result.aborted, false);
+  assert.equal(result.lifetime_ms, 1600);
 });
 
 // Child code that ignores TERM and then renames its pid into `path`, so the
 // file existing means TERM can no longer stop that process.
 const ignoreTermThenArm = path => `process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
-// A TERM-resistant process the run fails to kill outlives the test. Unless the
-// test saw it gone, kill the pid in `armed` after the test, so such a regression
-// fails at the test's timeout instead of leaving that process behind. Once it is
-// gone the OS may reuse its pid, so the test marks it reaped.
+// Child code that renames its pid into `path` and changes nothing else, so a
+// guard can find a runner that holds the run's pipes.
+const recordPid = path => `{const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});}`;
+// A process the run fails to kill outlives the test, and one that holds the
+// run's pipes keeps the run from returning. Unless the test saw it gone, kill
+// the pid in `armed` after the test, so such a regression fails at the test's
+// timeout instead of leaving that process behind or hanging the file. Once it
+// is gone the OS may reuse its pid, so the test marks it reaped.
 function killArmedAfter(t, dir, armed) {
   const guard = { reaped: false };
   t.after(() => {
@@ -68,10 +121,10 @@ function killArmedAfter(t, dir, armed) {
   });
   return guard;
 }
-// Polls for `path` at most 1000 times (5 s or more), so a process that never
-// arms normally fails the caller's assertion well before the test's timeout.
-async function waitForPath(path) {
-  for (let polls = 0; polls < 1000 && !existsSync(path); polls++) await new Promise(resolve => setTimeout(resolve, 5));
+// Polls for `path` at most `limit` times (5 ms or more each), so a process that
+// never arms normally fails the caller's assertion well before the test's timeout.
+async function waitForPath(path, limit = 1000) {
+  for (let polls = 0; polls < limit && !existsSync(path); polls++) await new Promise(resolve => setTimeout(resolve, 5));
   return existsSync(path);
 }
 // SIGKILL and TerminateProcess cannot be ignored, but neither has finished when
@@ -123,118 +176,136 @@ test('portable bounded runner aborts and reaps its descendant tree', { timeout: 
   assert.equal(result.timed_out, false);
 });
 
-test('an abort remains the stop cause when the deadline passes during descendant cleanup', { skip: process.platform === 'win32', timeout: 6000 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'goop-portable-abort-deadline-'));
-  const output = join(root, 'output'); mkdirSync(output);
-  const runner = join(root, 'runner.cjs');
-  const pidPath = join(root, 'descendant.pid');
-  const descendant = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10);`;
-  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'});setInterval(()=>{},10);`);
+test('an abort remains the stop cause when the deadline passes during descendant cleanup', { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-abort-deadline-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const clock = manualClock();
+  releaseClockAfter(t, clock);
+  const guard = killArmedAfter(t, root, armed);
+  // The descendant inherits the runner's pipes, so the root does not close, and
+  // its timeout stays armed, until the forced kill reaps the descendant. The
+  // runner exits with its descendant, so the guard's kill also ends the run.
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10);`;
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'}).on('exit',()=>process.exit(1));setInterval(()=>{},10);`);
   const controller = new AbortController();
-  let descendantPid = null, run;
-  try {
-    const launched = new Promise((resolve, reject) => {
-      const deadline = setTimeout(() => { clearInterval(poll); reject(Error('descendant did not start')); }, 1000);
-      const poll = setInterval(() => {
-        if (!existsSync(pidPath)) return;
-        clearInterval(poll); clearTimeout(deadline); resolve();
-      }, 10);
-    });
-    run = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 2000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal });
-    await launched;
-    descendantPid = Number(readFileSync(pidPath, 'utf8'));
-    controller.abort();
-    const result = await run;
-    assert.equal(result.aborted, true);
-    assert.equal(result.timed_out, false);
-    assert.equal(result.success, false);
-    let state = '';
-    try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
-    assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
-  } finally {
-    controller.abort();
-    if (run) await run.catch(() => {});
-    if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Gone. */ } }
-    rmSync(root, { recursive: true, force: true });
-  }
+  const running = runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1500, killGraceMs: 2000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+  running.catch(() => { /* Rethrown by the await below. */ });
+  const armedInTime = await waitForPath(armed);
+  controller.abort();
+  // The deadline falls due 1500 ms into the 2000 ms grace.
+  await clock.advance(1500);
+  assert.equal(armedInTime, true, 'descendant never armed');
+  assert.deepEqual(clock.sleeps, [1500, 2000]);
+  assert.deepEqual(clock.fired, [1500], 'the deadline did not fall due during the grace');
+  await clock.advance(500);
+  const result = await running;
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.aborted, true);
+  assert.equal(result.timed_out, false);
+  assert.equal(result.success, false);
+  assert.equal(result.lifetime_ms, 2000);
 });
 
-test('termination signal wrapper waits for owned process cleanup', { skip: process.platform === 'win32', timeout: 5000 }, async () => {
-  const root=mkdtempSync(join(tmpdir(),'goop-portable-signal-')),output=join(root,'output');mkdirSync(output);
-  const pidPath=join(root,'descendant.pid'),resultPath=join(root,'result.json'),runner=join(root,'runner.cjs'),harness=join(root,'harness.mjs');
-  const descendant=`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
-  writeFileSync(runner,`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
-  writeFileSync(harness,`import{writeFileSync}from'node:fs';import{runBoundedProcess,withTerminationSignals}from${JSON.stringify(pathToFileURL(join(import.meta.dirname,'performance-shared.mjs')).href)};await withTerminationSignals(async signal=>{const result=await runBoundedProcess({command:process.execPath,args:[${JSON.stringify(runner)}],outputDirectory:${JSON.stringify(output)},timeoutMs:5000,killGraceMs:100,logLimitBytes:1024,storageBudgetBytes:1048576,abortSignal:signal});writeFileSync(${JSON.stringify(resultPath)},JSON.stringify(result));});`);
-  let descendantPid=null,child=null;
-  try {
-    child=spawn(process.execPath,[harness],{stdio:'ignore'});
-    const deadline=Date.now()+2000;while(!existsSync(pidPath)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
-    descendantPid=Number(readFileSync(pidPath,'utf8'));child.kill('SIGTERM');
-    const exit=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
-    assert.deepEqual(exit,{code:143,signal:null});assert.equal(JSON.parse(readFileSync(resultPath,'utf8')).aborted,true);
-    let state='';try{state=execFileSync('ps',['-o','stat=','-p',String(descendantPid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);
-  } finally {if(child&&!child.killed){try{child.kill('SIGKILL');}catch{/* Gone. */}}if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true});}
+test('termination signal wrapper waits for owned process cleanup', { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-signal-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), resultPath = join(root, 'result.json'), runner = join(root, 'runner.cjs'), harness = join(root, 'harness.mjs');
+  const guard = killArmedAfter(t, root, armed);
+  // The runner exits with its descendant, so the guard's kill also ends the run.
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).on('exit',()=>process.exit(1));setInterval(()=>{},10);`);
+  // The run's timeout is far past the test's, so only the wrapper's abort can end it.
+  writeFileSync(harness, `import{writeFileSync}from'node:fs';import{runBoundedProcess,withTerminationSignals}from${JSON.stringify(pathToFileURL(join(import.meta.dirname, 'performance-shared.mjs')).href)};await withTerminationSignals(async signal=>{const result=await runBoundedProcess({command:process.execPath,args:[${JSON.stringify(runner)}],outputDirectory:${JSON.stringify(output)},timeoutMs:120000,killGraceMs:100,logLimitBytes:1024,storageBudgetBytes:1048576,abortSignal:signal});writeFileSync(${JSON.stringify(resultPath)},JSON.stringify(result));});`);
+  const child = spawn(process.execPath, [harness], { stdio: 'ignore' });
+  const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal })); });
+  exited.catch(() => { /* Rethrown by the await below. */ });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  // The wrapper gets TERM once TERM can no longer stop the descendant, so only
+  // the forced kill after the grace can. Three Node starts come before it arms.
+  const armedInTime = await waitForPath(armed, 3000);
+  child.kill('SIGTERM');
+  const exit = await exited;
+  assert.equal(armedInTime, true, 'descendant never armed');
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.deepEqual(exit, { code: 143, signal: null });
+  assert.equal(JSON.parse(readFileSync(resultPath, 'utf8')).aborted, true);
 });
 
-test('portable bounded runner removes only newly owned staging after timeout', async () => {
+test('portable bounded runner removes only newly owned staging after timeout', { timeout: 30_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-staging-'));
+  const clock = manualClock();
+  releaseClockAfter(t, clock);
+  const runnerPid = join(root, 'runner.pid');
+  const guard = killArmedAfter(t, root, runnerPid);
   const output = join(root, 'output');
   mkdirSync(output);
   const preserved = join(output, '.goop-output-1-0');
   mkdirSync(preserved);
   const created = join(output, `.goop-output-${process.pid}-1`);
   const runner = join(root, 'runner.cjs');
-  writeFileSync(runner, "require('node:fs').mkdirSync(process.env.GOOP_TEST_STAGING);setInterval(()=>{},10);");
-  try {
-    const result = await runBoundedProcess({ command: process.execPath, args: [runner], env: { ...process.env, GOOP_TEST_STAGING: created }, outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-    assert.equal(result.timed_out, true);
-    assert.equal(result.removed_staging_directories, 1);
-    assert.equal(result.cleanup_error, null);
-    assert.equal(existsSync(created), false);
-    assert.equal(existsSync(preserved), true);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  writeFileSync(runner, `${recordPid(runnerPid)}require('node:fs').mkdirSync(process.env.GOOP_TEST_STAGING);setInterval(()=>{},10);`);
+  const running = runBoundedProcess({ command: process.execPath, args: [runner], env: { ...process.env, GOOP_TEST_STAGING: created }, outputDirectory: output, timeoutMs: 1500, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+  running.catch(() => { /* Rethrown by the await below. */ });
+  // The timeout falls due only once the runner has created its staging.
+  const createdInTime = await waitForPath(created);
+  await clock.advance(1500);
+  assert.equal(createdInTime, true, 'runner never created its staging');
+  assert.deepEqual(clock.sleeps, [1500, 100]);
+  await clock.advance(100);
+  const result = await running;
+  guard.reaped = true;
+  assert.equal(result.timed_out, true);
+  assert.equal(result.removed_staging_directories, 1);
+  assert.equal(result.cleanup_error, null);
+  assert.equal(existsSync(created), false);
+  assert.equal(existsSync(preserved), true);
 });
 
-test('portable bounded runner reaps descendants after an ordinary parent failure', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'goop-portable-failure-tree-'));
-  const output = join(root, 'output');
-  mkdirSync(output);
-  const pidPath = join(root, 'descendant.pid');
-  const runner = join(root, 'runner.cjs');
-  const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
-  writeFileSync(runner, `const cp=require('node:child_process'),fs=require('node:fs');cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});while(!fs.existsSync(${JSON.stringify(pidPath)})){};process.exit(1);`);
-  let descendantPid = null;
-  try {
-    const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 3000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-    descendantPid = Number(readFileSync(pidPath, 'utf8'));
-    assert.equal(result.exit_code, 1);
-    assert.equal(result.success, false);
-    if (process.platform === 'win32') assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' });
-    else {
-      let state = '';
-      try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
-      assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
-    }
-  } finally {
-    if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already gone. */ } }
-    rmSync(root, { recursive: true, force: true });
-  }
+test('portable bounded runner reaps descendants after an ordinary parent failure', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-failure-tree-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const guard = killArmedAfter(t, root, armed);
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  // The parent exits only once TERM can no longer stop its descendant, so only
+  // the forced kill after the grace can.
+  writeFileSync(runner, `const cp=require('node:child_process'),fs=require('node:fs');cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});while(!fs.existsSync(${JSON.stringify(armed)})){};process.exit(1);`);
+  // The parent ends the run itself. The timeout only bounds a parent that never
+  // does, and sits under the test's own so the run still reaps the group.
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 20_000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.exit_code, 1);
+  assert.equal(result.success, false);
 });
 
-test('portable bounded runner reaps descendants after a clean parent exit', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'goop-portable-clean-tree-'));
-  const output = join(root, 'output');mkdirSync(output);
-  const pidPath = join(root, 'descendant.pid'), runner = join(root, 'runner.cjs');
-  const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
-  writeFileSync(runner, `const cp=require('node:child_process'),fs=require('node:fs');const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});child.unref();while(!fs.existsSync(${JSON.stringify(pidPath)})){};`);
-  let descendantPid = null;
-  try {
-    const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 3000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-    descendantPid = Number(readFileSync(pidPath, 'utf8'));
-    assert.equal(result.exit_code, 0);assert.equal(result.success, true);
-    if (process.platform === 'win32') assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' });
-    else { let state='';try{state=execFileSync('ps',['-o','stat=','-p',String(descendantPid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`); }
-  } finally { if(descendantPid){try{process.kill(descendantPid,'SIGKILL');}catch{/* Gone. */}}rmSync(root,{recursive:true,force:true}); }
+test('portable bounded runner reaps descendants after a clean parent exit', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-clean-tree-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const guard = killArmedAfter(t, root, armed);
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  // The parent exits only once TERM can no longer stop its descendant, so only
+  // the forced kill after the grace can.
+  writeFileSync(runner, `const cp=require('node:child_process'),fs=require('node:fs');const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});child.unref();while(!fs.existsSync(${JSON.stringify(armed)})){};`);
+  // The parent ends the run itself. The timeout only bounds a parent that never
+  // does, and sits under the test's own so the run still reaps the group.
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 20_000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.success, true);
 });
 
 test('portable bounded runner returns promptly after a clean Windows exit', { skip: process.platform !== 'win32' }, async () => {
@@ -256,7 +327,10 @@ test('portable bounded runner catches a fast successful storage overrun', async 
   const runner = join(root, 'runner.cjs');
   writeFileSync(runner, "require('node:fs').writeFileSync(require('node:path').join(process.env.GOOP_TEST_OUTPUT,'large.bin'),Buffer.alloc(10000));");
   try {
-    const result = await runBoundedProcess({ command: process.execPath, args: [runner], env: { ...process.env, GOOP_TEST_OUTPUT: output }, outputDirectory: output, timeoutMs: 3000, killGraceMs: 50, logLimitBytes: 128, storageBudgetBytes: 1024 });
+    // No live sample falls before the child exits, so only the check after it
+    // exits can catch the overrun. The timeout only bounds a child that never exits.
+    const result = await runBoundedProcess({ command: process.execPath, args: [runner], env: { ...process.env, GOOP_TEST_OUTPUT: output }, outputDirectory: output, timeoutMs: 20_000, killGraceMs: 50, logLimitBytes: 128, storageBudgetBytes: 1024, samplingIntervalMs: 60_000 });
+    assert.equal(result.sampling_interval_ms, 60_000);
     assert.equal(result.exit_code, 0);
     assert.equal(result.budget_exceeded, true);
     assert.equal(result.success, false);
@@ -265,12 +339,39 @@ test('portable bounded runner catches a fast successful storage overrun', async 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+// timers/promises rejects a delay that is not a number, where setTimeout used to
+// coerce it, so the run must stop at once rather than lose its timeout or leave
+// its grace rejected. The abort after the test stops a run that never does.
+test('portable bounded runner fails closed on a delay its timers reject', { timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-bad-delay-')), output = join(root, 'output'); mkdirSync(output);
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const runnerPid = join(root, 'runner.pid');
+  const guard = killArmedAfter(t, root, runnerPid);
+  const runner = join(root, 'runner.cjs');
+  writeFileSync(runner, `${recordPid(runnerPid)}setInterval(()=>{},10);`);
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: null, killGraceMs: null, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, abortSignal: controller.signal });
+  guard.reaped = true;
+  assert.equal(result.timed_out, true);
+  assert.equal(result.aborted, false);
+});
+
+test('portable bounded runner takes only a sampling interval Node can honor', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-interval-')), output = join(root, 'output'); mkdirSync(output);
+  try {
+    const run = samplingIntervalMs => runBoundedProcess({ command: process.execPath, args: ['-e', ''], outputDirectory: output, timeoutMs: 20_000, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, samplingIntervalMs });
+    for (const samplingIntervalMs of [0, 0.5, 2 ** 31, Number.NaN, '100']) await assert.rejects(run(samplingIntervalMs), /Sampling interval/, String(samplingIntervalMs));
+    for (const samplingIntervalMs of [1, 2 ** 31 - 1]) assert.equal((await run(samplingIntervalMs)).sampling_interval_ms, samplingIntervalMs);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('portable bounded runner rejects and removes child-created symlinks without following them', async () => {
   const root=mkdtempSync(join(tmpdir(),'goop-portable-symlink-')),output=join(root,'output');mkdirSync(output);
   const external=join(root,'external');writeFileSync(external,Buffer.alloc(10000));const runner=join(root,'runner.cjs');
   writeFileSync(runner,"require('node:fs').symlinkSync(process.env.GOOP_TEST_EXTERNAL,require('node:path').join(process.env.GOOP_TEST_OUTPUT,'link'));");
   try {
-    const result=await runBoundedProcess({command:process.execPath,args:[runner],env:{...process.env,GOOP_TEST_EXTERNAL:external,GOOP_TEST_OUTPUT:output},outputDirectory:output,timeoutMs:3000,killGraceMs:50,logLimitBytes:128,storageBudgetBytes:1024});
+    // The child ends the run itself. The timeout only bounds one that never does.
+    const result=await runBoundedProcess({command:process.execPath,args:[runner],env:{...process.env,GOOP_TEST_EXTERNAL:external,GOOP_TEST_OUTPUT:output},outputDirectory:output,timeoutMs:20_000,killGraceMs:50,logLimitBytes:128,storageBudgetBytes:1024});
     assert.equal(result.success,false);assert.match(result.output_error,/symbolic-link/i);assert.equal(existsSync(join(output,'link')),false);assert.equal(existsSync(external),true);
   } finally {rmSync(root,{recursive:true,force:true});}
 });

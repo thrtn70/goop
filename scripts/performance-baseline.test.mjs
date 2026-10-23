@@ -16,13 +16,105 @@ test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:-1},0,false),false);
  assert.equal(normalizeSuccess({success:true,process_ms:1},0,true),false);
 });
-async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeDelay?'sleep '+options.probeDelay+'\n':''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeDelay;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
-test('timeout escalates for a process ignoring TERM',async()=>{const start=performance.now();const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:30});assert.equal(result.success,false);assert.equal(result.timed_out,true);assert.ok(performance.now()-start<3000);});
-test('single conversion abort reaps the owned process group',async()=>{const controller=new AbortController();setTimeout(()=>controller.abort(),100);const result=await fakeRunner("process.on('SIGTERM',()=>{});setInterval(()=>{},10)",{timeoutMs:5000,killGraceMs:30,abortSignal:controller.signal});assert.equal(result.success,false);assert.equal(result.aborted,true);assert.equal(result.timed_out,false);});
-test('single conversion timeout kills a TERM-resistant descendant before returning',async()=>{
- const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));setInterval(()=>{},10)",{timeoutMs:200,killGraceMs:50});
- let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(result.descendant_pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}
- try{assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}finally{try{process.kill(result.descendant_pid,'SIGKILL');}catch{/* Already gone. */}}
+async function fakeRunner(code,options={}){const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{const file=join(dir,'runner');writeFileSync(file,`#!/usr/bin/env node\n${code}`);chmodSync(file,0o700);const runOptions={...options};if(options.probeJson){const probe=join(dir,'bound-ffprobe');writeFileSync(probe,`#!/bin/sh\n${options.probeMarker?": > '"+options.probeMarker+"'\n":''}printf '%s' '${JSON.stringify(options.probeJson)}'\n`);chmodSync(probe,0o700);runOptions.ffprobe=probe;delete runOptions.probeJson;delete runOptions.probeMarker;}return await run(file,dir,{output_path:join(dir,'result')},join(dir,'run'),runOptions);}finally{rmSync(dir,{recursive:true,force:true});}}
+// Each sleep first really waits until the runner has created `readyPath`, then
+// advances virtual time by its duration without yielding. The caps only keep
+// the clock itself finite: a runner that never gets ready stops being waited
+// for after 3000 polls (`missed`), and sleep 1000 throws. The test's own
+// timeout and after hook are what keep a run that never escalates from
+// hanging the gate.
+function clockAfter(readyPath){
+ const sleeps=[];let now=0,polls=0;
+ const clock={sleeps,missed:false,nowMs:()=>now,sleepMs:async(ms,{signal}={})=>{
+  while(!existsSync(readyPath)&&!clock.missed){
+   if(signal?.aborted)throw signal.reason;
+   if(++polls>=3000)clock.missed=true;else await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  if(signal?.aborted)throw signal.reason;
+  if(sleeps.length>=1000)throw Error('Virtual clock: run never stopped sleeping');
+  sleeps.push(ms);now+=ms;
+ }};
+ return clock;
+}
+// Child code that ignores TERM and then renames its pid into `path`, so the
+// file existing means TERM can no longer stop that process.
+const ignoreTermThenArm=path=>`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
+// A TERM-resistant process the run fails to kill can hold its pipes open
+// forever. Unless the test passed, kill the pid in each `armed` file after it,
+// so such a regression fails at the test's timeout instead of hanging the gate.
+function killArmedAfter(t,dir,...armed){
+ const guard={passed:false};
+ t.after(()=>{for(const path of armed){try{const pid=Number(readFileSync(path,'utf8'));if(!guard.passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}}rmSync(dir,{recursive:true,force:true});});
+ return guard;
+}
+// Polls for `path`, giving up after 3000 polls so a process that never arms
+// cannot keep the test runner alive.
+async function waitForPath(path){for(let polls=0;polls<3000&&!existsSync(path);polls++)await new Promise(resolve=>setTimeout(resolve,5));return existsSync(path);}
+test('timeout escalates for a process ignoring TERM',{timeout:5000},async t=>{
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-term-clock-'));
+ const armed=join(clockDir,'armed');
+ const guard=killArmedAfter(t,clockDir,armed);
+ // The timeout starts only once TERM can no longer stop the runner, so the run
+ // can return only by escalating to SIGKILL.
+ const clock=clockAfter(armed);
+ const result=await fakeRunner(`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:30,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ assert.equal(clock.missed,false);
+ assert.equal(result.success,false);
+ assert.equal(result.timed_out,true);
+ assert.deepEqual(clock.sleeps,[200,30]);
+ assert.equal(result.lifetime_ms,230);
+ guard.passed=true;
+});
+test('run coerces its limits the way setTimeout does',{timeout:5000},async t=>{
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-coerced-limits-'));
+ const armed=join(clockDir,'armed');
+ let passed=false;
+ t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(clockDir,{recursive:true,force:true});});
+ // Both limits once went to setTimeout, which coerces its delay. A run given
+ // numeric strings must still time out and escalate rather than lose a timer.
+ const result=await fakeRunner(`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`,{timeoutMs:'200',killGraceMs:'30'});
+ assert.equal(result.success,false);
+ assert.equal(result.timed_out,true);
+ passed=true;
+});
+test('single conversion abort reaps the owned process group',{timeout:5000},async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-abort-'));
+ const armed=join(dir,'armed');
+ const guard=killArmedAfter(t,dir,armed);
+ const controller=new AbortController();
+ // The run's own timeout stays at its 120 s default, far past this test's, so
+ // only the abort can end it. The abort is sent once TERM can no longer stop
+ // the runner, so the run can return only by escalating to SIGKILL.
+ const running=fakeRunner(`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`,{killGraceMs:30,abortSignal:controller.signal});
+ running.catch(()=>{/* Rethrown by the await below. */});
+ const armedInTime=await waitForPath(armed);
+ controller.abort();
+ const result=await running;
+ assert.equal(armedInTime,true);
+ assert.equal(result.success,false);
+ assert.equal(result.aborted,true);
+ assert.equal(result.timed_out,false);
+ guard.passed=true;
+});
+test('single conversion timeout kills a TERM-resistant descendant before returning',{timeout:5000},async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-descendant-clock-'));
+ const armed=join(dir,'armed'),runnerPid=join(dir,'runner.pid');
+ // The runner holds the run's pipes, so the guard kills it too: if the group
+ // signal regressed, the runner would never see TERM and would keep them open.
+ const guard=killArmedAfter(t,dir,armed,runnerPid);
+ // The timeout starts only once the descendant ignores TERM, so only the group
+ // SIGKILL after the grace can stop it. The runner itself dies of TERM.
+ const clock=clockAfter(armed);
+ const descendant=`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+ const result=await fakeRunner(`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${runnerPid}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${runnerPid}.tmp`)},${JSON.stringify(runnerPid)});require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:50,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ assert.equal(clock.missed,false);
+ assert.equal(result.timed_out,true);
+ assert.deepEqual(clock.sleeps,[200,50]);
+ assert.equal(result.lifetime_ms,250);
+ const pid=Number(readFileSync(armed,'utf8'));
+ assert.ok(Number.isSafeInteger(pid)&&pid>1,`invalid descendant pid ${pid}`);
+ assert.equal(await runnableAfterKill(pid),null,'descendant outlived the run');
+ guard.passed=true;
 });
 test('single conversion failure kills a TERM-resistant descendant before returning',async()=>{
  const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:false,process_ms:1,descendant_pid:c.pid}));process.exitCode=1;",{timeoutMs:2000,killGraceMs:50});
@@ -160,10 +252,17 @@ test('storage budget catches an oversized output written immediately before exit
 test('directory byte count includes only files in suite',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));try{writeFileSync(join(dir,'one'),'1234');assert.equal(directoryBytes(dir),4);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('bounded atomic JSON refuses the temporary replacement high-water peak',()=>{const dir=mkdtempSync(join(tmpdir(),'goop-atomic-budget-'));try{const path=join(dir,'state.json');writeFileSync(path,'{"old":true}\n');const value={next:'x'.repeat(1000)};const nextBytes=Buffer.byteLength(`${JSON.stringify(value)}\n`);const budget=directoryBytes(dir)+nextBytes-1;assert.throws(()=>writeJsonAtomic(path,value,{budgetDirectory:dir,budgetBytes:budget}),/atomic.*budget/i);assert.equal(readFileSync(path,'utf8'),'{"old":true}\n');assert.deepEqual(readdirSync(dir),['state.json']);}finally{rmSync(dir,{recursive:true,force:true});}});
 test('child lifetime excludes subsequent output verification',async()=>{
- const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[{codec_type:'video',codec_name:'mjpeg'}],format:{format_name:'image2'}},probeDelay:0.5,expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
- assert.equal(result.success,true);
- assert.ok(result.verification_ms >= 400);
- assert.ok(result.lifetime_ms < result.verification_ms);
+ const clockDir=mkdtempSync(join(tmpdir(),'goop-probe-clock-'));
+ try{
+  // The clock moves only when the independent probe runs, so the child's own
+  // runtime (however slow under load) cannot reorder the two windows.
+  const probed=join(clockDir,'probed');
+  const nowMs=()=>existsSync(probed)?500:0;
+  const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[{codec_type:'video',codec_name:'mjpeg'}],format:{format_name:'image2'}},probeMarker:probed,nowMs,expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
+  assert.equal(result.success,true);
+  assert.equal(result.lifetime_ms,0);
+  assert.equal(result.verification_ms,500);
+ }finally{rmSync(clockDir,{recursive:true,force:true});}
 });
 test('single conversion rejects an independent probe with no usable stream',async()=>{
  const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{probeJson:{streams:[],format:{}},expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});
