@@ -40,11 +40,11 @@ function clockAfter(readyPath){
 // file existing means TERM can no longer stop that process.
 const ignoreTermThenArm=path=>`process.on('SIGTERM',()=>{});const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
 // A TERM-resistant process the run fails to kill can hold its pipes open
-// forever. Unless the test passed, kill the pid in `armed` after it, so such a
-// regression fails at the test's timeout instead of hanging the gate.
-function killArmedAfter(t,dir,armed){
+// forever. Unless the test passed, kill the pid in each `armed` file after it,
+// so such a regression fails at the test's timeout instead of hanging the gate.
+function killArmedAfter(t,dir,...armed){
  const guard={passed:false};
- t.after(()=>{try{const pid=Number(readFileSync(armed,'utf8'));if(!guard.passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}rmSync(dir,{recursive:true,force:true});});
+ t.after(()=>{for(const path of armed){try{const pid=Number(readFileSync(path,'utf8'));if(!guard.passed&&Number.isSafeInteger(pid)&&pid>1)process.kill(pid,'SIGKILL');}catch{/* Never armed, or already gone. */}}rmSync(dir,{recursive:true,force:true});});
  return guard;
 }
 // Polls for `path`, giving up after 3000 polls so a process that never arms
@@ -98,13 +98,15 @@ test('single conversion abort reaps the owned process group',{timeout:5000},asyn
 });
 test('single conversion timeout kills a TERM-resistant descendant before returning',{timeout:5000},async t=>{
  const dir=mkdtempSync(join(tmpdir(),'goop-descendant-clock-'));
- const armed=join(dir,'armed');
- const guard=killArmedAfter(t,dir,armed);
+ const armed=join(dir,'armed'),runnerPid=join(dir,'runner.pid');
+ // The runner holds the run's pipes, so the guard kills it too: if the group
+ // signal regressed, the runner would never see TERM and would keep them open.
+ const guard=killArmedAfter(t,dir,armed,runnerPid);
  // The timeout starts only once the descendant ignores TERM, so only the group
  // SIGKILL after the grace can stop it. The runner itself dies of TERM.
  const clock=clockAfter(armed);
  const descendant=`${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
- const result=await fakeRunner(`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:50,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
+ const result=await fakeRunner(`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(`${runnerPid}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${runnerPid}.tmp`)},${JSON.stringify(runnerPid)});require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10)`,{timeoutMs:200,killGraceMs:50,nowMs:clock.nowMs,sleepMs:clock.sleepMs});
  assert.equal(clock.missed,false);
  assert.equal(result.timed_out,true);
  assert.deepEqual(clock.sleeps,[200,50]);
