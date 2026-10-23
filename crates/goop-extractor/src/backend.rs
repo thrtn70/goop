@@ -2762,12 +2762,14 @@ done
     /// cost more than a truncated message: the stdout arm propagated the
     /// decode error with `?`, returning from `download_once` with the
     /// child neither killed nor waited for. Nothing downstream cleaned
-    /// that up — no spawn in this tree sets `kill_on_drop` — so a live
-    /// yt-dlp kept writing into the user's folder after the job had
-    /// already reported failure, and the Retry button then landed a
-    /// second one on the same `--continue`d `.part`. No layer even
-    /// re-dispatched on its own to make that visible: `GoopError::Io` is
-    /// neither transient nor a no-match verdict, so the run just failed.
+    /// that up — no spawn set `kill_on_drop` then — so a live yt-dlp
+    /// kept writing into the user's folder after the job had already
+    /// reported failure, and the Retry button then landed a second one
+    /// on the same `--continue`d `.part`. No layer even re-dispatched on
+    /// its own to make that visible: `GoopError::Io` is neither transient
+    /// nor a no-match verdict, so the run just failed. Dropping the
+    /// process tree now kills the group, but an early return would still
+    /// fail a run that one unreadable line need not end.
     ///
     /// What this observes is the success, not the process: the fake
     /// writes its file AFTER the bad line, so finishing at all proves the
