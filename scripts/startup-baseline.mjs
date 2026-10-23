@@ -26,7 +26,7 @@ export function seedQueue(path, count) {
 }
 
 /** Fresh local runtime; no user settings/data are read or changed. */
-export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, environment = process.env, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }) }) {
+export async function runStartup({ binary, args = [], directory, settings, jobs = 0, readinessTimeoutMs = 30000, idleMs = 10000, killGraceMs = 2000, logLimitBytes = 1024 * 1024, budgetBytes = 512 * 1024 * 1024, abortSignal = null, environment = process.env, readSnapshot = () => execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,rss=,comm='], { encoding: 'utf8', timeout: 1000 }), measureBytes = directoryBytes }) {
   if (abortSignal?.aborted) throw Error('Startup run aborted before launch');
   if (existsSync(directory)) throw Error('Run output directory must be new');
   mkdirSync(directory, { recursive: true });
@@ -56,14 +56,19 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const abort = () => { aborted = true; signal('SIGTERM'); };
   abortSignal?.addEventListener('abort', abort, { once: true });
   let budgetKillTimer = null;
+  const stopForBudget = () => {
+    budgetExceeded = true;
+    signal('SIGTERM');
+    budgetKillTimer ??= setTimeout(() => signal('SIGKILL'), killGraceMs);
+  };
   const budgetCheck = setInterval(() => {
     try {
-      if (directoryBytes(directory) + stdout.length + stderr.length > budgetBytes) {
-        budgetExceeded = true;
-        signal('SIGTERM');
-        budgetKillTimer ??= setTimeout(() => signal('SIGKILL'), killGraceMs);
-      }
-    } catch { /* Owned output can change between snapshots. */ }
+      if (measureBytes(directory) + stdout.length + stderr.length > budgetBytes) stopForBudget();
+    } catch {
+      // Vanished entries count zero, so this is a real read failure that would
+      // leave the live budget blind for the rest of the run.
+      stopForBudget();
+    }
   }, 100);
   const samples = [];
   const sample = () => {
@@ -113,7 +118,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     await closed;
   }
   try {
-    budgetExceeded ||= directoryBytes(directory) + retainedLogBytes > budgetBytes;
+    budgetExceeded ||= measureBytes(directory) + retainedLogBytes > budgetBytes;
   } catch {
     budgetExceeded = true;
   }

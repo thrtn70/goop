@@ -2531,57 +2531,262 @@ async fn video_sample(
     ))
 }
 
+/// These tests run `child_output` on a paused clock (`start_paused`, so the
+/// current-thread runtime), which stays still while a blocking task runs.
+/// `held` keeps one running for the whole run, so a deadline falls due, or a
+/// cancel lands, only once the child has armed, however long a loaded machine
+/// takes to start it. A child arms by writing its pid to `<pid file>.tmp` and
+/// renaming that over the pid file, so a reader sees a whole pid or none.
 #[cfg(all(test, unix))]
 mod process_tests {
     use super::*;
-    #[tokio::test]
+    use std::cell::Cell;
+    use std::fmt::Debug;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::oneshot;
+
+    /// How long an armed child sleeps, longer than `LIVENESS_LIMIT`: a run
+    /// that waits for it to exit on its own fails instead of passing late.
+    const LIFETIME_SECONDS: u64 = 120;
+
+    /// Real time a whole run may take. Correct code finishes well inside it,
+    /// even behind children that start seconds late; this only stops a broken
+    /// run from hanging its test.
+    const LIVENESS_LIMIT: Duration = Duration::from_secs(LIFETIME_SECONDS / 2);
+
+    /// How far `Step::Expire` moves the clock past the deadline, a margin for
+    /// tokio rounding a timer's deadline up to a whole millisecond.
+    const PAST_DEADLINE: Duration = Duration::from_millis(1);
+
+    /// A deadline the held clock reaches only when `Step::Expire` moves it.
+    /// In real time it is `TIMEOUT` past the runtime's start, so the real-time
+    /// checkpoint on entry to `child_output` passes.
+    fn held_deadline() -> Instant {
+        tokio::time::Instant::now().into_std() + TIMEOUT
+    }
+
+    /// Shell commands that arm with the shell's own pid.
+    fn arm(pid_file: &Path) -> String {
+        let path = pid_file.to_str().expect("pid file path is UTF-8");
+        assert!(!path.contains('\''), "{path:?} cannot be single-quoted");
+        format!("echo $$ > '{path}.tmp' && mv '{path}.tmp' '{path}'")
+    }
+
+    /// Shell commands that arm, then sleep for the child's lifetime.
+    fn armed_sleeper(pid_file: &Path) -> String {
+        format!("{} && exec sleep {LIFETIME_SECONDS}", arm(pid_file))
+    }
+
+    /// A pid that `kill` cannot read as a process group or every process.
+    fn parse_pid(text: &str) -> Option<u32> {
+        text.trim()
+            .parse()
+            .ok()
+            .filter(|pid| (2..=i32::MAX as u32).contains(pid))
+    }
+
+    /// The pid in `pid_file`, once a child has armed it.
+    fn armed_pid(pid_file: &Path) -> Option<u32> {
+        match std::fs::read_to_string(pid_file) {
+            Ok(pid) => Some(parse_pid(&pid).expect("pid file holds a pid")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("could not read {}: {error}", pid_file.display()),
+        }
+    }
+
+    /// Whether `pid` still names a process. A zombie does, until it is reaped.
+    fn pid_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0 could not run")
+            .success()
+    }
+
+    enum Step<'a> {
+        /// Move the clock past `held_deadline`.
+        Expire,
+        Cancel(&'a CancellationToken),
+    }
+
+    /// Runs `run` with the clock held, and takes `step` once `armed` returns
+    /// a pid. Returns what the run returned, that pid, and whether it still
+    /// named a process the moment the run returned.
+    ///
+    /// `run` must not have been polled yet, so it cannot start a child before
+    /// the clock is held.
+    async fn held<T: Debug>(
+        run: impl Future<Output = T>,
+        armed: impl FnMut() -> Option<u32> + Send + 'static,
+        step: Step<'_>,
+    ) -> (T, u32, bool) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let _stop_on_unwind = StopOnDrop(Arc::clone(&stop));
+        let (armed_tx, armed_rx) = oneshot::channel();
+        // Spawned before `run` is first polled, and running until it returns,
+        // so the clock never moves on its own.
+        let watchdog = tokio::task::spawn_blocking({
+            let stop = Arc::clone(&stop);
+            move || watch(&stop, armed, armed_tx)
+        });
+        let armed_child = Cell::new(None);
+        let checked_run = async {
+            let result = run.await;
+            // Checked at once, since any await would let tokio reap a child
+            // the run abandoned. Strict only when the test runs alone: tokio's
+            // orphan queue is process-wide and every runtime drains it when it
+            // parks, so in a parallel run another test's runtime usually reaps
+            // an abandoned child first.
+            let running = armed_child.get().map(pid_exists);
+            stop.store(true, Ordering::Relaxed);
+            (result, running)
+        };
+        let drive = async {
+            if let Ok(pid) = armed_rx.await {
+                armed_child.set(Some(pid));
+                match step {
+                    Step::Expire => tokio::time::advance(TIMEOUT + PAST_DEADLINE).await,
+                    Step::Cancel(token) => token.cancel(),
+                }
+            }
+            let timed_out = watchdog.await.expect("watchdog panicked");
+            let stalled = if armed_child.get().is_some() {
+                "the run was still going"
+            } else {
+                "no child had armed"
+            };
+            assert!(
+                !timed_out,
+                "{stalled} after {LIVENESS_LIMIT:?} of real time"
+            );
+        };
+        let ((result, running), ()) = tokio::join!(checked_run, drive);
+        match (armed_child.get(), running) {
+            (Some(pid), Some(running)) => (result, pid, running),
+            _ => panic!("the run returned before its child armed: {result:?}"),
+        }
+    }
+
+    /// Polls `armed` until it returns a pid, sends that, and goes on holding
+    /// the clock until `stop` is set. True if `LIVENESS_LIMIT` passed first.
+    fn watch(
+        stop: &AtomicBool,
+        mut armed: impl FnMut() -> Option<u32>,
+        armed_tx: oneshot::Sender<u32>,
+    ) -> bool {
+        let limit = Instant::now() + LIVENESS_LIMIT;
+        let mut armed_tx = Some(armed_tx);
+        while !stop.load(Ordering::Relaxed) {
+            if let Some(tx) = armed_tx.take() {
+                match armed() {
+                    Some(pid) => {
+                        let _ = tx.send(pid);
+                    }
+                    None => armed_tx = Some(tx),
+                }
+            }
+            if Instant::now() >= limit {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Stops the watchdog if the test unwinds, since the runtime waits for
+    /// blocking tasks before it shuts down.
+    struct StopOnDrop(Arc<AtomicBool>);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Kills the process that armed this pid file, however the test ends.
+    struct KillOnDrop(PathBuf);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let pid = std::fs::read_to_string(&self.0).ok();
+            if let Some(pid) = pid.as_deref().and_then(parse_pid) {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn deadline_still_applies_after_parent_exit_with_inherited_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_file = dir.path().join("parent.pid");
+        let holder_file = dir.path().join("holder.pid");
+        // The parent leaves a background shell holding stdout open, arms, and
+        // exits. The holder outlives the run on purpose.
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 1 & exit 0"]);
-        let result = tokio::time::timeout(
-            Duration::from_millis(400),
-            child_output(
-                command,
-                &CancellationToken::new(),
-                Instant::now() + Duration::from_millis(30),
-            ),
+        command.args([
+            "-c",
+            &format!("sh -c \"$1\" & {}", arm(&parent_file)),
+            "sh",
+            &armed_sleeper(&holder_file),
+        ]);
+        let _kill_holder = KillOnDrop(holder_file.clone());
+        let armed = move || {
+            let holder = armed_pid(&holder_file)?;
+            // Reaped, not just exited: `child_output` has seen the exit and
+            // moved on to reading stdout.
+            (!pid_exists(armed_pid(&parent_file)?)).then_some(holder)
+        };
+        let (result, _, holder_running) = held(
+            child_output(command, &CancellationToken::new(), held_deadline()),
+            armed,
+            Step::Expire,
         )
-        .await
-        .expect("inherited stdout must not keep the preview request alive");
+        .await;
+        assert!(holder_running, "the shell holding stdout exited early");
         assert!(result.unwrap_err().to_string().contains("timed out"));
     }
-    #[tokio::test]
+
+    #[tokio::test(start_paused = true)]
     async fn cancellation_kills_and_reaps_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exec sleep 30"]);
+        command.args(["-c", &armed_sleeper(&pid_file)]);
         let token = CancellationToken::new();
-        let cancel = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            cancel.cancel();
-        });
-        let start = Instant::now();
-        assert!(matches!(
-            child_output(command, &token, start + TIMEOUT).await,
-            Err(GoopError::Cancelled)
-        ));
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
-    #[tokio::test]
-    async fn timeout_stops_child() {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exec sleep 30"]);
-        let start = Instant::now();
-        assert!(child_output(
-            command,
-            &CancellationToken::new(),
-            start + Duration::from_millis(30)
+        let (result, pid, running) = held(
+            child_output(command, &token, held_deadline()),
+            move || armed_pid(&pid_file),
+            Step::Cancel(&token),
         )
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("timed out"));
-        assert!(start.elapsed() < Duration::from_secs(2));
+        .await;
+        assert!(matches!(result, Err(GoopError::Cancelled)));
+        assert!(
+            !running,
+            "child {pid} was not reaped before the run returned"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_stops_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &armed_sleeper(&pid_file)]);
+        let (result, pid, running) = held(
+            child_output(command, &CancellationToken::new(), held_deadline()),
+            move || armed_pid(&pid_file),
+            Step::Expire,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(
+            !running,
+            "child {pid} was not reaped before the run returned"
+        );
     }
 }
 
