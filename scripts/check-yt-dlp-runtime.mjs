@@ -19,7 +19,7 @@
 // a library below its floor, or the binary could not report. 2: usage error.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,7 +95,7 @@ function stderrContext(stderr) {
 
 // Windows needs SystemRoot to start Python and TEMP/TMP for the PyInstaller
 // unpack directory; USERPROFILE is what expanduser reads there.
-function scrubbedEnv(home) {
+export function scrubbedEnv(home, { platform = process.platform, env = process.env } = {}) {
   const posix = {
     HOME: home,
     TMPDIR: home,
@@ -103,8 +103,8 @@ function scrubbedEnv(home) {
     XDG_CONFIG_HOME: join(home, "config"),
     XDG_DATA_HOME: join(home, "data"),
   };
-  if (process.platform !== "win32") return { ...posix, PATH: "/usr/bin:/bin" };
-  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  if (platform !== "win32") return { ...posix, PATH: "/usr/bin:/bin" };
+  const systemRoot = env.SystemRoot ?? "C:\\Windows";
   return {
     ...posix,
     USERPROFILE: home,
@@ -266,4 +266,6 @@ function main(argv) {
   }
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  process.exitCode = main(process.argv.slice(2));
+}

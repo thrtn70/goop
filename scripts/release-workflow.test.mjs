@@ -330,8 +330,17 @@ test("both quality gates run the gallery-dl runtime checker tests", () => {
 
 // yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only with
 // its version pin. These checks ask the binary which ones it imported.
-const ytDlpRuntimeCheck = /node scripts\/check-yt-dlp-runtime\.mjs --binary "([^"]+)"/;
+// Anchored to a whole command line, so a commented-out call or a trailing
+// `|| true` does not count as running the check.
+const ytDlpRuntimeCommand = String.raw`node scripts/check-yt-dlp-runtime\.mjs --binary "([^"]+)"`;
 const ytDlpRuntimeStep = "yt-dlp runtime clears the certifi and urllib3 floors";
+
+// A step that cannot fail is not a check. The anchored command line already
+// rules out a trailing `|| true` on the call itself.
+function assertFailsTheJob(step) {
+  assert.doesNotMatch(step, /continue-on-error/);
+  assert.doesNotMatch(step, /^\s*set \+e/m);
+}
 
 test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on macOS and Windows", () => {
   const smoke = auditJob("sidecar-smoke");
@@ -339,8 +348,9 @@ test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on m
   const step = namedStep(smoke, ytDlpRuntimeStep);
   assert.doesNotMatch(step, /^ {8}if:/m, "every sidecar-smoke runner must run the check");
   assert.match(step, /^ {8}shell: bash$/m);
+  assertFailsTheJob(step);
   assert.equal(
-    step.match(ytDlpRuntimeCheck)?.[1],
+    step.match(new RegExp(`^ {8}run: ${ytDlpRuntimeCommand}$`, "m"))?.[1],
     "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}",
   );
   assert.ok(
@@ -352,17 +362,24 @@ test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on m
 test("the signed in-bundle yt-dlp must clear the floors before assets are staged", () => {
   const build = job("build");
   const verify = namedStep(build, "Verify signed sidecars run (macOS)");
-  assert.equal(verify.match(ytDlpRuntimeCheck)?.[1], "$APP/Contents/MacOS/yt-dlp");
+  assert.match(verify, /^ {8}shell: bash$/m);
+  assertFailsTheJob(verify);
+  assert.equal(
+    verify.match(new RegExp(`^ {10}${ytDlpRuntimeCommand}$`, "m"))?.[1],
+    "$APP/Contents/MacOS/yt-dlp",
+  );
   assert.ok(
     build.indexOf("- name: Verify signed sidecars run (macOS)") < build.indexOf("- name: Stage release assets"),
     "assets must not be staged before the in-bundle runtime check",
   );
 });
 
-test("both quality gates run the yt-dlp runtime checker tests", () => {
+test("both quality gates run the yt-dlp runtime checker and pin tests", () => {
   const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
-  assert.match(prePush, /node --test scripts\/check-yt-dlp-runtime\.test\.mjs/);
-  assert.match(auditJob("web"), /- run: node --test scripts\/check-yt-dlp-runtime\.test\.mjs/);
+  for (const suite of ["check-yt-dlp-runtime", "sidecar-provenance"]) {
+    assert.match(prePush, new RegExp(`node --test scripts/${suite}\\.test\\.mjs`));
+    assert.match(auditJob("web"), new RegExp(`^ {6}- run: node --test scripts/${suite}\\.test\\.mjs$`, "m"));
+  }
 });
 
 test("a manual rehearsal builds the signed package but can never publish", () => {

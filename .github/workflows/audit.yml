@@ -159,6 +159,7 @@ jobs:
       - run: node --test scripts/heif-deps.test.mjs
       - run: node --test scripts/check-gallery-dl-runtime.test.mjs
       - run: node --test scripts/check-yt-dlp-runtime.test.mjs
+      - run: node --test scripts/sidecar-provenance.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs

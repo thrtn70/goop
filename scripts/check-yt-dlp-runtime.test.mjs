@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { scrubbedEnv } from "./check-yt-dlp-runtime.mjs";
 
 const checker = fileURLToPath(new URL("./check-yt-dlp-runtime.mjs", import.meta.url));
 const fetchScript = fileURLToPath(new URL("./fetch-sidecars.sh", import.meta.url));
@@ -118,13 +119,53 @@ test("accepts the pinned yt-dlp when certifi and urllib3 sit exactly at the floo
   });
 });
 
-test("reads the Windows binary's CRLF output", () => {
+// Shaped like the Windows exe: Python 3.10, websockets 16, its own program
+// name in the usage error, and CRLF line ends.
+function windowsReport() {
+  return [
+    ...report().map((line) =>
+      line
+        .replace("(darwin_exe)", "(win_exe)")
+        .replace(/Python 3\.14\.7 .*/, "Python 3.10.11 (CPython AMD64 64bit) - Windows-10-10.0.26100-SP0 (OpenSSL 3.0.15 3 Sep 2024)")
+        .replace("websockets-17.2", "websockets-16.1.1"),
+    ),
+    "",
+    "Usage: yt-dlp-x86_64-pc-windows-msvc.exe [OPTIONS] URL [URL...]",
+    "",
+    "yt-dlp-x86_64-pc-windows-msvc.exe: error: You must provide at least one URL.",
+    "Type yt-dlp --help to see a list of all options.",
+  ].map((line) => `${line}\r`);
+}
+
+test("reads the Windows binary's output", () => {
   withDir((dir) => {
-    const bin = fakeBinary(dir, { stderrLines: [...report(), ...NO_URL].map((line) => `${line}\r`) });
-    const result = run(dir, bin);
+    const result = run(dir, fakeBinary(dir, { stderrLines: windowsReport() }));
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /certifi 2026\.10\.19, urllib3 2\.8\.0$/m);
+    assert.match(result.stdout, /Python 3\.10\.11, certifi 2026\.10\.19, urllib3 2\.8\.0$/m);
   });
+});
+
+test("gives a Windows child only what Python and the PyInstaller unpack need", () => {
+  const home = "C:\\Users\\runner\\AppData\\Local\\Temp\\goop-yt-dlp-home-x";
+  const env = scrubbedEnv(home, {
+    platform: "win32",
+    env: { SystemRoot: "D:\\Win", GITHUB_TOKEN: "secret", GOOP_LEAK_PROBE: "leaked", PATH: "C:\\tools" },
+  });
+  assert.deepEqual(Object.keys(env).sort(), [
+    "APPDATA", "HOME", "LOCALAPPDATA", "PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR",
+    "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+  ]);
+  assert.equal(env.SystemRoot, "D:\\Win");
+  assert.equal(env.PATH, "D:\\Win\\System32;D:\\Win");
+  for (const name of ["HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR"]) assert.equal(env[name], home, name);
+  assert.equal(scrubbedEnv(home, { platform: "win32", env: {} }).SystemRoot, "C:\\Windows");
+});
+
+test("gives a POSIX child a throwaway home and the system PATH only", () => {
+  const env = scrubbedEnv("/tmp/goop-yt-dlp-home-x", { platform: "darwin", env: { GITHUB_TOKEN: "secret" } });
+  assert.deepEqual(Object.keys(env).sort(), ["HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]);
+  assert.equal(env.PATH, "/usr/bin:/bin");
+  assert.equal(env.TMPDIR, "/tmp/goop-yt-dlp-home-x");
 });
 
 test("compares versions numerically, not as text", () => {
@@ -134,6 +175,21 @@ test("compares versions numerically, not as text", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /urllib3 2\.10\.0/);
   });
+});
+
+test("treats missing version parts as zero", async (t) => {
+  for (const [name, overrides, status] of [
+    ["a two-part version at the floor", { urllib3: "2.8" }, 0],
+    ["a four-part version above the floor", { urllib3: "2.8.0.1" }, 0],
+    ["a four-part version below the floor", { certifi: "2026.10.18.9" }, 1],
+  ]) {
+    await t.test(name, () => {
+      withDir((dir) => {
+        const result = run(dir, fakeBinary(dir, { stderrLines: [...report(overrides), ...NO_URL] }));
+        assert.equal(result.status, status, result.stderr);
+      });
+    });
+  }
 });
 
 test("refuses the certifi and urllib3 that yt-dlp 2026.08.19 shipped", () => {
@@ -203,7 +259,7 @@ test("fails closed when a debug line is missing or repeated", async (t) => {
       report().map((line) => line.replace("yt-dlp version stable@", "yt-dlp version  stable@")).concat(NO_URL),
       /::error::unrecognised "yt-dlp version" line/,
     ],
-    ["no debug output at all", NO_URL, /::error::/],
+    ["no debug output at all", NO_URL, /::error::yt-dlp did not report a "yt-dlp version/],
   ]) {
     await t.test(name, () => {
       withDir((dir) => {
