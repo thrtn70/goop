@@ -3,6 +3,7 @@ import {readFileSync,writeFileSync,mkdirSync,statSync,lstatSync,existsSync,readd
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
 import {directoryBytes,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
@@ -28,7 +29,9 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now()}=options;
+ // The default sleep coerces its delay as setTimeout does, so a numeric-string
+ // limit still fires instead of rejecting and leaving the run without a timer.
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
@@ -37,12 +40,12 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
  const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
  const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
- let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killTimer,killEscalation=null,stopRequested=false;
+ let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killEscalation=null,stopRequested=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
  const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
- const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=new Promise(resolveKill=>{killTimer=setTimeout(()=>{signal('SIGKILL');resolveKill();},killGraceMs);});};
+ const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=sleepMs(killGraceMs).then(()=>{signal('SIGKILL');});};
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
   try {
@@ -51,16 +54,19 @@ export async function run(binary,sidecars,request,stem,options={}) {
    if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
   } catch {/* A process or output can disappear between snapshots. */}
  },100);
- const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
  const start=nowMs();let code;
+ // sleepMs(ms,{signal}) must reject once signal aborts, as the default does, so
+ // a run that closes first cancels its timeout instead of stopping a dead group.
+ const timeout=new AbortController();
+ sleepMs(timeoutMs,{signal:timeout.signal}).then(()=>{timedOut=true;stop();},()=>{/* Cancelled: the root closed first. */});
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
- finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
+ finally{clearInterval(timer);timeout.abort();abortSignal?.removeEventListener('abort',abort);}
   const lifetimeMs=nowMs()-start;
  // A clean root exit is not a clean sample if owned descendants remain. Reap
  // before any post-exit file I/O, so no throw below can leave the group running
  // and every check below sees a tree the child can no longer change.
  stop();
- if(killEscalation)await killEscalation;else clearTimeout(killTimer);
+ if(killEscalation)await killEscalation;
   writeFileSync(`${stem}.stdout`,stdout);writeFileSync(`${stem}.stderr`,stderr);
  let metrics={success:false,error:'No metrics produced'};
  const metricsPath=`${stem}.metrics.json`;

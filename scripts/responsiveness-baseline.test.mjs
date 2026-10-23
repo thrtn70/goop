@@ -776,11 +776,22 @@ test('recorder readiness wait is bounded and requires matching identity', async 
   const root = mkdtempSync(join(tmpdir(), 'goop-recorder-ready-'));
   try {
     const path = join(root, 'recorder_ready.json');
-    setTimeout(() => writeFileSync(path, JSON.stringify({ schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 10 } })), 20);
-    const ready = await waitForRecorderReady(path, { schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42 }, { timeoutMs: 500, pollMs: 5 });
+    const identity = { schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42 };
+    // The marker appears during the third sleep, so the wait must keep polling
+    // past its first misses however slowly the machine runs.
+    const clock = virtualClock();
+    const sleepThenWrite = async ms => { await clock.sleepMs(ms); if (clock.sleeps.length === 3) writeFileSync(path, JSON.stringify({ ...identity, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 10 } })); };
+    const ready = await waitForRecorderReady(path, identity, { timeoutMs: 500, pollMs: 5, nowMs: clock.nowMs, sleepMs: sleepThenWrite });
     assert.equal(ready.page_instance_id, uuid('2'));
+    assert.deepEqual(clock.sleeps, [5, 5, 5]);
     writeFileSync(path, JSON.stringify({ ...ready, pid: 99 }));
-    await assert.rejects(() => waitForRecorderReady(path, { session_id: uuid('1'), sample_id: 'sample', pid: 42 }, { timeoutMs: 20, pollMs: 5 }), /identity/i);
+    const mismatched = virtualClock();
+    await assert.rejects(() => waitForRecorderReady(path, { session_id: uuid('1'), sample_id: 'sample', pid: 42 }, { timeoutMs: 20, pollMs: 5, ...mismatched }), /identity/i);
+    assert.deepEqual(mismatched.sleeps, [5, 5, 5, 5]);
+    rmSync(path);
+    const missing = virtualClock();
+    await assert.rejects(() => waitForRecorderReady(path, identity, { timeoutMs: 20, pollMs: 5, ...missing }), /timed out/);
+    assert.deepEqual(missing.sleeps, [5, 5, 5, 5]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
