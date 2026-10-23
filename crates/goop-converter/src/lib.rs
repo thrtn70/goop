@@ -40,6 +40,8 @@ pub use progress::{ProgressSnapshot, ProgressTracker};
 
 pub mod preview;
 
+#[cfg(all(test, unix))]
+mod armed_child;
 mod bounded_process;
 pub mod video_options;
 pub mod video_track_options;
