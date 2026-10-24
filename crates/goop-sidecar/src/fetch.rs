@@ -359,6 +359,15 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+/// Whether two version strings name the same version (`2026.07.04` and
+/// `v2026.7.4`, `1.32` and `1.32.0`). Unparseable never matches.
+pub(crate) fn is_same_version(a: &str, b: &str) -> bool {
+    match (parse_version(a), parse_version(b)) {
+        (Some(a), Some(b)) => cmp_versions(&a, &b) == std::cmp::Ordering::Equal,
+        _ => false,
+    }
+}
+
 /// Whether a release tag is safe to interpolate into the download URL. Real
 /// tags look like `v1.32.4` or `2026.07.04`; we accept a conservative
 /// version-token charset and forbid `..` so a spoofed `tag_name` can't perform
@@ -417,6 +426,17 @@ mod tests {
         assert!(!is_newer("1.32", "1.32.0")); // equal via zero-pad
         assert!(!is_newer("garbage", "1.0.0")); // unparseable → no update
         assert!(!is_newer("1.0.0", "garbage"));
+    }
+
+    #[test]
+    fn is_same_version_compares_numerically() {
+        assert!(is_same_version("2026.07.04", "2026.07.04"));
+        assert!(is_same_version("2026.07.04", "v2026.7.4"));
+        assert!(is_same_version("1.32", "1.32.0"));
+        assert!(!is_same_version("2026.07.03", "2026.07.04"));
+        assert!(!is_same_version("1.32.4", "1.32.40"));
+        assert!(!is_same_version("garbage", "garbage"));
+        assert!(!is_same_version("", "1.0.0"));
     }
 
     #[test]
