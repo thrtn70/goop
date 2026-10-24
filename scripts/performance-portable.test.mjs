@@ -356,6 +356,79 @@ test('portable bounded runner fails closed on a delay its timers reject', { time
   assert.equal(result.aborted, false);
 });
 
+// A group kill sent while a member is being forked misses that member: the
+// stop's TERM and KILL reached /usr/bin/time but not the runner it was forking.
+// These tests model the miss by dropping every group signal until `armed`
+// exists, recording each dropped one in `dropped`.
+const dropUntilArmed = (armed, dropped) => (pid, name) => {
+  if (!existsSync(armed)) { dropped.push(name); return; }
+  process.kill(-pid, name);
+};
+
+test('portable bounded runner keeps killing its group until a member the stop missed is gone', { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-missed-kill-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const guard = killArmedAfter(t, root, armed);
+  const dropped = [];
+  // The runner holds the run's pipes, so the root cannot close while it lives.
+  writeFileSync(runner, `${recordPid(armed)}setInterval(()=>{},10);`);
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: null, killGraceMs: null, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, samplingIntervalMs: 10, killGroup: dropUntilArmed(armed, dropped) });
+  assert.deepEqual(dropped.slice(0, 2), ['SIGTERM', 'SIGKILL'], "the stop's own signals did not miss the runner");
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid runner pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `runner remained runnable with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.timed_out, true);
+});
+
+test('portable bounded runner kills a member the stop missed after the root closes', { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-missed-kill-closed-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const guard = killArmedAfter(t, root, armed);
+  const dropped = [];
+  // The descendant ignores TERM and holds none of the run's pipes, and the
+  // runner exits once it has armed, so the root closes with the descendant still
+  // in the group. The monitor never ticks before that, so only a kill after the
+  // close can reach it.
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  writeFileSync(runner, `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(armed)})){clearInterval(wait);process.exit(0);}},5);`);
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: null, killGraceMs: null, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, samplingIntervalMs: 2 ** 31 - 1, killGroup: dropUntilArmed(armed, dropped) });
+  assert.deepEqual(dropped.slice(0, 2), ['SIGTERM', 'SIGKILL'], "the stop's own signals did not miss the descendant");
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `descendant outlived the run with state ${state}`);
+  guard.reaped = true;
+  assert.equal(result.timed_out, true);
+});
+
+test('portable bounded runner stops killing its group once the group is gone', { skip: process.platform === 'win32', timeout: 30_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-group-gone-')), output = join(root, 'output'); mkdirSync(output);
+  const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+  const guard = killArmedAfter(t, root, armed);
+  const dropped = [], sent = [];
+  const killGroup = (pid, name) => {
+    if (!existsSync(armed)) { dropped.push(name); return; }
+    try { process.kill(-pid, name); sent.push(`${name}:ok`); } catch (error) { sent.push(`${name}:${error.code}`); throw error; }
+  };
+  // The holder leaves the group in its own session but keeps the run's pipes for
+  // 500 ms, so the root stays open after the group kill has emptied the group.
+  const holder = `${recordPid(armed)}setTimeout(()=>process.exit(0),500)`;
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(holder)}],{stdio:'inherit',detached:true});setInterval(()=>{},10);`);
+  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: null, killGraceMs: null, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, samplingIntervalMs: 10, killGroup });
+  const pid = Number(readFileSync(armed, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid holder pid ${pid}`);
+  const state = await stateAfterKill(pid);
+  assert.ok(state === '' || /[ZE]/.test(state), `holder outlived the run with state ${state}`);
+  guard.reaped = true;
+  assert.deepEqual(dropped.slice(0, 2), ['SIGTERM', 'SIGKILL'], "the stop's own signals did not miss the group");
+  assert.ok(sent.includes('SIGKILL:ok'), `the group was never killed: ${sent.join(', ')}`);
+  // A group with only zombies left reports EPERM on macOS until they are reaped.
+  assert.ok(sent.filter(entry => entry === 'SIGKILL:ESRCH').length <= 1, `kept killing a group that was gone: ${sent.join(', ')}`);
+  assert.equal(result.timed_out, true);
+});
+
 test('portable bounded runner takes only a sampling interval Node can honor', async () => {
   const root = mkdtempSync(join(tmpdir(), 'goop-portable-interval-')), output = join(root, 'output'); mkdirSync(output);
   try {
