@@ -126,6 +126,19 @@ async fn update_with(
         }
     }
 
+    // The resolver ignores an update-dir copy that is no newer than the
+    // bundled one, so installing such a release would change nothing.
+    if let Some(bundled) = resolver.bundled_copy_version("yt-dlp") {
+        if !fetch::is_newer(&latest, bundled) {
+            return Ok(UpdateStatus {
+                attempted: false,
+                previous_version: previous,
+                new_version: None,
+                message: format!("yt-dlp {latest} is not newer than the bundled {bundled}."),
+            });
+        }
+    }
+
     let exe_name = if cfg!(windows) {
         "yt-dlp.exe"
     } else {
@@ -172,11 +185,18 @@ async fn update_with(
     }
 
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
-    // actually runs, and is the release its marker says. If it doesn't (wrong
-    // arch, corrupt, truncated), remove it so it can't shadow the working
-    // bundled copy.
+    // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
+    // so it can't shadow the working bundled copy.
     match current_version(resolver).await {
-        Some(v) if fetch::is_same_version(&v, &latest) => {
+        Some(v) => {
+            // The marker must hold the version the binary itself reports, or
+            // the resolver would weigh the bundled copy against the wrong one.
+            if !fetch::is_same_version(&v, &latest) {
+                binaries::discard_update(&dest, LABEL).await;
+                return Err(GoopError::Queue(format!(
+                    "yt-dlp update: after installing {latest}, yt-dlp reports version {v:?}; reverted to the bundled version"
+                )));
+            }
             let message = match &previous {
                 Some(p) => format!("Updated yt-dlp {p} → {v}."),
                 None => format!("Installed yt-dlp {v}."),
@@ -187,12 +207,6 @@ async fn update_with(
                 new_version: Some(v),
                 message,
             })
-        }
-        Some(v) => {
-            binaries::discard_update(&dest, LABEL).await;
-            Err(GoopError::Queue(format!(
-                "yt-dlp update: after installing {latest}, yt-dlp reports version {v:?}; reverted to the bundled version"
-            )))
         }
         None => {
             binaries::discard_update(&dest, LABEL).await;
@@ -683,5 +697,101 @@ mod tests {
         assert!(!status.attempted);
         assert_eq!(status.previous_version.as_deref(), Some("2026.10.21"));
         assert!(status.message.contains("up to date (2026.10.21)"));
+    }
+
+    /// The resolver would ignore an installed release that is no newer than
+    /// the bundled copy, so the updater must not download one — here because
+    /// the bundled binary won't run, which leaves no version to compare with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_release_no_newer_than_the_bundled_copy_is_not_downloaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
+            )
+            .mount(&server)
+            .await;
+        // No download mocks: fetching the checksums would 404 and error.
+
+        let bundled = TempDir::new().unwrap();
+        std::fs::write(bundled.path().join("yt-dlp"), [0u8, 1, 2, 3]).unwrap();
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.07.04");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect("ok");
+
+        assert!(!status.attempted);
+        assert!(
+            status
+                .message
+                .contains("not newer than the bundled 2026.07.04"),
+            "{}",
+            status.message
+        );
+        assert!(!updates.path().join("yt-dlp").exists());
+    }
+
+    /// With the bundled yt-dlp gone (quarantined by antivirus, say), an
+    /// update to the very version Goop bundles is the repair, so it must be
+    /// installed and used. The far-future version keeps the test independent
+    /// of any yt-dlp on the machine's PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_bundled_copy_is_replaced_by_the_same_release() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2099.01.01"}"#),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2099.01.01/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "a65f5b61819a2df6dcd4093ad280719579554a9ff22552bb480b5e494dd9cd34  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2099.01.01/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2099.01.01\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap(); // the bundled copy is gone
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2099.01.01");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect("update ok");
+
+        assert!(status.attempted);
+        assert_eq!(status.new_version.as_deref(), Some("2099.01.01"));
+        assert_eq!(
+            resolver.resolve("yt-dlp").unwrap().path,
+            updates.path().join("yt-dlp")
+        );
     }
 }

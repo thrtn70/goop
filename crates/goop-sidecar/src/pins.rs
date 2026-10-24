@@ -45,6 +45,14 @@ GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLER
         assert_eq!(read_pin(SCRIPT, "GALLERY_DL_VERSION"), Some("v1.32.11"));
     }
 
+    /// Windows CI checks the script out with CRLF line endings.
+    #[test]
+    fn reads_pins_from_a_crlf_checkout() {
+        let crlf = SCRIPT.replace('\n', "\r\n");
+        assert_eq!(read_pin(&crlf, "YT_DLP_VERSION"), Some("2026.10.21"));
+        assert_eq!(read_pin(&crlf, "GALLERY_DL_VERSION"), Some("v1.32.11"));
+    }
+
     #[test]
     fn a_missing_pin_is_none() {
         assert_eq!(read_pin(SCRIPT, "MUPDF_VERSION"), None);

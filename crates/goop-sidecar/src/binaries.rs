@@ -80,11 +80,7 @@ impl BinaryResolver {
     ///   2. the bundled copy in `sidecar_dir`,
     ///   3. `$PATH` (dev / Homebrew installs).
     pub fn resolve(&self, name: &str) -> Result<ResolvedBinary, GoopError> {
-        let exe = if cfg!(windows) {
-            format!("{name}.exe")
-        } else {
-            name.to_string()
-        };
+        let exe = exe_name(name);
         if let Some(updated) = self.newer_update(name, &exe) {
             return Ok(ResolvedBinary {
                 name: name.to_string(),
@@ -114,8 +110,19 @@ impl BinaryResolver {
         &self.sidecar_dir
     }
 
+    /// The version of the bundled copy of `name` an update has to beat:
+    /// `None` when `sidecar_dir` holds no such binary, or its version is
+    /// unknown, which leaves nothing for a verified update to lose against.
+    pub(crate) fn bundled_copy_version(&self, name: &str) -> Option<&str> {
+        let bundled = self.bundled_version(name)?;
+        self.sidecar_dir
+            .join(exe_name(name))
+            .is_file()
+            .then_some(bundled)
+    }
+
     /// The update-dir copy of `exe`, if there is one and it is newer than the
-    /// copy this Goop bundles.
+    /// bundled copy (or there is no bundled copy).
     ///
     /// "Newer" is read from the version marker the updater wrote beside the
     /// binary after verifying it, so the check costs a small file read rather
@@ -129,10 +136,19 @@ impl BinaryResolver {
             return None;
         }
         let installed = read_version_marker(&path)?;
-        match self.bundled_version(name) {
+        match self.bundled_copy_version(name) {
             Some(bundled) => fetch::is_newer(&installed, bundled).then_some(path),
             None => Some(path),
         }
+    }
+}
+
+/// The file name of sidecar `name` on this platform.
+fn exe_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
     }
 }
 
@@ -292,12 +308,16 @@ mod tests {
     #[test]
     fn an_update_with_a_malformed_version_marker_is_ignored() {
         let long = "9".repeat(200);
+        // Valid once trimmed, but longer than the cap: only part of the file
+        // is read, so the rest of it is unknown.
+        let padded = format!("2099.01.01{}", " ".repeat(100));
         for marker in [
             "",
             "not-a-version",
             "2099.01.01\nrm -rf /",
             "2099.01.01 2099.01.02",
             &long,
+            &padded,
         ] {
             let bundled = TempDir::new().unwrap();
             let updated = TempDir::new().unwrap();
@@ -395,5 +415,32 @@ mod tests {
         let got = r.resolve("cargo").expect("cargo on PATH");
         assert!(got.source_is_path);
         assert!(got.path.exists());
+    }
+
+    /// With no bundled copy there is nothing to protect, so a verified update
+    /// is used whatever its version. That is the repair path when the
+    /// bundled binary is gone (quarantined by antivirus, say).
+    #[test]
+    fn a_marked_update_wins_when_the_bundled_copy_is_missing() {
+        let bundled = TempDir::new().unwrap(); // empty
+        let updated = TempDir::new().unwrap();
+        let r = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updated.path().to_path_buf())
+            .with_bundled_version("goop-test-tool", "2.0.0");
+        for marker in ["2.0.0", "1.0.0"] {
+            let want = install_update(updated.path(), "goop-test-tool", Some(marker));
+            let got = r.resolve("goop-test-tool").expect("resolves updated");
+            assert_eq!(got.path, want, "marker {marker}");
+        }
+    }
+
+    #[test]
+    fn an_unmarked_update_is_ignored_even_when_the_bundled_copy_is_missing() {
+        let bundled = TempDir::new().unwrap(); // empty
+        let updated = TempDir::new().unwrap();
+        install_update(updated.path(), "goop-test-tool", None);
+        let r = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updated.path().to_path_buf());
+        assert!(r.resolve("goop-test-tool").is_err());
     }
 }

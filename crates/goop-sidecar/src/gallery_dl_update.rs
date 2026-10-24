@@ -121,6 +121,19 @@ async fn update_with(
         }
     }
 
+    // The resolver ignores an update-dir copy that is no newer than the
+    // bundled one, so installing such a release would change nothing.
+    if let Some(bundled) = resolver.bundled_copy_version("gallery-dl") {
+        if !fetch::is_newer(&latest, bundled) {
+            return Ok(UpdateStatus {
+                attempted: false,
+                previous_version: previous,
+                new_version: None,
+                message: format!("gallery-dl {latest} is not newer than the bundled {bundled}."),
+            });
+        }
+    }
+
     let exe_name = if cfg!(windows) {
         "gallery-dl.exe"
     } else {
@@ -147,12 +160,20 @@ async fn update_with(
     }
 
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
-    // actually runs, and is the release its marker says. If it doesn't (wrong
-    // arch, corrupt, truncated), remove it so it can't shadow the working
-    // bundled copy. (Updates are user-initiated and serialized through the
-    // single IPC handler, so nothing else races us for `dest`.)
+    // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
+    // so it can't shadow the working bundled copy. (Updates are user-initiated
+    // and serialized through the single IPC handler, so nothing else races us
+    // for `dest`.)
     match current_version(resolver).await {
-        Some(v) if fetch::is_same_version(&v, &latest) => {
+        Some(v) => {
+            // The marker must hold the version the binary itself reports, or
+            // the resolver would weigh the bundled copy against the wrong one.
+            if !fetch::is_same_version(&v, &latest) {
+                binaries::discard_update(&dest, LABEL).await;
+                return Err(GoopError::Queue(format!(
+                    "gallery-dl update: after installing {latest}, gallery-dl reports version {v:?}; reverted to the bundled version"
+                )));
+            }
             let message = match &previous {
                 Some(p) => format!("Updated gallery-dl {p} → {v}."),
                 None => format!("Installed gallery-dl {v}."),
@@ -163,12 +184,6 @@ async fn update_with(
                 new_version: Some(v),
                 message,
             })
-        }
-        Some(v) => {
-            binaries::discard_update(&dest, LABEL).await;
-            Err(GoopError::Queue(format!(
-                "gallery-dl update: after installing {latest}, gallery-dl reports version {v:?}; reverted to the bundled version"
-            )))
         }
         None => {
             binaries::discard_update(&dest, LABEL).await;
@@ -401,8 +416,9 @@ mod tests {
         assert_eq!(current_version(&resolver).await.as_deref(), Some("1.0.0"));
     }
 
-    /// The Windows half of the stale-copy bug: gallery-dl self-updated before
-    /// markers existed, then a Goop bundling a newer gallery-dl was installed.
+    /// The stale-copy bug as Windows users meet it, played with a shell
+    /// stand-in: gallery-dl self-updated before markers existed, then a Goop
+    /// bundling a newer gallery-dl was installed.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_self_update_is_not_taken_for_the_current_version() {
@@ -434,5 +450,46 @@ mod tests {
         assert!(!status.attempted);
         assert_eq!(status.previous_version.as_deref(), Some("1.32.11"));
         assert!(status.message.contains("up to date (1.32.11)"));
+    }
+
+    /// The resolver would ignore an installed release that is no newer than
+    /// the bundled copy, so the updater must not download one — here because
+    /// the bundled binary won't run, which leaves no version to compare with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_release_no_newer_than_the_bundled_copy_is_not_downloaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"v1.32.11"}"#))
+            .mount(&server)
+            .await;
+        // No download mocks: fetching the checksums would 404 and error.
+
+        let bundled = TempDir::new().unwrap();
+        std::fs::write(bundled.path().join("gallery-dl"), [0u8, 1, 2, 3]).unwrap();
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "v1.32.11");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("gallery-dl.bin"),
+        )
+        .await
+        .expect("ok");
+
+        assert!(!status.attempted);
+        assert!(
+            status
+                .message
+                .contains("not newer than the bundled v1.32.11"),
+            "{}",
+            status.message
+        );
+        assert!(!updates.path().join("gallery-dl").exists());
     }
 }
