@@ -9,14 +9,14 @@
 //! So Goop updates yt-dlp the same way it updates gallery-dl: ask GitHub for
 //! the latest release, download the per-platform binary into the resolver's
 //! writable update dir, and let `BinaryResolver` prefer that copy over the
-//! bundled one (`BinaryResolver::with_update_dir`). The signed bundle is never
-//! touched.
+//! bundled one (`BinaryResolver::with_update_dir`) for as long as the version
+//! recorded beside it is newer. The signed bundle is never touched.
 //!
 //! Platform coverage: yt-dlp publishes `yt-dlp_macos` (arm64-capable
 //! universal), `yt-dlp.exe` (Windows x64) and `yt-dlp_linux`. goop ships macOS
 //! arm64 + Windows x64; the Linux asset exists for dev/CI only.
 
-use crate::binaries::BinaryResolver;
+use crate::binaries::{self, BinaryResolver};
 use crate::fetch::{self, FetchError};
 use crate::updater::{UpdateChecker, UpdateStatus};
 use goop_core::GoopError;
@@ -162,11 +162,21 @@ async fn update_with(
         Err(FetchError::Failed(e)) => return Err(e),
     }
 
+    // The resolver prefers an update-dir copy only while the version recorded
+    // beside it is newer than the bundled one.
+    if let Err(e) = binaries::record_update_version(&dest, &latest).await {
+        binaries::discard_update(&dest, LABEL).await;
+        return Err(GoopError::Queue(format!(
+            "yt-dlp update: could not record the installed version: {e}"
+        )));
+    }
+
     // The resolver now prefers `dest`; confirm the freshly downloaded binary
-    // actually runs. If it doesn't (wrong arch, corrupt, truncated), remove it
-    // so it can't shadow the working bundled copy.
+    // actually runs, and is the release its marker says. If it doesn't (wrong
+    // arch, corrupt, truncated), remove it so it can't shadow the working
+    // bundled copy.
     match current_version(resolver).await {
-        Some(v) => {
+        Some(v) if fetch::is_same_version(&v, &latest) => {
             let message = match &previous {
                 Some(p) => format!("Updated yt-dlp {p} → {v}."),
                 None => format!("Installed yt-dlp {v}."),
@@ -178,13 +188,14 @@ async fn update_with(
                 message,
             })
         }
+        Some(v) => {
+            binaries::discard_update(&dest, LABEL).await;
+            Err(GoopError::Queue(format!(
+                "yt-dlp update: after installing {latest}, yt-dlp reports version {v:?}; reverted to the bundled version"
+            )))
+        }
         None => {
-            if let Err(e) = tokio::fs::remove_file(&dest).await {
-                tracing::warn!(
-                    "yt-dlp update: failed to remove non-running download {}: {e}",
-                    dest.display()
-                );
-            }
+            binaries::discard_update(&dest, LABEL).await;
             Err(GoopError::Queue(
                 "yt-dlp update: the downloaded binary did not run; reverted to the bundled version"
                     .into(),
@@ -401,7 +412,8 @@ mod tests {
         write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
 
         let status = update_with(
             &resolver,
@@ -418,6 +430,11 @@ mod tests {
         assert!(
             updates.path().join("yt-dlp").is_file(),
             "updated binary must land in the update dir, never in the bundle"
+        );
+        assert_eq!(
+            std::fs::read_to_string(updates.path().join("yt-dlp.version")).unwrap(),
+            "2026.07.04",
+            "the resolver only prefers an update whose version is recorded"
         );
         assert!(status.message.contains("2026.07.04"));
     }
@@ -439,7 +456,8 @@ mod tests {
         write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
 
         let status = update_with(
             &resolver,
@@ -494,7 +512,8 @@ mod tests {
         write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
 
         let api = format!("{}/latest", server.uri());
         let dl = format!("{}/dl", server.uri());
@@ -550,7 +569,8 @@ mod tests {
         write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
 
         let err = update_with(
             &resolver,
@@ -565,10 +585,103 @@ mod tests {
             !updates.path().join("yt-dlp").exists(),
             "the broken download must be removed, not left to shadow the bundled copy"
         );
+        assert!(!updates.path().join("yt-dlp.version").exists());
         assert_eq!(
             current_version(&resolver).await.as_deref(),
             Some("2026.06.09"),
             "the bundled copy must be working again after the revert"
         );
+    }
+
+    /// The marker must be the version the binary itself reports, or the
+    /// resolver would compare the bundled copy against a number the installed
+    /// binary doesn't have.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_that_reports_another_version_than_its_release_is_reverted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.07.04"}"#),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/SHA2-256SUMS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "62e12e6164d4b5297e3c0a88a45ec719128b3143e3183be5999f99432bb6573e  yt-dlp_linux\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.03\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
+
+        let err = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect_err("a version mismatch must error");
+        assert!(matches!(err, GoopError::Queue(_)));
+        assert!(!updates.path().join("yt-dlp").exists());
+        assert!(!updates.path().join("yt-dlp.version").exists());
+        assert_eq!(
+            current_version(&resolver).await.as_deref(),
+            Some("2026.06.09"),
+            "the bundled copy must be in use again after the revert"
+        );
+    }
+
+    /// The bug a version-aware resolver fixes, seen from the updater: a copy
+    /// self-updated before markers existed, older than the bundled yt-dlp,
+    /// must neither run nor be reported as the current version.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_self_update_is_not_taken_for_the_current_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"2026.10.21"}"#),
+            )
+            .mount(&server)
+            .await;
+        // No download mock: the bundled copy is already the latest release.
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("yt-dlp"), "2026.10.21");
+        let updates = TempDir::new().unwrap();
+        write_script(&updates.path().join("yt-dlp"), "2026.08.19");
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.10.21");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+        )
+        .await
+        .expect("ok");
+
+        assert!(!status.attempted);
+        assert_eq!(status.previous_version.as_deref(), Some("2026.10.21"));
+        assert!(status.message.contains("up to date (2026.10.21)"));
     }
 }
