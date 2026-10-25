@@ -203,8 +203,9 @@ test('startup reaps a TERM-resistant descendant after its parent exits on its ow
   const armed = join(root, 'armed'), guard = join(root, 'descendant.pid');
   let passed = false;
   t.after(() => {
-    // A run that never kills the descendant waits on its pipes forever. Kill it
-    // here so the test fails at its timeout instead of hanging the gate.
+    // A run that never kills the descendant leaves it behind, or never returns
+    // if it waits on the pipes the descendant holds. Kill it here so the test
+    // fails instead of leaving it running or hanging the gate.
     try {
       const pid = Number(readFileSync(guard, 'utf8'));
       if (!passed && Number.isSafeInteger(pid) && pid > 1) process.kill(pid, 'SIGKILL');

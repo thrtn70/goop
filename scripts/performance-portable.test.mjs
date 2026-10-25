@@ -419,13 +419,14 @@ test('portable bounded runner keeps killing its group while the drain waits afte
   const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
   const guard = killArmedAfter(t, root, armed);
   const dropped = [];
-  // Every group signal is dropped until the root has been reaped. Node reaps the
-  // root as it reports the exit, so only a kill sent while the drain waits can
-  // reach the member that holds the pipes.
+  let missedAfterReap = 0;
+  // Every group signal is dropped until the root has been reaped, and the first
+  // three after it too. Node reaps the root as it reports the exit, so only kills
+  // that keep coming while the drain waits can reach the member holding the pipes.
   const killGroup = (pid, name) => {
     let reaped = false;
     try { process.kill(pid, 0); } catch (error) { reaped = error.code === 'ESRCH'; }
-    if (!reaped) { dropped.push(name); return; }
+    if (!reaped || missedAfterReap++ < 3) { dropped.push(name); return; }
     process.kill(-pid, name);
   };
   // The member holds the run's pipes, and the runner exits once it has armed.
