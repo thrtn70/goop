@@ -5,9 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Reads the armored signing keys src/signature.rs pins. Already in the tree
+# through reqwest.
+base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 goop-core = { path = "../goop-core" }
 reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+# The RSA arithmetic behind the release-signature check (src/signature.rs).
+# Already in the tree through rustls.
+ring = "0.17"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

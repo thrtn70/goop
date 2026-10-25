@@ -258,9 +258,10 @@ pub fn run() {
                 .ok()
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            // Updated sidecars (currently just gallery-dl, via its Codeberg
-            // self-updater) land in a writable app-data dir that the resolver
-            // prefers over the read-only bundled copy inside the signed app.
+            // Updated sidecars (yt-dlp and gallery-dl, via their goop-native
+            // updaters) land in a writable app-data dir that the resolver
+            // prefers over the read-only bundled copy inside the signed app,
+            // while the updated copy is newer than the bundled one.
             let resolver = Arc::new(
                 BinaryResolver::new(sidecar_dir).with_update_dir(gpath::data_dir().join("bin")),
             );
