@@ -16,6 +16,7 @@ Goop is a Cargo workspace with a Tauri 2 shell. The Rust backend lives in `crate
 | `goop-pdf` | PDF inspection and operations via `lopdf`, Ghostscript, mutool, and Tesseract. |
 | `goop-metadata` | Typed metadata read/write operations and policy enforcement. |
 | `goop-sidecar` | `BinaryResolver`, status reporting, and verified runtime updates for supported tools. |
+| `goop-owned-run` | Windows-only launcher for the performance harnesses: runs one command in a job that ends with it, so a stop reaps the whole tree without naming a pid. Build it (`cargo build -p goop-owned-run`) before a Windows harness run, or point `GOOP_OWNED_RUN` at a build. |
 | `src-tauri` | Tauri shell, `AppState`, IPC commands (`commands/*.rs`), `ThumbnailService` (video first frame, image decode, PDF page 1, audio waveform). |
 
 Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + React Router 7 + Vite 8. State lives in `src/store/appStore.ts`. IPC commands are wrapped in `src/ipc/commands.ts` (`api.queue.*`, `api.preset.*`, …). Rust types reach TS via `ts-rs` — when a struct on the Rust side changes, run `scripts/generate-bindings.sh` to refresh `shared/types/`.

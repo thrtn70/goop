@@ -9,6 +9,7 @@ members = [
     "crates/goop-config",
     "crates/goop-pdf",
     "crates/goop-metadata",
+    "crates/goop-owned-run",
     "src-tauri",
 ]
 

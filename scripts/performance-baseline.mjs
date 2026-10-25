@@ -1,11 +1,11 @@
 import {spawn,execFileSync} from 'node:child_process';
-import {readFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync,openSync,fstatSync,closeSync,constants} from 'node:fs';
+import {readFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkSync,rmSync} from 'node:fs';
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,directoryBytes,drainChildOutput,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,createOwnedGroupStopper,directoryBytes,drainChildOutput,ownedLaunch,readOwnedRegularFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -36,18 +36,16 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const directory=dirname(stem);
  // Tests inject a failing symbolic-link scan here; no caller passes one.
  const {listSymlinks=ownedSymlinks}=options;
+ const launch=ownedLaunch(binary,[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]);
  const existingEntries=new Set(readdirSync(directory));
  const initialSymlinks=new Set(listSymlinks(directory));
  createEvidenceFile(`${stem}.request.json`,JSON.stringify(request,null,2));
- const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
- const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
- const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
- let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killEscalation=null,stopRequested=false;
+ const child=spawn(launch.command,launch.args,{stdio:[launch.stdin,'pipe','pipe'],detached:process.platform!=='win32',env:environment});
+ let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
- const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
- const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=sleepMs(killGraceMs).then(()=>{signal('SIGKILL');});};
+ const {stop}=createOwnedGroupStopper(child,{killGraceMs,sleep:sleepMs});
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
   try {
@@ -69,27 +67,18 @@ export async function run(binary,sidecars,request,stem,options={}) {
  // A clean root exit is not a clean sample if owned descendants remain. Reap
  // before any post-exit file I/O, so no throw below can leave the group running
  // and every check below sees a tree the child can no longer change.
- stop();
- if(killEscalation)await killEscalation;
+ await stop();
  const stdioError=await drainChildOutput([child.stdout,child.stderr],killGraceMs);
  // The child shared this directory, so whatever it left at an evidence path is
  // refused rather than followed or opened, and the refusal fails the sample.
  let evidenceError=null;
  for(const [path,data] of [[`${stem}.stdout`,stdout],[`${stem}.stderr`,stderr]])try{createEvidenceFile(path,data);}catch(error){evidenceError??=error.message;}
  let metrics={success:false,error:'No metrics produced'};
- const metricsPath=`${stem}.metrics.json`;
- // One descriptor for the check and the read, so the child can neither redirect
- // nor stall it: a FIFO never blocks, a hard link is refused, and so is a symbolic
- // link wherever the platform has O_NOFOLLOW (Windows does not).
- let metricsFd=null;
- try {
-  metricsFd=openSync(metricsPath,constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0));
-  const metricsStats=fstatSync(metricsFd);
-  if(metricsStats.isFile()&&metricsStats.nlink===1&&metricsStats.size<Math.min(1024*1024,budgetBytes/4)) {
-   try{const parsed=JSON.parse(readFileSync(metricsFd));if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Metrics must be an object');metrics=parsed;}catch{metrics.error='Invalid metrics JSON';}
-  }
- } catch {/* Missing, a link, or not openable: no metrics. */}
- finally{if(metricsFd!==null)closeSync(metricsFd);}
+ // The child can neither redirect nor stall this read: a link (symbolic or hard)
+ // is refused on every platform, Windows included, and a FIFO never blocks.
+ let metricsBytes=null;
+ try{metricsBytes=readOwnedRegularFile(`${stem}.metrics.json`,Math.min(1024*1024,budgetBytes/4));}catch{/* Missing or not openable: no metrics. */}
+ if(metricsBytes!==null)try{const parsed=JSON.parse(metricsBytes);if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Metrics must be an object');metrics=parsed;}catch{metrics.error='Invalid metrics JSON';}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
  const verificationStart=nowMs();
  // A scan that cannot read the tree fails the sample instead of rejecting the

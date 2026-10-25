@@ -228,6 +228,12 @@ jobs:
       - name: HEIC stack tests (macOS)
         if: matrix.os == 'macos-14'
         run: node --test scripts/heif-deps.test.mjs
+      # On Windows the harnesses run every owned process inside the launcher's
+      # job and refuse to start without it, so build it before they run.
+      - name: Build the owned-process launcher (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: cargo build -p goop-owned-run
       - name: PERF-01 portable harness tests
         shell: bash
         run: node --test scripts/performance-portable.test.mjs
