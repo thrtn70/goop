@@ -660,8 +660,8 @@ export async function runBoundedProcess({
   abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
     // A group kill misses a member that is being forked at that instant, and
-    // such a member can hold the pipes and keep the root from closing. Once the
-    // group has been killed, kill it again every interval until the root closes
+    // such a member can hold the pipes and keep the drain waiting. Once the
+    // group has been killed, kill it again every interval until the drain ends
     // or the group is gone.
     group.killAgain();
     try {
@@ -699,7 +699,7 @@ export async function runBoundedProcess({
   // killed again while it holds the pipes.
   const stdioError = await drainChildOutput([child.stdout, child.stderr], killGraceMs);
   clearInterval(monitor);
-  // A missed member that holds none of the pipes can outlive the close, so kill
+  // A missed member that holds none of the pipes can outlive the drain, so kill
   // the group once more after it.
   group.killAgain();
   // Counted after the reap and the drain, so whatever the group wrote during its

@@ -225,9 +225,14 @@ test('startup reaps a TERM-resistant descendant after its parent exits on its ow
   assert.equal(result.timed_out, false);
   assert.equal(result.exit_code, 0);
   assert.equal(result.exit_signal, null);
+  // The drain can end before the killed descendant is retired, so poll for it.
   const pid = readFileSync(guard, 'utf8');
-  let state = '';
-  try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', pid], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
+  let state = 'unchecked';
+  for (let polls = 0; polls < 100; polls++) {
+    try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', pid], { encoding: 'utf8', timeout: 5000 }).trim(); } catch (error) { if (error.status !== 1) throw error; state = ''; }
+    if (state === '' || /[ZE]/.test(state)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
   passed = true;
 });

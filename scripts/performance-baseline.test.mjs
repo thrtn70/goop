@@ -316,13 +316,13 @@ test('a pipe holder inside the owned group is reaped, not reported as held',asyn
 });
 test('bounded process counts what the group writes during the reap grace',{skip:process.platform==='win32'},async()=>{
  // The descendant writes past the budget only when TERM arrives, after the root
- // has exited and the monitor has stopped, so only a count after the reap sees it.
+ // has exited, and the monitor never ticks, so only a count after the reap sees it.
  const root=mkdtempSync(join(tmpdir(),'goop-process-grace-')),output=join(root,'output'),armed=join(root,'armed'),runner=join(root,'runner.cjs');
  mkdirSync(output);
  const descendant=`const fs=require('node:fs');process.on('SIGTERM',()=>{fs.writeFileSync(require('node:path').join(process.env.GOOP_TEST_OUTPUT,'late'),Buffer.alloc(2*1024*1024));});fs.writeFileSync(${JSON.stringify(armed)},'1');setInterval(()=>{},10)`;
  writeFileSync(runner,`const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref();const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(armed)}))clearInterval(t);},5);`);
  try{
-  const result=await runBoundedProcess({command:process.execPath,args:[runner],env:{...process.env,GOOP_TEST_OUTPUT:output},outputDirectory:output,timeoutMs:30000,killGraceMs:2000,logLimitBytes:1024,storageBudgetBytes:1024*1024});
+  const result=await runBoundedProcess({command:process.execPath,args:[runner],env:{...process.env,GOOP_TEST_OUTPUT:output},outputDirectory:output,timeoutMs:30000,killGraceMs:2000,logLimitBytes:1024,storageBudgetBytes:1024*1024,samplingIntervalMs:2**31-1});
   assert.equal(result.exit_code,0);assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
