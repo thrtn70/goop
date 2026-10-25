@@ -281,6 +281,23 @@ test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {
   assert.ok(major > 2 || (major === 2 && minor >= 8), "urllib3 must be at least 2.8.0");
 });
 
+test("the macOS gallery-dl recipe excludes certifi bundles that trust the compromised emSign root", () => {
+  const lines = galleryDlMacosRequirements.split("\n");
+  const certifiLines = lines.filter((line) => line.startsWith("certifi=="));
+  assert.equal(certifiLines.length, 1, "expected exactly one certifi pin");
+
+  const pin = /^certifi==(\d{4})\.(\d{1,2})\.(\d{1,2}) \\$/.exec(certifiLines[0]);
+  assert.ok(pin, "certifi must use a date pin with one hash stanza");
+  const pinIndex = lines.indexOf(certifiLines[0]);
+  assert.match(lines[pinIndex + 1], /^ {4}--hash=sha256:[0-9a-f]{64}$/);
+
+  // 2026.10.19 is the first patched release for GHSA-6q48-6c7w-9gw2: it drops
+  // "emSign ECC Root CA - G3", whose intermediate CA keys were compromised,
+  // and keeps the unaffected emSign roots that 2026.10.18 had also removed.
+  const [year, month, day] = pin.slice(1).map(Number);
+  assert.ok(year * 10_000 + month * 100 + day >= 20261019, "certifi must be at least 2026.10.19");
+});
+
 // A source pin is not proof the frozen binary contains it. These checks run
 // the built gallery-dl and compare what it reports against the recipe.
 const galleryRuntimeCheck =

@@ -478,6 +478,7 @@ export async function runBoundedProcess({
   samplingIntervalMs = 100,
   nowMs = () => performance.now(),
   sleepMs = (ms, wait) => delay(ms, undefined, wait),
+  killGroup = (pid, name) => process.kill(-pid, name),
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
   // Node turns an interval below 1 ms or above 2^31-1 ms into 1 ms, so a bad
@@ -489,7 +490,7 @@ export async function runBoundedProcess({
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
-  let stopRequested = false, childSettled = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
+  let stopRequested = false, childSettled = false, killEscalation = null, killSent = false, groupGone = false, sampledTreePeakKiB = null, observedChildren = null;
   const windowsCleanupPids = new Set();
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
@@ -514,9 +515,14 @@ export async function runBoundedProcess({
           return sent;
         }
       }
-      process.kill(-child.pid, name);
+      killGroup(child.pid, name);
       return true;
-    } catch { return false; }
+    } catch (error) {
+      // An empty group's id is free for reuse, so never signal it again. A
+      // group of zombies reports EPERM on macOS until they are reaped.
+      if (process.platform !== 'win32' && error?.code === 'ESRCH') groupGone = true;
+      return false;
+    }
   };
   const stop = reason => {
     if (stopRequested) return;
@@ -527,12 +533,17 @@ export async function runBoundedProcess({
     const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
     if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
     // A grace the sleep rejects (a delay that is not a number) escalates at once.
-    const kill = () => { signal('SIGKILL'); };
+    const kill = () => { killSent = true; signal('SIGKILL'); };
     killEscalation = sleepMs(killGraceMs).then(kill, kill);
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
+    // A group kill misses a member that is being forked at that instant, and
+    // such a member can hold the pipes and keep the root from closing. Once the
+    // group has been killed, kill it again every interval until the root closes
+    // or the group is gone.
+    if (killSent && !groupGone && process.platform !== 'win32') signal('SIGKILL');
     try {
       if (process.platform !== 'win32') {
         const sample = processTreeRss(execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }), child.pid);
@@ -569,6 +580,9 @@ export async function runBoundedProcess({
   // adapters may otherwise leave ignored-stdio descendants behind.
   stop();
   await killEscalation;
+  // A missed member that holds none of the pipes can outlive the close, so kill
+  // the group once more after it.
+  if (killSent && !groupGone && process.platform !== 'win32') signal('SIGKILL');
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
