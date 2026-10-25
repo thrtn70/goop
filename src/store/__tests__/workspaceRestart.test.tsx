@@ -1,7 +1,13 @@
 import { createElement, type ReactNode } from "react";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "../workspacePersistence";
+// Loads the page's module graph while the file is collected, outside any test
+// timeout: transforming it on a busy machine takes seconds. Each test still
+// evaluates a fresh copy after vi.resetModules().
+import "@/pages/ConvertPage";
 beforeEach(() => {
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -36,19 +42,20 @@ vi.mock("@/ipc/commands", () => ({ api: { convert: { inspect: jpegMocks.inspect 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: jpegMocks.open, save: jpegMocks.save }));
 vi.mock("@/features/convert/DropZone", () => ({ default: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/features/presets/PresetChips", () => ({ default: () => null }));
+// Every mock resolves at once, and an async act keeps flushing until a task
+// turn passes with no new React work. So each page has settled when its act
+// returns, and the checks below are synchronous rather than polls racing
+// Testing Library's one-second limit.
 
 it("restores empty image width in a fresh store and blocks submission even while another inspector is selected", async () => {
-  const { render, screen, fireEvent, waitFor } = await import("@testing-library/react");
-  const { default: userEvent } = await import("@testing-library/user-event");
-  const { MemoryRouter } = await import("react-router-dom");
   const descriptor = { available: true, reason: null, quality_min: 1, quality_max: 100, default_quality: 75, max_dimension: 32768, max_output_pixels: 100000000, fit_within: true, upscale: false, preview_original_available: false, preview_fit_within: false, preview_unavailable_reason: "No preview" };
   jpegMocks.inspect.mockResolvedValue({ probe: { source_kind: "image", image_format: "dng", width: 6048, height: 8064, duration_ms: 0, file_size: 100, audio_codecs: [], subtitle_codecs: [] }, capabilities: { targets: [{ target: "jpeg", available: true, reason: null, image_settings: descriptor }], compression: { quality: false, target_size: false, lossless: false, reason: null } } });
   jpegMocks.open.mockResolvedValue(["/a.dng", "/b.dng"]);
   vi.resetModules();
   const { default: FirstPage } = await import("@/pages/ConvertPage");
   const first = render(createElement(MemoryRouter, {}, createElement(FirstPage)));
-  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
-  await screen.findByRole("textbox", { name: "JPEG quality" });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add files" })); });
+  expect(screen.getByRole("textbox", { name: "JPEG quality" })).toBeTruthy();
   const user = userEvent.setup();
   await user.selectOptions(screen.getByRole("combobox", { name: "Image dimensions" }), "fit_within");
   await user.clear(screen.getByRole("textbox", { name: "Image width" }));
@@ -57,9 +64,9 @@ it("restores empty image width in a fresh store and blocks submission even while
   expect(window.localStorage.getItem(DRAFT_STORAGE_KEY)).toContain("ImageOptionsPanel.widthDraft");
   vi.resetModules();
   const { default: SecondPage } = await import("@/pages/ConvertPage");
-  render(createElement(MemoryRouter, {}, createElement(SecondPage)));
-  await screen.findByRole("textbox", { name: "JPEG quality" });
-  await waitFor(() => expect(screen.queryByText("Inspecting source…")).toBeNull());
+  await act(async () => { render(createElement(MemoryRouter, {}, createElement(SecondPage))); });
+  expect(screen.getByRole("textbox", { name: "JPEG quality" })).toBeTruthy();
+  expect(screen.queryByText("Inspecting source…")).toBeNull();
   expect((screen.getByRole("button", { name: "Convert 2 files" }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Select a.dng" }));
   expect((screen.getByRole("textbox", { name: "Image width" }) as HTMLInputElement).value).toBe("");
@@ -68,8 +75,6 @@ it("restores empty image width in a fresh store and blocks submission even while
 });
 
 it("keeps preexisting GIF text drafts at their established scope after adding identity-scoped image controls", async () => {
-  const { render, screen } = await import("@testing-library/react");
-  const { MemoryRouter } = await import("react-router-dom");
   const file = { id: "existing-video", revision: 2, optionsReady: true, path: "/movie.mp4", sourceDir: "/", target: "gif", gifOptions: { size_preset: "medium", trim_start_ms: null, trim_end_ms: null }, subtitle: null, metadataPolicy: "preserve", qualityPreset: null, resolutionCap: null };
   window.localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({version:1, entries: {
     [JSON.stringify(["convert", "ConvertPage.files"])]: { value: [file] },
@@ -79,6 +84,6 @@ it("keeps preexisting GIF text drafts at their established scope after adding id
   jpegMocks.inspect.mockResolvedValue({ probe: { source_kind: "video", video_codec: "h264", has_video: true, duration_ms: 1000, width: 100, height: 100, file_size: 100, audio_codecs: [], subtitle_codecs: [] }, capabilities: { targets: [{ target: "gif", available: true }], compression: { quality: false, target_size: false, lossless: false } } });
   vi.resetModules();
   const { default: Page } = await import("@/pages/ConvertPage");
-  render(createElement(MemoryRouter, {}, createElement(Page)));
-  expect((await screen.findByRole("textbox", { name: "Start" }) as HTMLInputElement).value).toBe("00:");
+  await act(async () => { render(createElement(MemoryRouter, {}, createElement(Page))); });
+  expect((screen.getByRole("textbox", { name: "Start" }) as HTMLInputElement).value).toBe("00:");
 });

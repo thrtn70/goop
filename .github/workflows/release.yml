@@ -404,6 +404,10 @@ jobs:
           # signed binary what it imported and compare with the freezer recipe.
           echo "== gallery-dl runtime vs scripts/gallery-dl-macos-requirements.txt (signed, in-bundle) =="
           node scripts/check-gallery-dl-runtime.mjs --binary "$APP/Contents/MacOS/gallery-dl" --python "$GALLERY_DL_PYTHON"
+          # yt-dlp is downloaded prebuilt: ask the signed copy that it is the
+          # pinned release and that its certifi and urllib3 clear the floors.
+          echo "== yt-dlp runtime vs the pin and the certifi/urllib3 floors (signed, in-bundle) =="
+          node scripts/check-yt-dlp-runtime.mjs --binary "$APP/Contents/MacOS/yt-dlp"
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
           # PDF compress/thumbnail features reach via GS_LIB (set to the

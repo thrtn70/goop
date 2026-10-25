@@ -166,6 +166,68 @@ test("only the no-build publish job can write release state", () => {
   assert.doesNotMatch(publish, /draft: false/);
 });
 
+// The repository's default workflow token can write, and main has no branch
+// protection, so a workflow that names no permissions inherits a token that
+// can push to main. Audit compiles freshly resolved crates (Cargo.lock is not
+// committed), so any build script it runs could read a token left behind.
+// YAML allows blank lines and comments inside the block, so read past them
+// rather than stopping early and missing a scope added after one.
+function topLevelPermissions(body) {
+  const block = body.match(/^permissions:[ \t]*\n((?:(?:[ \t]+.*|#.*)?\n)*)/m)?.[1];
+  return block?.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+}
+
+// Every checkout `uses:` line, counted from the raw text so that a step the
+// parser below misreads still counts against it.
+function checkoutUses(body) {
+  return body.match(/\buses:\s*["']?actions\/checkout@/g)?.length ?? 0;
+}
+
+function checkoutSteps(body) {
+  return steps(body).filter((step) => /^ {6}- uses: actions\/checkout@|^ {8}uses: actions\/checkout@/m.test(step));
+}
+
+test("every workflow declares its own token permissions", () => {
+  for (const { name, body } of workflows) {
+    assert.ok(/^permissions:/m.test(body), `${name} inherits the repository's default token`);
+  }
+  const pages = workflows.find(({ name }) => name === "pages.yml");
+  assert.deepEqual(topLevelPermissions(pages.body), ["contents: read", "pages: write", "id-token: write"]);
+});
+
+test("audit runs with a read-only token", () => {
+  assert.deepEqual(topLevelPermissions(auditWorkflow), ["contents: read"]);
+  assert.doesNotMatch(auditWorkflow, /^ +permissions:/m, "no audit job may widen the token");
+});
+
+test("no workflow leaves its token in the checkout's git config", () => {
+  let checked = 0;
+  for (const { name, body } of workflows) {
+    const checkouts = checkoutSteps(body);
+    assert.equal(checkouts.length, checkoutUses(body), `${name}: a checkout step the parser missed`);
+    for (const step of checkouts) {
+      // Deliberately exact: block-style `with:`, the form release.yml uses.
+      assert.match(step, /^ {8}with:\n(?: {10}.*\n)*? {10}persist-credentials: false$/m, `${name}:\n${step}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 0, "no checkout steps found to validate");
+});
+
+test("every workflow pins each action to a full commit SHA", () => {
+  let pinned = 0;
+  for (const { name, body } of workflows) {
+    const refs = [...body.matchAll(/^[ -]*uses: (\S+)$/gm)].map((match) => match[1]);
+    assert.equal(refs.length, body.match(/\buses:/g)?.length ?? 0, `${name}: a uses: line the parser missed (the ref must end the line)`);
+    for (const ref of refs) {
+      if (ref.startsWith("./")) continue;
+      assert.match(ref, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${name} uses ${ref} by a mutable ref`);
+      pinned += 1;
+    }
+  }
+  assert.ok(pinned > 0, "no actions found to validate");
+});
+
 test("the macOS arm64 build stages one immutable workflow artifact before publication", () => {
   const build = job("build");
   assert.match(build, /os: macos-14/);
@@ -219,6 +281,23 @@ test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {
   assert.ok(major > 2 || (major === 2 && minor >= 8), "urllib3 must be at least 2.8.0");
 });
 
+test("the macOS gallery-dl recipe excludes certifi bundles that trust the compromised emSign root", () => {
+  const lines = galleryDlMacosRequirements.split("\n");
+  const certifiLines = lines.filter((line) => line.startsWith("certifi=="));
+  assert.equal(certifiLines.length, 1, "expected exactly one certifi pin");
+
+  const pin = /^certifi==(\d{4})\.(\d{1,2})\.(\d{1,2}) \\$/.exec(certifiLines[0]);
+  assert.ok(pin, "certifi must use a date pin with one hash stanza");
+  const pinIndex = lines.indexOf(certifiLines[0]);
+  assert.match(lines[pinIndex + 1], /^ {4}--hash=sha256:[0-9a-f]{64}$/);
+
+  // 2026.10.19 is the first patched release for GHSA-6q48-6c7w-9gw2: it drops
+  // "emSign ECC Root CA - G3", whose intermediate CA keys were compromised,
+  // and keeps the unaffected emSign roots that 2026.10.18 had also removed.
+  const [year, month, day] = pin.slice(1).map(Number);
+  assert.ok(year * 10_000 + month * 100 + day >= 20261019, "certifi must be at least 2026.10.19");
+});
+
 // A source pin is not proof the frozen binary contains it. These checks run
 // the built gallery-dl and compare what it reports against the recipe.
 const galleryRuntimeCheck =
@@ -264,6 +343,60 @@ test("both quality gates run the gallery-dl runtime checker tests", () => {
   const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
   assert.match(prePush, /node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
   assert.match(auditJob("web"), /- run: node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
+});
+
+// yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only with
+// its version pin. These checks ask the binary which ones it imported.
+// Anchored to a whole command line, so a commented-out call or a trailing
+// `|| true` does not count as running the check.
+const ytDlpRuntimeCommand = String.raw`node scripts/check-yt-dlp-runtime\.mjs --binary "([^"]+)"`;
+const ytDlpRuntimeStep = "yt-dlp runtime clears the certifi and urllib3 floors";
+
+// A step that cannot fail is not a check. The anchored command line already
+// rules out a trailing `|| true` on the call itself.
+function assertFailsTheJob(step) {
+  assert.doesNotMatch(step, /continue-on-error/);
+  assert.doesNotMatch(step, /^\s*set \+e/m);
+}
+
+test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on macOS and Windows", () => {
+  const smoke = auditJob("sidecar-smoke");
+  assert.match(smoke, /^ {8}os: \[macos-14, windows-latest\]$/m);
+  const step = namedStep(smoke, ytDlpRuntimeStep);
+  assert.doesNotMatch(step, /^ {8}if:/m, "every sidecar-smoke runner must run the check");
+  assert.match(step, /^ {8}shell: bash$/m);
+  assertFailsTheJob(step);
+  assert.equal(
+    step.match(new RegExp(`^ {8}run: ${ytDlpRuntimeCommand}$`, "m"))?.[1],
+    "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}",
+  );
+  assert.ok(
+    smoke.indexOf("- name: Fetch sidecars") < smoke.indexOf(`- name: ${ytDlpRuntimeStep}`),
+    "the runtime check must run on the freshly fetched binary",
+  );
+});
+
+test("the signed in-bundle yt-dlp must clear the floors before assets are staged", () => {
+  const build = job("build");
+  const verify = namedStep(build, "Verify signed sidecars run (macOS)");
+  assert.match(verify, /^ {8}shell: bash$/m);
+  assertFailsTheJob(verify);
+  assert.equal(
+    verify.match(new RegExp(`^ {10}${ytDlpRuntimeCommand}$`, "m"))?.[1],
+    "$APP/Contents/MacOS/yt-dlp",
+  );
+  assert.ok(
+    build.indexOf("- name: Verify signed sidecars run (macOS)") < build.indexOf("- name: Stage release assets"),
+    "assets must not be staged before the in-bundle runtime check",
+  );
+});
+
+test("both quality gates run the yt-dlp runtime checker and pin tests", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  for (const suite of ["check-yt-dlp-runtime", "sidecar-provenance"]) {
+    assert.match(prePush, new RegExp(`node --test scripts/${suite}\\.test\\.mjs`));
+    assert.match(auditJob("web"), new RegExp(`^ {6}- run: node --test scripts/${suite}\\.test\\.mjs$`, "m"));
+  }
 });
 
 test("a manual rehearsal builds the signed package but can never publish", () => {

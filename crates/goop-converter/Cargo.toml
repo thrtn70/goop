@@ -92,6 +92,9 @@ sha2 = { version = "0.10", optional = true }
 goop-queue = { path = "../goop-queue" }
 # Scratch dirs for the `#[ignore]`d real-ffmpeg tests.
 tempfile = "3"
+# start_paused for the subprocess tests, so a query deadline falls due on a
+# paused clock (the workspace tokio "full" feature set omits test-util).
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cc = "1"
