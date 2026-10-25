@@ -29,9 +29,9 @@ import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
-import { batchKind, kindScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
+import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
 import { newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
-import { applyButtonLabel, applyOutcome, applyTooltip, FIX_SELECTED_FIRST, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import { applyButtonLabel, applyOutcome, applyTooltip, FIX_SELECTED_FIRST, noPresetTarget, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -609,10 +609,16 @@ function ConvertPage() {
     return true;
   };
 
+  const refuse = (message: string) => { setApplicationError(message); setApplicationStatus(null); };
+  // A preset applies to the files whose capabilities admit its format, and
+  // says which files kept their settings.
   const applyPreset = (preset: Preset) => {
-    if (preset.compress_mode) { setApplicationError("Compression settings cannot be applied in Convert."); return; }
-    const ids = new Set(files.flatMap(file => file.id ? [file.id] : []));
-    applySettings({
+    if (preset.compress_mode) { refuse("Compression settings cannot be applied in Convert."); return; }
+    const scope = targetScope(files, byId, preset.target);
+    if (scope.pending) { refuse(WAIT_FOR_INSPECTION); return; }
+    if (scope.ids.length === 0) { refuse(noPresetTarget(preset.target)); return; }
+    const label = preset.name || "a preset";
+    const applied = applySettings({
       target: preset.target,
       imageOptions: cloneImageOptions(preset.image_options),
       videoOptions: cloneVideoOptions(preset.video_options),
@@ -627,7 +633,8 @@ function ConvertPage() {
       trackOptions: preset.track_policy ? null : undefined,
       pendingTrackPolicy: preset.track_policy ?? undefined,
       videoTrackOptionsEnabled: preset.track_policy?.kind === "video" || undefined,
-    }, { ids, stamp: { id: newBatchStampId(), label: preset.name || "a preset" } });
+    }, { ids: new Set(scope.ids), stamp: { id: newBatchStampId(), label } });
+    if (applied) setApplicationStatus(presetOutcome(label, kindCounts(scope.ids, byId), scope.kept));
   };
 
 

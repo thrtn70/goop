@@ -58,3 +58,9 @@ export function targetScope(
 ): BatchScope {
   return scope(entries, states, state => state.capabilities.targets.some(candidate => candidate.target === target && candidate.available));
 }
+
+export function kindCounts(ids: readonly string[], states: Readonly<Record<string, ProbeState>>): KindCounts {
+  const counts: KindCounts = { image: 0, video: 0, audio: 0, unknown: 0 };
+  for (const id of ids) counts[batchKind(states[id]) ?? "unknown"] += 1;
+  return counts;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProbeState } from "@/hooks/useProbe";
-import { batchKind, kindScope, targetScope } from "../batchScope";
+import { batchKind, kindCounts, kindScope, targetScope } from "../batchScope";
 import { batchResetSource, batchState, stampEntries, validBatchStamp, type StampableEntry } from "../batchStamp";
 
 const ready = (source_kind: string, opts: { streams?: Array<{ codec_type: string; attached_pic: boolean }>; targets?: string[]; unavailable?: string[] } = {}) => ({
@@ -38,6 +38,9 @@ describe("scopes", () => {
   it("reports pending while a file is probing or not yet seeded", () => {
     expect(kindScope([...entries, { id: "p", optionsReady: false }], { ...states, p: probing }, "image").pending).toBe(true);
     expect(kindScope([{ id: "a", optionsReady: false }], { a: ready("image") }, "image").pending).toBe(true);
+  });
+  it("counts scoped ids by kind, with unknown for anything unclassified", () => {
+    expect(kindCounts(["a", "c", "m", "d", "missing"], states)).toEqual({ image: 1, video: 1, audio: 1, unknown: 2 });
   });
   it("scopes presets by available target capability", () => {
     expect(targetScope(entries, { ...states, b: ready("image", { unavailable: ["jpeg"] }) }, "jpeg")).toEqual({ ids: ["a"], kept: { image: 1, video: 1, audio: 1, unknown: 1 }, pending: false });

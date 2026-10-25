@@ -127,12 +127,12 @@ it("copies independent settings and retries only the unacknowledged JPEG", async
   expect(mocks.enqueue.mock.calls.map(c => c[0].input_path)).toEqual(["/a.jpg", "/b.jpg", "/b.jpg"]);
   expect(mocks.enqueue.mock.calls[2][0].image_options).toEqual(fit);
 });
-it("rejects mixed-source batch and preset applications atomically with the incompatible source name", async () => {
+it("hides Apply for a single image and applies the Photo preset to the image only", async () => {
   mocks.preset = preset(); render(page()); await add(["/a.jpg", "/clip.mp4"]); await setFit();
   await seeded("/a.jpg", "/clip.mp4");
   expect(screen.queryByRole("button", { name: /^Apply to/ })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
-  expect(screen.getByRole("alert").textContent).toContain("clip.mp4");
+  expect(outcome()).toBe("Applied Photo to 1 image. 1 video kept its settings.");
   fireEvent.click(screen.getByRole("button", { name: "Select clip.mp4" }));
   expect(screen.getByRole("button", { name: "MP4" }).className).toContain("bg-accent");
 });
@@ -249,7 +249,7 @@ it("refuses image preset application until every source inspection is ready", as
   mocks.inspect.mockImplementation((path: string) => path === "/b.jpg" ? new Promise(r => { resolve = r; }) : Promise.resolve(inspect()));
   render(page()); await add(["/a.jpg", "/b.jpg"]);
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
-  expect(screen.getByRole("alert").textContent).toContain("b.jpg: Inspecting");
+  expect(screen.getByRole("alert").textContent).toBe("Wait for every file to finish inspecting.");
   expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("75");
   await act(async () => resolve(inspect()));
 });
@@ -641,6 +641,23 @@ const outcome = () => {
 };
 
 describe("mixed batches in Convert", () => {
+  it("applies a preset only to the files that can take its format", async () => {
+    mocks.preset = preset(); render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]);
+    await seeded("/a.jpg", "/b.jpg", "/clip.mp4");
+    const clipBefore = row("/clip.mp4");
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(outcome()).toBe("Applied Photo to 2 images. 1 video kept its settings.");
+    expect(row("/clip.mp4")).toEqual(clipBefore);
+    expect(row("/a.jpg").batch?.label).toBe("Photo");
+  });
+  it("refuses a preset no file can take", async () => {
+    mocks.preset = { ...preset(), target: "webp" } as Preset; render(page()); await add(["/a.jpg", "/clip.mp4"]);
+    await seeded("/a.jpg", "/clip.mp4");
+    const before = stored();
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(screen.getByRole("alert").textContent).toBe("None of these files can become WebP.");
+    expect(stored()).toEqual(before);
+  });
   it("applies the selected file's settings, not the first file's", async () => {
     render(page()); await add(["/a.jpg", "/b.jpg"]);
     fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
@@ -684,11 +701,15 @@ describe("mixed batches in Convert", () => {
   it("waits for every inspection before Apply", async () => {
     let release!: (value: ReturnType<typeof inspect>) => void;
     mocks.inspect.mockImplementation((path: string) => path === "/slow.jpg" ? new Promise(resolve => { release = resolve; }) : Promise.resolve(inspect(false)));
-    render(page()); await add(["/a.jpg", "/slow.jpg"]);
-    const pending = screen.getByRole("button", { name: "Apply to matching files" }) as HTMLButtonElement;
-    expect(pending.disabled).toBe(true); expect(pending.title).toBe("Wait for every file to finish inspecting.");
-    // Inspections run one at a time app-wide, so the slow one must finish here.
-    await act(async () => release(inspect(false)));
+    render(page());
+    try {
+      await add(["/a.jpg", "/slow.jpg"]);
+      const pending = screen.getByRole("button", { name: "Apply to matching files" }) as HTMLButtonElement;
+      expect(pending.disabled).toBe(true); expect(pending.title).toBe("Wait for every file to finish inspecting.");
+    } finally {
+      // Inspections run one at a time app-wide; a stuck one would starve later tests.
+      await act(async () => release?.(inspect(false)));
+    }
     expect(await screen.findByRole("button", { name: "Apply to all 2" })).toBeTruthy();
   });
   it("leaves a file whose inspection failed out of the scope", async () => {
