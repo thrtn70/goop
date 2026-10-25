@@ -745,12 +745,15 @@ function ConvertPage() {
   } : null;
   const selectedBatchState = selected ? batchState(selected) : null;
   const resetSource = selected && selectedBatchState === "edited" ? batchResetSource(selected, files) : null;
-  // Copies an unedited batch member's settings back onto this row alone.
+  // Copies an unedited batch member's stored settings back onto this row
+  // alone. Stored, not request-validated: an edit marks a row Edited, so the
+  // member holds exactly what the batch wrote, including a Hardware required
+  // intent this machine cannot run, which applySettings admits as before.
   const restoreBatchSettings = () => {
     if (!selected?.id || !selected.batch || !resetSource) return false;
     const source = plannedFiles[files.indexOf(resetSource)];
     const restored = applySettings(
-      { ...source, audioOptions: audioRequestOptions(source), videoOptions: videoRequestOptions(source) },
+      source,
       { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
     );
     if (restored) setApplicationStatus(null);

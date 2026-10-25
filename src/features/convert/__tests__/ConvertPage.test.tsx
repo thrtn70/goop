@@ -91,6 +91,7 @@ vi.mock("@/ipc/commands", () => ({
                       ]
                     : []),
                 ];
+        const noHardware = path.startsWith("/tmp/no-hardware");
         return {
           probe: p,
           capabilities: {
@@ -146,7 +147,7 @@ vi.mock("@/ipc/commands", () => ({
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
                 crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                 speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",preview_available:false,preview_unavailable_reason:"Explicit video samples are unavailable."
-                ,hardware:{available:path !== "/tmp/no-hardware.mp4" && !(path === "/tmp/target-loss.mp4" && target === "mov"),reason:path === "/tmp/no-hardware.mp4" || (path === "/tmp/target-loss.mp4" && target === "mov") ? "Hardware session unavailable" : null,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
+                ,hardware:{available:!noHardware && !(path === "/tmp/target-loss.mp4" && target === "mov"),reason:noHardware || (path === "/tmp/target-loss.mp4" && target === "mov") ? "Hardware session unavailable" : null,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                   resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}},
                   frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{frame_rate:{kind:"constant",numerator:24000,denominator:1001},label:"23.976 fps"}]}}
                 ,resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}}
@@ -1480,6 +1481,7 @@ describe("explicit video inspector", () => {
   beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
   afterEach(cleanup);
   async function stage() { renderPage(); await userEvent.click(screen.getByRole("button",{name:"Add files"})); await screen.findByLabelText("Processing"); }
+  const row = (name: string) => within(screen.getByRole("button",{name:`Select ${name}`}).closest("li")!);
   const noAudioPlan = {
     requested: {kind:"copy" as const}, video_codec:"h264" as const, video_stream_index:0,
     audio_stream_index:null, audio_codec:null, audio_copied:false, width:1920, height:1080, notices:[],
@@ -1664,6 +1666,38 @@ describe("explicit video inspector", () => {
     expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
     expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
+  });
+  it("restores an unavailable Hardware required batch setting onto an edited row", async () => {
+    mockOpen.mockResolvedValue(["/tmp/no-hardware.mp4","/tmp/no-hardware-2.mp4"]);
+    useAppStore.setState({presets:[{
+      id:"hardware",name:"Required H.264",target:"mp4",
+      video_options:{kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000}} as never,
+      quality_preset:null,resolution_cap:null,compress_mode:null,is_builtin:false,created_at:0n,
+    }]});
+    await stage();
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Required H.264"}));
+    await userEvent.click(screen.getByRole("button",{name:"Select no-hardware-2.mp4"}));
+    await userEvent.selectOptions(screen.getByLabelText("Processor"),"software");
+    expect(row("no-hardware-2.mp4").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("no-hardware-2.mp4").getByText("Batch")).toBeTruthy();
+    expect(screen.queryByText(/Settings were not applied/)).toBeNull();
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","6000");
+    expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
+  });
+  it("marks a batch row Edited when its rate text changes, so restore copies only applied values", async () => {
+    mockOpen.mockResolvedValue(["/tmp/first.mp4","/tmp/second.mp4"]);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
+    await userEvent.clear(screen.getByLabelText("CRF"));
+    expect(row("first.mp4").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("first.mp4").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
   });
   it("retains committed Hardware required intent when the selected target loses capability", async () => {
     mockOpen.mockResolvedValue(["/tmp/target-loss.mp4"]);
