@@ -1,5 +1,6 @@
 import { File, X } from "lucide-react";
 import type { ProbeState } from "@/hooks/useProbe";
+import type { BatchState } from "./batchStamp";
 import {
   claimResponsivenessAction,
   expectsResponsivenessAction,
@@ -22,6 +23,8 @@ export default function SourceRow({
   state,
   problem,
   edited,
+  summary,
+  batchState,
   onSelect,
   onRemove,
   onRetry,
@@ -33,6 +36,9 @@ export default function SourceRow({
   state: ProbeState;
   problem: string | null;
   edited?: boolean;
+  /** What the row will become, e.g. "→ JPEG · Quality 80". */
+  summary?: string | null;
+  batchState?: BatchState;
   onSelect: () => void;
   onRemove: () => void;
   onRetry: () => void;
@@ -108,6 +114,18 @@ export default function SourceRow({
                   ? "Inspecting source…"
                   : "Inspection failed")}
             </span>
+            {summary && (
+              <span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-fg-secondary">
+                {batchState && (
+                  <span className={batchState === "batch"
+                    ? "shrink-0 rounded-full border border-accent/45 bg-accent-subtle px-1.5 font-semibold text-accent"
+                    : "shrink-0 rounded-full border bg-surface-2 px-1.5 font-semibold text-fg-secondary"}>
+                    {batchState === "batch" ? "Batch" : "Edited"}
+                  </span>
+                )}
+                <span className="truncate" title={summary}>{summary}</span>
+              </span>
+            )}
           </span>
         </button>
         <button

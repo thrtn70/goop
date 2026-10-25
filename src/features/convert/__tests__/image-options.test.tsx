@@ -640,7 +640,45 @@ const outcome = () => {
   return node?.textContent ?? null;
 };
 
+const tag = (name: string) => within(screen.getByRole("button", { name: `Select ${name}` }).closest("li")!);
+async function typeQuality(value: string) {
+  const user = userEvent.setup();
+  await user.clear(screen.getByRole("textbox", { name: "JPEG quality" }));
+  await user.type(screen.getByRole("textbox", { name: "JPEG quality" }), value);
+  await user.tab();
+}
+
 describe("mixed batches in Convert", () => {
+  it("tags rows, flags an edit and restores batch settings", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(tag("a.jpg").getByText("Batch")).toBeTruthy(); expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 90 · Fit 2048 × 2048")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    await typeQuality("70");
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy(); expect(tag("a.jpg").getByText("Batch")).toBeTruthy();
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 70 · Fit 2048 × 2048")).toBeTruthy();
+    expect(screen.getByText("Changed for this file.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("90");
+  });
+  it("keeps tags across a route remount and drops reset when no unedited member is left", async () => {
+    const view = render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    view.unmount(); render(page());
+    expect(await screen.findByText("Batch settings from a.jpg.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    await typeQuality("70");
+    fireEvent.click(screen.getByRole("button", { name: "Remove a.jpg" }));
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Use batch settings" })).toBeNull();
+  });
+  it("summarises outputs by format", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(screen.getByText("3 media files · 2 → JPEG · 1 → MP4 · Outputs go beside each source unless you choose a folder.")).toBeTruthy();
+  });
   it("applies a preset only to the files that can take its format", async () => {
     mocks.preset = preset(); render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]);
     await seeded("/a.jpg", "/b.jpg", "/clip.mp4");

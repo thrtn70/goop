@@ -30,8 +30,8 @@ import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
-import { newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
-import { applyButtonLabel, applyOutcome, applyTooltip, FIX_SELECTED_FIRST, noPresetTarget, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
+import { applyButtonLabel, applyOutcome, applyTooltip, convertSettingsLine, FIX_SELECTED_FIRST, inspectorBatchStatus, noPresetTarget, outputBreakdown, presetOutcome, USE_BATCH_SETTINGS, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -741,6 +741,20 @@ function ConvertPage() {
     disabledReason: applyScope.pending ? WAIT_FOR_INSPECTION : selectedProblem ? FIX_SELECTED_FIRST : null,
     onApply: applySelectedToKind,
   } : null;
+  const selectedBatchState = selected ? batchState(selected) : null;
+  const resetSource = selected && selectedBatchState === "edited" ? batchResetSource(selected, files) : null;
+  // Copies an unedited batch member's settings back onto this row alone.
+  const restoreBatchSettings = () => {
+    if (!selected?.id || !selected.batch || !resetSource) return;
+    const source = plannedFiles[files.indexOf(resetSource)];
+    const restored = applySettings(
+      { ...source, audioOptions: audioRequestOptions(source), videoOptions: videoRequestOptions(source) },
+      { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
+    );
+    if (restored) setApplicationStatus(null);
+  };
+  const settled = (file: FileEntry) => file.optionsReady === true && byId[file.id ?? ""]?.phase === "ready";
+  const breakdown = files.length > 1 ? outputBreakdown(files.filter(settled)) : "";
   return (
     <WorkspaceFrame
       title="Convert"
@@ -758,19 +772,37 @@ function ConvertPage() {
       }
       outputSummary={
         <p className="text-sm text-fg-secondary">
-          {files.length} media file{files.length === 1 ? "" : "s"} ·{" "}
-          {files.length === 1
-            ? "Choose a destination when you start."
-            : "Outputs go beside each source unless you choose a folder."}
+          {[
+            `${files.length} media file${files.length === 1 ? "" : "s"}`,
+            ...(breakdown ? [breakdown] : []),
+            files.length === 1
+              ? "Choose a destination when you start."
+              : "Outputs go beside each source unless you choose a folder.",
+          ].join(" · ")}
         </p>
       }
       inspector={
         <WorkspaceInspector
           title="Output settings"
           description={
-            selected
-              ? "Editing " + sourceName(selected.path)
-              : "Select a source to get started."
+            selected ? (
+              <>
+                <span className="block">{"Editing " + sourceName(selected.path)}</span>
+                {selectedBatchState && (
+                  <span className="mt-1 block text-fg-secondary">
+                    {inspectorBatchStatus(selectedBatchState, selected.batch?.label ?? "")}
+                    {resetSource && (
+                      <>
+                        {" "}
+                        <button type="button" onClick={restoreBatchSettings} className="text-accent underline">
+                          {USE_BATCH_SETTINGS}
+                        </button>
+                      </>
+                    )}
+                  </span>
+                )}
+              </>
+            ) : "Select a source to get started."
           }
           actions={<>
             <ConvertActionBar
@@ -866,6 +898,8 @@ function ConvertPage() {
               state={byId[f.id ?? ""] ?? PROBING}
               problem={problems[i] ?? planProblem(plannedFiles[i])}
               edited={f.submittedEdit}
+              summary={settled(f) ? convertSettingsLine(f) : null}
+              batchState={batchState(f)}
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}
               onRetry={() => f.id && retry(f.id)}
