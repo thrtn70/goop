@@ -385,6 +385,32 @@ export function readOwnedRegularFile(path, maxBytes, open = openSync) {
 }
 
 /**
+ * Give a reaped child's output pipes `graceMs` to reach EOF. A process that left
+ * the owned group can hold them open for as long as it lives, so after the grace
+ * and one more event-loop turn (which reads an EOF that is already pending) both
+ * are destroyed. Resolves null once both ended, or a message recording them as
+ * held.
+ */
+export function drainChildOutput(streams, graceMs) {
+  const open = streams.filter(stream => stream && !stream.readableEnded && !stream.closed);
+  const ended = () => open.every(stream => stream.readableEnded || stream.closed);
+  if (ended()) return Promise.resolve(null);
+  return new Promise(resolveDrain => {
+    let settled = false, deadline = null;
+    const settle = drained => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (!drained) for (const stream of open) stream.destroy();
+      resolveDrain(drained ? null : 'The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group');
+    };
+    const settleIfEnded = () => { if (ended()) settle(true); };
+    for (const stream of open) { stream.once('end', settleIfEnded); stream.once('close', settleIfEnded); }
+    deadline = setTimeout(() => setImmediate(() => settle(ended())), graceMs);
+  });
+}
+
+/**
  * Read a file the measured child left, through one descriptor so the child can
  * neither redirect nor stall the read: a FIFO opens without blocking, and only a
  * regular file of at most `maxBytes` that no other path links to is read. A
@@ -666,8 +692,8 @@ export async function runBoundedProcess({
   };
   const monitor = setInterval(() => {
     // A group kill misses a member that is being forked at that instant, and
-    // such a member can hold the pipes and keep the root from closing. Once the
-    // group has been killed, kill it again every interval until the root closes
+    // such a member can hold the pipes and keep the drain waiting. Once the
+    // group has been killed, kill it again every interval until the drain ends
     // or the group is gone.
     group.killAgain();
     if (process.platform !== 'win32') {
@@ -685,29 +711,36 @@ export async function runBoundedProcess({
     }
   }, samplingIntervalMs);
   // sleepMs(ms, { signal }) must reject once signal aborts, as the default does,
-  // so a run that closes first cancels its timeout instead of stopping a dead group.
+  // so a run that exits first cancels its timeout instead of stopping a dead group.
   // Any other rejection (a delay that is not a number) times the run out at once.
   const timeout = new AbortController();
   sleepMs(timeoutMs, { signal: timeout.signal }).then(() => stop('timeout'), () => { if (!timeout.signal.aborted) stop('timeout'); });
   const start = nowMs();
+  // The root's exit, not its pipes' EOF: a process that left the group can hold
+  // the pipes open for as long as it lives.
   const code = await new Promise(resolve => {
     child.once('error', error => { spawnError = error.message; resolve(null); });
-    child.once('close', value => resolve(value));
+    child.once('exit', value => resolve(value));
   });
-  clearInterval(monitor);
   timeout.abort();
   abortSignal?.removeEventListener('abort', abort);
+  // Confirm the entire owned group is gone even when the root exits cleanly;
+  // adapters may otherwise leave ignored-stdio descendants behind.
+  await stop();
+  // The monitor runs until the drain ends, so a member the group kill missed is
+  // killed again while it holds the pipes.
+  const stdioError = await drainChildOutput([child.stdout, child.stderr], killGraceMs);
+  clearInterval(monitor);
+  // A missed member that holds none of the pipes can outlive the drain, so kill
+  // the group once more after it.
+  group.killAgain();
+  // Counted after the reap and the drain, so whatever the group wrote during its
+  // kill grace, and the output read since the exit, are included.
   try {
     budgetExceeded ||= measureBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
   } catch {
     budgetExceeded = true;
   }
-  // Confirm the entire owned group is gone even when the root exits cleanly;
-  // adapters may otherwise leave ignored-stdio descendants behind.
-  await stop();
-  // A missed member that holds none of the pipes can outlive the close, so kill
-  // the group once more after it.
-  group.killAgain();
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
@@ -729,7 +762,7 @@ export async function runBoundedProcess({
   }
   const timePeakMatch = process.platform === 'darwin' ? stderr.toString().match(/(\d+)\s+maximum resident set size/) : null;
   return {
-    success: code === 0 && !timedOut && !budgetExceeded && !aborted && spawnError === null && cleanupError === null && outputError === null,
+    success: code === 0 && !timedOut && !budgetExceeded && !aborted && spawnError === null && cleanupError === null && outputError === null && stdioError === null,
     exit_code: code,
     timed_out: timedOut,
     budget_exceeded: budgetExceeded,
@@ -737,6 +770,7 @@ export async function runBoundedProcess({
     spawn_error: spawnError,
     cleanup_error: cleanupError,
     output_error: outputError,
+    stdio_error: stdioError,
     removed_staging_directories: removedStagingDirectories,
     lifetime_ms: nowMs() - start,
     sampled_tree_peak_KiB: sampledTreePeakKiB,

@@ -119,6 +119,61 @@ test('abort kills a TERM-resistant startup process before returning', { timeout:
   assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' });
   guard.passed = true;
 });
+const readyApp = "fs.writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10);";
+for (const [label, abort] of [['root exited', false], ['ready', false], ['aborted', true]]) {
+  test(`startup stops waiting for output pipes held outside the owned group (${label})`, () => {
+    const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-')), armed = join(root, 'holder.pid'), resisting = join(root, 'resisting');
+    // An aborted app survives TERM and says so, so the abort lands only once the
+    // reap's SIGKILL is the one thing that can end it.
+    const after = label === 'ready' ? readyApp : abort ? `process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(resisting)},'1');setInterval(()=>{},10);` : '';
+    // The holder leaves the owned group (detached is setsid) and keeps stdout and
+    // stderr open. It writes one marker before it publishes its pid, never writes
+    // again, and outlives the guard, so only the finally below ends it.
+    const holder = `const fs=require('node:fs');fs.writeSync(1,'escaped-marker\\n');fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setTimeout(()=>{},120000)`;
+    const app = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(holder)}],{detached:true,stdio:['ignore','inherit','inherit']}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;
+    try {
+      writeFileSync(join(root, 'app.cjs'), app);
+      // Waiting for the holder's EOF would hang, so the run happens in a
+      // subprocess whose timeout turns that into a failure. The holder's state is
+      // read the moment runStartup resolves.
+      const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `import {runStartup} from ${JSON.stringify(new URL('./startup-baseline.mjs', import.meta.url).href)};import fs from 'node:fs';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
+const [root,armed,abortWhen]=process.argv.slice(1),controller=new AbortController();
+if(abortWhen){const t=setInterval(()=>{if(fs.existsSync(abortWhen)){clearInterval(t);controller.abort();}},5);}
+const result=await runStartup({binary:process.execPath,args:[join(root,'app.cjs')],directory:join(root,'run'),settings:{},readinessTimeoutMs:30000,idleMs:30,killGraceMs:200,abortSignal:controller.signal});
+let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',fs.readFileSync(armed,'utf8')],{encoding:'utf8'}).trim();}catch{/* Gone. */}
+process.stdout.write(JSON.stringify({success:result.success,stdio_error:result.stdio_error,exit_code:result.exit_code,timed_out:result.timed_out,aborted:result.aborted,ready:result.marker!==null&&result.idle_tree_rss_KiB!==null,log:fs.readFileSync(join(root,'run','stdout.log'),'utf8'),holder_state:state}));`, root, armed, abort ? resisting : ''], { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL' }));
+      // The holder is still alive, so runStartup resolved without its EOF.
+      assert.ok(result.holder_state !== '' && !/[ZE]/.test(result.holder_state), `holder state '${result.holder_state}'`);
+      assert.equal(result.success, false);
+      assert.match(result.stdio_error ?? '', /output pipes/i);
+      assert.match(result.log, /escaped-marker/);
+      if (abort) assert.equal(result.aborted, true);
+      else assert.equal(result.timed_out, false);
+      // A ready app's sample fails only because of the held pipes.
+      if (label === 'ready') assert.equal(result.ready, true);
+      if (label === 'root exited') assert.equal(result.exit_code, 0);
+    } finally {
+      try { process.kill(Number(readFileSync(armed, 'utf8')), 'SIGKILL'); } catch { /* Never armed or already gone. */ }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+test('clean startup records no held pipes', async () => {
+  const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)");
+  assert.equal(result.success, true);
+  assert.equal(result.stdio_error, null);
+});
+test('a startup binary that cannot launch returns without waiting for readiness', { timeout: 20000 }, async () => {
+  // A failed spawn emits error and close but never exit.
+  const root = mkdtempSync(join(tmpdir(), 'goop-startup-missing-'));
+  try {
+    const result = await runStartup({ binary: join(root, 'missing'), directory: join(root, 'run'), settings: {}, readinessTimeoutMs: 30000, idleMs: 30, killGraceMs: 30 });
+    assert.equal(result.success, false);
+    assert.match(result.spawn_error, /ENOENT/);
+    assert.equal(result.timed_out, false);
+    assert.equal(result.stdio_error, null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 test('invalid and failed readiness excluded from medians', async () => {
   const { result, clock } = await fakeStartingAt('ready.json', "publishReady({schema_version:1,backend_ready_ms:-1,pid:process.pid});setInterval(()=>{},10)");
   assert.equal(result.success, false);
@@ -143,36 +198,42 @@ test('records marker and idle RSS then waits for child exit', async () => {
   assert.ok(result.idle_tree_rss_KiB > 0);
   assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' });
 });
-test('timeout also reaps a TERM-resistant descendant after its parent exits', { timeout: 5000 }, async t => {
+test('startup reaps a TERM-resistant descendant after its parent exits on its own', { timeout: 5000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'goop-startup-orphan-'));
   const armed = join(root, 'armed'), guard = join(root, 'descendant.pid');
   let passed = false;
   t.after(() => {
-    // A run that never kills the descendant waits on its pipes forever. Kill it
-    // here so the test fails at its timeout instead of hanging the gate.
+    // A run that never kills the descendant leaves it behind, or never returns
+    // if it waits on the pipes the descendant holds. Kill it here so the test
+    // fails instead of leaving it running or hanging the gate.
     try {
       const pid = Number(readFileSync(guard, 'utf8'));
       if (!passed && Number.isSafeInteger(pid) && pid > 1) process.kill(pid, 'SIGKILL');
     } catch { /* Never spawned, or already gone. */ }
     rmSync(root, { recursive: true, force: true });
   });
-  // The descendant ignores TERM and signals only once its parent has exited on
-  // its own, so the parent is gone before the timeout starts.
-  const descendant = `process.on('SIGTERM',()=>{});const fs=require('node:fs');const parent=Number(process.argv[1]);const orphaned=setInterval(()=>{if(process.ppid!==parent){clearInterval(orphaned);fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},'');fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});}},5);setInterval(()=>{},10)`;
-  const clock = clockStartingAt(armed);
-  const result = await fake(`const descendant=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)},String(process.pid)],{stdio:'inherit'});require('node:fs').writeFileSync(${JSON.stringify(guard)},String(descendant.pid));process.exit(0)`, { readinessTimeoutMs: 1500, killGraceMs: 30, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+  // The descendant holds the run's pipes and ignores TERM, and the parent exits
+  // on its own once that handler is installed, so only the group's SIGKILL can
+  // end the descendant.
+  const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
+  // Time stands still for the whole run, so no readiness deadline passes while a
+  // loaded child is still starting: only the parent's exit can end the wait.
+  const clock = clockStartingAt(join(root, 'never-created'));
+  const result = await fake(`const fs=require('node:fs');const descendant=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(guard)},String(descendant.pid));const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(armed)})){clearInterval(wait);process.exit(0);}},5)`, { readinessTimeoutMs: 1500, killGraceMs: 30, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
   assert.equal(clock.missed, false);
   assert.equal(result.success, false);
-  assert.equal(result.timed_out, true);
-  // The parent's own clean exit, not the timeout's TERM, ended it.
+  // The parent's own clean exit ended the wait, so it is not reported as a timeout.
+  assert.equal(result.timed_out, false);
   assert.equal(result.exit_code, 0);
   assert.equal(result.exit_signal, null);
-  // 1470 ms of readiness polling, then the 30 ms grace: exactly the total timeout.
-  assert.deepEqual(clock.sleeps, [...Array(147).fill(10), 30]);
-  assert.equal(result.lifetime_ms, 1500);
+  // The drain can end before the killed descendant is retired, so poll for it.
   const pid = readFileSync(guard, 'utf8');
-  let state = '';
-  try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', pid], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
+  let state = 'unchecked';
+  for (let polls = 0; polls < 100; polls++) {
+    try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', pid], { encoding: 'utf8', timeout: 5000 }).trim(); } catch (error) { if (error.status !== 1) throw error; state = ''; }
+    if (state === '' || /[ZE]/.test(state)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
   passed = true;
 });
