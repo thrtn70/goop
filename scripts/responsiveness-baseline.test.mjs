@@ -628,6 +628,23 @@ test('AX driver focuses one exact launched-process text field and verifies its p
   }
 });
 
+// Time advances only when an AX wait loop sleeps, so retries and deadlines are
+// exact however long each attempt takes on a loaded machine. These sleeps never
+// yield to the event loop, so a loop that ignores its deadline must fail here
+// rather than spin forever.
+function virtualClock() {
+  const sleeps = [];
+  let now = 0;
+  return {
+    sleeps,
+    nowMs: () => now,
+    sleepMs: async ms => {
+      if (sleeps.length >= 1000) throw Error('Virtual clock: wait loop never reached its deadline');
+      sleeps.push(ms); now += ms;
+    },
+  };
+}
+
 test('AX activation retries only while the exact process or main window is still mounting', async () => {
   let attempts = 0;
   const driver = {
@@ -637,9 +654,18 @@ test('AX activation retries only while the exact process or main window is still
       return { frontmost_pid: 42, window_count: 1 };
     },
   };
-  assert.deepEqual(await waitForAxActivation(driver, { timeoutMs: 100, pollMs: 1 }), { frontmost_pid: 42, window_count: 1 });
+  const clock = virtualClock();
+  assert.deepEqual(await waitForAxActivation(driver, { timeoutMs: 100, pollMs: 1, ...clock }), { frontmost_pid: 42, window_count: 1 });
   assert.equal(attempts, 2);
-  await assert.rejects(() => waitForAxActivation({ activate: async () => { throw Error('Accessibility permission is not granted'); } }, { timeoutMs: 100, pollMs: 1 }), /permission/i);
+  assert.deepEqual(clock.sleeps, [1]);
+  let mounting = 0;
+  const bounded = virtualClock();
+  await assert.rejects(() => waitForAxActivation({ activate: async () => { mounting += 1; throw Error('Accessibility process is not ready'); } }, { timeoutMs: 100, pollMs: 25, ...bounded }), /process is not ready/);
+  assert.equal(mounting, 4);
+  assert.deepEqual(bounded.sleeps, [25, 25, 25, 25]);
+  const denied = virtualClock();
+  await assert.rejects(() => waitForAxActivation({ activate: async () => { throw Error('Accessibility permission is not granted'); } }, { timeoutMs: 100, pollMs: 1, ...denied }), /permission/i);
+  assert.deepEqual(denied.sleeps, []);
 });
 
 test('AX driver fails closed on permission, focus, modal, and missing labels', async () => {
@@ -750,11 +776,22 @@ test('recorder readiness wait is bounded and requires matching identity', async 
   const root = mkdtempSync(join(tmpdir(), 'goop-recorder-ready-'));
   try {
     const path = join(root, 'recorder_ready.json');
-    setTimeout(() => writeFileSync(path, JSON.stringify({ schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 10 } })), 20);
-    const ready = await waitForRecorderReady(path, { schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42 }, { timeoutMs: 500, pollMs: 5 });
+    const identity = { schema_version: 2, component_kind: 'recorder_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 1, pid: 42 };
+    // The marker appears during the third sleep, so the wait must keep polling
+    // past its first misses however slowly the machine runs.
+    const clock = virtualClock();
+    const sleepThenWrite = async ms => { await clock.sleepMs(ms); if (clock.sleeps.length === 3) writeFileSync(path, JSON.stringify({ ...identity, native_clock: { domain: 'native_monotonic', unit: 'us', elapsed_us: 10 } })); };
+    const ready = await waitForRecorderReady(path, identity, { timeoutMs: 500, pollMs: 5, nowMs: clock.nowMs, sleepMs: sleepThenWrite });
     assert.equal(ready.page_instance_id, uuid('2'));
+    assert.deepEqual(clock.sleeps, [5, 5, 5]);
     writeFileSync(path, JSON.stringify({ ...ready, pid: 99 }));
-    await assert.rejects(() => waitForRecorderReady(path, { session_id: uuid('1'), sample_id: 'sample', pid: 42 }, { timeoutMs: 20, pollMs: 5 }), /identity/i);
+    const mismatched = virtualClock();
+    await assert.rejects(() => waitForRecorderReady(path, { session_id: uuid('1'), sample_id: 'sample', pid: 42 }, { timeoutMs: 20, pollMs: 5, ...mismatched }), /identity/i);
+    assert.deepEqual(mismatched.sleeps, [5, 5, 5, 5]);
+    rmSync(path);
+    const missing = virtualClock();
+    await assert.rejects(() => waitForRecorderReady(path, identity, { timeoutMs: 20, pollMs: 5, ...missing }), /timed out/);
+    assert.deepEqual(missing.sleeps, [5, 5, 5, 5]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -853,7 +890,12 @@ test('native page reaps a pre-ready recorder failure without AX dispatch and ret
     const template = join(root, 'component.json'); writeFileSync(template, JSON.stringify(component));
     const binary = process.execPath;
     const fakeApp = join(root, 'fake-app.cjs');
-    writeFileSync(fakeApp, `const fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;fs.writeFileSync(path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,'frontend-'+value.component_role+'-'+value.page_instance_id+'.json'),JSON.stringify(value),{flag:'wx'});setInterval(()=>{},1000);\n`);
+    // Like the app, publish the component complete: write a temporary file, then
+    // hard-link it into place (create-new). The harness reads a component as soon
+    // as it exists and rejects one that is not valid JSON. The temporary file
+    // sits beside the template, outside the directories the storage monitor
+    // scans, so its removal cannot be read as a vanished output.
+    writeFileSync(fakeApp, `const fs=require('node:fs');const path=require('node:path');const value=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));value.pid=process.pid;const name='frontend-'+value.component_role+'-'+value.page_instance_id+'.json',temp=path.join(path.dirname(process.argv[2]),'.'+name+'.tmp');fs.writeFileSync(temp,JSON.stringify(value),{flag:'wx'});fs.linkSync(temp,path.join(process.env.GOOP_RESPONSIVENESS_REPORT_DIR,name));fs.unlinkSync(temp);setInterval(()=>{},1000);\n`);
     const manifest = {
       schema_version: 2, token: 'pre-ready-token', ...activationFields(),
       descriptor: { componentRole: 'primary', sessionId: component.session_id, sampleId: component.sample_id, pageInstanceId: component.page_instance_id, lane: 'inspection', scenario: { id: component.scenario?.id ?? component.frontend_trace.scenario.id, manifestSha256: component.frontend_trace.scenario.manifest_sha256 }, workload: component.frontend_trace.workload, phase: 'measured', repetition: 0 },
@@ -891,7 +933,10 @@ test('readiness markers require the exact native clock envelope', async () => {
   try {
     const path = join(root, `action-ready-2-${uuid('2')}.json`);
     writeFileSync(path, JSON.stringify({ schema_version: 2, component_kind: 'action_ready', session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }));
-    await assert.rejects(() => waitForActionReady(root, { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }, { timeoutMs: 20, pollMs: 5 }), /native clock|fields/i);
+    const clock = virtualClock();
+    await assert.rejects(() => waitForActionReady(root, { session_id: uuid('1'), sample_id: 'sample', page_instance_id: uuid('2'), action_id: 2, pid: 42 }, { timeoutMs: 20, pollMs: 5, ...clock }), /native clock|fields/i);
+    // A malformed envelope fails at the first read instead of being retried.
+    assert.deepEqual(clock.sleeps, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -900,8 +945,14 @@ test('startup readiness wait binds the launched PID before AX preflight', async 
   try {
     const path = join(root, 'startup.json');
     writeFileSync(path, JSON.stringify({ schema_version: 1, pid: 42, backend_ready_ms: 5 }));
-    assert.equal((await waitForStartupReady(path, 42, { timeoutMs: 20, pollMs: 5 })).backend_ready_ms, 5);
-    await assert.rejects(() => waitForStartupReady(path, 99, { timeoutMs: 20, pollMs: 5 }), /identity/i);
+    const ready = virtualClock();
+    assert.equal((await waitForStartupReady(path, 42, { timeoutMs: 20, pollMs: 5, ...ready })).backend_ready_ms, 5);
+    assert.deepEqual(ready.sleeps, []);
+    // Another PID's marker is never accepted: the wait polls to its deadline,
+    // however slow each poll is, and then reports the mismatch.
+    const mismatched = virtualClock();
+    await assert.rejects(() => waitForStartupReady(path, 99, { timeoutMs: 20, pollMs: 5, ...mismatched }), /identity/i);
+    assert.deepEqual(mismatched.sleeps, [5, 5, 5, 5]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -915,9 +966,18 @@ test('AX preflight retries only while a recorder-ready target is still mounting'
       return { ok: true };
     },
   };
-  assert.deepEqual(await waitForAxPreflight(driver, ['Convert'], { timeoutMs: 100, pollMs: 1 }), { ok: true });
+  const clock = virtualClock();
+  assert.deepEqual(await waitForAxPreflight(driver, ['Convert'], { timeoutMs: 100, pollMs: 1, ...clock }), { ok: true });
   assert.equal(attempts, 2);
-  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { throw Error('Frontmost process changed'); } }, ['Convert'], { timeoutMs: 100, pollMs: 1 }), /Frontmost process changed/);
+  assert.deepEqual(clock.sleeps, [1]);
+  let mounting = 0;
+  const bounded = virtualClock();
+  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { mounting += 1; throw Error('Required accessibility label is missing: Convert'); } }, ['Convert'], { timeoutMs: 100, pollMs: 25, ...bounded }), /label is missing/);
+  assert.equal(mounting, 4);
+  assert.deepEqual(bounded.sleeps, [25, 25, 25, 25]);
+  const changed = virtualClock();
+  await assert.rejects(() => waitForAxPreflight({ preflight: async () => { throw Error('Frontmost process changed'); } }, ['Convert'], { timeoutMs: 100, pollMs: 1, ...changed }), /Frontmost process changed/);
+  assert.deepEqual(changed.sleeps, []);
 });
 
 test('action sequence waits for initial readiness before setup and each next-action marker before dispatch', async () => {
