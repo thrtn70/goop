@@ -31,6 +31,16 @@ test("macOS Homebrew sidecars preserve the reviewed runner formula set", () => {
   }
 });
 
+// 2026.08.19's frozen binaries carry certifi 2026.07.22, which still trusts
+// the compromised "emSign ECC Root CA - G3". check-yt-dlp-runtime.mjs proves
+// each fetched binary clears the floors; this records the reviewed pin.
+test("yt-dlp is pinned to a release whose binaries carry the patched certifi and urllib3", () => {
+  assert.match(script, /^YT_DLP_VERSION="2026\.10\.21"$/m);
+  for (const asset of ["WINDOWS", "MACOS", "PORTABLE"]) {
+    assert.match(script, new RegExp(`^YT_DLP_${asset}_SHA256="[0-9a-f]{64}"$`, "m"));
+  }
+});
+
 test("Ghostscript resources are replaced on every run", () => {
   assert.doesNotMatch(script, /if \[ ! -d "\$OUT_DIR\/gs-resources\/Resource" \]/);
   assert.match(

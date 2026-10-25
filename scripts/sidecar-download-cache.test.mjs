@@ -58,11 +58,16 @@ for (const name of ["rust", "sidecar-smoke"]) {
     // Hit or miss, the fetch runs, and fetch_verified checks every digest.
     assert.equal(condition(fetch), undefined, `${name} fetch must never be skipped on a cache hit`);
 
-    const restoreAt = list.findIndex((step) => step.includes(`uses: actions/cache/restore@${sha}`));
-    assert.ok(restoreAt !== -1 && restoreAt < fetchAt, `${name} must restore the cache before fetching`);
+    // The job restores other caches too (the HEIC stack), so pick this one by
+    // its path, and require it to be the only one.
+    const restores = list.filter(
+      (step) => step.includes(`uses: actions/cache/restore@${sha}`) && field(step, "path") === cachePath,
+    );
+    assert.equal(restores.length, 1, `${name} restores the downloads exactly once`);
+    const restoreAt = list.indexOf(restores[0]);
+    assert.ok(restoreAt < fetchAt, `${name} must restore the cache before fetching`);
     const restore = list[restoreAt];
     assert.equal(field(restore, "id"), restoreId);
-    assert.equal(field(restore, "path"), cachePath);
     assert.equal(field(restore, "key"), key);
     assert.match(restore, new RegExp(`^ {10}restore-keys: ${keyPrefix.replace(/[$.{}]/g, "\\$&")}$`, "m"));
     assert.equal(condition(restore), undefined, `${name} restores on every leg`);
