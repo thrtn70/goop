@@ -4,12 +4,20 @@ on:
   push:
     branches: [main]
 
+# Read-only, and checkouts keep no credentials: the repository's default
+# token can write, and these jobs run build scripts from freshly resolved
+# crates.
+permissions:
+  contents: read
+
 jobs:
   rust:
     # Stays on ubuntu-24.04 (current LTS; libwebkit2gtk-4.1 lives here).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22" }
       # Seconds, and placed first so a broken download helper fails here
@@ -54,9 +62,39 @@ jobs:
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
+      # Verified sidecar downloads, kept by SHA-256 between runs so an outage
+      # at a pinned download host does not fail the fetch below. On 2026-10-18
+      # osxexperts.net answered 503 for about three hours and every macOS
+      # sidecar-smoke leg failed its fetch. On a hit the fetch still runs and
+      # fetch_verified re-checks every restored byte against its pin; a
+      # mismatch fails the job instead of falling back to the network.
+      #
+      # The key moves with fetch-sidecars.sh, which holds every pin. On a
+      # miss the newest older snapshot is restored, so a pin bump downloads
+      # only the artifact that changed. A cache saved on a pull request stays
+      # with that pull request: main's first run after a pin bump downloads
+      # the changed artifact itself and needs that one host to be up. So does
+      # any run after GitHub evicts the snapshot (seven days unused). Homebrew
+      # bottles and the macOS gallery-dl build's PyPI wheels are not covered.
+      # release.yml deliberately fetches fresh.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        id: sidecar-downloads
+        with:
+          path: .sidecar-downloads
+          key: sidecar-downloads-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-sidecars.sh') }}
+          restore-keys: sidecar-downloads-v1-${{ runner.os }}-
       - name: Fetch sidecars (required for goop-tauri build)
         shell: bash
+        env:
+          GOOP_SIDECAR_CACHE: .sidecar-downloads
         run: ./scripts/fetch-sidecars.sh "$TARGET"
+      # Saved now rather than in a post step, so a later failure in this job
+      # cannot discard downloads that are already verified.
+      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: steps.sidecar-downloads.outputs.cache-hit != 'true'
+        with:
+          path: .sidecar-downloads
+          key: sidecar-downloads-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-sidecars.sh') }}
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
@@ -100,6 +138,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22", cache: "npm" }
       - run: npm ci
@@ -122,6 +162,7 @@ jobs:
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs
       - run: node --test scripts/npm-audit-gate.test.mjs
+      - run: node --test scripts/sidecar-download-cache.test.mjs
       - run: npm run build
 
   legal:
@@ -134,6 +175,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: Rust dep graph clear of mupdf-*
@@ -163,6 +206,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       # fetch-sidecars.sh's macOS path generates src-tauri/tauri.macos.conf.json
@@ -205,9 +250,24 @@ jobs:
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
+      # Same verified download cache as the rust job; see the comment there.
+      # Each runner OS keeps its own snapshot of the pins it fetches.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        id: sidecar-downloads
+        with:
+          path: .sidecar-downloads
+          key: sidecar-downloads-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-sidecars.sh') }}
+          restore-keys: sidecar-downloads-v1-${{ runner.os }}-
       - name: Fetch sidecars
         shell: bash
+        env:
+          GOOP_SIDECAR_CACHE: .sidecar-downloads
         run: ./scripts/fetch-sidecars.sh "$TARGET"
+      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: steps.sidecar-downloads.outputs.cache-hit != 'true'
+        with:
+          path: .sidecar-downloads
+          key: sidecar-downloads-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-sidecars.sh') }}
       - name: Extractor process lifecycle (macOS)
         if: matrix.os == 'macos-14'
         shell: bash

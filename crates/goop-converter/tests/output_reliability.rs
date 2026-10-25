@@ -65,23 +65,24 @@ async fn zero_exit_without_output_is_failure() {
         .await
         .is_err());
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_after_stdout_eof_reaps_child() {
-    let (_dir, r, input, output) = fixture("exec 1>&-; exec sleep 20");
+    let pids = tempfile::tempdir().unwrap();
+    let pid_file = pids.path().join("ffmpeg.pid");
+    let (_dir, r, input, output) = fixture(&format!(
+        "exec 1>&-; {}",
+        common::held_clock::script(&pid_file)
+    ));
     let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        trigger.cancel();
-    });
     let backend = FfmpegBackend::new(&r, Arc::new(SilentSink));
     let req = request(&input, &output, TargetFormat::Mp4, None);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        backend.convert(JobId::new(), &req, cancel),
+    let result = common::held_clock::cancel(
+        &pid_file,
+        &cancel,
+        backend.convert(JobId::new(), &req, cancel.clone()),
     )
     .await;
-    assert!(matches!(result, Ok(Err(GoopError::Cancelled))));
+    assert!(matches!(result, Err(GoopError::Cancelled)));
     assert!(!output.exists());
 }
 
@@ -112,20 +113,19 @@ async fn input_as_output_cannot_destroy_the_source() {
     assert!(result.is_err());
     assert_eq!(std::fs::read(input).unwrap(), b"source");
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn large_stderr_is_bounded_and_drained() {
     let (_dir, r, input, output) = fixture(
         "dd if=/dev/zero bs=65536 count=8 >&2 2>/dev/null; printf '\\377\\377' >&2; exit 1",
     );
     let backend = FfmpegBackend::new(&r, Arc::new(SilentSink));
     let req = request(&input, &output, TargetFormat::Mp4, None);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        backend.convert(JobId::new(), &req, CancellationToken::new()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    // An undrained stderr pipe would stall the child until the held clock's
+    // liveness limit fails the run.
+    let result =
+        common::held_clock::hold(backend.convert(JobId::new(), &req, CancellationToken::new()))
+            .await
+            .unwrap_err();
     match result {
         GoopError::SubprocessFailed { stderr, .. } => assert!(stderr.len() <= 8196),
         other => panic!("unexpected {other}"),
