@@ -166,6 +166,68 @@ test("only the no-build publish job can write release state", () => {
   assert.doesNotMatch(publish, /draft: false/);
 });
 
+// The repository's default workflow token can write, and main has no branch
+// protection, so a workflow that names no permissions inherits a token that
+// can push to main. Audit compiles freshly resolved crates (Cargo.lock is not
+// committed), so any build script it runs could read a token left behind.
+// YAML allows blank lines and comments inside the block, so read past them
+// rather than stopping early and missing a scope added after one.
+function topLevelPermissions(body) {
+  const block = body.match(/^permissions:[ \t]*\n((?:(?:[ \t]+.*|#.*)?\n)*)/m)?.[1];
+  return block?.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+}
+
+// Every checkout `uses:` line, counted from the raw text so that a step the
+// parser below misreads still counts against it.
+function checkoutUses(body) {
+  return body.match(/\buses:\s*["']?actions\/checkout@/g)?.length ?? 0;
+}
+
+function checkoutSteps(body) {
+  return steps(body).filter((step) => /^ {6}- uses: actions\/checkout@|^ {8}uses: actions\/checkout@/m.test(step));
+}
+
+test("every workflow declares its own token permissions", () => {
+  for (const { name, body } of workflows) {
+    assert.ok(/^permissions:/m.test(body), `${name} inherits the repository's default token`);
+  }
+  const pages = workflows.find(({ name }) => name === "pages.yml");
+  assert.deepEqual(topLevelPermissions(pages.body), ["contents: read", "pages: write", "id-token: write"]);
+});
+
+test("audit runs with a read-only token", () => {
+  assert.deepEqual(topLevelPermissions(auditWorkflow), ["contents: read"]);
+  assert.doesNotMatch(auditWorkflow, /^ +permissions:/m, "no audit job may widen the token");
+});
+
+test("no workflow leaves its token in the checkout's git config", () => {
+  let checked = 0;
+  for (const { name, body } of workflows) {
+    const checkouts = checkoutSteps(body);
+    assert.equal(checkouts.length, checkoutUses(body), `${name}: a checkout step the parser missed`);
+    for (const step of checkouts) {
+      // Deliberately exact: block-style `with:`, the form release.yml uses.
+      assert.match(step, /^ {8}with:\n(?: {10}.*\n)*? {10}persist-credentials: false$/m, `${name}:\n${step}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 0, "no checkout steps found to validate");
+});
+
+test("every workflow pins each action to a full commit SHA", () => {
+  let pinned = 0;
+  for (const { name, body } of workflows) {
+    const refs = [...body.matchAll(/^[ -]*uses: (\S+)$/gm)].map((match) => match[1]);
+    assert.equal(refs.length, body.match(/\buses:/g)?.length ?? 0, `${name}: a uses: line the parser missed (the ref must end the line)`);
+    for (const ref of refs) {
+      if (ref.startsWith("./")) continue;
+      assert.match(ref, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${name} uses ${ref} by a mutable ref`);
+      pinned += 1;
+    }
+  }
+  assert.ok(pinned > 0, "no actions found to validate");
+});
+
 test("the macOS arm64 build stages one immutable workflow artifact before publication", () => {
   const build = job("build");
   assert.match(build, /os: macos-14/);
@@ -219,6 +281,23 @@ test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {
   assert.ok(major > 2 || (major === 2 && minor >= 8), "urllib3 must be at least 2.8.0");
 });
 
+test("the macOS gallery-dl recipe excludes certifi bundles that trust the compromised emSign root", () => {
+  const lines = galleryDlMacosRequirements.split("\n");
+  const certifiLines = lines.filter((line) => line.startsWith("certifi=="));
+  assert.equal(certifiLines.length, 1, "expected exactly one certifi pin");
+
+  const pin = /^certifi==(\d{4})\.(\d{1,2})\.(\d{1,2}) \\$/.exec(certifiLines[0]);
+  assert.ok(pin, "certifi must use a date pin with one hash stanza");
+  const pinIndex = lines.indexOf(certifiLines[0]);
+  assert.match(lines[pinIndex + 1], /^ {4}--hash=sha256:[0-9a-f]{64}$/);
+
+  // 2026.10.19 is the first patched release for GHSA-6q48-6c7w-9gw2: it drops
+  // "emSign ECC Root CA - G3", whose intermediate CA keys were compromised,
+  // and keeps the unaffected emSign roots that 2026.10.18 had also removed.
+  const [year, month, day] = pin.slice(1).map(Number);
+  assert.ok(year * 10_000 + month * 100 + day >= 20261019, "certifi must be at least 2026.10.19");
+});
+
 // A source pin is not proof the frozen binary contains it. These checks run
 // the built gallery-dl and compare what it reports against the recipe.
 const galleryRuntimeCheck =
@@ -264,6 +343,60 @@ test("both quality gates run the gallery-dl runtime checker tests", () => {
   const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
   assert.match(prePush, /node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
   assert.match(auditJob("web"), /- run: node --test scripts\/check-gallery-dl-runtime\.test\.mjs/);
+});
+
+// yt-dlp is downloaded prebuilt, so its certifi and urllib3 change only with
+// its version pin. These checks ask the binary which ones it imported.
+// Anchored to a whole command line, so a commented-out call or a trailing
+// `|| true` does not count as running the check.
+const ytDlpRuntimeCommand = String.raw`node scripts/check-yt-dlp-runtime\.mjs --binary "([^"]+)"`;
+const ytDlpRuntimeStep = "yt-dlp runtime clears the certifi and urllib3 floors";
+
+// A step that cannot fail is not a check. The anchored command line already
+// rules out a trailing `|| true` on the call itself.
+function assertFailsTheJob(step) {
+  assert.doesNotMatch(step, /continue-on-error/);
+  assert.doesNotMatch(step, /^\s*set \+e/m);
+}
+
+test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on macOS and Windows", () => {
+  const smoke = auditJob("sidecar-smoke");
+  assert.match(smoke, /^ {8}os: \[macos-14, windows-latest\]$/m);
+  const step = namedStep(smoke, ytDlpRuntimeStep);
+  assert.doesNotMatch(step, /^ {8}if:/m, "every sidecar-smoke runner must run the check");
+  assert.match(step, /^ {8}shell: bash$/m);
+  assertFailsTheJob(step);
+  assert.equal(
+    step.match(new RegExp(`^ {8}run: ${ytDlpRuntimeCommand}$`, "m"))?.[1],
+    "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}",
+  );
+  assert.ok(
+    smoke.indexOf("- name: Fetch sidecars") < smoke.indexOf(`- name: ${ytDlpRuntimeStep}`),
+    "the runtime check must run on the freshly fetched binary",
+  );
+});
+
+test("the signed in-bundle yt-dlp must clear the floors before assets are staged", () => {
+  const build = job("build");
+  const verify = namedStep(build, "Verify signed sidecars run (macOS)");
+  assert.match(verify, /^ {8}shell: bash$/m);
+  assertFailsTheJob(verify);
+  assert.equal(
+    verify.match(new RegExp(`^ {10}${ytDlpRuntimeCommand}$`, "m"))?.[1],
+    "$APP/Contents/MacOS/yt-dlp",
+  );
+  assert.ok(
+    build.indexOf("- name: Verify signed sidecars run (macOS)") < build.indexOf("- name: Stage release assets"),
+    "assets must not be staged before the in-bundle runtime check",
+  );
+});
+
+test("both quality gates run the yt-dlp runtime checker and pin tests", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  for (const suite of ["check-yt-dlp-runtime", "sidecar-provenance"]) {
+    assert.match(prePush, new RegExp(`node --test scripts/${suite}\\.test\\.mjs`));
+    assert.match(auditJob("web"), new RegExp(`^ {6}- run: node --test scripts/${suite}\\.test\\.mjs$`, "m"));
+  }
 });
 
 test("a manual rehearsal builds the signed package but can never publish", () => {
@@ -538,43 +671,185 @@ test("every HEIC cache key carries the macOS floor the stack was built for", () 
     assert.equal(condition(list[floorAt]), condition(cache), `${name}: the floor step and the cache run together`);
     floorScripts.add(stepScript(list[floorAt]));
   }
+  // Release has no HEIC cache, but its floor step is the one runFloorStep
+  // exercises, so tying audit's to it carries those checks over to them.
+  floorScripts.add(stepScript(steps(job("build")).find((step) => /^ {8}id: macos-floor$/m.test(step))));
   assert.equal(floorScripts.size, 1, "every job reads the floor the same way");
   const cached = `${workflow}\n${auditWorkflow}`.match(/^ {10}path: \.heif-deps$/gm) ?? [];
   assert.equal(cached.length, jobs.length, "a HEIC cache outside these jobs would need the same key");
 });
 
-test("the cache-key floor step fails closed when tauri.conf.json declares no floor", () => {
-  const floorStep = steps(auditJob("heif-deps")).find((step) => /^ {8}id: macos-floor$/m.test(step));
+// Runs the macos-floor step the way a runner does, against a scratch checkout
+// holding only the helper and a tauri.conf.json, and returns what it wrote to
+// $GITHUB_OUTPUT and $GITHUB_ENV.
+function runFloorStep(config, { helper = readFileSync(floorCli, "utf8"), runnerOs = "macOS" } = {}) {
+  const floorStep = steps(job("build")).find((step) => /^ {8}id: macos-floor$/m.test(step));
   assert.ok(floorStep, "missing macos-floor step");
-  const script = stepScript(floorStep);
-  const run = (config, helper = readFileSync(floorCli, "utf8")) => {
-    const directory = mkdtempSync(join(tmpdir(), "goop-floor-step-"));
-    try {
-      for (const sub of ["scripts", "src-tauri"]) mkdirSync(join(directory, sub));
-      writeFileSync(join(directory, "scripts", "macos-deployment-target.mjs"), helper);
-      writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify(config));
-      const output = join(directory, "github-output");
-      writeFileSync(output, "");
-      // Unspecified `shell:` on a Linux or macOS runner is `bash -e {0}`: no pipefail.
-      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", script], {
-        cwd: directory,
-        encoding: "utf8",
-        env: { ...process.env, GITHUB_OUTPUT: output },
-      });
-      return { status: result.status, log: result.stdout + result.stderr, output: readFileSync(output, "utf8") };
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  };
-  const declared = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } });
+  const directory = mkdtempSync(join(tmpdir(), "goop-floor-step-"));
+  try {
+    for (const sub of ["scripts", "src-tauri"]) mkdirSync(join(directory, sub));
+    writeFileSync(join(directory, "scripts", "macos-deployment-target.mjs"), helper);
+    writeFileSync(join(directory, "src-tauri", "tauri.conf.json"), JSON.stringify(config));
+    const output = join(directory, "github-output");
+    const env = join(directory, "github-env");
+    writeFileSync(output, "");
+    writeFileSync(env, "");
+    // Unspecified `shell:` on a Linux or macOS runner is `bash -e {0}`: no pipefail.
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", stepScript(floorStep)], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_ENV: env, RUNNER_OS: runnerOs },
+    });
+    return {
+      status: result.status,
+      log: result.stdout + result.stderr,
+      output: readFileSync(output, "utf8"),
+      env: readFileSync(env, "utf8"),
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("the cache-key floor step fails closed when tauri.conf.json declares no floor", () => {
+  const declared = runFloorStep({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } });
   assert.equal(declared.status, 0, declared.log);
   assert.equal(declared.output, `version=${declaredFloor}\n`);
-  const missing = run({ bundle: { macOS: {} } });
+  const missing = runFloorStep({ bundle: { macOS: {} } });
   assert.notEqual(missing.status, 0, missing.log);
   assert.equal(missing.output, "", "an empty floor must never reach the cache key");
-  const silent = run({ bundle: { macOS: { minimumSystemVersion: declaredFloor } } }, "// prints nothing, exits 0\n");
+  const silent = runFloorStep(
+    { bundle: { macOS: { minimumSystemVersion: declaredFloor } } },
+    { helper: "// prints nothing, exits 0\n" },
+  );
   assert.notEqual(silent.status, 0, silent.log);
   assert.equal(silent.output, "", "an empty floor must never reach the cache key");
+});
+
+test("on a macOS runner the floor step makes the floor every later build's deployment target", () => {
+  // cc and cmake build scripts compile for MACOSX_DEPLOYMENT_TARGET and fall
+  // back to the SDK's own version without it, so `cargo test` would build
+  // sqlite, ring, libjxl and raw.m for a newer macOS than the release does.
+  const config = { bundle: { macOS: { minimumSystemVersion: declaredFloor } } };
+  const mac = runFloorStep(config);
+  assert.equal(mac.status, 0, mac.log);
+  assert.equal(mac.env, `MACOSX_DEPLOYMENT_TARGET=${declaredFloor}\n`);
+  for (const runnerOs of ["Linux", "Windows"]) {
+    const other = runFloorStep(config, { runnerOs });
+    assert.equal(other.status, 0, other.log);
+    assert.equal(other.env, "", `a ${runnerOs} runner builds no Mach-O and gets no macOS deployment target`);
+  }
+  const missing = runFloorStep({ bundle: { macOS: {} } });
+  assert.notEqual(missing.status, 0, missing.log);
+  assert.equal(missing.env, "", "an empty floor must never become the deployment target");
+  const silent = runFloorStep(config, { helper: "// prints nothing, exits 0\n" });
+  assert.notEqual(silent.status, 0, silent.log);
+  assert.equal(silent.env, "", "an empty floor must never become the deployment target");
+});
+
+// A step's own lines, without the comments above the next step that
+// steps() leaves at its end.
+function stepCode(step) {
+  return step
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("macOS jobs export the floor before any Rust cache or native build, and key the cache on it", () => {
+  // Only setup that compiles nothing may come first. Everything else, the
+  // Rust cache included, runs after the floor is exported.
+  const setup = /^ {6}- uses: (?:actions\/checkout|dtolnay\/rust-toolchain|actions\/setup-python|actions\/setup-node)@/m;
+  // The release build restores no cache at all; see "release neither
+  // restores nor saves a cache".
+  const jobs = [
+    ["release build", job("build"), 0],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke"), 1],
+  ];
+  for (const [name, body, rustCaches] of jobs) {
+    const list = steps(body).map(stepCode);
+    const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
+    assert.notEqual(floorAt, -1, `${name} has no macos-floor step`);
+    assert.match(list[floorAt], /^ {8}if: matrix\.os == 'macos-14'$/m, `${name}: the floor step runs on macOS`);
+    for (const step of list.slice(0, floorAt)) {
+      assert.match(step, setup, `${name}: this step runs before the floor is exported:\n${step}`);
+    }
+    const caches = list.filter((step) => /Swatinem\/rust-cache@/.test(step));
+    assert.equal(caches.length, rustCaches, `${name} restores ${rustCaches} Rust cache(s)`);
+    // rust-cache hashes the variables it is told about into the key, and only
+    // when they are set, so the Windows leg's key is untouched.
+    for (const cache of caches) {
+      assert.match(cache, /^ {10}env-vars: MACOSX_DEPLOYMENT_TARGET$/m, `${name}: a new floor must start a new Rust cache`);
+    }
+  }
+});
+
+test("audit relinks libheif-sys against the HEIC stack the job just built or restored", () => {
+  // libheif-sys's rlib carries a copy of libheif.a and libde265.a, and
+  // nothing in its fingerprint tracks .heif-deps. A Rust cache built against
+  // an earlier stack would otherwise link that stack's objects, whatever the
+  // floor or version of the one in .heif-deps.
+  const stacks = [
+    ["audit rust", auditJob("rust"), "Static HEIC decode stack (libde265 + libheif)"],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke"), "Static HEIC stack (macOS)"],
+  ];
+  for (const [name, body, stepName] of stacks) {
+    const script = runBlock(namedStep(body, stepName)).split("\n");
+    const built = script.indexOf("./scripts/build-static-heif-deps.sh");
+    assert.notEqual(built, -1, `${name} does not build the HEIC stack in "${stepName}"`);
+    // `cargo clean -p` without a profile only empties target/debug.
+    for (const clean of ["cargo clean -p libheif-sys", "cargo clean -p libheif-sys --release"]) {
+      assert.ok(script.indexOf(clean) > built, `${name}: "${clean}" must follow the stack build`);
+    }
+  }
+  // The release build needs no clean because it restores no Rust cache; see
+  // "release neither restores nor saves a cache".
+  assert.equal(
+    steps(job("build")).filter((step) => /Swatinem\/rust-cache@/.test(step)).length,
+    0,
+    "the release build restores no Rust cache",
+  );
+});
+
+// A rust-cache entry is 0.2-2.2 GB per job. One saved from a pull request is
+// scoped to refs/pull/N/merge, where no other run can restore it, and a few
+// open PRs filled the 10 GB repository quota until LRU eviction dropped
+// main's caches, the only ones every run can restore. A tag's entry is
+// scoped to that tag, where no later release or audit run can restore it.
+const mainOnlySave = "${{ github.ref == 'refs/heads/main' }}";
+
+// Every `uses:` line, counted from the raw text so that a step the parser
+// below misreads still counts against it.
+function rustCacheUses(body) {
+  return body.match(/^[ -]*uses: Swatinem\/rust-cache@/gm)?.length ?? 0;
+}
+
+function rustCacheSteps(body) {
+  return steps(body).filter((step) => /^ {6}- uses: Swatinem\/rust-cache@|^ {8}uses: Swatinem\/rust-cache@/m.test(step));
+}
+
+// Deliberately exact: block-style `with:`, the value as the workflows write it.
+function saveIf(step) {
+  return step.match(/^ {10}save-if: (.*)$/m)?.[1];
+}
+
+test("audit saves the Rust cache from main only, so PR runs restore main's", () => {
+  const jobs = ["rust", "legal", "sidecar-smoke"];
+  for (const name of jobs) {
+    const cached = rustCacheSteps(auditJob(name));
+    assert.equal(cached.length, 1, `audit ${name} has one rust-cache step`);
+    assert.equal(saveIf(cached[0]), mainOnlySave, `audit ${name}:\n${cached[0]}`);
+  }
+  assert.equal(rustCacheUses(auditWorkflow), jobs.length, "a rust-cache step outside these jobs needs the same save-if");
+});
+
+test("no workflow saves a Rust cache outside main", () => {
+  for (const { name, body } of workflows) {
+    assert.equal(rustCacheSteps(body).length, rustCacheUses(body), `${name}: a rust-cache step the parser missed`);
+    for (const step of rustCacheSteps(body)) {
+      assert.ok([mainOnlySave, '"false"'].includes(saveIf(step)), `${name}:\n${step}`);
+    }
+  }
 });
 
 test("both quality gates run the HEIC stack tests, and audit runs them on macOS too", () => {
@@ -585,6 +860,51 @@ test("both quality gates run the HEIC stack tests, and audit runs them on macOS 
   const step = namedStep(auditJob("sidecar-smoke"), "HEIC stack tests (macOS)");
   assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
   assert.match(step, /^ {8}run: node --test scripts\/heif-deps\.test\.mjs$/m);
+});
+
+// scripts/build-tesseract-macos.sh builds tesseract for the floor inside
+// fetch-sidecars.sh, so audit's cache must be restored before that step runs,
+// and keyed like the HEIC stack: a new floor or a changed script restores
+// nothing. A release restores no cache, so it builds tesseract every time.
+// It is keyed on the runner image too, because the image fixes the Homebrew
+// leptonica and libarchive the build links. The script rebuilds when they
+// change, and actions/cache never re-saves a key it restored, so without the
+// image a new one would rebuild on every run.
+const tesseractCacheKey =
+  "tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-" +
+  "image-${{ steps.runner-image.outputs.version }}-" +
+  "${{ hashFiles('scripts/build-tesseract-macos.sh') }}";
+
+test("every tesseract cache carries the floor and the build script, and is restored before the sidecars are fetched", () => {
+  const jobs = [["audit sidecar-smoke", auditJob("sidecar-smoke"), "Fetch sidecars"]];
+  for (const [name, body, fetchName] of jobs) {
+    const list = steps(body);
+    const cacheAt = list.findIndex((step) => /^ {10}path: \.tesseract-deps$/m.test(step));
+    assert.notEqual(cacheAt, -1, `${name} has no tesseract cache`);
+    const cache = list[cacheAt];
+    assert.ok(cache.split("\n").includes(`          key: ${tesseractCacheKey}`), `${name} cache key:\n${cache}`);
+    assert.match(cache, /^ {8}if: matrix\.os == 'macos-14'$/m);
+    const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
+    assert.ok(floorAt !== -1 && floorAt < cacheAt, `${name} must read the floor before restoring the cache`);
+    const imageAt = list.findIndex((step) => /^ {8}id: runner-image$/m.test(step));
+    assert.ok(imageAt !== -1 && imageAt < cacheAt, `${name} must read the runner image before restoring the cache`);
+    assert.match(list[imageAt], /^ {8}if: matrix\.os == 'macos-14'$/m);
+    assert.match(stepScript(list[imageAt]), /^echo "version=\$\{ImageVersion:-unknown\}" >> "\$GITHUB_OUTPUT"$/m);
+    const fetchAt = list.findIndex((step) => step.includes(`      - name: ${fetchName}\n`));
+    assert.ok(fetchAt !== -1 && cacheAt < fetchAt, `${name} must restore the build before fetch-sidecars.sh runs`);
+  }
+  const cached = `${workflow}\n${auditWorkflow}`.match(/^ {10}path: \.tesseract-deps$/gm) ?? [];
+  assert.equal(cached.length, jobs.length, "a tesseract cache outside these jobs would need the same key");
+});
+
+test("both quality gates run the tesseract build tests, and audit runs them on macOS too", () => {
+  const prePush = readFileSync(new URL("./pre-push.sh", import.meta.url), "utf8");
+  assert.match(prePush, /node --test scripts\/tesseract-build\.test\.mjs/);
+  assert.match(auditJob("web"), /- run: node --test scripts\/tesseract-build\.test\.mjs/);
+  // The web job is Linux, where the tests that build real Mach-O files skip.
+  const step = namedStep(auditJob("sidecar-smoke"), "Tesseract build tests (macOS)");
+  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, /^ {8}run: node --test scripts\/tesseract-build\.test\.mjs$/m);
 });
 
 test("Windows audit records fresh-process HEIC preview memory evidence", () => {
@@ -837,8 +1157,9 @@ test("the macOS bundle declares the floor its bundled tools need", () => {
   // Tailwind 4's output relies on cascade layers, color-mix() and @property,
   // all present from Safari 16.4, which macOS 13.3's system WebKit matches.
   // The bundled PDF tools set the higher floor: gs, mutool and their
-  // libraries are built for macOS 14.0. The bundled tesseract is built for
-  // 14.8.5, so OCR on earlier 14.x releases remains a known gap.
+  // libraries are built for macOS 14.0. Homebrew's tesseract is built for
+  // 14.8.5, so fetch-sidecars.sh bundles one built here for the floor
+  // instead (see tesseract-build.test.mjs).
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
 });

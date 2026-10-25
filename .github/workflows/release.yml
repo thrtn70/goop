@@ -155,6 +155,23 @@ jobs:
       # packageManager; package-manager-cache: false keeps it from doing so.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22", package-manager-cache: false }
+      # bundle.macOS.minimumSystemVersion in tauri.conf.json, the oldest
+      # macOS Goop declares. Every later step gets it as
+      # MACOSX_DEPLOYMENT_TARGET, which rustc and the cc and cmake build
+      # scripts compile for; without it they take the SDK's own version.
+      # `tauri build` exports the same value for its cargo build, so this
+      # keeps the release from depending on that, and the same step in
+      # audit.yml makes the tested build match this one.
+      - name: macOS deployment floor
+        id: macos-floor
+        if: matrix.os == 'macos-14'
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
       # v0.2.8: static HEIC decode stack (libheif + libde265, no other
       # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
       # upload flow below are untouched. Nothing needs bundling at
@@ -171,6 +188,10 @@ jobs:
           ./scripts/build-static-heif-deps.sh
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
+      # source for the declared floor (scripts/build-tesseract-macos.sh).
+      # Like the HEIC stack, it is built here every time: nothing a release
+      # links or bundles comes from a cache.
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
@@ -197,19 +218,24 @@ jobs:
       # macOS Goop claims to run on. It reaches the package by two routes and
       # no PR job exercises either: the bundler writes it into Info.plist as
       # LSMinimumSystemVersion, which is what macOS checks before it launches
-      # the app, and tauri-build exports it as MACOSX_DEPLOYMENT_TARGET for
-      # release builds only, which sets the main executable's Mach-O minos.
-      # Hold both to the declared value in the bundle that is about to ship.
-      # That proves the declaration reached the package, not that the code
-      # runs there: the executable's minos is what the linker was told, and
-      # static libraries built for a newer macOS only make the linker warn.
-      # The HEIC stack is built for the declared floor, but the C libraries
-      # that Cargo build scripts compile still target the runner's own macOS.
+      # the app, and the build links the main executable for it, which sets
+      # its Mach-O minos. Hold both to the declared value in the bundle that
+      # is about to ship. That proves the declaration reached the package,
+      # not that the code runs there: the executable's minos is what the
+      # linker was told, and a static library built for a newer macOS only
+      # makes the linker warn. The native libraries linked in are compiled
+      # for the floor too: the HEIC stack by scripts/build-static-heif-deps.sh,
+      # which checks every object, and the C, C++ and Objective-C that Cargo
+      # build scripts compile, through the MACOSX_DEPLOYMENT_TARGET the
+      # macos-floor step exports (without it they take the SDK default).
+      # Nothing here re-checks those objects; only the linker would warn.
       #
-      # Everything else in Contents/MacOS is reported, not enforced. The
+      # Everything else in Contents/MacOS is reported, not enforced. Most
       # sidecars and their dylibs are upstream, Homebrew and PyInstaller
       # builds whose floor nothing in this repo sets; Homebrew bottles target
-      # the runner's own macOS. One whose minos is above the declared floor
+      # the macOS that built them. tesseract and libtesseract.5.dylib are the
+      # exception: fetch-sidecars.sh builds them for the floor and fails if
+      # either bundled copy is not. One whose minos is above the declared floor
       # was built for a newer macOS, so Goop's real floor may be higher than
       # it says. Only slices Apple Silicon runs count; an x86_64 slice counts
       # when it is the only one. For the PyInstaller sidecars the minos is
@@ -375,6 +401,10 @@ jobs:
           # signed binary what it imported and compare with the freezer recipe.
           echo "== gallery-dl runtime vs scripts/gallery-dl-macos-requirements.txt (signed, in-bundle) =="
           node scripts/check-gallery-dl-runtime.mjs --binary "$APP/Contents/MacOS/gallery-dl" --python "$GALLERY_DL_PYTHON"
+          # yt-dlp is downloaded prebuilt: ask the signed copy that it is the
+          # pinned release and that its certifi and urllib3 clear the floors.
+          echo "== yt-dlp runtime vs the pin and the certifi/urllib3 floors (signed, in-bundle) =="
+          node scripts/check-yt-dlp-runtime.mjs --binary "$APP/Contents/MacOS/yt-dlp"
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
           # PDF compress/thumbnail features reach via GS_LIB (set to the

@@ -34,6 +34,9 @@ Thumbs.db
 /.bindings-stage.*
 # sidecar binaries fetched by fetch-sidecars.sh
 /src-tauri/bin/
+# verified sidecar downloads kept by SHA-256 when GOOP_SIDECAR_CACHE points
+# here (audit CI restores and saves this directory between runs)
+/.sidecar-downloads
 # macOS sidecar dylib bundle map — generated per-build by fetch-sidecars.sh
 # from the actual src-tauri/bin/*.dylib set; Tauri auto-merges it over
 # tauri.conf.json for macOS builds (see scripts/fetch-sidecars.sh).
@@ -53,3 +56,6 @@ Thumbs.db
 # No trailing slash: a directory in the main checkout, a symlink in linked
 # worktrees. A dir-only pattern would not match the symlink.
 /.heif-deps
+# tesseract and libtesseract.5.dylib built for the macOS floor by
+# scripts/build-tesseract-macos.sh. No trailing slash, as above.
+/.tesseract-deps

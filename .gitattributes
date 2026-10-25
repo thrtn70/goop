@@ -1,0 +1,5 @@
+# Signed fixtures and pinned signing keys have to stay byte-for-byte what was
+# signed or published. A line-ending conversion on checkout (Git for Windows
+# defaults to one) would break every signature over them.
+crates/goop-sidecar/tests/fixtures/signatures/** -text
+crates/goop-sidecar/keys/** -text

@@ -1,0 +1,2 @@
+Goop signature fixture.
+Signed by a throwaway test key.
