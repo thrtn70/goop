@@ -13,6 +13,9 @@
 // the pre-push gate on helpers that are dead only from one binary's view.
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod held_clock;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

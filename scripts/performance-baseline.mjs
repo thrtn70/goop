@@ -3,8 +3,9 @@ import {readFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkS
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,drainChildOutput,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,directoryBytes,drainChildOutput,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -17,9 +18,8 @@ const hash=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 export function normalizeSuccess(metrics, code, timedOut) {
  return metrics.success === true && code === 0 && !timedOut && Number.isFinite(metrics.process_ms) && metrics.process_ms >= 0;
 }
-export function directoryBytes(directory) {
- return readdirSync(directory).reduce((sum,name)=>{const path=join(directory,name),stats=lstatSync(path);return sum+(stats.isDirectory()?directoryBytes(path):stats.size);},0);
-}
+// One byte count for every storage monitor, so they agree on vanished entries.
+export {directoryBytes};
 export function ownedSymlinks(directory){const links=[];for(const name of readdirSync(directory)){const path=join(directory,name),stats=lstatSync(path);if(stats.isSymbolicLink())links.push(path);else if(stats.isDirectory())links.push(...ownedSymlinks(path));}return links;}
 export function effectiveHardware(metrics,hardwareEnabled) {
  const summary=metrics.result?.video_execution;
@@ -29,7 +29,9 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
+ // The default sleep coerces its delay as setTimeout does, so a numeric-string
+ // limit still fires instead of rejecting and leaving the run without a timer.
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  // Tests inject a failing symbolic-link scan here; no caller passes one.
@@ -40,12 +42,12 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
  const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
  const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
- let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killTimer,killEscalation=null,stopRequested=false;
+ let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killEscalation=null,stopRequested=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
  const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
- const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=new Promise(resolveKill=>{killTimer=setTimeout(()=>{signal('SIGKILL');resolveKill();},killGraceMs);});};
+ const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=sleepMs(killGraceMs).then(()=>{signal('SIGKILL');});};
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
   try {
@@ -54,18 +56,21 @@ export async function run(binary,sidecars,request,stem,options={}) {
    if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
   } catch {/* A process or output can disappear between snapshots. */}
  },100);
- const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
- const start=performance.now();let code;
+ const start=nowMs();let code;
+ // sleepMs(ms,{signal}) must reject once signal aborts, as the default does, so
+ // a run that exits first cancels its timeout instead of stopping a dead group.
+ const timeout=new AbortController();
+ sleepMs(timeoutMs,{signal:timeout.signal}).then(()=>{timedOut=true;stop();},()=>{/* Cancelled: the root exited first. */});
  // The root's exit, not its pipes' EOF: a process that left the group can hold
  // the pipes open for as long as it lives.
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('exit',res);});}
- finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
-  const lifetimeMs=performance.now()-start;
+ finally{clearInterval(timer);timeout.abort();abortSignal?.removeEventListener('abort',abort);}
+  const lifetimeMs=nowMs()-start;
  // A clean root exit is not a clean sample if owned descendants remain. Reap
  // before any post-exit file I/O, so no throw below can leave the group running
  // and every check below sees a tree the child can no longer change.
  stop();
- if(killEscalation)await killEscalation;else clearTimeout(killTimer);
+ if(killEscalation)await killEscalation;
  const stdioError=await drainChildOutput([child.stdout,child.stderr],killGraceMs);
  // The child shared this directory, so whatever it left at an evidence path is
  // refused rather than followed or opened, and the refusal fails the sample.
@@ -86,7 +91,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  } catch {/* Missing, a link, or not openable: no metrics. */}
  finally{if(metricsFd!==null)closeSync(metricsFd);}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
- const verificationStart=performance.now();
+ const verificationStart=nowMs();
  // A scan that cannot read the tree fails the sample instead of rejecting the
  // run and skipping its cleanup.
  let createdSymlinks=[],outputError=null;
@@ -110,7 +115,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
   const effective=effectiveHardware(metrics,hardwareEnabled);
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput)try{validateEffectiveExecution(metrics.result?.video_execution,request);}catch(error){metrics.success=false;verification={...verification,execution_error:error.message};}
  const timePeak=stderr.toString().match(/(\d+)\s+maximum resident set size/);
- const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
+ const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:nowMs()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
  const evidenceFailed=message=>{sample.evidence_error??=message;sample.success=false;};
  sample.evidence_error=null;if(evidenceError!==null)evidenceFailed(evidenceError);
  sample.stdio_error=stdioError;if(stdioError!==null)sample.success=false;
