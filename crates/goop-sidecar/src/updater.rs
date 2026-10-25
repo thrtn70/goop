@@ -1,6 +1,7 @@
 use crate::binaries::BinaryResolver;
 use goop_core::GoopError;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::process::Command;
 use ts_rs::TS;
 
@@ -100,10 +101,13 @@ impl<'a> UpdateChecker<'a> {
 
     pub async fn current_version(&self) -> Result<String, GoopError> {
         let bin = self.resolver.resolve(self.binary_name)?;
-        let out = Command::new(&bin.path)
-            .args(self.version_args)
-            .output()
-            .await?;
+        self.version_at(&bin.path).await
+    }
+
+    /// The version a specific copy of this binary reports — used to vet a
+    /// downloaded update before it replaces the one the resolver runs.
+    pub(crate) async fn version_at(&self, path: &Path) -> Result<String, GoopError> {
+        let out = Command::new(path).args(self.version_args).output().await?;
         if !out.status.success() {
             return Err(GoopError::SubprocessFailed {
                 binary: self.binary_name.into(),

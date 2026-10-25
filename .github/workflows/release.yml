@@ -15,6 +15,12 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Nothing in this workflow restores or saves an Actions cache. A tag run can
+# restore whatever main's runs saved, and main's audit runs compile crates
+# resolved fresh on every push (Cargo.lock is gitignored), whose build scripts
+# run before the post-step save and could rewrite what it saves. Anything
+# restored here would ship signed. With no cache step, a rehearsal on main
+# also stops saving its own build into main's cache scope.
 jobs:
   # Reject a tag whose manifests disagree before any expensive build starts.
   # This job is read-only; draft creation happens only after the builder passes.
@@ -114,7 +120,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: Rust dep graph clear of mupdf-*
         run: |
           if cargo tree --workspace --prefix none --edges normal,build,dev 2>/dev/null | grep -i mupdf; then
@@ -146,26 +151,17 @@ jobs:
         id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
-      # Restore from existing main-branch caches but don't save new ones.
-      # Tag builds happen rarely (a few per quarter) and each adds ~500MB
-      # to the 10GB cache quota; over time that fills up and the post-step
-      # cache-save can fail once the quota is full. save-if=false lets us keep
-      # the warm-start benefit without accumulating tag-only caches forever.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          save-if: "false"
+      # setup-node caches npm by itself once package.json names npm as its
+      # packageManager; package-manager-cache: false keeps it from doing so.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with: { node-version: "22", cache: "npm" }
-      # v0.2.8: static HEIC decode stack (libheif + libde265, no other
-      # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
-      # upload flow below are untouched. Nothing needs bundling at
-      # packaging time because the link is fully static; audit.yml's
-      # per-PR link guards enforce that property stays true.
-      #
-      # The stack is built for the declared macOS floor, so the floor is in
-      # the cache key: a new one restores nothing built for the old. The
-      # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
-      # which would also change with every version bump.
+        with: { node-version: "22", package-manager-cache: false }
+      # bundle.macOS.minimumSystemVersion in tauri.conf.json, the oldest
+      # macOS Goop declares. Every later step gets it as
+      # MACOSX_DEPLOYMENT_TARGET, which rustc and the cc and cmake build
+      # scripts compile for; without it they take the SDK's own version.
+      # `tauri build` exports the same value for its cargo build, so this
+      # keeps the release from depending on that, and the same step in
+      # audit.yml makes the tested build match this one.
       - name: macOS deployment floor
         id: macos-floor
         if: matrix.os == 'macos-14'
@@ -173,17 +169,29 @@ jobs:
           floor="$(node scripts/macos-deployment-target.mjs)"
           [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
           echo "version=$floor" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        if: matrix.os == 'macos-14'
-        with:
-          path: .heif-deps
-          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
+      # v0.2.8: static HEIC decode stack (libheif + libde265, no other
+      # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
+      # upload flow below are untouched. Nothing needs bundling at
+      # packaging time because the link is fully static; audit.yml's
+      # per-PR link guards enforce that property stays true.
+      #
+      # Built here every time from the checksum-verified sources, for the
+      # declared macOS floor, which the script reads and refuses to run
+      # without. Before it reuses an existing stack, the script checks only
+      # that the archives exist and target the floor, not what is in them.
       - name: Static HEIC decode stack (macOS)
         if: matrix.os == 'macos-14'
         run: |
           ./scripts/build-static-heif-deps.sh
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
+      # source for the declared floor (scripts/build-tesseract-macos.sh).
+      # Like the HEIC stack, it is built here every time: nothing a release
+      # links or bundles comes from a cache.
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
@@ -210,19 +218,24 @@ jobs:
       # macOS Goop claims to run on. It reaches the package by two routes and
       # no PR job exercises either: the bundler writes it into Info.plist as
       # LSMinimumSystemVersion, which is what macOS checks before it launches
-      # the app, and tauri-build exports it as MACOSX_DEPLOYMENT_TARGET for
-      # release builds only, which sets the main executable's Mach-O minos.
-      # Hold both to the declared value in the bundle that is about to ship.
-      # That proves the declaration reached the package, not that the code
-      # runs there: the executable's minos is what the linker was told, and
-      # static libraries built for a newer macOS only make the linker warn.
-      # The HEIC stack is built for the declared floor, but the C libraries
-      # that Cargo build scripts compile still target the runner's own macOS.
+      # the app, and the build links the main executable for it, which sets
+      # its Mach-O minos. Hold both to the declared value in the bundle that
+      # is about to ship. That proves the declaration reached the package,
+      # not that the code runs there: the executable's minos is what the
+      # linker was told, and a static library built for a newer macOS only
+      # makes the linker warn. The native libraries linked in are compiled
+      # for the floor too: the HEIC stack by scripts/build-static-heif-deps.sh,
+      # which checks every object, and the C, C++ and Objective-C that Cargo
+      # build scripts compile, through the MACOSX_DEPLOYMENT_TARGET the
+      # macos-floor step exports (without it they take the SDK default).
+      # Nothing here re-checks those objects; only the linker would warn.
       #
-      # Everything else in Contents/MacOS is reported, not enforced. The
+      # Everything else in Contents/MacOS is reported, not enforced. Most
       # sidecars and their dylibs are upstream, Homebrew and PyInstaller
       # builds whose floor nothing in this repo sets; Homebrew bottles target
-      # the runner's own macOS. One whose minos is above the declared floor
+      # the macOS that built them. tesseract and libtesseract.5.dylib are the
+      # exception: fetch-sidecars.sh builds them for the floor and fails if
+      # either bundled copy is not. One whose minos is above the declared floor
       # was built for a newer macOS, so Goop's real floor may be higher than
       # it says. Only slices Apple Silicon runs count; an x86_64 slice counts
       # when it is the only one. For the PyInstaller sidecars the minos is
@@ -388,6 +401,10 @@ jobs:
           # signed binary what it imported and compare with the freezer recipe.
           echo "== gallery-dl runtime vs scripts/gallery-dl-macos-requirements.txt (signed, in-bundle) =="
           node scripts/check-gallery-dl-runtime.mjs --binary "$APP/Contents/MacOS/gallery-dl" --python "$GALLERY_DL_PYTHON"
+          # yt-dlp is downloaded prebuilt: ask the signed copy that it is the
+          # pinned release and that its certifi and urllib3 clear the floors.
+          echo "== yt-dlp runtime vs the pin and the certifi/urllib3 floors (signed, in-bundle) =="
+          node scripts/check-yt-dlp-runtime.mjs --binary "$APP/Contents/MacOS/yt-dlp"
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
           # PDF compress/thumbnail features reach via GS_LIB (set to the
