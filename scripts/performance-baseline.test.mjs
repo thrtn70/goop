@@ -4,12 +4,13 @@ import { treeRss, summarize, outputName } from './performance-baseline.mjs';
 test('aggregates only descendants in KiB',()=>assert.deepEqual(treeRss('10 1 100 parent\n11 10 200 ffmpeg\n12 11 50 child\n99 1 900 other',10),{rssKiB:350,children:2}));
 test('failed operations excluded from throughput',()=>assert.deepEqual(summarize([{success:true,process_ms:20},{success:false,process_ms:1},{success:true,process_ms:40}]),{successes:2,failures:1,median_ms:30,min_ms:20,max_ms:40}));
 test('output names differ for warmup and every repetition',()=>assert.equal(new Set([-1,0,1,2,3,4].map(i=>outputName('video',i,'mp4'))).size,6));
-import {run, normalizeSuccess, directoryBytes} from './performance-baseline.mjs';
-import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync,realpathSync} from 'node:fs';
+import {run, normalizeSuccess, directoryBytes, ownedSymlinks} from './performance-baseline.mjs';
+import {mkdtempSync,writeFileSync,chmodSync,rmSync,symlinkSync,readdirSync,realpathSync,lstatSync,linkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { captureIdentity, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity, withoutGitRepositoryEnvironment, writeJsonAtomic } from './performance-shared.mjs';
+import { captureIdentity, createEvidenceFile, replaceEvidenceFile, runBoundedProcess, sha256Text, stableStringify, validateCapturedIdentity, withoutGitRepositoryEnvironment, writeJsonAtomic } from './performance-shared.mjs';
 test('success requires clean exit and finite nonnegative duration',()=>{
  assert.equal(normalizeSuccess({success:true,process_ms:1},1,false),false);
  assert.equal(normalizeSuccess({success:true},0,false),false);
@@ -151,15 +152,21 @@ test('single conversion clean exit kills a TERM-resistant descendant before retu
 const runnableAfterKill=async pid=>{const state=()=>{let stat='';try{stat=execFileSync('/bin/ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim();}catch(error){if(error.status!==1)throw error;}return stat===''||/[ZE]/.test(stat)?null:stat;};let stat=state();for(let polls=0;stat!==null&&polls<250;polls++){await new Promise(resolve=>setTimeout(resolve,20));stat=state();}return stat;};
 // The descendant publishes its pid only after installing its TERM handler, so
 // only SIGKILL can end it. The runner runs `after` and exits once it is armed.
-const armedRunner=(armed,after='')=>{const descendant=`const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`;return `const fs=require('node:fs'),cp=require('node:child_process'),p=require('node:path');cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;};
+// With `watch`, the descendant also records whether that run file ever appears.
+const armedRunner=(armed,after='',watch=null)=>{const descendant=`const fs=require('node:fs');process.on('SIGTERM',()=>{});${watch?`setInterval(()=>{if(fs.existsSync(require('node:path').join(process.argv[1],${JSON.stringify(watch)})))fs.writeFileSync(${JSON.stringify(`${armed}.saw`)},'1');},2);`:''}fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`;return `const fs=require('node:fs'),cp=require('node:child_process'),p=require('node:path');cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)},process.argv[2]],{stdio:'ignore'}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;};
 const armedPid=armed=>{try{const pid=Number(readFileSync(armed,'utf8'));return Number.isInteger(pid)&&pid>1?pid:null;}catch{return null;}};
 test('single conversion reaps the owned group before post-exit evidence writes',async()=>{
  const pidDir=mkdtempSync(join(tmpdir(),'goop-bench-reap-')),armed=join(pidDir,'descendant.pid');
  try{
-  // The runner leaves a directory where run() writes its stdout log.
-  await assert.rejects(fakeRunner(armedRunner(armed,"fs.mkdirSync(p.join(process.argv[2],'run.stdout'));"),{timeoutMs:30000,killGraceMs:50}),/EISDIR/);
+  // The runner leaves a directory where run() writes its stdout log, and the
+  // descendant watches for the stderr log. SIGKILL lands before either write, so
+  // the descendant can never see one. The runner reports success, so only the
+  // blocked log can fail the sample.
+  const result=await fakeRunner(armedRunner(armed,"fs.mkdirSync(p.join(process.argv[2],'run.stdout'));fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));",'run.stderr'),{timeoutMs:30000,killGraceMs:1000});
+  assert.equal(result.success,false);assert.match(result.evidence_error,/run\.stdout/);
   const pid=armedPid(armed);assert.ok(pid,'descendant never armed');
-  assert.equal(await runnableAfterKill(pid),null,'descendant outlived the rejected run');
+  assert.equal(existsSync(`${armed}.saw`),false,'descendant was alive for an evidence write');
+  assert.equal(await runnableAfterKill(pid),null,'descendant outlived the run');
  }finally{
   try{const pid=armedPid(armed);if(pid)process.kill(pid,'SIGKILL');}catch{/* Already gone. */}
   rmSync(pidDir,{recursive:true,force:true});
@@ -230,7 +237,113 @@ test('single conversion records an owned output removal failure instead of rejec
  const result=await fakeRunner("const fs=require('node:fs'),p=require('node:path');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.mkdirSync(r.output_path);fs.writeFileSync(p.join(r.output_path,'partial'),Buffer.alloc(10000));",{budgetBytes:4096,logLimitBytes:100,killGraceMs:30});
  assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);assert.match(result.cleanup_error,/EPERM|EISDIR/);
 });
-test('single conversion records no cleanup error for a clean run',async()=>{const result=await fakeRunner("require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));");assert.equal(result.success,true);assert.equal(result.cleanup_error,null);});
+test('single conversion records no cleanup or evidence error for a clean run',async()=>{const result=await fakeRunner("require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));");assert.equal(result.success,true);assert.equal(result.cleanup_error,null);assert.equal(result.evidence_error,null);});
+// A blocked open freezes the whole event loop, so a run that might block goes in
+// a subprocess whose timeout turns a regression into a failure, not a hung gate.
+const guardedRun=(dir,body,name)=>JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`import {run} from ${JSON.stringify(new URL('./performance-baseline.mjs',import.meta.url).href)};import fs from 'node:fs';import {join} from 'node:path';
+const [dir,body,name]=process.argv.slice(1),runner=join(dir,'runner');fs.writeFileSync(runner,'#!/usr/bin/env node\\n'+body);fs.chmodSync(runner,0o700);
+const result=await run(runner,dir,{output_path:join(dir,'result')},join(dir,'run'),{killGraceMs:30});
+const sample=join(dir,'run.sample.json');
+process.stdout.write(JSON.stringify({success:result.success,evidence_error:result.evidence_error,fifo:fs.lstatSync(join(dir,name)).isFIFO(),saved:fs.lstatSync(sample).isFile()?JSON.parse(fs.readFileSync(sample,'utf8')).evidence_error:null}));`,dir,body,name],{encoding:'utf8',timeout:60000,killSignal:'SIGKILL'}));
+test('single conversion evidence writes cannot block on a child-made FIFO',()=>{
+ for(const name of ['run.stdout','run.stderr','run.sample.json']){
+  const dir=mkdtempSync(join(tmpdir(),'goop-bench-fifo-'));
+  try{
+   const result=guardedRun(dir,`require('node:child_process').execFileSync('/usr/bin/mkfifo',[require('node:path').join(process.argv[2],${JSON.stringify(name)})]);require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));`,name);
+   assert.equal(result.success,false,name);assert.ok(result.evidence_error?.includes(name),`${name}: ${result.evidence_error}`);
+   // A log is never written through the FIFO. The sample, rewritten after
+   // cleanup, replaces it unopened and keeps the evidence error on disk.
+   if(name==='run.sample.json'){assert.equal(result.fifo,false);assert.equal(result.saved,result.evidence_error);}
+   else assert.equal(result.fifo,true,name);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+ }
+});
+test('single conversion never writes evidence through a child-made link',async()=>{
+ for(const [name,link] of [['run.stdout','symlinkSync'],['run.stdout','linkSync'],['run.stderr','linkSync'],['run.sample.json','linkSync']]){
+  const outside=mkdtempSync(join(tmpdir(),'goop-bench-outside-')),target=join(outside,'evidence');
+  writeFileSync(target,'outside');
+  try{
+   const result=await fakeRunner(`const fs=require('node:fs');fs.${link}(${JSON.stringify(target)},require('node:path').join(process.argv[2],${JSON.stringify(name)}));process.stdout.write('child');process.stderr.write('child');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));`);
+   assert.equal(readFileSync(target,'utf8'),'outside',`${link} at ${name} was written through`);
+   // The evidence error also proves the runner made its link.
+   assert.equal(result.success,false,`${link} at ${name}`);assert.ok(result.evidence_error?.includes(name),`${link} at ${name}: ${result.evidence_error}`);
+  }finally{rmSync(outside,{recursive:true,force:true});}
+ }
+});
+test('single conversion refuses a planted request path before launch',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-bench-')),outside=mkdtempSync(join(tmpdir(),'goop-bench-outside-')),target=join(outside,'request.json'),launched=join(outside,'launched');
+ try{
+  // In the standalone harness's shared directory an earlier child can plant the next run's request path.
+  writeFileSync(target,'outside');symlinkSync(target,join(dir,'run.request.json'));
+  const runner=join(dir,'runner');writeFileSync(runner,`#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(launched)},'1');`);chmodSync(runner,0o700);
+  await assert.rejects(run(runner,dir,{output_path:join(dir,'result')},join(dir,'run'),{killGraceMs:30}),/EEXIST/);
+  assert.equal(readFileSync(target,'utf8'),'outside');assert.equal(existsSync(launched),false);
+ }finally{rmSync(dir,{recursive:true,force:true});rmSync(outside,{recursive:true,force:true});}
+});
+test('single conversion treats metrics that are not an object as invalid',async()=>{
+ for(const text of ['null','5','"done"','[1,2]']){
+  const result=await fakeRunner(`require('node:fs').writeFileSync(process.argv[4],${JSON.stringify(text)});`);
+  assert.equal(result.error,'Invalid metrics JSON',text);assert.equal(result.success,false,text);assert.equal(result['0'],undefined,text);
+ }
+});
+test('single conversion records a failed post-exit symlink scan instead of rejecting',async()=>{
+ // A real unreadable tree fails the post-exit byte count before the scan, so
+ // the scan failure is injected alone, once the run's logs exist.
+ const scanFails=dir=>directory=>{if(existsSync(join(dir,'run.stdout')))throw Error(`EACCES: permission denied, scandir '${directory}'`);return ownedSymlinks(directory);};
+ const clean=mkdtempSync(join(tmpdir(),'goop-bench-')),over=mkdtempSync(join(tmpdir(),'goop-bench-'));
+ try{
+  writeFileSync(join(clean,'runner'),"#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));");chmodSync(join(clean,'runner'),0o700);
+  const result=await run(join(clean,'runner'),clean,{output_path:join(clean,'result')},join(clean,'run'),{killGraceMs:30,listSymlinks:scanFails(clean)});
+  assert.equal(result.success,false);assert.match(result.output_error,/symbolic links.*EACCES/);
+  assert.equal(JSON.parse(readFileSync(join(clean,'run.sample.json'),'utf8')).output_error,result.output_error);
+  // Over budget, the cleanup that a rejection would skip still runs.
+  writeFileSync(join(over,'runner'),"#!/usr/bin/env node\nconst fs=require('node:fs'),p=require('node:path');const d=p.join(process.argv[2],'.goop-output-1-0');fs.mkdirSync(d);fs.writeFileSync(p.join(d,'partial'),Buffer.alloc(10000));setInterval(()=>{},10);");chmodSync(join(over,'runner'),0o700);
+  const overBudget=await run(join(over,'runner'),over,{output_path:join(over,'result')},join(over,'run'),{budgetBytes:4096,logLimitBytes:100,killGraceMs:30,listSymlinks:scanFails(over)});
+  assert.equal(overBudget.budget_exceeded,true);assert.match(overBudget.output_error,/symbolic links.*EACCES/);assert.equal(overBudget.removed_staging_directories,1);
+ }finally{rmSync(clean,{recursive:true,force:true});rmSync(over,{recursive:true,force:true});}
+});
+test('single conversion records a refused sample rewrite and still cleans up',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-bench-'));
+ try{
+  // A directory at the sample path refuses both the first write and the
+  // rewrite after cleanup; the over-budget cleanup must still run.
+  writeFileSync(join(dir,'runner'),"#!/usr/bin/env node\nconst fs=require('node:fs'),p=require('node:path');fs.mkdirSync(p.join(process.argv[2],'run.sample.json'));const d=p.join(process.argv[2],'.goop-output-1-0');fs.mkdirSync(d);fs.writeFileSync(p.join(d,'partial'),Buffer.alloc(10000));setInterval(()=>{},10);");chmodSync(join(dir,'runner'),0o700);
+  const result=await run(join(dir,'runner'),dir,{output_path:join(dir,'result')},join(dir,'run'),{budgetBytes:4096,logLimitBytes:100,killGraceMs:30});
+  assert.equal(result.budget_exceeded,true);assert.equal(result.success,false);assert.match(result.evidence_error,/run\.sample\.json/);
+  assert.equal(result.removed_staging_directories,1);assert.ok(lstatSync(join(dir,'run.sample.json')).isDirectory());
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('evidence files refuse every child-made entry and are replaced only unopened',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'goop-evidence-')),outside=join(dir,'outside');
+ try{
+  writeFileSync(outside,'outside');symlinkSync(outside,join(dir,'symlink'));symlinkSync(join(dir,'missing'),join(dir,'dangling'));linkSync(outside,join(dir,'hard'));mkdirSync(join(dir,'directory'));writeFileSync(join(dir,'file'),'child');
+  execFileSync('/usr/bin/mkfifo',[join(dir,'fifo')]);
+  for(const name of ['symlink','dangling','hard','directory','file','fifo'])assert.throws(()=>createEvidenceFile(join(dir,name),'evidence'),{code:'EEXIST'},name);
+  for(const name of ['symlink','dangling','hard','fifo']){replaceEvidenceFile(join(dir,name),'evidence');assert.ok(lstatSync(join(dir,name)).isFile(),name);assert.equal(readFileSync(join(dir,name),'utf8'),'evidence',name);}
+  assert.throws(()=>replaceEvidenceFile(join(dir,'directory'),'evidence'),{code:'ERR_FS_EISDIR'});
+  assert.equal(readFileSync(outside,'utf8'),'outside');assert.equal(lstatSync(outside).nlink,1);assert.equal(existsSync(join(dir,'missing')),false);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('standalone baseline never follows or blocks on a child-planted summary path',()=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-bench-main-')),outside=join(root,'outside'),fixtures=join(root,'fixtures'),sidecars=join(root,'sidecars'),out=join(root,'out'),runner=join(root,'runner'),script=join(root,'runner.js');
+ try{
+  mkdirSync(fixtures);mkdirSync(sidecars);writeFileSync(outside,'outside');
+  for(const name of ['photo.png','photo.heic','sample.mp4','malformed.dng'])writeFileSync(join(fixtures,name),name);
+  // The first child leaves a FIFO where the harness writes its summary; a later
+  // one swaps the written summary for a hard link to a file outside the run.
+  // Children get only the sidecar directory on PATH, so a shell wrapper names
+  // node by its absolute path, which a shebang could not hold if it had spaces.
+  writeFileSync(runner,`#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`);chmodSync(runner,0o700);
+  writeFileSync(script,`const fs=require('node:fs'),p=require('node:path');const summary=p.join(p.dirname(process.argv[3]),'summary.json'),run=p.basename(process.argv[3]);
+if(run==='png-jpeg-warmup.request.json')require('node:child_process').execFileSync('/usr/bin/mkfifo',[summary]);
+if(run==='mp4-mp3-warmup.request.json'){fs.rmSync(summary);fs.linkSync(${JSON.stringify(outside)},summary);}
+fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));`);
+  // The harness traps SIGTERM, which a blocked open would never service.
+  execFileSync(process.execPath,[fileURLToPath(new URL('./performance-baseline.mjs',import.meta.url)),'--binary',runner,'--runtime-sidecars',sidecars,'--fixtures',fixtures,'--output',out,'--repeat','1'],{stdio:'pipe',timeout:60000,killSignal:'SIGKILL'});
+  assert.equal(readFileSync(outside,'utf8'),'outside');assert.ok(lstatSync(join(out,'summary.json')).isFile());
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(out,'summary.json'),'utf8'))),['png-jpeg','heic-jpeg','mp4-mp3','mp4-h264','mp4-quality','mp4-compress','malformed']);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('contradictory metrics cannot count as success',async()=>{const result=await fakeRunner("require('node:fs').writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));process.exitCode=1;");assert.equal(result.success,false);});
 test('single conversion cannot succeed without an independent probe',async()=>{const result=await fakeRunner("const fs=require('node:fs');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.writeFileSync(r.output_path,'x');fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});assert.equal(result.success,false);assert.equal(result.verification.checked,false);assert.match(result.verification.error,/ffprobe/i);});
 test('single conversion rejects and removes a child-created symlink output',async()=>{const result=await fakeRunner("const fs=require('node:fs'),p=require('node:path');const r=JSON.parse(fs.readFileSync(process.argv[3]));fs.symlinkSync(p.join(process.argv[2],'runner'),r.output_path);fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:1}}));",{expectedOutput:{extension:'jpg',probe:'media',format_names:['image2'],required_streams:[{codec_type:'video',codec_name:'mjpeg'}]}});assert.equal(result.success,false);assert.match(result.output_error,/symbolic-link/i);assert.equal(result.removed_symlink_outputs,1);});
