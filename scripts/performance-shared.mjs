@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { release as osRelease, version as osVersion } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 export const sha256Text = text => createHash('sha256').update(text).digest('hex');
@@ -264,12 +265,32 @@ export function validateCapturedIdentity(identity, label = 'identity') {
   return identity;
 }
 
-export function directoryBytes(directory) {
-  if (!existsSync(directory)) return 0;
-  return readdirSync(directory, { withFileTypes: true }).reduce((sum, entry) => {
-    const path = join(directory, entry.name);
-    const stats = lstatSync(path);
-    return sum + (stats.isDirectory() ? directoryBytes(path) : stats.size);
+// Live storage checks race removals: the app publishes reports through a temp
+// file it then removes, and SQLite deletes its rollback journal after each
+// write. A vanished entry holds no bytes, so ENOENT counts zero and every other
+// error reaches the caller. Names that are not valid UTF-8 list as U+FFFD: such
+// a name never stats, and it can shadow a twin, so neither case is a vanish.
+const vanished = error => error?.code === 'ENOENT';
+
+export function directoryBytes(directory, filesystem = { readdirSync, lstatSync }) {
+  let names;
+  try {
+    names = filesystem.readdirSync(directory);
+  } catch (error) {
+    if (vanished(error)) return 0;
+    throw error;
+  }
+  if (new Set(names).size !== names.length) throw Error(`Entry names collide after decoding in ${directory}`);
+  return names.reduce((sum, name) => {
+    const path = join(directory, name);
+    let stats;
+    try {
+      stats = filesystem.lstatSync(path);
+    } catch (error) {
+      if (vanished(error) && !name.includes('\uFFFD')) return sum;
+      throw error;
+    }
+    return sum + (stats.isDirectory() ? directoryBytes(path, filesystem) : stats.size);
   }, 0);
 }
 
@@ -506,15 +527,18 @@ const WINDOWS_ROOT_CREATION_SLACK = 1000n * 10000n;
  * second). Console processes refuse a soft taskkill, so the forced one follows
  * whenever the root may still be running or the walk found descendants. stop()
  * returns one promise for every caller, settled once any forced kill is sent.
- * `sleep`, `platform` and `execFile` are for tests.
+ * A POSIX group kill misses a member being forked at that instant, so once the
+ * forced kill is sent, killAgain() sends another until a group kill reports the
+ * group gone. `sleep`, `platform`, `execFile` and `killGroup` are for tests.
  */
 export function createOwnedGroupStopper(child, {
   killGraceMs,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   platform = process.platform,
   execFile = execFileSync,
+  killGroup = (pid, name) => process.kill(-pid, name),
 }) {
-  let rootSettled = false, stopping = null;
+  let rootSettled = false, stopping = null, killSent = false, groupGone = false;
   const launchedAt = windowsFileTime(Date.now());
   child.once('close', () => { rootSettled = true; });
   child.once('error', () => { rootSettled = true; });
@@ -540,20 +564,27 @@ export function createOwnedGroupStopper(child, {
           return sent;
         }
       }
-      process.kill(-child.pid, name);
+      killGroup(child.pid, name);
       return true;
-    } catch { return false; }
+    } catch (error) {
+      // An empty group's id is free for reuse, so never signal it again. A
+      // group of zombies reports EPERM on macOS until they are reaped.
+      if (platform !== 'win32' && error?.code === 'ESRCH') groupGone = true;
+      return false;
+    }
   };
   const stop = () => {
     if (stopping) return stopping;
     const softSignalSent = signal('SIGTERM');
     const windowsNeedsForcedCleanup = platform === 'win32' && (!rootSettled || windowsCleanupPids.size > 0);
-    // A grace the sleep rejects escalates at once.
-    const kill = () => { signal('SIGKILL'); };
+    // A grace the sleep rejects (a delay that is not a number) escalates at once.
+    const kill = () => { killSent = true; signal('SIGKILL'); };
     stopping = (softSignalSent || windowsNeedsForcedCleanup) ? sleep(killGraceMs).then(kill, kill) : Promise.resolve();
     return stopping;
   };
-  return { stop };
+  // No SIGKILL is sent before the grace ends, and Windows is unchanged.
+  const killAgain = () => { if (killSent && !groupGone && platform !== 'win32') signal('SIGKILL'); };
+  return { stop, killAgain };
 }
 
 /** Run one owned process group with bounded retained logs, lifetime, and suite storage. */
@@ -568,8 +599,15 @@ export async function runBoundedProcess({
   logLimitBytes,
   storageBudgetBytes,
   abortSignal = null,
+  samplingIntervalMs = 100,
+  nowMs = () => performance.now(),
+  sleepMs = (ms, wait) => delay(ms, undefined, wait),
+  killGroup = (pid, name) => process.kill(-pid, name),
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
+  // Node turns an interval below 1 ms or above 2^31-1 ms into 1 ms, so a bad
+  // value would sample nonstop.
+  if (!Number.isSafeInteger(samplingIntervalMs) || samplingIntervalMs < 1 || samplingIntervalMs > 2 ** 31 - 1) throw Error('Sampling interval must be a whole number of milliseconds from 1 to 2147483647');
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
   if (symlinksBelow(outputDirectory).length > 0) throw Error('Owned output directory must not contain symbolic links');
   const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
@@ -577,7 +615,7 @@ export async function runBoundedProcess({
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
   let stopRequested = false, sampledTreePeakKiB = null, observedChildren = null;
-  const group = createOwnedGroupStopper(child, { killGraceMs });
+  const group = createOwnedGroupStopper(child, { killGraceMs, sleep: sleepMs, killGroup });
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
   child.stderr.on('data', chunk => { stderr = retain(stderr, chunk); });
@@ -593,6 +631,11 @@ export async function runBoundedProcess({
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
+    // A group kill misses a member that is being forked at that instant, and
+    // such a member can hold the pipes and keep the root from closing. Once the
+    // group has been killed, kill it again every interval until the root closes
+    // or the group is gone.
+    group.killAgain();
     try {
       if (process.platform !== 'win32') {
         const sample = processTreeRss(execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }), child.pid);
@@ -606,15 +649,19 @@ export async function runBoundedProcess({
         stop('budget');
       }
     } catch { /* A just-exited child can race a directory snapshot. */ }
-  }, 100);
-  const timeout = setTimeout(() => stop('timeout'), timeoutMs);
-  const start = performance.now();
+  }, samplingIntervalMs);
+  // sleepMs(ms, { signal }) must reject once signal aborts, as the default does,
+  // so a run that closes first cancels its timeout instead of stopping a dead group.
+  // Any other rejection (a delay that is not a number) times the run out at once.
+  const timeout = new AbortController();
+  sleepMs(timeoutMs, { signal: timeout.signal }).then(() => stop('timeout'), () => { if (!timeout.signal.aborted) stop('timeout'); });
+  const start = nowMs();
   const code = await new Promise(resolve => {
     child.once('error', error => { spawnError = error.message; resolve(null); });
     child.once('close', value => resolve(value));
   });
   clearInterval(monitor);
-  clearTimeout(timeout);
+  timeout.abort();
   abortSignal?.removeEventListener('abort', abort);
   try {
     budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
@@ -624,6 +671,9 @@ export async function runBoundedProcess({
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
   await stop();
+  // A missed member that holds none of the pipes can outlive the close, so kill
+  // the group once more after it.
+  group.killAgain();
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
@@ -654,9 +704,9 @@ export async function runBoundedProcess({
     cleanup_error: cleanupError,
     output_error: outputError,
     removed_staging_directories: removedStagingDirectories,
-    lifetime_ms: performance.now() - start,
+    lifetime_ms: nowMs() - start,
     sampled_tree_peak_KiB: sampledTreePeakKiB,
-    sampling_interval_ms: 100,
+    sampling_interval_ms: samplingIntervalMs,
     observed_children: observedChildren,
     time_peak_bytes: timePeakMatch ? Number(timePeakMatch[1]) : null,
     log_bytes_retained: retainedLogBytes,

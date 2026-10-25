@@ -3,8 +3,9 @@ import {readFileSync,mkdirSync,statSync,lstatSync,existsSync,readdirSync,unlinkS
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,createOwnedGroupStopper,readOwnedRegularFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,createOwnedGroupStopper,directoryBytes,readOwnedRegularFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -17,9 +18,8 @@ const hash=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 export function normalizeSuccess(metrics, code, timedOut) {
  return metrics.success === true && code === 0 && !timedOut && Number.isFinite(metrics.process_ms) && metrics.process_ms >= 0;
 }
-export function directoryBytes(directory) {
- return readdirSync(directory).reduce((sum,name)=>{const path=join(directory,name),stats=lstatSync(path);return sum+(stats.isDirectory()?directoryBytes(path):stats.size);},0);
-}
+// One byte count for every storage monitor, so they agree on vanished entries.
+export {directoryBytes};
 export function ownedSymlinks(directory){const links=[];for(const name of readdirSync(directory)){const path=join(directory,name),stats=lstatSync(path);if(stats.isSymbolicLink())links.push(path);else if(stats.isDirectory())links.push(...ownedSymlinks(path));}return links;}
 export function effectiveHardware(metrics,hardwareEnabled) {
  const summary=metrics.result?.video_execution;
@@ -29,7 +29,9 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
+ // The default sleep coerces its delay as setTimeout does, so a numeric-string
+ // limit still fires instead of rejecting and leaving the run without a timer.
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  // Tests inject a failing symbolic-link scan here; no caller passes one.
@@ -44,7 +46,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
- const {stop}=createOwnedGroupStopper(child,{killGraceMs});
+ const {stop}=createOwnedGroupStopper(child,{killGraceMs,sleep:sleepMs});
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
   try {
@@ -53,11 +55,14 @@ export async function run(binary,sidecars,request,stem,options={}) {
    if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
   } catch {/* A process or output can disappear between snapshots. */}
  },100);
- const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
- const start=performance.now();let code;
+ const start=nowMs();let code;
+ // sleepMs(ms,{signal}) must reject once signal aborts, as the default does, so
+ // a run that closes first cancels its timeout instead of stopping a dead group.
+ const timeout=new AbortController();
+ sleepMs(timeoutMs,{signal:timeout.signal}).then(()=>{timedOut=true;stop();},()=>{/* Cancelled: the root closed first. */});
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
- finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
-  const lifetimeMs=performance.now()-start;
+ finally{clearInterval(timer);timeout.abort();abortSignal?.removeEventListener('abort',abort);}
+  const lifetimeMs=nowMs()-start;
  // A clean root exit is not a clean sample if owned descendants remain. Reap
  // before any post-exit file I/O, so no throw below can leave the group running
  // and every check below sees a tree the child can no longer change.
@@ -73,7 +78,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  try{metricsBytes=readOwnedRegularFile(`${stem}.metrics.json`,Math.min(1024*1024,budgetBytes/4));}catch{/* Missing or not openable: no metrics. */}
  if(metricsBytes!==null)try{const parsed=JSON.parse(metricsBytes);if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Metrics must be an object');metrics=parsed;}catch{metrics.error='Invalid metrics JSON';}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
- const verificationStart=performance.now();
+ const verificationStart=nowMs();
  // A scan that cannot read the tree fails the sample instead of rejecting the
  // run and skipping its cleanup.
  let createdSymlinks=[],outputError=null;
@@ -97,7 +102,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
   const effective=effectiveHardware(metrics,hardwareEnabled);
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput)try{validateEffectiveExecution(metrics.result?.video_execution,request);}catch(error){metrics.success=false;verification={...verification,execution_error:error.message};}
  const timePeak=stderr.toString().match(/(\d+)\s+maximum resident set size/);
- const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
+ const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:nowMs()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
  const evidenceFailed=message=>{sample.evidence_error??=message;sample.success=false;};
  sample.evidence_error=null;if(evidenceError!==null)evidenceFailed(evidenceError);
  const saveSample=write=>{try{write(`${stem}.sample.json`,JSON.stringify(sample,null,2));}catch(error){evidenceFailed(error.message);}};
