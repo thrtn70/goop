@@ -116,19 +116,39 @@ test('single conversion timeout kills a TERM-resistant descendant before returni
  assert.equal(await runnableAfterKill(pid),null,'descendant outlived the run');
  guard.passed=true;
 });
+// The root exits on its own only once its descendant ignores TERM, so only the
+// post-exit SIGKILL can end the descendant. The timeout is a liveness limit:
+// the root's exit, not the timeout, must end the run, however slow the machine.
+// The lifetime test below pins that run() waits out the kill before returning.
 test('single conversion failure kills a TERM-resistant descendant before returning',async()=>{
- const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});fs.writeFileSync(process.argv[4],JSON.stringify({success:false,process_ms:1,descendant_pid:c.pid}));process.exitCode=1;",{timeoutMs:2000,killGraceMs:50});
- let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(result.descendant_pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}
- try{assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}finally{try{process.kill(result.descendant_pid,'SIGKILL');}catch{/* Already gone. */}}
+ const pidDir=mkdtempSync(join(tmpdir(),'goop-bench-reap-')),armed=join(pidDir,'descendant.pid');
+ try{
+  const result=await fakeRunner(armedRunner(armed,"fs.writeFileSync(process.argv[4],JSON.stringify({success:false,process_ms:1}));process.exitCode=1;"),{timeoutMs:30000,killGraceMs:50});
+  const pid=armedPid(armed);assert.ok(pid,'descendant never armed');
+  // time(1) reports 1 for a crash as well, so the read metrics prove the failing exit.
+  assert.equal(result.timed_out,false);assert.equal(result.exit_code,1);assert.equal(result.process_ms,1);assert.equal(result.success,false);
+  assert.equal(await runnableAfterKill(pid),null,'descendant outlived the failed run');
+ }finally{
+  try{const pid=armedPid(armed);if(pid)process.kill(pid,'SIGKILL');}catch{/* Already gone. */}
+  rmSync(pidDir,{recursive:true,force:true});
+ }
 });
 test('single conversion clean exit kills a TERM-resistant descendant before returning',async()=>{
- const result=await fakeRunner("const fs=require('node:fs'),cp=require('node:child_process');const c=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},10)\"],{stdio:'ignore'});c.unref();fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,descendant_pid:c.pid}));",{timeoutMs:2000,killGraceMs:50});
- let state='';try{state=execFileSync('/bin/ps',['-o','stat=','-p',String(result.descendant_pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}
- try{assert.equal(result.success,true);assert.ok(state===''||/[ZE]/.test(state),`descendant remained runnable with state ${state}`);}finally{try{process.kill(result.descendant_pid,'SIGKILL');}catch{/* Already gone. */}}
+ const pidDir=mkdtempSync(join(tmpdir(),'goop-bench-reap-')),armed=join(pidDir,'descendant.pid');
+ try{
+  const result=await fakeRunner(armedRunner(armed,"fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1}));"),{timeoutMs:30000,killGraceMs:50});
+  const pid=armedPid(armed);assert.ok(pid,'descendant never armed');
+  assert.equal(result.timed_out,false);assert.equal(result.exit_code,0);assert.equal(result.success,true);
+  assert.equal(await runnableAfterKill(pid),null,'descendant outlived the clean run');
+ }finally{
+  try{const pid=armedPid(armed);if(pid)process.kill(pid,'SIGKILL');}catch{/* Already gone. */}
+  rmSync(pidDir,{recursive:true,force:true});
+ }
 });
 // SIGKILL is sent before run() settles, but the kernel may take a moment to
 // retire the process. A descendant nothing killed ignores TERM and never exits.
-const runnableAfterKill=async pid=>{const state=()=>{let stat='';try{stat=execFileSync('/bin/ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim();}catch{/* Gone. */}return stat===''||/[ZE]/.test(stat)?null:stat;};let stat=state();for(let polls=0;stat!==null&&polls<250;polls++){await new Promise(resolve=>setTimeout(resolve,20));stat=state();}return stat;};
+// ps exits 1 for a pid it cannot find; any other failure proves nothing.
+const runnableAfterKill=async pid=>{const state=()=>{let stat='';try{stat=execFileSync('/bin/ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim();}catch(error){if(error.status!==1)throw error;}return stat===''||/[ZE]/.test(stat)?null:stat;};let stat=state();for(let polls=0;stat!==null&&polls<250;polls++){await new Promise(resolve=>setTimeout(resolve,20));stat=state();}return stat;};
 // The descendant publishes its pid only after installing its TERM handler, so
 // only SIGKILL can end it. The runner runs `after` and exits once it is armed.
 const armedRunner=(armed,after='')=>{const descendant=`const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(`${armed}.tmp`)},String(process.pid));fs.renameSync(${JSON.stringify(`${armed}.tmp`)},${JSON.stringify(armed)});setInterval(()=>{},10)`;return `const fs=require('node:fs'),cp=require('node:child_process'),p=require('node:path');cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref();const t=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(t);${after}},5);`;};
