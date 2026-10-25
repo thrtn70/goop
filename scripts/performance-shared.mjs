@@ -10,6 +10,7 @@ import {
   openSync,
   realpathSync,
   readFileSync,
+  readSync,
   readlinkSync,
   readdirSync,
   renameSync,
@@ -379,6 +380,30 @@ export function readOwnedRegularFile(path, maxBytes, open = openSync) {
     return readFileSync(fd);
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Read a file the measured child left, through one descriptor so the child can
+ * neither redirect nor stall the read: a FIFO opens without blocking, and only a
+ * regular file of at most `maxBytes` that no other path links to is read. A
+ * symbolic link is refused wherever the platform has O_NOFOLLOW (Windows does
+ * not). The check and the read share the descriptor, so a swap after the open
+ * changes nothing; a file unlinked since then has no links and is still its own.
+ */
+export function readChildFile(path, maxBytes) {
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || stats.nlink > 1) throw Error('Not a regular file of its own');
+    // A live child can still append, so the read itself is bounded too.
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    for (let read; length < buffer.length && (read = readSync(descriptor, buffer, length, buffer.length - length, length)) > 0;) length += read;
+    if (length > maxBytes) throw Error(`Larger than ${maxBytes} bytes`);
+    return buffer.subarray(0, length);
+  } finally {
+    closeSync(descriptor);
   }
 }
 
