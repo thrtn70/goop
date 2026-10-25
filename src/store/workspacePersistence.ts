@@ -2,6 +2,7 @@ import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoO
 import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { parsePresetBundle, PRESET_BUNDLE_VERSION } from "@/features/presets/io";
+import { validBatchStamp } from "@/features/workspace/batchStamp";
 import {
   getResponsivenessRecorder,
   type CausalOwner,
@@ -242,8 +243,11 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
   return value.map((file) => {
     if (!object(file)) return file;
     const imageTarget = ["png", "jpeg", "webp", "bmp", "tiff", "avif", "jpeg_xl"].includes(String(file.target));
+    // A batch stamp only labels the row, so a malformed one is dropped
+    // rather than protecting the whole draft store over it.
+    const { batch, ...unstamped } = file;
     const normalized = {
-      ...file,
+      ...("batch" in file && !validBatchStamp(batch) ? unstamped : file),
       ...(imageTarget && file.metadataPolicy == null ? { metadataPolicy: "preserve" } : {}),
       ...(imageTarget && file.imageColorPolicy == null ? { imageColorPolicy: "preserve" } : {}),
     };
