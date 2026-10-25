@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { release as osRelease, version as osVersion } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 export const sha256Text = text => createHash('sha256').update(text).digest('hex');
@@ -489,15 +490,22 @@ export async function runBoundedProcess({
   logLimitBytes,
   storageBudgetBytes,
   abortSignal = null,
+  samplingIntervalMs = 100,
+  nowMs = () => performance.now(),
+  sleepMs = (ms, wait) => delay(ms, undefined, wait),
+  killGroup = (pid, name) => process.kill(-pid, name),
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
+  // Node turns an interval below 1 ms or above 2^31-1 ms into 1 ms, so a bad
+  // value would sample nonstop.
+  if (!Number.isSafeInteger(samplingIntervalMs) || samplingIntervalMs < 1 || samplingIntervalMs > 2 ** 31 - 1) throw Error('Sampling interval must be a whole number of milliseconds from 1 to 2147483647');
   const initialEntries = new Set(existsSync(outputDirectory) ? readdirSync(outputDirectory) : []);
   if (symlinksBelow(outputDirectory).length > 0) throw Error('Owned output directory must not contain symbolic links');
   const timedCommand = process.platform === 'darwin' ? '/usr/bin/time' : command;
   const timedArgs = process.platform === 'darwin' ? ['-l', command, ...args] : args;
   const child = spawn(timedCommand, timedArgs, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null, killTimer;
-  let stopRequested = false, childSettled = false, killEscalation = null, sampledTreePeakKiB = null, observedChildren = null;
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), retainedLogBytes = 0, timedOut = false, budgetExceeded = false, aborted = false, spawnError = null;
+  let stopRequested = false, childSettled = false, killEscalation = null, killSent = false, groupGone = false, sampledTreePeakKiB = null, observedChildren = null;
   const windowsCleanupPids = new Set();
   const retain = (current, chunk) => { const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]); };
   child.stdout.on('data', chunk => { stdout = retain(stdout, chunk); });
@@ -522,9 +530,14 @@ export async function runBoundedProcess({
           return sent;
         }
       }
-      process.kill(-child.pid, name);
+      killGroup(child.pid, name);
       return true;
-    } catch { return false; }
+    } catch (error) {
+      // An empty group's id is free for reuse, so never signal it again. A
+      // group of zombies reports EPERM on macOS until they are reaped.
+      if (process.platform !== 'win32' && error?.code === 'ESRCH') groupGone = true;
+      return false;
+    }
   };
   const stop = reason => {
     if (stopRequested) return;
@@ -534,13 +547,18 @@ export async function runBoundedProcess({
     const softSignalSent = signal('SIGTERM');
     const windowsNeedsForcedCleanup = process.platform === 'win32' && (!childSettled || windowsCleanupPids.size > 0);
     if (!softSignalSent && !windowsNeedsForcedCleanup) { killEscalation = Promise.resolve(); return; }
-    killEscalation = new Promise(resolveKill => {
-      killTimer = setTimeout(() => { signal('SIGKILL'); resolveKill(); }, killGraceMs);
-    });
+    // A grace the sleep rejects (a delay that is not a number) escalates at once.
+    const kill = () => { killSent = true; signal('SIGKILL'); };
+    killEscalation = sleepMs(killGraceMs).then(kill, kill);
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
   const monitor = setInterval(() => {
+    // A group kill misses a member that is being forked at that instant, and
+    // such a member can hold the pipes and keep the root from closing. Once the
+    // group has been killed, kill it again every interval until the root closes
+    // or the group is gone.
+    if (killSent && !groupGone && process.platform !== 'win32') signal('SIGKILL');
     try {
       if (process.platform !== 'win32') {
         const sample = processTreeRss(execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }), child.pid);
@@ -554,15 +572,19 @@ export async function runBoundedProcess({
         stop('budget');
       }
     } catch { /* A just-exited child can race a directory snapshot. */ }
-  }, 100);
-  const timeout = setTimeout(() => stop('timeout'), timeoutMs);
-  const start = performance.now();
+  }, samplingIntervalMs);
+  // sleepMs(ms, { signal }) must reject once signal aborts, as the default does,
+  // so a run that closes first cancels its timeout instead of stopping a dead group.
+  // Any other rejection (a delay that is not a number) times the run out at once.
+  const timeout = new AbortController();
+  sleepMs(timeoutMs, { signal: timeout.signal }).then(() => stop('timeout'), () => { if (!timeout.signal.aborted) stop('timeout'); });
+  const start = nowMs();
   const code = await new Promise(resolve => {
     child.once('error', error => { childSettled = true; spawnError = error.message; resolve(null); });
     child.once('close', value => { childSettled = true; resolve(value); });
   });
   clearInterval(monitor);
-  clearTimeout(timeout);
+  timeout.abort();
   abortSignal?.removeEventListener('abort', abort);
   try {
     budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
@@ -572,8 +594,10 @@ export async function runBoundedProcess({
   // Confirm the entire owned group is gone even when the root exits cleanly;
   // adapters may otherwise leave ignored-stdio descendants behind.
   stop();
-  if (killEscalation) await killEscalation;
-  else clearTimeout(killTimer);
+  await killEscalation;
+  // A missed member that holds none of the pipes can outlive the close, so kill
+  // the group once more after it.
+  if (killSent && !groupGone && process.platform !== 'win32') signal('SIGKILL');
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
   const createdSymlinks = symlinksBelow(outputDirectory);
   if (createdSymlinks.length > 0) {
@@ -604,9 +628,9 @@ export async function runBoundedProcess({
     cleanup_error: cleanupError,
     output_error: outputError,
     removed_staging_directories: removedStagingDirectories,
-    lifetime_ms: performance.now() - start,
+    lifetime_ms: nowMs() - start,
     sampled_tree_peak_KiB: sampledTreePeakKiB,
-    sampling_interval_ms: 100,
+    sampling_interval_ms: samplingIntervalMs,
     observed_children: observedChildren,
     time_peak_bytes: timePeakMatch ? Number(timePeakMatch[1]) : null,
     log_bytes_retained: retainedLogBytes,
