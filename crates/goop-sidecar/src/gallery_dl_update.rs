@@ -16,7 +16,7 @@
 //! ship-with-Goop no-op (gallery-dl is refreshed by bumping the pinned
 //! version and shipping a new Goop release).
 
-use crate::binaries::BinaryResolver;
+use crate::binaries::{self, BinaryResolver};
 use crate::fetch;
 use crate::signature::TrustedKey;
 use crate::updater::{UpdateChecker, UpdateStatus};
@@ -138,6 +138,19 @@ async fn update_with(
         }
     }
 
+    // The resolver ignores an update-dir copy that is no newer than the
+    // bundled one, so installing such a release would change nothing.
+    if let Some(bundled) = resolver.bundled_copy_version("gallery-dl") {
+        if !fetch::is_newer(&latest, bundled) {
+            return Ok(UpdateStatus {
+                attempted: false,
+                previous_version: previous,
+                new_version: None,
+                message: format!("gallery-dl {latest} is not newer than the bundled {bundled}."),
+            });
+        }
+    }
+
     let exe_name = if cfg!(windows) {
         "gallery-dl.exe"
     } else {
@@ -157,6 +170,17 @@ async fn update_with(
         vet(staged, resolver, &latest, previous.as_deref())
     })
     .await?;
+
+    // The resolver prefers an update-dir copy only while the version recorded
+    // beside it is newer than the bundled one. `installed` is the version the
+    // vetted binary itself reported, so the marker can't hold a number the
+    // binary doesn't have.
+    if let Err(e) = binaries::record_update_version(&dest, &installed).await {
+        binaries::discard_update(&dest, LABEL).await;
+        return Err(GoopError::Queue(format!(
+            "gallery-dl update: could not record the installed version: {e}"
+        )));
+    }
 
     let message = match &previous {
         Some(p) => format!("Updated gallery-dl {p} → {installed}."),
@@ -192,7 +216,8 @@ async fn vet(
 }
 
 /// `gallery-dl --version` via the resolver, or `None` if it can't be resolved
-/// or run. After a successful download the resolver points at the updated dir.
+/// or run. Once an update is installed and its version recorded, the resolver
+/// points at the updated dir.
 async fn current_version(resolver: &BinaryResolver) -> Option<String> {
     UpdateChecker::for_gallery_dl(resolver)
         .current_version()
@@ -449,7 +474,8 @@ mod tests {
         write_script(&bundled.path().join("gallery-dl"), "1.0.0"); // current = 1.0.0
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "1.0.0");
 
         let status = update_with(
             &resolver,
@@ -467,6 +493,11 @@ mod tests {
         assert!(
             updates.path().join("gallery-dl").is_file(),
             "updated binary must land in the update dir"
+        );
+        assert_eq!(
+            std::fs::read_to_string(updates.path().join("gallery-dl.version")).unwrap(),
+            "9.99.0",
+            "the resolver only prefers an update whose version is recorded"
         );
         assert!(status.message.contains("9.99.0"));
     }
@@ -527,7 +558,8 @@ mod tests {
         write_script(&bundled.path().join("gallery-dl"), "2.0.0");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "2.0.0");
 
         let err = update_with(
             &resolver,
@@ -567,8 +599,11 @@ mod tests {
         write_script(&bundled.path().join("gallery-dl"), "1.0.0");
         let updates = TempDir::new().unwrap();
         write_script(&updates.path().join("gallery-dl"), "2.0.0");
+        // The resolver only runs an update whose version is recorded beside it.
+        std::fs::write(updates.path().join("gallery-dl.version"), "2.0.0").unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "1.0.0");
 
         update_with(
             &resolver,
@@ -607,7 +642,8 @@ mod tests {
         write_script(&bundled.path().join("gallery-dl"), "1.0.0");
         let updates = TempDir::new().unwrap();
         let resolver = BinaryResolver::new(bundled.path().to_path_buf())
-            .with_update_dir(updates.path().to_path_buf());
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "1.0.0");
 
         let err = update_with(
             &resolver,
@@ -620,6 +656,130 @@ mod tests {
         .expect_err("a binary older than its tag must be refused");
         assert!(err.to_string().contains("10.0.0"), "{err}");
         assert!(!updates.path().join("gallery-dl").exists());
+        assert!(!updates.path().join("gallery-dl.version").exists());
         assert_eq!(current_version(&resolver).await.as_deref(), Some("1.0.0"));
+    }
+
+    /// The marker must be the version the binary itself reports, or the
+    /// resolver would compare the bundled copy against a number the installed
+    /// binary doesn't have. A binary may report a release newer than its tag
+    /// and still be installed, so the marker can't simply be the tag.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_marker_records_the_version_the_binary_reports() {
+        let server = MockServer::start().await;
+        serve_latest(&server, "v9.98.0").await;
+        serve_signed_sums(&server, "v9.98.0", "gallery-dl-newer.sums").await;
+        Mock::given(method("GET"))
+            .and(path("/dl/v9.98.0/gallery-dl.bin"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 9.99.0\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("gallery-dl"), "1.0.0");
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "1.0.0");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("gallery-dl.bin"),
+            &[TEST_KEY],
+        )
+        .await
+        .expect("update ok");
+
+        assert_eq!(status.new_version.as_deref(), Some("9.99.0"));
+        assert_eq!(
+            std::fs::read_to_string(updates.path().join("gallery-dl.version")).unwrap(),
+            "9.99.0",
+            "the marker must hold the version the binary reports, not its tag"
+        );
+        assert_eq!(current_version(&resolver).await.as_deref(), Some("9.99.0"));
+    }
+
+    /// The stale-copy bug as Windows users meet it, played with a shell
+    /// stand-in: gallery-dl self-updated before markers existed, then a Goop
+    /// bundling a newer gallery-dl was installed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_self_update_is_not_taken_for_the_current_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"v1.32.11"}"#))
+            .mount(&server)
+            .await;
+        // No download mock: the bundled copy is already the latest release.
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("gallery-dl"), "1.32.11");
+        let updates = TempDir::new().unwrap();
+        write_script(&updates.path().join("gallery-dl"), "1.32.4");
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "v1.32.11");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("gallery-dl.bin"),
+            &[TEST_KEY],
+        )
+        .await
+        .expect("ok");
+
+        assert!(!status.attempted);
+        assert_eq!(status.previous_version.as_deref(), Some("1.32.11"));
+        assert!(status.message.contains("up to date (1.32.11)"));
+    }
+
+    /// The resolver would ignore an installed release that is no newer than
+    /// the bundled copy, so the updater must not download one — here because
+    /// the bundled binary won't run, which leaves no version to compare with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_release_no_newer_than_the_bundled_copy_is_not_downloaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tag_name":"v1.32.11"}"#))
+            .mount(&server)
+            .await;
+        // No download mocks: fetching the checksums would 404 and error.
+
+        let bundled = TempDir::new().unwrap();
+        std::fs::write(bundled.path().join("gallery-dl"), [0u8, 1, 2, 3]).unwrap();
+        let updates = TempDir::new().unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("gallery-dl", "v1.32.11");
+
+        let status = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("gallery-dl.bin"),
+            &[TEST_KEY],
+        )
+        .await
+        .expect("ok");
+
+        assert!(!status.attempted);
+        assert!(
+            status
+                .message
+                .contains("not newer than the bundled v1.32.11"),
+            "{}",
+            status.message
+        );
+        assert!(!updates.path().join("gallery-dl").exists());
     }
 }
