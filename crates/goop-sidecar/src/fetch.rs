@@ -402,7 +402,11 @@ pub(crate) fn vet_version(
     if parse_version(release).is_none() {
         return Err(format!("the release tag {release:?} is not a version"));
     }
-    if parse_version(&v).is_none() {
+    // The installed version is recorded beside the binary, and the resolver
+    // only believes a record holding one plain version token
+    // (`binaries::read_version_marker`). A version it can't read back would
+    // install a binary the resolver then ignores.
+    if !is_safe_tag(&v) || parse_version(&v).is_none() {
         return Err(format!(
             "the downloaded binary reports an unreadable version {v:?}"
         ));
@@ -940,6 +944,9 @@ mod tests {
         };
         assert!(refused(None, "2026.10.21", Some("2026.06.09")).contains("did not run"));
         assert!(refused(Some("garbage"), "2026.10.21", None).contains("unreadable"));
+        // Parseable, but not something the resolver would read back.
+        assert!(refused(Some("2026.10.21+dev"), "2026.10.21", None).contains("unreadable"));
+        assert!(refused(Some("2026.10.21\nWARNING: x"), "2026.10.21", None).contains("unreadable"));
         assert!(refused(Some("2026.01.01"), "nightly", None).contains("not a version"));
         assert!(refused(Some("2026.07.04"), "2026.10.21", Some("2026.06.09")).contains("older"));
         assert!(refused(Some("2026.07.04"), "2026.10.21", None).contains("older"));

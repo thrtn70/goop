@@ -200,10 +200,10 @@ async fn update_with(
     // beside it is newer than the bundled one. `installed` is the version the
     // vetted binary itself reported, so the marker can't hold a number the
     // binary doesn't have.
+    // See `record_update_version` for why a failure here keeps the download.
     if let Err(e) = binaries::record_update_version(&dest, &installed).await {
-        binaries::discard_update(&dest, LABEL).await;
         return Err(GoopError::Queue(format!(
-            "yt-dlp update: could not record the installed version: {e}"
+            "yt-dlp update: installed {installed} but could not record its version: {e}"
         )));
     }
 
@@ -1044,6 +1044,106 @@ mod tests {
         assert!(!updates.path().join("yt-dlp").exists());
     }
 
+    /// A version record that can't be written must not cost the download,
+    /// and must not let the resolver run a binary it has no record for.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unrecorded_download_is_kept_but_not_used() {
+        let server = MockServer::start().await;
+        serve_latest(&server, "2026.07.04").await;
+        serve_signed_sums(&server, "2026.07.04", "yt-dlp-newer.sums").await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.04\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        let updates = TempDir::new().unwrap();
+        // A directory where the record goes makes writing it fail.
+        std::fs::create_dir(updates.path().join("yt-dlp.version")).unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
+
+        let err = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+            &[TEST_KEY],
+        )
+        .await
+        .expect_err("an unrecorded install must be reported");
+        assert!(
+            err.to_string().contains("could not record its version"),
+            "{err}"
+        );
+        assert!(
+            updates.path().join("yt-dlp").is_file(),
+            "the download must be kept"
+        );
+        assert_eq!(
+            current_version(&resolver).await.as_deref(),
+            Some("2026.06.09"),
+            "the resolver must ignore a download with no record"
+        );
+    }
+
+    /// An older record that survives a failed write still only says the
+    /// download is newer than the bundled copy, which it is, so the download
+    /// is used.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_download_under_an_older_record_is_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let server = MockServer::start().await;
+        serve_latest(&server, "2026.07.04").await;
+        serve_signed_sums(&server, "2026.07.04", "yt-dlp-newer.sums").await;
+        Mock::given(method("GET"))
+            .and(path("/dl/2026.07.04/yt-dlp_linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\necho 2026.07.04\n".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let bundled = TempDir::new().unwrap();
+        write_script(&bundled.path().join("yt-dlp"), "2026.06.09");
+        let updates = TempDir::new().unwrap();
+        write_script(&updates.path().join("yt-dlp"), "2026.06.30");
+        let marker = updates.path().join("yt-dlp.version");
+        std::fs::write(&marker, "2026.06.30").unwrap();
+        // A read-only record makes writing the new one fail.
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let resolver = BinaryResolver::new(bundled.path().to_path_buf())
+            .with_update_dir(updates.path().to_path_buf())
+            .with_bundled_version("yt-dlp", "2026.06.09");
+
+        let err = update_with(
+            &resolver,
+            &format!("{}/latest", server.uri()),
+            &format!("{}/dl", server.uri()),
+            Some("yt-dlp_linux"),
+            &[TEST_KEY],
+        )
+        .await
+        .expect_err("an unrecorded install must be reported");
+        assert!(
+            err.to_string().contains("could not record its version"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "2026.06.30");
+        assert_eq!(
+            current_version(&resolver).await.as_deref(),
+            Some("2026.07.04"),
+            "the download must replace the earlier update, not fall back to the bundled copy"
+        );
+    }
+
     /// With the bundled yt-dlp gone (quarantined by antivirus, say), an
     /// update to the very version Goop bundles is the repair, so it must be
     /// installed and used. An earlier, older update supplies the current
@@ -1088,6 +1188,16 @@ mod tests {
         assert_eq!(
             resolver.resolve("yt-dlp").unwrap().path,
             updates.path().join("yt-dlp")
+        );
+        // The earlier update would already resolve to that path, so check it
+        // was actually replaced and re-recorded.
+        assert_eq!(
+            std::fs::read_to_string(updates.path().join("yt-dlp.version")).unwrap(),
+            "2026.07.04"
+        );
+        assert_eq!(
+            current_version(&resolver).await.as_deref(),
+            Some("2026.07.04")
         );
     }
 }

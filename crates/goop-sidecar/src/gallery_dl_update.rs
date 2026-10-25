@@ -175,10 +175,10 @@ async fn update_with(
     // beside it is newer than the bundled one. `installed` is the version the
     // vetted binary itself reported, so the marker can't hold a number the
     // binary doesn't have.
+    // See `record_update_version` for why a failure here keeps the download.
     if let Err(e) = binaries::record_update_version(&dest, &installed).await {
-        binaries::discard_update(&dest, LABEL).await;
         return Err(GoopError::Queue(format!(
-            "gallery-dl update: could not record the installed version: {e}"
+            "gallery-dl update: installed {installed} but could not record its version: {e}"
         )));
     }
 
