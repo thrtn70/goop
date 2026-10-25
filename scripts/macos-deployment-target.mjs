@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Print the oldest macOS Goop declares it runs on: bundle.macOS.minimumSystemVersion
 // in src-tauri/tauri.conf.json. That key is the only place the number lives.
-// The bundler writes it into Info.plist and tauri-build links the executable
-// for it; scripts/build-static-heif-deps.sh builds the static HEIC stack for
-// it, and the workflows put it in that stack's cache key.
+// The bundler writes it into Info.plist, and `tauri build` exports it as
+// MACOSX_DEPLOYMENT_TARGET for its cargo build (tauri-build repeats it for the
+// app crate); scripts/build-static-heif-deps.sh builds the static HEIC stack
+// for it, and the workflows put it in that stack's cache key. On macOS runners
+// the workflows also export it as MACOSX_DEPLOYMENT_TARGET, so plain cargo
+// builds and tests compile their cc and cmake code for it as well.
 //
 // Usage:
 //   node scripts/macos-deployment-target.mjs [path/to/tauri.conf.json]

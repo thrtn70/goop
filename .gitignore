@@ -56,3 +56,6 @@ Thumbs.db
 # No trailing slash: a directory in the main checkout, a symlink in linked
 # worktrees. A dir-only pattern would not match the symlink.
 /.heif-deps
+# tesseract and libtesseract.5.dylib built for the macOS floor by
+# scripts/build-tesseract-macos.sh. No trailing slash, as above.
+/.tesseract-deps

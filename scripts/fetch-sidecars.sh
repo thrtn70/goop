@@ -36,10 +36,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
 # immutable URL (the osxexperts arm64 builds) is still content-pinned: an
 # upstream replacement fails the build until its bytes are reviewed and this
 # digest is deliberately updated.
-YT_DLP_VERSION="2026.08.19"
-YT_DLP_WINDOWS_SHA256="66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
-YT_DLP_MACOS_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
-YT_DLP_PORTABLE_SHA256="1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6"
+# The bundled yt-dlp binaries carry their own certifi and urllib3, which
+# change only with this pin. scripts/check-yt-dlp-runtime.mjs asks the fetched
+# binary which ones it imports and holds them to Goop's floors.
+YT_DLP_VERSION="2026.10.21"
+YT_DLP_WINDOWS_SHA256="33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
+YT_DLP_MACOS_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
+YT_DLP_PORTABLE_SHA256="b7af77f686e95f7845ce8d09d21957718febb8b48b30555adb9dd2292ad7bf14"
 
 # Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
 # binary and its own `--update` targets GitHub (which no longer hosts the
@@ -67,9 +70,10 @@ MUPDF_BASE="https://github.com/ArtifexSoftware/mupdf-downloads/releases/download
 # UB-Mannheim wiki points to the same artifact). The installer extracts
 # cleanly with 7z — same pattern we use for Ghostscript and mutool, and
 # the resulting tesseract.exe is MSVC-built so it composes with our
-# other Windows sidecars without runtime mismatch. macOS uses Homebrew's
-# tesseract formula. mutool ships without HAVE_TESSERACT, so v0.2.4 OCR
-# runs through a separate tesseract subprocess.
+# other Windows sidecars without runtime mismatch. macOS builds the same
+# release line from source for the declared floor
+# (scripts/build-tesseract-macos.sh). mutool ships without HAVE_TESSERACT, so
+# v0.2.4 OCR runs through a separate tesseract subprocess.
 TESSERACT_VER="5.5.0"
 TESSERACT_BUILD="5.5.0.20241111"
 TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/releases/download/${TESSERACT_VER}/tesseract-ocr-w64-setup-${TESSERACT_BUILD}.exe"
@@ -84,9 +88,12 @@ TESSDATA_VER="4.1.0"
 TESSDATA_BASE="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_VER}"
 TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
 
-# Homebrew is used only for the macOS builds that have no suitable upstream
-# arm64 bundle. Keep the reviewed formula outputs version-pinned: a formula
-# bump must fail the release until its CLI and dylib closure are rechecked.
+# Homebrew supplies the macOS builds that have no suitable upstream arm64
+# bundle, and the libraries the tesseract source build links. Keep the
+# reviewed formula outputs version-pinned: a formula bump must fail the
+# release until its CLI and dylib closure are rechecked. MACOS_TESSERACT_VERSION
+# pins the Homebrew tesseract that its gs was built against, which the source
+# build must match (scripts/build-tesseract-macos.sh holds the source pin).
 MACOS_GHOSTSCRIPT_VERSION="10.07.1"
 MACOS_MUPDF_VERSION="1.28.3"
 MACOS_TESSERACT_VERSION="5.5.3"
@@ -206,8 +213,9 @@ case "$TARGET" in
     # gallery-dl — built locally via PyInstaller because Codeberg ships
     # no macOS binary. The build script writes directly to OUT_DIR.
     "$(git rev-parse --show-toplevel)/scripts/build-gallery-dl-macos.sh" "$TARGET"
-    # Ghostscript — via Homebrew. macos-14 ships with arm64 Homebrew at
-    # /opt/homebrew. Apple Silicon only — Intel Mac was dropped in v0.2.0.
+    # Homebrew, for the macOS sidecars with no suitable upstream arm64 build.
+    # macos-14 ships with arm64 Homebrew at /opt/homebrew. Apple Silicon
+    # only — Intel Mac was dropped in v0.2.0.
     GS_BREW=/opt/homebrew/bin/brew
     # Preserve the runner's reviewed bottled set. Current Homebrew metadata can
     # require source-only dependencies on this supported runner, so never update
@@ -218,6 +226,50 @@ case "$TARGET" in
         "$GS_BREW" install --quiet "$formula"
       fi
     }
+    # tesseract — built from source for the declared macOS floor by
+    # scripts/build-tesseract-macos.sh, because Homebrew's bottle is linked
+    # for the macOS of the machine that built it (14.8.5 for 5.5.3 on
+    # Sonoma). The build links Homebrew's leptonica and libarchive and needs
+    # autotools to configure.
+    #
+    # Homebrew's own tesseract is still installed: its ghostscript depends on
+    # it and was linked against its libtesseract.5.dylib. That library is
+    # replaced in the bundle by this build's, so both are held to one
+    # version, and gs loads the ABI it was built for.
+    for formula in autoconf automake libtool pkgconf leptonica libarchive; do
+      ensure_reviewed_brew_formula "$formula"
+    done
+    ensure_reviewed_brew_formula tesseract
+    BREW_TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
+    BREW_TESS_VERSION="$("$BREW_TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
+    [ "$BREW_TESS_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
+      echo "::error::Tesseract version drift: Homebrew's gs is built against tesseract $BREW_TESS_VERSION, expected $MACOS_TESSERACT_VERSION" >&2
+      exit 1
+    }
+    "$(git rev-parse --show-toplevel)/scripts/build-tesseract-macos.sh"
+    TESS_PREFIX="$(git rev-parse --show-toplevel)/.tesseract-deps"
+    TESS_ACTUAL_VERSION="$("$TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
+    [ "$TESS_ACTUAL_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
+      echo "::error::Tesseract version drift: expected $MACOS_TESSERACT_VERSION, got $TESS_ACTUAL_VERSION" >&2
+      exit 1
+    }
+    rm -f "$OUT_DIR/tesseract-$TARGET"
+    cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
+    chmod +wx "$OUT_DIR/tesseract-$TARGET"
+    # The binary loads libtesseract / libleptonica / libarchive / libwebp /
+    # libtiff / libopenjp2 / libgif / ... by absolute paths that don't exist
+    # on a clean Mac. bundle_macos_dylibs copies that transitive dylib graph
+    # next to the sidecar, rewrites every load command to
+    # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
+    # tesseract resolves and loads them as siblings at runtime.
+    #
+    # It runs before gs on purpose: the helper keeps the first copy of each
+    # basename, so gs's libtesseract.5.dylib load command is rewritten to
+    # this build's copy and Homebrew's is never bundled.
+    bundle_macos_dylibs "$OUT_DIR/tesseract-$TARGET"
+    # (Left writable, for the same reason as gs below.)
+
+    # Ghostscript — via Homebrew.
     ensure_reviewed_brew_formula ghostscript
     GS_PREFIX="$("$GS_BREW" --prefix ghostscript)"
     GS_ACTUAL_VERSION="$("$GS_PREFIX/bin/gs" --version)"
@@ -234,8 +286,9 @@ case "$TARGET" in
     # tesseract: externalBin ships only the binary, so bundle the transitive
     # closure next to it and rewrite every load command to @loader_path.
     # bundle_macos_dylibs keys copies by basename, so the dylibs gs shares
-    # with the tesseract sidecar bundled below are written once and reused
-    # (both binaries end up pointing at the same @loader_path/<name> sibling).
+    # with the tesseract sidecar bundled above, libtesseract.5.dylib among
+    # them, are written once and reused (both binaries end up pointing at the
+    # same @loader_path/<name> sibling).
     chmod +wx "$OUT_DIR/gs-$TARGET"
     bundle_macos_dylibs "$OUT_DIR/gs-$TARGET"
     # Stays writable. Homebrew installs 555 and the mode used to be restored
@@ -275,25 +328,21 @@ case "$TARGET" in
     # is a no-op and leaves it read-only — same bundler failure as gs above.
     # mutool needs no dylib bundling, so nothing else here would have caught it.
     chmod u+wx "$OUT_DIR/mutool-$TARGET"
-    # tesseract — via Homebrew's tesseract formula. The brew binary loads
-    # libtesseract / libleptonica / libarchive / libwebp / libtiff /
-    # libopenjp2 / libgif / ... from /opt/homebrew — paths that don't
-    # exist on a clean Mac. bundle_macos_dylibs copies that transitive
-    # dylib graph next to the sidecar, rewrites every load command to
-    # @loader_path/<basename>, and ad-hoc re-signs each file so the bundled
-    # tesseract resolves and loads them as siblings at runtime.
-    ensure_reviewed_brew_formula tesseract
-    TESS_PREFIX="$("$GS_BREW" --prefix tesseract)"
-    TESS_ACTUAL_VERSION="$("$TESS_PREFIX/bin/tesseract" --version 2>&1 | awk 'NR == 1 { print $2 }')"
-    [ "$TESS_ACTUAL_VERSION" = "$MACOS_TESSERACT_VERSION" ] || {
-      echo "::error::Tesseract version drift: expected $MACOS_TESSERACT_VERSION, got $TESS_ACTUAL_VERSION" >&2
-      exit 1
-    }
-    rm -f "$OUT_DIR/tesseract-$TARGET"
-    cp "$TESS_PREFIX/bin/tesseract" "$OUT_DIR/tesseract-$TARGET"
-    chmod +wx "$OUT_DIR/tesseract-$TARGET"
-    bundle_macos_dylibs "$OUT_DIR/tesseract-$TARGET"
-    # Writable for the same reason as gs above.
+
+    # Both copies of this tesseract build must still be the ones built for
+    # the floor once gs's closure has been bundled: a libtesseract.5.dylib
+    # from Homebrew here would be linked for the build machine's macOS.
+    MACOS_FLOOR="$(node "$(git rev-parse --show-toplevel)/scripts/macos-deployment-target.mjs")"
+    for f in "$OUT_DIR/tesseract-$TARGET" "$OUT_DIR/libtesseract.5.dylib"; do
+      minos="$(vtool -show-build "$f" 2>/dev/null | awk '$1 == "minos" { print $2; exit }' || true)"
+      # Compared as versions, so a floor written 14.0.0 still matches 14.0.
+      awk -v a="$minos" -v b="$MACOS_FLOOR" '
+        function norm(v) { while (v ~ /\.0$/) sub(/\.0$/, "", v); return v "" }
+        BEGIN { exit !(a != "" && norm(a) == norm(b)) }' || {
+        echo "::error::$(basename "$f") is linked for macOS ${minos:-<unknown>}, not the declared $MACOS_FLOOR; it is not the tesseract build from scripts/build-tesseract-macos.sh" >&2
+        exit 1
+      }
+    done
 
     # Tauri's externalBin packaging copies ONLY the named binary into the
     # .app's Contents/MacOS — not the sibling dylibs we bundled for gs and
@@ -346,17 +395,20 @@ case "$TARGET" in
     # Load-command sweep — the generated map proves the right FILES are
     # bundled, not that every load command resolves inside the bundle. An
     # install_name_tool -change that silently failed (it is run with
-    # `2>/dev/null || true`) would leave an absolute /opt/homebrew path that
-    # loads fine on this Homebrew-equipped runner but dyld-faults on a clean
-    # user Mac. An @rpath/<name> is fine only if <name> is a co-located
-    # sibling (the @loader_path rpath resolves it); otherwise it dangles.
+    # `2>/dev/null || true`) would leave an absolute path, into /opt/homebrew
+    # or the .tesseract-deps build prefix, that loads fine on the machine that
+    # ran this script but dyld-faults on a clean user Mac. Only /usr/lib and
+    # /System are on every Mac. An @rpath/<name> is fine only if <name> is a
+    # co-located sibling (the @loader_path rpath resolves it); otherwise it
+    # dangles.
     # This is the real correctness gate now that the file map is generated.
     for f in "$OUT_DIR/gs-$TARGET" "$OUT_DIR/tesseract-$TARGET" "$OUT_DIR"/*.dylib; do
       [ -f "$f" ] || continue
       while IFS= read -r ref; do
         case "$ref" in
-          /opt/homebrew/*)
-            echo "::error::$(basename "$f") keeps a Homebrew load command: $ref" >&2
+          /usr/lib/*|/System/*) ;;
+          /*)
+            echo "::error::$(basename "$f") keeps a load command outside the bundle: $ref" >&2
             exit 1 ;;
           @rpath/*)
             [ -f "$OUT_DIR/${ref#@rpath/}" ] || {
@@ -379,7 +431,7 @@ case "$TARGET" in
     # ffmpeg/ffprobe are the known offender (evermeet.cx's getrelease silently
     # served x86_64, which is why the fetch above moved to osxexperts.net) and
     # they appear in no verification loop anywhere. But they are not the only
-    # unpinned arch: yt-dlp_macos comes from releases/latest/download, and
+    # arch we do not choose: yt-dlp_macos is upstream's prebuilt binary, and
     # gallery-dl is PyInstaller-frozen against whatever python3 the runner
     # resolves, so it inherits the INTERPRETER's arch, not the runner's.
     # Assert on the artefacts rather than trusting any of that.
