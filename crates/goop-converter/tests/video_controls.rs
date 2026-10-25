@@ -636,7 +636,7 @@ fn incomplete_display_matrix_disables_both_modes_but_rotate_tag_remains_supporte
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn incomplete_display_matrix_rejected_before_staging() {
     for side in [
         json!({"side_data_type":"Display Matrix","rotation":90}),
@@ -661,7 +661,9 @@ async fn incomplete_display_matrix_rejected_before_staging() {
                 .to_string_lossy()
                 .into_owned();
             req.video_options = Some(options);
-            let error = run_explicit(&r, &req, &inventory()).await.unwrap_err();
+            let error = common::held_clock::hold(run_explicit(&r, &req, &inventory()))
+                .await
+                .unwrap_err();
             assert!(error.user_message().contains("rotation"), "{error:?}");
             assert!(!tmp.path().join("absent-parent").exists());
         }
@@ -2061,7 +2063,7 @@ fn executable_waits_out_an_inherited_writer_before_returning() {
     holder.wait().unwrap();
 }
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn output_mismatch_never_publishes() {
     let tmp = tempfile::tempdir().unwrap();
     let input = tmp.path().join("input.mp4");
@@ -2081,11 +2083,13 @@ async fn output_mismatch_never_publishes() {
     let mut req = request();
     req.input_path = input.to_string_lossy().into_owned();
     req.output_path = out.to_string_lossy().into_owned();
-    assert!(run_explicit(&r, &req, &inventory())
-        .await
-        .unwrap_err()
-        .user_message()
-        .contains("geometry"));
+    assert!(
+        common::held_clock::hold(run_explicit(&r, &req, &inventory()))
+            .await
+            .unwrap_err()
+            .user_message()
+            .contains("geometry")
+    );
     assert!(!out.exists());
     assert_eq!(std::fs::read(input).unwrap(), b"input");
     println!("OUTPUT MISMATCH: staged output removed, source unchanged, no publication");
@@ -2208,7 +2212,7 @@ fn silent_encoding_and_legacy_inventory_boundaries() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn legacy_probe_retains_its_existing_limits() {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("ffprobe");
@@ -2225,11 +2229,11 @@ dd if=/dev/zero bs=1100000 count=1 2>/dev/null | tr '\000' ' '
         legacy.is_ok(),
         "legacy probing must retain existing behavior: {legacy:?}"
     );
-    let explicit = FfmpegBackend::probe_with_cancel(
+    let explicit = common::held_clock::hold(FfmpegBackend::probe_with_cancel(
         &resolver,
         Path::new("source.mp4"),
         &CancellationToken::new(),
-    )
+    ))
     .await;
     assert!(explicit.unwrap_err().user_message().contains("1 MiB"));
 }

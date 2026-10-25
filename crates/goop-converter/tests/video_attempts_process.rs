@@ -22,6 +22,8 @@ struct Fixture {
     output: PathBuf,
     attempts: PathBuf,
     ffmpeg: PathBuf,
+    /// Where the `sleep` mode's ffmpeg arms.
+    pid_file: PathBuf,
 }
 
 fn executable(path: &Path, body: &str) {
@@ -36,6 +38,7 @@ fn fixture_with_probe(mode: &str, probe_json: &str) -> Fixture {
     let bin = directory.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let attempts = directory.path().join("attempts.txt");
+    let pid_file = directory.path().join("ffmpeg.pid");
     let script = format!(
         r#"
 encoder=unknown
@@ -50,12 +53,13 @@ case '{}' in
   fallback) [ "$encoder" = h264_videotoolbox ] && exit 9 ;;
   fail) exit 9 ;;
   no_output) exit 0 ;;
-  sleep) exec sleep 20 ;;
+  sleep) {} ;;
 esac
 printf 'encoded media' > "$output"
 "#,
         attempts.display(),
-        mode
+        mode,
+        common::held_clock::script(&pid_file),
     );
     let ffmpeg = bin.join("ffmpeg");
     executable(&ffmpeg, &script);
@@ -69,6 +73,7 @@ printf 'encoded media' > "$output"
         output,
         attempts,
         ffmpeg,
+        pid_file,
         _directory: directory,
     }
 }
@@ -282,7 +287,7 @@ async fn spawn_io_failure_does_not_retry() {
     assert!(!fixture.output.exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_does_not_retry() {
     let fixture = fixture("sleep");
     let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
@@ -290,21 +295,15 @@ async fn cancellation_does_not_retry() {
     let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
     executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
     let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
-    let wait_for_ffmpeg = async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while attempted_encoders(&fixture).is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("ffmpeg did not record its first encoder attempt");
-        trigger.cancel();
-    };
     let backend = hardware_backend(&fixture);
     let req = encode_request(&fixture);
-    let conversion = backend.convert(JobId::new(), &req, cancel);
-    let (result, ()) = tokio::join!(conversion, wait_for_ffmpeg);
+    // ffmpeg records its encoder attempt before it arms.
+    let result = common::held_clock::cancel(
+        &fixture.pid_file,
+        &cancel,
+        backend.convert(JobId::new(), &req, cancel.clone()),
+    )
+    .await;
 
     assert!(matches!(result, Err(GoopError::Cancelled)));
     assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
@@ -341,17 +340,19 @@ async fn publication_failure_does_not_retry_encoder() {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_publication_failure_never_retries_software() {
     let fixture = fixture("success");
-    let result = hardware_required_backend(&fixture, true)
-        .with_publication_observer(Arc::new(FailIntent))
-        .convert(
-            JobId::new(),
-            &hardware_required_request(&fixture),
-            CancellationToken::new(),
-        )
-        .await;
+    let result = common::held_clock::hold(
+        hardware_required_backend(&fixture, true)
+            .with_publication_observer(Arc::new(FailIntent))
+            .convert(
+                JobId::new(),
+                &hardware_required_request(&fixture),
+                CancellationToken::new(),
+            ),
+    )
+    .await;
     assert!(matches!(result, Err(GoopError::Queue(_))));
     assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
     assert!(!fixture.output.exists());
@@ -403,16 +404,18 @@ async fn completed_attempt_is_frozen_before_publication() {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_execution_attempt_and_result_are_frozen_before_publication() {
     let fixture = fixture("success");
     let observer = Arc::new(RecordingObserver::default());
     let request = hardware_required_request(&fixture);
-    let result = hardware_required_backend(&fixture, false)
-        .with_publication_observer(observer.clone())
-        .convert(JobId::new(), &request, CancellationToken::new())
-        .await
-        .unwrap();
+    let result = common::held_clock::hold(
+        hardware_required_backend(&fixture, false)
+            .with_publication_observer(observer.clone())
+            .convert(JobId::new(), &request, CancellationToken::new()),
+    )
+    .await
+    .unwrap();
     let expected = goop_converter::backend::conversion_job_result(&result);
     assert_eq!(observer.intent.lock().unwrap().as_ref(), Some(&expected));
     assert_eq!(observer.published.lock().unwrap().as_ref(), Some(&expected));
@@ -458,7 +461,7 @@ async fn enabled_hardware_with_no_selected_encoder_is_not_fallback() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn explicit_software_reports_explicit_context_and_bypasses_hardware() {
     let fixture = fixture("success");
     let req: ConvertRequest = serde_json::from_value(json!({
@@ -474,10 +477,13 @@ async fn explicit_software_reports_explicit_context_and_bypasses_hardware() {
         }
     }))
     .unwrap();
-    let result = hardware_backend(&fixture)
-        .convert(JobId::new(), &req, CancellationToken::new())
-        .await
-        .unwrap();
+    let result = common::held_clock::hold(hardware_backend(&fixture).convert(
+        JobId::new(),
+        &req,
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(attempted_encoders(&fixture), ["libx264"]);
     assert_eq!(
@@ -492,13 +498,17 @@ async fn explicit_software_reports_explicit_context_and_bypasses_hardware() {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_success_is_ordinal_one_and_independent_of_global_toggle() {
     for global_enabled in [false, true] {
         let fixture = fixture("success");
         let request = hardware_required_request(&fixture);
-        let result = hardware_required_backend(&fixture, global_enabled)
-            .convert(JobId::new(), &request, CancellationToken::new())
+        let result =
+            common::held_clock::hold(hardware_required_backend(&fixture, global_enabled).convert(
+                JobId::new(),
+                &request,
+                CancellationToken::new(),
+            ))
             .await
             .unwrap();
         assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
@@ -519,56 +529,53 @@ async fn hardware_required_success_is_ordinal_one_and_independent_of_global_togg
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_subprocess_failure_never_retries_software() {
     let fixture = fixture("fallback");
-    let result = hardware_required_backend(&fixture, true)
-        .convert(
-            JobId::new(),
-            &hardware_required_request(&fixture),
-            CancellationToken::new(),
-        )
-        .await;
+    let result = common::held_clock::hold(hardware_required_backend(&fixture, true).convert(
+        JobId::new(),
+        &hardware_required_request(&fixture),
+        CancellationToken::new(),
+    ))
+    .await;
     assert!(matches!(result, Err(GoopError::SubprocessFailed { .. })));
     assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_output_validation_failure_never_retries_software() {
     let fixture = fixture("no_output");
-    let result = hardware_required_backend(&fixture, true)
-        .convert(
-            JobId::new(),
-            &hardware_required_request(&fixture),
-            CancellationToken::new(),
-        )
-        .await;
+    let result = common::held_clock::hold(hardware_required_backend(&fixture, true).convert(
+        JobId::new(),
+        &hardware_required_request(&fixture),
+        CancellationToken::new(),
+    ))
+    .await;
     assert!(result.is_err());
     assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);
     assert!(!fixture.output.exists());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_spawn_failure_never_retries_software() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = fixture("success");
     std::fs::set_permissions(&fixture.ffmpeg, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let result = hardware_required_backend(&fixture, true)
-        .convert(
-            JobId::new(),
-            &hardware_required_request(&fixture),
-            CancellationToken::new(),
-        )
-        .await;
+    let result = common::held_clock::hold(hardware_required_backend(&fixture, true).convert(
+        JobId::new(),
+        &hardware_required_request(&fixture),
+        CancellationToken::new(),
+    ))
+    .await;
     assert!(matches!(result, Err(GoopError::Io(_))));
     assert!(attempted_encoders(&fixture).is_empty());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hardware_required_cancellation_never_retries_software() {
     let fixture = fixture("sleep");
     let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
@@ -576,21 +583,15 @@ async fn hardware_required_cancellation_never_retries_software() {
     let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
     executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
     let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
-    let wait_for_ffmpeg = async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while attempted_encoders(&fixture).is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("ffmpeg did not record its first encoder attempt");
-        trigger.cancel();
-    };
     let backend = hardware_required_backend(&fixture, true);
     let req = hardware_required_request(&fixture);
-    let conversion = backend.convert(JobId::new(), &req, cancel);
-    let (result, ()) = tokio::join!(conversion, wait_for_ffmpeg);
+    // ffmpeg records its encoder attempt before it arms.
+    let result = common::held_clock::cancel(
+        &fixture.pid_file,
+        &cancel,
+        backend.convert(JobId::new(), &req, cancel.clone()),
+    )
+    .await;
 
     assert!(matches!(result, Err(GoopError::Cancelled)));
     assert_eq!(attempted_encoders(&fixture), ["h264_videotoolbox"]);

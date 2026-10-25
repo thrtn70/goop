@@ -4,7 +4,7 @@ import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,directoryBytes,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -17,9 +17,8 @@ const hash=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 export function normalizeSuccess(metrics, code, timedOut) {
  return metrics.success === true && code === 0 && !timedOut && Number.isFinite(metrics.process_ms) && metrics.process_ms >= 0;
 }
-export function directoryBytes(directory) {
- return readdirSync(directory).reduce((sum,name)=>{const path=join(directory,name),stats=lstatSync(path);return sum+(stats.isDirectory()?directoryBytes(path):stats.size);},0);
-}
+// One byte count for every storage monitor, so they agree on vanished entries.
+export {directoryBytes};
 export function ownedSymlinks(directory){const links=[];for(const name of readdirSync(directory)){const path=join(directory,name),stats=lstatSync(path);if(stats.isSymbolicLink())links.push(path);else if(stats.isDirectory())links.push(...ownedSymlinks(path));}return links;}
 export function effectiveHardware(metrics,hardwareEnabled) {
  const summary=metrics.result?.video_execution;
