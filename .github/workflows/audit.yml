@@ -43,20 +43,32 @@ jobs:
       # built static by the script (every other codec OFF); apt's
       # libheif-dev is NOT used (it would dynamic-link and drift).
       # The macOS floor is in the key on every runner: one key format, and
-      # the script refuses to run without a floor anyway.
+      # the script refuses to run without a floor anyway. The step is the
+      # same in every job; only on a macOS runner does it also export the
+      # floor as MACOSX_DEPLOYMENT_TARGET.
       - name: macOS deployment floor
         id: macos-floor
         run: |
           floor="$(node scripts/macos-deployment-target.mjs)"
           [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
           echo "version=$floor" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: .heif-deps
           key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      # libheif-sys's rlib carries a copy of libheif.a and libde265.a, and its
+      # fingerprint does not track .heif-deps, so a restored Rust cache would
+      # link whichever stack it was built against. Cleaning it makes the next
+      # build relink this one. Without a profile, `cargo clean -p` only
+      # empties target/debug.
       - name: Static HEIC decode stack (libde265 + libheif)
         run: |
           ./scripts/build-static-heif-deps.sh
+          cargo clean -p libheif-sys
+          cargo clean -p libheif-sys --release
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       - name: Resolve target
@@ -211,12 +223,33 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-      # fetch-sidecars.sh's macOS path generates src-tauri/tauri.macos.conf.json
-      # (the sidecar dylib bundle map) with `node`. Declare the dependency
-      # rather than leaning on the runner image happening to preinstall Node.
+      # The floor step below and fetch-sidecars.sh's macOS path (which
+      # generates src-tauri/tauri.macos.conf.json, the sidecar dylib bundle
+      # map) both run `node`. Declare the dependency rather than leaning on
+      # the runner image happening to preinstall Node.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22" }
+      # On macOS every later step gets the declared floor as
+      # MACOSX_DEPLOYMENT_TARGET, the value `tauri build` compiles the
+      # release for. Without it the cc and cmake build scripts take the
+      # SDK's own version, so the tests would exercise sqlite, ring, libjxl
+      # and raw.m built for a newer macOS than the ones that ship. It runs
+      # before the Rust cache so the floor is part of that cache's key:
+      # libjxl's cmake build does not rerun when the variable changes, so a
+      # cache from before the floor would keep its old objects.
+      - name: macOS deployment floor
+        id: macos-floor
+        if: matrix.os == 'macos-14'
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Startup and performance harnesses (macOS)
         if: matrix.os == 'macos-14'
         run: node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
@@ -351,22 +384,20 @@ jobs:
       # the cache key: a new one restores nothing built for the old. The
       # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
       # which would also change with every version bump.
-      - name: macOS deployment floor
-        id: macos-floor
-        if: matrix.os == 'macos-14'
-        run: |
-          floor="$(node scripts/macos-deployment-target.mjs)"
-          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
-          echo "version=$floor" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         if: matrix.os == 'macos-14'
         with:
           path: .heif-deps
           key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      # libheif-sys's rlib carries a copy of the stack (see the rust job), so
+      # it is rebuilt against this one: the floor in the Rust cache key does
+      # not cover a stack rebuilt for a new version of the script.
       - name: Static HEIC stack (macOS)
         if: matrix.os == 'macos-14'
         run: |
           ./scripts/build-static-heif-deps.sh
+          cargo clean -p libheif-sys
+          cargo clean -p libheif-sys --release
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       - name: HEIC static link guard (macOS)
