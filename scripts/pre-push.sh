@@ -56,6 +56,7 @@ run_step "yt-dlp runtime check" node --test scripts/check-yt-dlp-runtime.test.mj
 run_step "sidecar provenance" node --test scripts/sidecar-provenance.test.mjs
 run_step "sidecar download cache" node --test scripts/sidecar-download-cache.test.mjs
 run_step "download helper" ./scripts/fetch-with-retry.test.sh
+run_step "tesseract build"   node --test scripts/tesseract-build.test.mjs
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   run_step "macOS baselines" node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs

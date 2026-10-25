@@ -197,6 +197,24 @@ jobs:
           ./scripts/build-static-heif-deps.sh
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
+      # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
+      # source for the declared floor (scripts/build-tesseract-macos.sh).
+      # The build is cached like the HEIC stack, and the script checks a
+      # restored one before it reuses it. The runner image is in the key as
+      # well: it fixes the Homebrew leptonica and libarchive the build links,
+      # which the script also checks, and a cache restored by its exact key
+      # is never saved again, so a new image would otherwise rebuild on
+      # every run.
+      - name: Runner image
+        id: runner-image
+        if: matrix.os == 'macos-14'
+        run: |
+          echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'macos-14'
+        with:
+          path: .tesseract-deps
+          key: tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-image-${{ steps.runner-image.outputs.version }}-${{ hashFiles('scripts/build-tesseract-macos.sh') }}
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"
@@ -235,10 +253,12 @@ jobs:
       # macos-floor step exports (without it they take the SDK default).
       # Nothing here re-checks those objects; only the linker would warn.
       #
-      # Everything else in Contents/MacOS is reported, not enforced. The
+      # Everything else in Contents/MacOS is reported, not enforced. Most
       # sidecars and their dylibs are upstream, Homebrew and PyInstaller
       # builds whose floor nothing in this repo sets; Homebrew bottles target
-      # the runner's own macOS. One whose minos is above the declared floor
+      # the macOS that built them. tesseract and libtesseract.5.dylib are the
+      # exception: fetch-sidecars.sh builds them for the floor and fails if
+      # either bundled copy is not. One whose minos is above the declared floor
       # was built for a newer macOS, so Goop's real floor may be higher than
       # it says. Only slices Apple Silicon runs count; an x86_64 slice counts
       # when it is the only one. For the PyInstaller sidecars the minos is
