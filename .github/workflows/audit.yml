@@ -28,9 +28,15 @@ jobs:
         run: ./scripts/fetch-with-retry.test.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with: { components: "rustfmt,clippy" }
+      # PR runs restore main's cache and save nothing. An entry is 0.2-2.2 GB
+      # per job, and one saved from a PR is scoped to that PR, so a few open
+      # PRs filled the 10 GB quota and LRU eviction dropped main's caches,
+      # the only ones every run can restore. The cost: a PR that changes
+      # Cargo dependencies rebuilds them on every push.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-directories: ~/.cargo/bin
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: System libs (Tauri 2 + image codecs)
         # v0.2.6: cmake added so jpegxl-sys's `vendored` feature can
         # build libjxl 0.11 from vendored source at compile time.
@@ -43,20 +49,34 @@ jobs:
       # built static by the script (every other codec OFF); apt's
       # libheif-dev is NOT used (it would dynamic-link and drift).
       # The macOS floor is in the key on every runner: one key format, and
-      # the script refuses to run without a floor anyway.
+      # the script refuses to run without a floor anyway. The step's script
+      # is the same in every job; only on a macOS runner does it also export
+      # the floor as MACOSX_DEPLOYMENT_TARGET.
       - name: macOS deployment floor
         id: macos-floor
         run: |
           floor="$(node scripts/macos-deployment-target.mjs)"
           [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
           echo "version=$floor" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
+      # Restore only; the heif-deps job saves it. On a miss the script
+      # builds the stack here, and nothing keeps it.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: .heif-deps
           key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      # libheif-sys's rlib carries a copy of libheif.a and libde265.a, and its
+      # fingerprint does not track .heif-deps, so a restored Rust cache would
+      # link whichever stack it was built against. Cleaning it makes the next
+      # build relink this one. Without a profile, `cargo clean -p` only
+      # empties target/debug.
       - name: Static HEIC decode stack (libde265 + libheif)
         run: |
           ./scripts/build-static-heif-deps.sh
+          cargo clean -p libheif-sys
+          cargo clean -p libheif-sys --release
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       - name: Resolve target
@@ -157,7 +177,10 @@ jobs:
       - run: npm run test
       - run: node --test scripts/release-workflow.test.mjs
       - run: node --test scripts/heif-deps.test.mjs
+      - run: node --test scripts/tesseract-build.test.mjs
       - run: node --test scripts/check-gallery-dl-runtime.test.mjs
+      - run: node --test scripts/check-yt-dlp-runtime.test.mjs
+      - run: node --test scripts/sidecar-provenance.test.mjs
       - run: node --test scripts/startup-fonts.test.mjs
       - run: node --test scripts/desktop-preview.test.mjs
       - run: node --test scripts/video-hardware-contract.test.mjs
@@ -178,7 +201,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      # Saves from main only; see the rust job.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust dep graph clear of mupdf-*
         run: |
           if cargo tree --workspace --prefix none --edges normal,build,dev 2>/dev/null | grep -i mupdf; then
@@ -209,12 +235,35 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-      # fetch-sidecars.sh's macOS path generates src-tauri/tauri.macos.conf.json
-      # (the sidecar dylib bundle map) with `node`. Declare the dependency
-      # rather than leaning on the runner image happening to preinstall Node.
+      # The floor step below and fetch-sidecars.sh's macOS path (which
+      # generates src-tauri/tauri.macos.conf.json, the sidecar dylib bundle
+      # map) both run `node`. Declare the dependency rather than leaning on
+      # the runner image happening to preinstall Node.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with: { node-version: "22" }
+      # On macOS every later step gets the declared floor as
+      # MACOSX_DEPLOYMENT_TARGET, the value `tauri build` compiles the
+      # release for. Without it the cc and cmake build scripts take the
+      # SDK's own version, so the tests would exercise sqlite, ring, libjxl
+      # and raw.m built for a newer macOS than the ones that ship. It runs
+      # before the Rust cache so the floor is part of that cache's key:
+      # libjxl's cmake build does not rerun when the variable changes, so a
+      # cache from before the floor would keep its old objects.
+      - name: macOS deployment floor
+        id: macos-floor
+        if: matrix.os == 'macos-14'
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
+      # Saves from main only; see the rust job.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Startup and performance harnesses (macOS)
         if: matrix.os == 'macos-14'
         run: node --test --test-concurrency=1 scripts/performance-baseline.test.mjs scripts/startup-baseline.test.mjs
@@ -228,6 +277,10 @@ jobs:
       - name: HEIC stack tests (macOS)
         if: matrix.os == 'macos-14'
         run: node --test scripts/heif-deps.test.mjs
+      # Likewise for the tesseract build, whose fixtures are real Mach-O files.
+      - name: Tesseract build tests (macOS)
+        if: matrix.os == 'macos-14'
+        run: node --test scripts/tesseract-build.test.mjs
       # On Windows the harnesses run every owned process inside the launcher's
       # job and refuse to start without it, so build it before they run.
       - name: Build the owned-process launcher (Windows)
@@ -247,6 +300,26 @@ jobs:
         id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
+      # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
+      # source for the declared floor (scripts/build-tesseract-macos.sh).
+      # The build is cached here, and the script checks a restored one before
+      # it reuses it. Unlike the HEIC stack, this job saves the cache itself,
+      # after its own crate build scripts have run, so what it restores only
+      # ever feeds CI; release.yml builds tesseract every time and restores no
+      # cache. The runner image is in the key as well: it fixes the Homebrew
+      # leptonica and libarchive the build links, which the script also
+      # checks, and a cache restored by its exact key is never saved again,
+      # so a new image would otherwise rebuild on every run.
+      - name: Runner image
+        id: runner-image
+        if: matrix.os == 'macos-14'
+        run: |
+          echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        if: matrix.os == 'macos-14'
+        with:
+          path: .tesseract-deps
+          key: tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-image-${{ steps.runner-image.outputs.version }}-${{ hashFiles('scripts/build-tesseract-macos.sh') }}
       - name: Resolve target
         shell: bash
         run: echo "TARGET=$(rustc -vV | awk '/host/ {print $2}')" >> "$GITHUB_ENV"
@@ -294,15 +367,23 @@ jobs:
           "./src-tauri/bin/gs-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
           "./src-tauri/bin/tesseract-$TARGET"${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
       # A pin in the freezer recipe is no proof the frozen binary carries it.
-      # Ask the freshly built gallery-dl which gallery-dl, Python, requests and
-      # urllib3 it imported, and compare with the recipe. release.yml repeats
-      # this on the signed, in-bundle copy.
+      # Ask the freshly built gallery-dl which gallery-dl, Python, requests,
+      # urllib3 and certifi it imported, and compare with the recipe.
+      # release.yml repeats this on the signed, in-bundle copy.
       - name: gallery-dl runtime matches the recipe (macOS)
         if: matrix.os == 'macos-14'
         shell: bash
         env:
           GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
         run: node scripts/check-gallery-dl-runtime.mjs --binary "./src-tauri/bin/gallery-dl-$TARGET" --python "$GALLERY_DL_PYTHON"
+      # yt-dlp is downloaded prebuilt, so the bundled copy's certifi and
+      # urllib3 change only with its version pin. Ask the fetched binary which
+      # ones it imported and hold them to the floors. Both runners: the Windows
+      # exe freezes its own dependency set. release.yml repeats this on the
+      # signed macOS copy.
+      - name: yt-dlp runtime clears the certifi and urllib3 floors
+        shell: bash
+        run: node scripts/check-yt-dlp-runtime.mjs --binary "./src-tauri/bin/yt-dlp-$TARGET${{ matrix.os == 'windows-latest' && '.exe' || '' }}"
       # Every sidecar must stay owner-writable. Tauri's bundler clears extended
       # attributes across Contents/ before signing, `cp` carries the mode in
       # from src-tauri/bin, and a read-only binary fails that step with
@@ -347,22 +428,21 @@ jobs:
       # the cache key: a new one restores nothing built for the old. The
       # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
       # which would also change with every version bump.
-      - name: macOS deployment floor
-        id: macos-floor
-        if: matrix.os == 'macos-14'
-        run: |
-          floor="$(node scripts/macos-deployment-target.mjs)"
-          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
-          echo "version=$floor" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+      # Restore only, as in the rust job; the heif-deps job saves it.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
         if: matrix.os == 'macos-14'
         with:
           path: .heif-deps
           key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      # libheif-sys's rlib carries a copy of the stack (see the rust job), so
+      # it is rebuilt against this one: the floor in the Rust cache key does
+      # not cover a stack rebuilt for a new version of the script.
       - name: Static HEIC stack (macOS)
         if: matrix.os == 'macos-14'
         run: |
           ./scripts/build-static-heif-deps.sh
+          cargo clean -p libheif-sys
+          cargo clean -p libheif-sys --release
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       - name: HEIC static link guard (macOS)
@@ -813,3 +893,42 @@ jobs:
       - name: PDF pipeline (real mutool / gs / tesseract)
         shell: bash
         run: cargo test -p goop-pdf --lib -- --ignored
+
+  # The only job that saves the static HEIC stack's cache, and it compiles
+  # nothing else. The rust and sidecar-smoke jobs run build scripts from
+  # crates resolved fresh on every push (Cargo.lock is gitignored). When they
+  # saved this cache, that code ran between the stack's build and the
+  # post-step save and could rewrite .heif-deps before main's entry was
+  # written. They only restore it now, and neither waits for this job.
+  # That closes the rewrite, not every way in: code holding the run's cache
+  # token could still claim this key first, so audit's restored stack is not
+  # proof of anything. release.yml restores no cache at all.
+  heif-deps:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The runners that restore it: the rust job's, and sidecar-smoke's
+        # macOS leg.
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with: { node-version: "22", package-manager-cache: false }
+      - name: macOS deployment floor
+        id: macos-floor
+        run: |
+          floor="$(node scripts/macos-deployment-target.mjs)"
+          [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
+          echo "version=$floor" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        with:
+          path: .heif-deps
+          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      - name: Static HEIC decode stack (libde265 + libheif)
+        run: ./scripts/build-static-heif-deps.sh

@@ -1,14 +1,19 @@
 #!/usr/bin/env node
-// Prove which gallery-dl, Python, requests and urllib3 a frozen gallery-dl
-// binary actually runs, and compare them with the macOS freezer recipe.
+// Prove which gallery-dl, Python, requests, urllib3 and certifi a frozen
+// gallery-dl binary actually runs, and compare them with the macOS freezer
+// recipe.
 //
 // A pin in gallery-dl-macos-requirements.txt is not proof the binary carries
 // it: the freezer could resolve a different wheel, or a stale binary could be
 // bundled. With --verbose, gallery-dl logs the versions of the modules it
-// really imported, so ask the binary. --list-modules exits 0 with no URL and
-// no network; --config-ignore keeps a user config out of the run. The child
-// gets a throwaway HOME/TMPDIR (PyInstaller unpacks there) and nothing else
-// from this environment.
+// really imported, so ask the binary. It does not log certifi, whose CA bundle
+// is what requests trusts, so a probe module passed through gallery-dl's
+// "globals" option reports it from inside the frozen interpreter. A gallery-dl
+// that ignores the option prints no probe line and fails the check.
+// --list-modules exits 0 with no URL and no network; --config-ignore keeps a
+// user config out of the run. The child gets a throwaway HOME/TMPDIR
+// (PyInstaller unpacks there, and the probe lives there) and nothing else from
+// this environment.
 //
 // Usage:
 //   node scripts/check-gallery-dl-runtime.mjs --binary <path> --python <x.y.z>
@@ -18,7 +23,7 @@
 // not report. 2: usage error.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,10 +31,21 @@ import { parseArgs } from "node:util";
 
 const DEFAULT_REQUIREMENTS = fileURLToPath(new URL("./gallery-dl-macos-requirements.txt", import.meta.url));
 const DEFAULT_TIMEOUT_MS = 30_000;
-const PINNED_PACKAGES = ["gallery-dl", "requests", "urllib3"];
-const GALLERY_DL_ARGS = ["--config-ignore", "--verbose", "--list-modules"];
+const PINNED_PACKAGES = ["gallery-dl", "requests", "urllib3", "certifi"];
+// gallery-dl imports this file at startup, before it logs anything, and writes
+// in its own log format so one parser reads both.
+const PROBE_MODULE = [
+  "import sys",
+  "",
+  "import certifi",
+  "import requests.utils",
+  "",
+  'bundle = "certifi" if requests.utils.DEFAULT_CA_BUNDLE_PATH == certifi.where() else "other"',
+  'print(f"[goop-probe][debug] certifi {certifi.__version__} - requests CA bundle {bundle}", file=sys.stderr)',
+  "",
+].join("\n");
 // gallery-dl's default log format is "[{name}][{levelname}] {message}" on stderr.
-const DEBUG_LINE = /^\[[^\]\n]+\]\[debug\] (Version|Python|requests) (.+)$/;
+const DEBUG_LINE = /^\[[^\]\n]+\]\[debug\] (Version|Python|requests|certifi) (.+)$/;
 const STDERR_CONTEXT_CHARS = 2_000;
 
 class UsageError extends Error {}
@@ -97,7 +113,13 @@ function runGalleryDl(binary, timeoutMs) {
   if (!existsSync(binary)) throw new CheckError(`gallery-dl binary not found: ${binary}`);
   const home = mkdtempSync(join(tmpdir(), "goop-gallery-dl-home-"));
   try {
-    const result = spawnSync(binary, GALLERY_DL_ARGS, {
+    // gallery-dl puts the probe's directory on sys.path, so give it its own.
+    const probeDir = join(home, "probe");
+    mkdirSync(probeDir);
+    const probe = join(probeDir, "goop_runtime_probe.py");
+    writeFileSync(probe, PROBE_MODULE);
+    const args = ["--config-ignore", "--verbose", "-o", `globals=${probe}`, "--list-modules"];
+    const result = spawnSync(binary, args, {
       encoding: "utf8",
       timeout: timeoutMs,
       killSignal: "SIGKILL",
@@ -152,7 +174,24 @@ function parseReport(stderr) {
     /^(\S+) - urllib3 (\S+)$/,
     "requests … - urllib3 …",
   );
-  return { version, python, platform, requests, urllib3 };
+  const [, certifi, caBundle] = requireField(
+    found,
+    "certifi",
+    /^(\S+) - requests CA bundle (certifi|other)$/,
+    "certifi … - requests CA bundle …",
+  );
+  return { version, python, platform, requests, urllib3, certifi, caBundle };
+}
+
+// certifi's __version__ zero-pads the month and day ("2026.07.22") while a pip
+// pin is normalised ("2026.7.22"), so compare all-numeric versions part by part
+// by value, as PEP 440 does. Every other package reports its canonical form.
+function versionsMatch(reported, pinned) {
+  const numeric = /^\d+(?:\.\d+)*$/;
+  if (!numeric.test(reported) || !numeric.test(pinned)) return reported === pinned;
+  const a = reported.split(".").map(Number);
+  const b = pinned.split(".").map(Number);
+  return a.length === b.length && a.every((part, index) => part === b[index]);
 }
 
 function compare(report, pins, python) {
@@ -161,9 +200,13 @@ function compare(report, pins, python) {
     ["gallery-dl", report.version],
     ["requests", report.requests],
     ["urllib3", report.urllib3],
+    ["certifi", report.certifi],
   ];
   for (const [name, actual] of pairs) {
-    if (actual !== pins[name]) problems.push(`${name} ${actual} does not match the recipe's ${pins[name]}`);
+    if (!versionsMatch(actual, pins[name])) problems.push(`${name} ${actual} does not match the recipe's ${pins[name]}`);
+  }
+  if (report.caBundle !== "certifi") {
+    problems.push("requests trusts a CA bundle other than the bundled certifi's");
   }
   if (report.python !== python) {
     problems.push(`Python ${report.python} does not match the build interpreter ${python}`);
@@ -188,7 +231,7 @@ function main(argv) {
     const problems = compare(report, pins, options.python);
     const summary =
       `gallery-dl ${report.version}, Python ${report.python} (${report.platform}), ` +
-      `requests ${report.requests}, urllib3 ${report.urllib3}`;
+      `requests ${report.requests}, urllib3 ${report.urllib3}, certifi ${report.certifi}`;
     if (problems.length > 0) {
       for (const problem of problems) console.error(`::error::${problem}`);
       console.error(`reported by ${options.binary}: ${summary}`);

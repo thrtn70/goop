@@ -193,6 +193,43 @@ test("both HEIC cmake configures target the declared floor and the archives are 
   assert.match(heifDepsScript.slice(lastInstall), /\nstale="\$\(floor_report\)" \|\| \{[\s\S]*?\n {2}exit 1\n\}\nif \[ -n "\$\{stale\}" \]; then\n[\s\S]*?\n {2}exit 1\nfi\n/);
 });
 
+test("both HEIC builds run one make job per core, never an unbounded make -j", () => {
+  // `cmake --build --parallel` with no count runs `make -j`, which starts
+  // every compile at once.
+  const builds = heifDepsScript.match(/^cmake --build .*$/gm) ?? [];
+  assert.equal(builds.length, 2, "expected the libde265 and libheif builds");
+  for (const build of builds) assert.match(build, / --parallel "\$\{JOBS\}" /, build);
+  assert.match(heifDepsScript, /^JOBS="\$\(build_jobs\)"$/m);
+  const definition = heifDepsScript.match(/^build_jobs\(\) \{\n[\s\S]*?\n\}$/m)?.[0];
+  assert.ok(definition, "missing build_jobs()");
+
+  const jobsFor = (getconf) => {
+    const root = mkdtempSync(join(tmpdir(), "goop-heif-jobs-"));
+    try {
+      mkdirSync(join(root, "stub"));
+      stubCommand(root, "getconf", getconf);
+      const run = spawnSync("bash", ["--noprofile", "--norc", "-euo", "pipefail", "-c", `${definition}\nbuild_jobs`], {
+        encoding: "utf8",
+        env: envWithoutGit({ PATH: `${join(root, "stub")}:${process.env.PATH}` }),
+      });
+      assert.equal(run.status, 0, run.stderr);
+      return run.stdout;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  // The stub answers only the variable the script must ask for, so a typo
+  // in its name falls back to two jobs and fails here.
+  const answering = (count) => `[ "$*" = _NPROCESSORS_ONLN ] || exit 2\necho ${count}`;
+  assert.equal(jobsFor(answering(3)), "3\n");
+  assert.equal(jobsFor(answering(16)), "16\n");
+  // Anything but a positive count falls back to two jobs rather than none or
+  // an unbounded number.
+  for (const broken of ["exit 1", "echo", "echo 0", "echo undefined", "echo '3 4'"]) {
+    assert.equal(jobsFor(broken), "2\n", broken);
+  }
+});
+
 test(
   "a HEIC stack holding objects built for another macOS is rebuilt, not reused",
   { skip: process.platform !== "darwin" && "needs clang, ar and otool" },
