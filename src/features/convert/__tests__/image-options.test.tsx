@@ -184,13 +184,14 @@ it.each(["convert", "compress"] as const)("%s keeps safe metadata choices visibl
   expect(within(metadata).getByRole("button", { name: "Remove personal data" }).getAttribute("aria-disabled")).toBe("true");
 });
 
-it("Compress rejects mixed-source RemovePersonal preset and Apply first atomically", async () => {
+it("Compress rejects mixed-source RemovePersonal preset and Apply atomically", async () => {
   mocks.open.mockResolvedValue(["/a.jpg", "/b.png"]);
   mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(false, path.endsWith("png") ? "png" : "jpeg")));
   mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 30 }, metadata_policy: "remove_personal" };
-  render(<MemoryRouter><CompressPage /></MemoryRouter>);
+  render(compressPage());
   fireEvent.click(screen.getByRole("button", { name: "Add files" }));
   await screen.findByRole("button", { name: "Select b.png" });
+  await compressSeeded("/a.jpg", "/b.png");
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
   expect(screen.getByRole("alert").textContent).toContain("b.png");
   fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
@@ -199,7 +200,7 @@ it("Compress rejects mixed-source RemovePersonal preset and Apply first atomical
 
   fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
   fireEvent.click(screen.getByRole("button", { name: "Remove personal data" }));
-  fireEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
   expect(screen.getByRole("alert").textContent).toContain("b.png");
   fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
   expect(screen.getByText("Output: PNG")).toBeTruthy();
@@ -755,5 +756,52 @@ describe("mixed batches in Convert", () => {
     render(page()); await add(["/a.jpg", "/b.jpg", "/bad.jpg"]); await setFit();
     fireEvent.click(await screen.findByRole("button", { name: "Apply to 2 images" }));
     expect(outcome()).toBe("Applied to 2 images. 1 other file kept its settings.");
+  });
+});
+
+const compressPage = () => <MemoryRouter><CompressPage /><DraftProbe /></MemoryRouter>;
+type StoredCompressRow = { path: string; target: string; revision: number; optionsReady?: boolean; mode: { kind: string; value: number }; batch?: { label: string } };
+const crow = (path: string) => (stored("compress") as unknown as StoredCompressRow[]).find(file => file.path === path)!;
+const compressSeeded = (...paths: string[]) => waitFor(() => paths.forEach(path => expect(crow(path).optionsReady).toBe(true)));
+async function addCompress(paths: string[]) {
+  mocks.open.mockResolvedValue(paths);
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await screen.findByRole("slider", { name: "Compression quality" });
+  await compressSeeded(...paths);
+}
+
+describe("mixed batches in Compress", () => {
+  it("applies the selected file's compression and keeps every file's format", async () => {
+    render(compressPage()); await addCompress(["/a.png", "/b.jpg"]);
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.change(await screen.findByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Compress 2 files" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+    const byPath = Object.fromEntries(mocks.enqueue.mock.calls.map(([request]) => [request.input_path, request]));
+    expect(byPath["/a.png"]).toMatchObject({ target: "png", compress_mode: { kind: "quality", value: 60 } });
+    expect(byPath["/b.jpg"]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 } });
+  });
+  it("applies to images only in a mixed batch, and tags and restores like Convert", async () => {
+    render(compressPage()); await addCompress(["/a.png", "/b.jpg", "/clip.mp4"]);
+    const clipBefore = crow("/clip.mp4");
+    fireEvent.change(screen.getByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(outcome()).toBe("Applied to 2 images. 1 other file kept its settings.");
+    expect(crow("/clip.mp4")).toEqual(clipBefore);
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 60")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.change(screen.getByRole("slider", { name: "Compression quality" }), { target: { value: "40" } });
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect((screen.getByRole("slider", { name: "Compression quality" }) as HTMLInputElement).value).toBe("60");
+    expect(crow("/b.jpg").target).toBe("jpeg");
+  });
+  it("scopes a Compress preset to the files that can take its format", async () => {
+    mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 50 } } as Preset;
+    render(compressPage()); await addCompress(["/a.png", "/clip.mp4"]);
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(outcome()).toBe("Applied Photo to 1 image. 1 video kept its settings.");
   });
 });
