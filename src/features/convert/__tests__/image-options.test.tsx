@@ -675,6 +675,17 @@ describe("mixed batches in Convert", () => {
     expect(document.activeElement?.textContent).toBe("Batch settings from a.jpg.");
     expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("90");
   });
+  it("keeps a long name to one line in the inspector, with the full text in its title", async () => {
+    const name = `${"a-very-long-batch-label-".repeat(8)}end.jpg`;
+    render(page()); await add([`/${name}`, "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    const editing = screen.getByText(`Editing ${name}`);
+    const status = screen.getByText(`Batch settings from ${name}.`);
+    for (const line of [editing, status]) {
+      expect(line.getAttribute("title")).toBe(line.textContent);
+      expect(line.className).toContain("truncate");
+    }
+  });
   it("describes each row's tag and settings to screen readers", async () => {
     render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
     fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
