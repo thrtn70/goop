@@ -10,6 +10,7 @@ import {
   openSync,
   realpathSync,
   readFileSync,
+  readSync,
   readlinkSync,
   readdirSync,
   renameSync,
@@ -383,6 +384,30 @@ export function readOwnedRegularFile(path, maxBytes, open = openSync) {
   }
 }
 
+/**
+ * Read a file the measured child left, through one descriptor so the child can
+ * neither redirect nor stall the read: a FIFO opens without blocking, and only a
+ * regular file of at most `maxBytes` that no other path links to is read. A
+ * symbolic link is refused wherever the platform has O_NOFOLLOW (Windows does
+ * not). The check and the read share the descriptor, so a swap after the open
+ * changes nothing; a file unlinked since then has no links and is still its own.
+ */
+export function readChildFile(path, maxBytes) {
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || stats.nlink > 1) throw Error('Not a regular file of its own');
+    // A live child can still append, so the read itself is bounded too.
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    for (let read; length < buffer.length && (read = readSync(descriptor, buffer, length, buffer.length - length, length)) > 0;) length += read;
+    if (length > maxBytes) throw Error(`Larger than ${maxBytes} bytes`);
+    return buffer.subarray(0, length);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 export async function withTerminationSignals(operation) {
   const controller = new AbortController();
   let receivedSignal = null;
@@ -606,6 +631,8 @@ export async function runBoundedProcess({
   nowMs = () => performance.now(),
   sleepMs = (ms, wait) => delay(ms, undefined, wait),
   killGroup = (pid, name) => process.kill(-pid, name),
+  readSnapshot = () => execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }),
+  measureBytes = directoryBytes,
 }) {
   if (abortSignal?.aborted) throw Error('Process run aborted before launch');
   // Node turns an interval below 1 ms or above 2^31-1 ms into 1 ms, so a bad
@@ -632,25 +659,30 @@ export async function runBoundedProcess({
   };
   const abort = () => stop('abort');
   abortSignal?.addEventListener('abort', abort, { once: true });
+  // Vanished entries count zero, so a throw from the count is a real read
+  // failure that would leave the live budget blind for the rest of the run.
+  const overBudget = () => {
+    try { return measureBytes(outputDirectory) + stdout.length + stderr.length > storageBudgetBytes; } catch { return true; }
+  };
   const monitor = setInterval(() => {
     // A group kill misses a member that is being forked at that instant, and
     // such a member can hold the pipes and keep the root from closing. Once the
     // group has been killed, kill it again every interval until the root closes
     // or the group is gone.
     group.killAgain();
-    try {
-      if (process.platform !== 'win32') {
-        const sample = processTreeRss(execFileSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 1000 }), child.pid);
+    if (process.platform !== 'win32') {
+      try {
+        const sample = processTreeRss(readSnapshot(), child.pid);
         if (sample) {
           sampledTreePeakKiB = Math.max(sampledTreePeakKiB ?? 0, sample.rssKiB);
           observedChildren = Math.max(observedChildren ?? 0, sample.children);
         }
-      }
-      if (directoryBytes(outputDirectory) + stdout.length + stderr.length > storageBudgetBytes) {
-        budgetExceeded = true;
-        stop('budget');
-      }
-    } catch { /* A just-exited child can race a directory snapshot. */ }
+      } catch { /* ps can time out under load; a missed sample is not an overrun. */ }
+    }
+    if (overBudget()) {
+      budgetExceeded = true;
+      stop('budget');
+    }
   }, samplingIntervalMs);
   // sleepMs(ms, { signal }) must reject once signal aborts, as the default does,
   // so a run that closes first cancels its timeout instead of stopping a dead group.
@@ -666,7 +698,7 @@ export async function runBoundedProcess({
   timeout.abort();
   abortSignal?.removeEventListener('abort', abort);
   try {
-    budgetExceeded ||= directoryBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
+    budgetExceeded ||= measureBytes(outputDirectory) + retainedLogBytes > storageBudgetBytes;
   } catch {
     budgetExceeded = true;
   }

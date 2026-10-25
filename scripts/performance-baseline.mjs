@@ -33,6 +33,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  // limit still fires instead of rejecting and leaving the run without a timer.
  const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
+ const {measureBytes=directoryBytes,readSnapshot=()=>execFileSync('ps',['-axo','pid=,ppid=,rss=,comm='],{encoding:'utf8',timeout:1000})}=options;
  const directory=dirname(stem);
  // Tests inject a failing symbolic-link scan here; no caller passes one.
  const {listSymlinks=ownedSymlinks}=options;
@@ -47,12 +48,15 @@ export async function run(binary,sidecars,request,stem,options={}) {
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
  const {stop}=createOwnedGroupStopper(child,{killGraceMs,sleep:sleepMs});
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
+ // Vanished entries count zero, so a throw from the count is a real read
+ // failure that would leave the live budget blind for the rest of the run.
+ const overBudget=()=>{try{return measureBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4);}catch{return true;}};
  const timer=setInterval(()=>{
   try {
-   const sample=treeRss(execFileSync('ps',['-axo','pid=,ppid=,rss=,comm='],{encoding:'utf8',timeout:1000}),child.pid);
+   const sample=treeRss(readSnapshot(),child.pid);
    if(sample.rssKiB>0){rssKiB=Math.max(rssKiB??0,sample.rssKiB);children=Math.max(children??0,sample.children);}
-   if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
-  } catch {/* A process or output can disappear between snapshots. */}
+  } catch {/* ps can time out under load or race an exiting process; a missed sample is not an overrun. */}
+  if(overBudget()){budgetExceeded=true;stop();}
  },100);
  const start=nowMs();let code;
  // sleepMs(ms,{signal}) must reject once signal aborts, as the default does, so
@@ -76,7 +80,8 @@ export async function run(binary,sidecars,request,stem,options={}) {
  let metricsBytes=null;
  try{metricsBytes=readOwnedRegularFile(`${stem}.metrics.json`,Math.min(1024*1024,budgetBytes/4));}catch{/* Missing or not openable: no metrics. */}
  if(metricsBytes!==null)try{const parsed=JSON.parse(metricsBytes);if(parsed===null||typeof parsed!=='object'||Array.isArray(parsed))throw Error('Metrics must be an object');metrics=parsed;}catch{metrics.error='Invalid metrics JSON';}
- budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
+ // A failed count fails closed here too instead of rejecting the run.
+ try{budgetExceeded ||= measureBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);}catch{budgetExceeded=true;}
  const verificationStart=nowMs();
  // A scan that cannot read the tree fails the sample instead of rejecting the
  // run and skipping its cleanup.
