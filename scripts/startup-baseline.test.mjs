@@ -347,3 +347,120 @@ test('startup live storage check fails closed when the owned tree cannot be read
   // The harness ended the child; which signal lands first depends on scheduling.
   assert.ok(['SIGTERM', 'SIGKILL'].includes(result.exit_signal));
 });
+
+// The child is alive while runStartup polls ready.json, so it can change the
+// entry between any two calls. This subprocess plays that child with perfect
+// timing. A look is a synchronous fs call that names ready.json from inside
+// runStartup while the child is alive; the storage monitor's timer and the
+// checks after the reap are not looks. Right after the `after`-th look of a
+// poll, the entry is swapped for a FIFO or for a valid marker padded to 1 MiB
+// (and put back before the next poll), or the marker grows by 1 MiB. The
+// subprocess also tracks the bytes read through ready.json, and writes `seen`
+// once a poll has looked at a planted or grown entry, which tells the runner
+// to exit.
+const readinessHarness = `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { join } from 'node:path';
+const { root, mode, after } = JSON.parse(process.argv[1]);
+const report = join(root, 'run', 'ready.json'), stash = join(root, 'stash.json');
+const sync = Object.fromEntries(Object.entries(fs).filter(([name, call]) => name.endsWith('Sync') && typeof call === 'function'));
+const state = { swaps: 0, grown: false, signalled: false, maxReadBytes: 0 }, opened = new Map();
+let poll = null;
+Error.stackTraceLimit = 50;
+const exists = () => { try { return sync.lstatSync(report); } catch { return null; } };
+const childAlive = () => { try { process.kill(Number(sync.readFileSync(join(root, 'child.pid'), 'utf8')), 0); return true; } catch { return false; } };
+const endPoll = () => {
+  if (poll.stashed) { sync.unlinkSync(report); sync.renameSync(stash, report); }
+  if (poll.bad && !state.signalled) { state.signalled = true; sync.writeFileSync(join(root, 'seen'), ''); }
+  poll = null;
+};
+const act = () => {
+  if (poll.stashed || !exists()?.isFile()) return;
+  if (mode === 'grow') { if (!state.grown) { sync.appendFileSync(report, ' '.repeat(1 << 20)); state.grown = poll.bad = true; } return; }
+  const marker = JSON.parse(sync.readFileSync(report, 'utf8'));
+  sync.renameSync(report, stash);
+  if (mode === 'swap-fifo') sync.linkSync(join(root, 'fifo'), report);
+  else sync.writeFileSync(report, JSON.stringify({ ...marker, backend_ready_ms: 999 }) + ' '.repeat(1 << 20));
+  poll.stashed = true; state.swaps++;
+};
+const count = (descriptor, bytes) => { const total = opened.get(descriptor) + bytes; opened.set(descriptor, total); state.maxReadBytes = Math.max(state.maxReadBytes, total); };
+for (const [name, call] of Object.entries(sync)) fs[name] = function (...args) {
+  const [target] = args, looked = target === report && /\\bat runStartup \\(/.test(new Error().stack) && childAlive();
+  if (looked) {
+    if (!poll) { poll = { looks: 0, bad: false, stashed: false }; queueMicrotask(endPoll); }
+    poll.looks++;
+    poll.bad ||= mode === 'plant' ? exists() !== null : state.grown;
+  }
+  try {
+    const result = call.apply(this, args);
+    if (name === 'openSync' && target === report) opened.set(result, 0);
+    else if (name === 'readSync' && opened.has(target)) count(target, result);
+    else if (name === 'readFileSync' && (target === report || opened.has(target))) { if (!opened.has(target)) opened.set(target, 0); count(target, result.length); }
+    else if (name === 'closeSync') opened.delete(target);
+    return result;
+  } finally {
+    if (looked && mode !== 'plant' && poll.looks === after) act();
+  }
+};
+syncBuiltinESMExports();
+const { runStartup } = await import(${JSON.stringify(new URL('./startup-baseline.mjs', import.meta.url).href)});
+const result = await runStartup({ binary: process.execPath, args: [join(root, 'runner.cjs')], directory: join(root, 'run'), settings: {}, readinessTimeoutMs: 20000, idleMs: 30, killGraceMs: 30, environment: { ...process.env, GOOP_TEST_SEEN: join(root, 'seen') } });
+process.stdout.write(JSON.stringify({ marker: result.marker, ...state }));`;
+// What the runner leaves at ready.json, always whole: a valid marker of its own
+// (padded with spaces to `size` bytes), or a FIFO already holding one with no
+// writer left (its reader descriptor stays open until the runner exits), or a
+// hard or symbolic link to one.
+const readinessPlants = {
+  marker: 'fs.writeFileSync(tmp,marker());fs.renameSync(tmp,report);',
+  fifo: "require('node:child_process').execFileSync('/usr/bin/mkfifo',[tmp]);fs.openSync(tmp,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK);const writer=fs.openSync(tmp,fs.constants.O_WRONLY);fs.writeSync(writer,marker());fs.closeSync(writer);fs.renameSync(tmp,report);",
+  hardlink: 'fs.writeFileSync(kept,marker());fs.linkSync(kept,report);',
+  symlink: 'fs.writeFileSync(kept,marker());fs.symlinkSync(kept,report);',
+  oversized: 'fs.writeFileSync(tmp,marker(4096));fs.renameSync(tmp,report);',
+  boundary: 'fs.writeFileSync(tmp,marker(4095));fs.renameSync(tmp,report);',
+};
+// A blocked open freezes the event loop, signal handlers included, so the
+// subprocess's timeout is what turns a regression into a failure instead of a
+// hung gate. Its child is killed here, since a hung harness never reaped it.
+function guardedReadiness(mode, plant, after = 1) {
+  const root = mkdtempSync(join(tmpdir(), 'goop-startup-ready-'));
+  try {
+    execFileSync('/usr/bin/mkfifo', [join(root, 'fifo')]);
+    writeFileSync(join(root, 'runner.cjs'), `const fs=require('node:fs'),path=require('node:path'),report=process.env.GOOP_STARTUP_REPORT,tmp=report+'.tmp',kept=path.join(${JSON.stringify(root)},'kept.json');
+const marker=(size=0)=>{const text=JSON.stringify({schema_version:1,backend_ready_ms:7,pid:process.pid});return text+' '.repeat(Math.max(0,size-text.length));};
+fs.writeFileSync(kept+'.pid',String(process.pid));fs.renameSync(kept+'.pid',path.join(${JSON.stringify(root)},'child.pid'));
+${readinessPlants[plant]}
+setInterval(()=>{if(fs.existsSync(process.env.GOOP_TEST_SEEN))process.exit(0);},5);`);
+    return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', readinessHarness, JSON.stringify({ root, mode, after })], { encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL' }));
+  } finally {
+    // The runner publishes its pid whole; a missing one must never become kill(0).
+    try { const pid = Number(readFileSync(join(root, 'child.pid'), 'utf8')); if (Number.isSafeInteger(pid) && pid > 1) process.kill(-pid, 'SIGKILL'); } catch { /* Reaped, or never started. */ }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+test('a readiness marker swapped after the harness looks at it is read as it was checked', () => {
+  for (const [mode, after] of [['swap-fifo', 1], ['swap-fifo', 2], ['swap-large', 1], ['swap-large', 2]]) {
+    const label = `${mode} after look ${after}`, result = guardedReadiness(mode, 'marker', after);
+    assert.equal(result.marker?.backend_ready_ms, 7, label);
+    assert.ok(result.maxReadBytes <= 4096, `${label}: read ${result.maxReadBytes} bytes`);
+    // A poll that reads through one descriptor looks once, so only the first
+    // look's swap reaches it. The second-look cases catch a poll that checks
+    // the path and then reads it again.
+    if (after === 1) assert.ok(result.swaps > 0, label);
+  }
+});
+test('a readiness marker that grows once opened is refused without being read whole', () => {
+  const result = guardedReadiness('grow', 'marker');
+  assert.equal(result.grown, true);
+  assert.equal(result.signalled, true);
+  assert.equal(result.marker, null);
+  assert.ok(result.maxReadBytes <= 4096, `read ${result.maxReadBytes} bytes`);
+});
+test('the readiness poll accepts only a regular file of its own under 4096 bytes', () => {
+  for (const [plant, accepted] of [['fifo', false], ['hardlink', false], ['symlink', false], ['oversized', false], ['boundary', true]]) {
+    const result = guardedReadiness('plant', plant);
+    // A poll looked at the planted entry while the runner was alive.
+    assert.equal(result.signalled, true, plant);
+    assert.equal(result.marker?.backend_ready_ms ?? null, accepted ? 7 : null, plant);
+    assert.ok(result.maxReadBytes <= 4096, `${plant}: read ${result.maxReadBytes} bytes`);
+  }
+});

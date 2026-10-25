@@ -969,3 +969,49 @@ test('storage scan counts a symlink itself and never follows it', () => {
 test('startup and conversion monitors share the one storage scan', () => {
   assert.equal(baselineDirectoryBytes, directoryBytes);
 });
+
+// The scan counts vanished entries as zero, so a throw that reaches the live
+// monitor is a real read failure, such as an owned directory made unreadable.
+test('bounded runner live storage check fails closed when the owned tree cannot be read', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-unreadable-'));
+  const output = join(root, 'output');
+  mkdirSync(output);
+  try {
+    // The post-exit check alone also reports an overrun, so only an early stop shows the live check acted.
+    const result = await runBoundedProcess({ command: process.execPath, args: ['-e', 'setInterval(()=>{},10)'], outputDirectory: output, timeoutMs: 30000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, measureBytes: () => { throw fsError('EACCES'); }, readSnapshot: () => '' });
+    assert.equal(result.budget_exceeded, true);
+    assert.equal(result.timed_out, false);
+    assert.equal(result.success, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Windows takes no process samples, so it has no sampler to fail.
+test('bounded runner storage check still runs when the process sampler fails', { skip: process.platform === 'win32' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-sampler-'));
+  const output = join(root, 'output');
+  mkdirSync(output);
+  let sampled = 0;
+  try {
+    const result = await runBoundedProcess({ command: process.execPath, args: ['-e', 'setInterval(()=>{},10)'], outputDirectory: output, timeoutMs: 30000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, measureBytes: () => 2 * 1024 * 1024, readSnapshot: () => { sampled += 1; throw fsError('ETIMEDOUT'); } });
+    assert.ok(sampled > 0);
+    assert.equal(result.budget_exceeded, true);
+    assert.equal(result.timed_out, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('bounded runner treats a failed process sample as a missed sample, not an overrun', { skip: process.platform === 'win32' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-missed-sample-'));
+  const output = join(root, 'output');
+  const flag = join(root, 'sampled');
+  mkdirSync(output);
+  let sampled = 0;
+  // The child exits only after the harness has tried and failed to sample it.
+  const child = "const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.env.GOOP_TEST_FLAG))process.exit(0);},5)";
+  try {
+    const result = await runBoundedProcess({ command: process.execPath, args: ['-e', child], env: { ...process.env, GOOP_TEST_FLAG: flag }, outputDirectory: output, timeoutMs: 30000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, readSnapshot: () => { sampled += 1; writeFileSync(flag, ''); throw fsError('ETIMEDOUT'); } });
+    assert.ok(sampled > 0);
+    assert.equal(result.success, true);
+    assert.equal(result.budget_exceeded, false);
+    assert.equal(result.timed_out, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
