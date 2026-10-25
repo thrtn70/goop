@@ -1,21 +1,25 @@
 //! Shared plumbing for the goop-native sidecar updaters.
 //!
 //! Both updaters (`gallery_dl_update` against Codeberg/Gitea, `yt_dlp_update`
-//! against GitHub) do the same four things: ask a releases API for the latest
+//! against GitHub) do the same five things: ask a releases API for the latest
 //! tag, refuse a tag that doesn't look like a version, compare it against what
-//! we already run, and stream the matching asset into the resolver's writable
-//! update dir. Only the hosts, the asset names and the message prefix differ,
-//! so the mechanics live here once and each updater supplies its own.
+//! we already run, read the asset's SHA-256 from the release's signed checksum
+//! manifest, and stream the matching asset into the resolver's writable update
+//! dir. Only the hosts, the asset names, the signing keys and the message
+//! prefix differ, so the mechanics live here once and each updater supplies
+//! its own.
 //!
 //! Every function takes a `label` (`"yt-dlp update"`, `"gallery-dl update"`)
 //! purely so the error text names the sidecar the user actually asked about.
 
+use crate::signature::{self, TrustedKey};
 use futures_util::StreamExt;
 use goop_core::GoopError;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::Path;
-use std::time::Duration;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWriteExt;
 
 /// Sidecar binaries run ~10–30 MB; generous ceiling so a slow link doesn't
@@ -23,23 +27,25 @@ use tokio::io::AsyncWriteExt;
 pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const API_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CHECKSUM_MANIFEST_BYTES: usize = 64 * 1024;
+/// A real one is 566 bytes; anything far past that is not a signature.
+const MAX_SIGNATURE_BYTES: usize = 16 * 1024;
 
 /// Serializes every sidecar update in the process.
 ///
 /// Each updater derives both its temp file and its destination from the tool
 /// name inside one shared `data_dir()/bin`, so two overlapping updates of the
-/// same tool write into the *same* temp path and then race to rename it. The
-/// nastier half is what follows: the loser's post-download "does it run?"
-/// check can fail and delete the binary the winner just installed and already
-/// reported as a success, leaving the resolver silently back on the bundled
-/// copy with nothing surfaced anywhere.
+/// same tool write into the *same* temp path and then race to vet and rename
+/// it: one can run or install bytes the other is still writing, or remove the
+/// temp file out from under the other's rename. And each reads the current
+/// version before downloading, so both would judge the download against the
+/// same stale version and both would install.
 ///
 /// Updating is a rare cold path — a button click, or one background check a
 /// day — so serializing all of it outright is cheaper than working out which
 /// pairs happen to be safe to overlap.
 static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Hold this for the whole check-download-verify-revert sequence.
+/// Hold this for the whole check-download-vet-install sequence.
 pub(crate) async fn lock_updates() -> tokio::sync::MutexGuard<'static, ()> {
     UPDATE_LOCK.lock().await
 }
@@ -166,73 +172,135 @@ pub(crate) fn checksum_for_asset(manifest: &str, asset: &str) -> Option<String> 
     found
 }
 
-/// Fetch and parse the vendor's release checksum manifest before downloading
-/// an executable. Missing, malformed, or ambiguous entries are errors.
-pub(crate) async fn fetch_checksum(
+/// Fetch the vendor's release checksum manifest and the detached signature
+/// published next to it as `<manifest>.sig`, check the signature against
+/// `keys`, and only then read the asset's SHA-256 out of the manifest.
+///
+/// The manifest on its own only proves the binary matches the release it was
+/// served from — whoever can replace one can replace the other. The signature
+/// is what ties the manifest to the upstream maintainer. A missing, malformed,
+/// expired or unverifiable signature is an error, never a fallback to the
+/// unsigned manifest, and so is a missing, malformed or ambiguous entry.
+pub(crate) async fn fetch_verified_checksum(
     client: &reqwest::Client,
     checksum_url: &str,
     asset: &str,
+    keys: &[TrustedKey],
     label: &str,
 ) -> Result<String, GoopError> {
-    let resp = client
-        .get(checksum_url)
-        .timeout(API_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| GoopError::Queue(format!("{label}: fetch checksum manifest: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(GoopError::Queue(format!(
-            "{label}: HTTP {} from {checksum_url}",
-            resp.status()
-        )));
-    }
-    let mut body = Vec::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| GoopError::Queue(format!("{label}: read checksum manifest: {e}")))?;
-        if body.len().saturating_add(chunk.len()) > MAX_CHECKSUM_MANIFEST_BYTES {
-            return Err(GoopError::Queue(format!(
-                "{label}: checksum manifest is too large"
-            )));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let body = String::from_utf8(body)
+    let manifest = fetch_capped(
+        client,
+        checksum_url,
+        MAX_CHECKSUM_MANIFEST_BYTES,
+        "checksum manifest",
+        label,
+    )
+    .await?;
+    let signature_url = format!("{checksum_url}.sig");
+    let signature = fetch_capped(
+        client,
+        &signature_url,
+        MAX_SIGNATURE_BYTES,
+        "checksum signature",
+        label,
+    )
+    .await?;
+    signature::verify_detached(keys, &manifest, &signature, SystemTime::now()).map_err(|e| {
+        // An unknown key is either an upstream rotation or a forgery, and
+        // the key named in the packet is the signer's own claim. Say what each
+        // would mean rather than assume the benign one.
+        let hint = if matches!(e, signature::SignatureError::UntrustedKey(_)) {
+            " If upstream has announced that key, a Goop update will trust it; \
+             otherwise treat this release as tampered with."
+        } else {
+            ""
+        };
+        GoopError::Queue(format!(
+            "{label}: refusing {checksum_url}: {e}. Nothing was installed.{hint}"
+        ))
+    })?;
+
+    let manifest = String::from_utf8(manifest)
         .map_err(|e| GoopError::Queue(format!("{label}: checksum manifest is not UTF-8: {e}")))?;
-    checksum_for_asset(&body, asset).ok_or_else(|| {
+    checksum_for_asset(&manifest, asset).ok_or_else(|| {
         GoopError::Queue(format!(
             "{label}: checksum manifest has no valid SHA-256 for {asset}"
         ))
     })
 }
 
+/// GET a small release file, refusing a non-success status or a body larger
+/// than `max` bytes. `what` names the file in errors.
+async fn fetch_capped(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+    what: &str,
+    label: &str,
+) -> Result<Vec<u8>, GoopError> {
+    let resp = client
+        .get(url)
+        .timeout(API_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| GoopError::Queue(format!("{label}: fetch {what}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(GoopError::Queue(format!(
+            "{label}: HTTP {} from {url}",
+            resp.status()
+        )));
+    }
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| GoopError::Queue(format!("{label}: read {what}: {e}")))?;
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(GoopError::Queue(format!("{label}: {what} is too large")));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Stream `url` to `dest`, writing to a sibling temp file first and renaming
 /// into place so a partial download never replaces a good binary. Sets the
 /// executable bit on unix. Creates the parent dir if missing.
 ///
-/// The payload is SHA-256 checked before the atomic rename. Callers obtain the
-/// expected digest from the vendor's release manifest; the post-download
-/// "does it run?" check remains a second, independent compatibility barrier.
-pub(crate) async fn download_binary(
+/// The payload is SHA-256 checked, then handed to `vet` at its temp path —
+/// complete and executable — before the atomic rename. Callers obtain the
+/// expected digest from the vendor's signed release manifest and use `vet` to
+/// run the binary; a refusal there leaves `dest` exactly as it was, so
+/// whatever ran before keeps running. What `vet` returns comes back on
+/// success.
+pub(crate) async fn download_binary<T, F, Fut>(
     client: &reqwest::Client,
     url: &str,
     expected_sha256: &str,
     dest: &Path,
     label: &str,
-) -> Result<(), FetchError> {
+    vet: F,
+) -> Result<T, FetchError>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = Result<T, GoopError>>,
+{
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| FetchError::Failed(GoopError::Io(e)))?;
     }
     // `dest` is always `<update_dir>/<tool>[.exe]`, so it always has a file
-    // name; the fallback only guards the theoretical root-path case.
-    let file_name = dest
-        .file_name()
+    // name; the fallback only guards the theoretical root-path case. The
+    // extension stays last so Windows will run the temp file for `vet`:
+    // `yt-dlp.exe` stages as `yt-dlp.tmp-download.exe`.
+    let stem = dest
+        .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("sidecar");
-    let tmp = dest.with_file_name(format!("{file_name}.tmp-download"));
+    let tmp = match dest.extension().and_then(|e| e.to_str()) {
+        Some(ext) => dest.with_file_name(format!("{stem}.tmp-download.{ext}")),
+        None => dest.with_file_name(format!("{stem}.tmp-download")),
+    };
 
     let result = tokio::time::timeout(DOWNLOAD_TIMEOUT, async {
         let resp = client
@@ -286,6 +354,14 @@ pub(crate) async fn download_binary(
         }
     }
 
+    let vetted = match vet(tmp.clone()).await {
+        Ok(vetted) => vetted,
+        Err(e) => {
+            remove_temp(&tmp, label).await;
+            return Err(FetchError::Failed(e));
+        }
+    };
+
     // The only step left is the swap. A refused rename is its own outcome:
     // the bytes are all here and nothing was damaged. Whether the caller may
     // treat that as "not now" depends on why it was refused — see `looks_busy`.
@@ -297,7 +373,56 @@ pub(crate) async fn download_binary(
             likely_busy,
         });
     }
-    Ok(())
+    Ok(vetted)
+}
+
+/// Whether a downloaded binary may replace the current one, judged by the
+/// version it reports (`None` when it did not run). Returns that version when
+/// it may, or why not.
+///
+/// The signature proves upstream published these bytes at some point, not
+/// that they are the release the tag names: an older release's manifest,
+/// signature and binary are all genuine, so a host serving them under a newer
+/// tag passes every earlier check. The reported version is what gives that
+/// away, so it must parse, must not be older than the tag, and must be newer
+/// than what it replaces. A host that controls the tag as well can still hold
+/// an install at a genuine release between the current one and the latest;
+/// stopping that would take a signed statement of the latest version, which
+/// neither upstream publishes. And when the current version cannot be read
+/// (`previous` is `None`), such a host can pick any genuine release at all.
+pub(crate) fn vet_version(
+    reported: Option<String>,
+    release: &str,
+    previous: Option<&str>,
+) -> Result<String, String> {
+    let Some(v) = reported else {
+        return Err("the downloaded binary did not run".into());
+    };
+    // Without a readable tag there is nothing to hold the binary to.
+    if parse_version(release).is_none() {
+        return Err(format!("the release tag {release:?} is not a version"));
+    }
+    // The installed version is recorded beside the binary, and the resolver
+    // only believes a record holding one plain version token
+    // (`binaries::read_version_marker`). A version it can't read back would
+    // install a binary the resolver then ignores.
+    if !is_safe_tag(&v) || parse_version(&v).is_none() {
+        return Err(format!(
+            "the downloaded binary reports an unreadable version {v:?}"
+        ));
+    }
+    if is_newer(release, &v) {
+        return Err(format!(
+            "the downloaded binary reports {v}, which is older than the release {release} it was \
+             served as"
+        ));
+    }
+    match previous {
+        Some(p) if !is_newer(&v, p) => Err(format!(
+            "the downloaded binary reports {v}, which is not newer than {p}"
+        )),
+        _ => Ok(v),
+    }
 }
 
 /// Best-effort temp cleanup. A leftover `.tmp-download` is harmless but the
@@ -359,15 +484,6 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Whether two version strings name the same version (`2026.07.04` and
-/// `v2026.7.4`, `1.32` and `1.32.0`). Unparseable never matches.
-pub(crate) fn is_same_version(a: &str, b: &str) -> bool {
-    match (parse_version(a), parse_version(b)) {
-        (Some(a), Some(b)) => cmp_versions(&a, &b) == std::cmp::Ordering::Equal,
-        _ => false,
-    }
-}
-
 /// Whether a release tag is safe to interpolate into the download URL. Real
 /// tags look like `v1.32.4` or `2026.07.04`; we accept a conservative
 /// version-token charset and forbid `..` so a spoofed `tag_name` can't perform
@@ -384,6 +500,7 @@ pub(crate) fn is_safe_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signature::test_support::{fixture, TEST_KEY};
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -426,17 +543,6 @@ mod tests {
         assert!(!is_newer("1.32", "1.32.0")); // equal via zero-pad
         assert!(!is_newer("garbage", "1.0.0")); // unparseable → no update
         assert!(!is_newer("1.0.0", "garbage"));
-    }
-
-    #[test]
-    fn is_same_version_compares_numerically() {
-        assert!(is_same_version("2026.07.04", "2026.07.04"));
-        assert!(is_same_version("2026.07.04", "v2026.7.4"));
-        assert!(is_same_version("1.32", "1.32.0"));
-        assert!(!is_same_version("2026.07.03", "2026.07.04"));
-        assert!(!is_same_version("1.32.4", "1.32.40"));
-        assert!(!is_same_version("garbage", "garbage"));
-        assert!(!is_same_version("", "1.0.0"));
     }
 
     #[test]
@@ -632,6 +738,7 @@ mod tests {
             "bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b",
             &dest,
             "test update",
+            |_| async { Ok(()) },
         )
         .await
         .expect("download ok");
@@ -666,6 +773,7 @@ mod tests {
             "bfdeaeb08cffb6a36438bcd12dda25417e3cdd36f1e7e482a2849d539225288b",
             &dest,
             "test update",
+            |_| async { Ok(()) },
         )
         .await
         .expect_err("404 should error");
@@ -699,6 +807,7 @@ mod tests {
             "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
             &dest,
             "test update",
+            |_| async { Ok(()) },
         )
         .await
         .expect_err("rename onto a non-empty dir must fail");
@@ -736,6 +845,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &dest,
             "test update",
+            |_| async { Ok(()) },
         )
         .await
         .expect_err("mismatched payload must fail");
@@ -745,28 +855,202 @@ mod tests {
         assert!(!dir.path().join("tool.tmp-download").exists());
     }
 
+    /// The vet step sees the finished download where it will be renamed
+    /// from, and a refusal there leaves the destination exactly as it was.
     #[tokio::test]
-    async fn checksum_manifest_rejects_an_oversized_response() {
+    async fn download_binary_vets_the_complete_download_before_replacing_anything() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/SHA256SUMS"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
-                b'a';
-                MAX_CHECKSUM_MANIFEST_BYTES
-                    + 1
-            ]))
+            .and(path("/asset"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"payload".to_vec()))
             .mount(&server)
             .await;
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("tool");
+        std::fs::write(&dest, b"known-good").unwrap();
 
-        let err = fetch_checksum(
+        let err = download_binary(
+            &reqwest::Client::new(),
+            &format!("{}/asset", server.uri()),
+            "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+            &dest,
+            "test update",
+            |staged: PathBuf| async move {
+                assert_eq!(std::fs::read(&staged).unwrap(), b"payload");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(&staged).unwrap().permissions().mode();
+                    assert!(mode & 0o111 != 0, "vet must be able to run the download");
+                }
+                Err::<(), _>(GoopError::Queue("refused".into()))
+            },
+        )
+        .await
+        .expect_err("a refused download must fail");
+
+        assert!(matches!(err, FetchError::Failed(_)));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"known-good");
+        assert!(!dir.path().join("tool.tmp-download").exists());
+    }
+
+    /// Windows only runs a file for `vet` if its name still ends in `.exe`.
+    #[tokio::test]
+    async fn download_binary_stages_a_windows_binary_with_its_extension_last() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/asset"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"payload".to_vec()))
+            .mount(&server)
+            .await;
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("tool.exe");
+
+        let staged_as = download_binary(
+            &reqwest::Client::new(),
+            &format!("{}/asset", server.uri()),
+            "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+            &dest,
+            "test update",
+            |staged: PathBuf| async move { Ok(staged) },
+        )
+        .await
+        .expect("download ok");
+
+        assert_eq!(staged_as, dir.path().join("tool.tmp-download.exe"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn vet_version_wants_the_tagged_release_and_something_newer() {
+        let ok = |v: &str, release, previous| vet_version(Some(v.into()), release, previous);
+        assert_eq!(
+            ok("2026.10.21", "2026.10.21", Some("2026.06.09")).as_deref(),
+            Ok("2026.10.21")
+        );
+        assert_eq!(
+            ok("1.32.17", "v1.32.17", Some("1.32.4")).as_deref(),
+            Ok("1.32.17")
+        );
+        // The current version could not be read, so there is nothing to be
+        // newer than — but the binary must still be the tagged release.
+        assert_eq!(
+            ok("2026.10.21", "2026.10.21", None).as_deref(),
+            Ok("2026.10.21")
+        );
+
+        let refused = |reported: Option<&str>, release, previous| {
+            vet_version(reported.map(String::from), release, previous).expect_err("refused")
+        };
+        assert!(refused(None, "2026.10.21", Some("2026.06.09")).contains("did not run"));
+        assert!(refused(Some("garbage"), "2026.10.21", None).contains("unreadable"));
+        // Parseable, but not something the resolver would read back.
+        assert!(refused(Some("2026.10.21+dev"), "2026.10.21", None).contains("unreadable"));
+        assert!(refused(Some("2026.10.21\nWARNING: x"), "2026.10.21", None).contains("unreadable"));
+        assert!(refused(Some("2026.01.01"), "nightly", None).contains("not a version"));
+        assert!(refused(Some("2026.07.04"), "2026.10.21", Some("2026.06.09")).contains("older"));
+        assert!(refused(Some("2026.07.04"), "2026.10.21", None).contains("older"));
+        assert!(
+            refused(Some("2026.06.09"), "2026.06.09", Some("2026.06.09")).contains("not newer")
+        );
+        assert!(
+            refused(Some("2026.01.01"), "2026.01.01", Some("2026.06.09")).contains("not newer")
+        );
+    }
+
+    async fn serve(server: &MockServer, at: &str, body: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(server)
+            .await;
+    }
+
+    async fn verified_checksum(server: &MockServer) -> Result<String, GoopError> {
+        fetch_verified_checksum(
             &reqwest::Client::new(),
             &format!("{}/SHA256SUMS", server.uri()),
-            "asset",
+            "yt-dlp_linux",
+            &[TEST_KEY],
             "test update",
         )
         .await
-        .expect_err("oversized checksum manifest must fail");
+    }
 
-        assert!(err.to_string().contains("too large"));
+    #[tokio::test]
+    async fn verified_checksum_reads_the_digest_once_the_signature_verifies() {
+        let server = MockServer::start().await;
+        serve(&server, "/SHA256SUMS", fixture("yt-dlp-newer.sums")).await;
+        serve(&server, "/SHA256SUMS.sig", fixture("yt-dlp-newer.sums.sig")).await;
+
+        assert_eq!(
+            verified_checksum(&server).await.expect("verified").as_str(),
+            "d8c3364ccace3861c2269d044b69fdf8813f1b332928a5f58003550cae9b4d71"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_checksum_refuses_a_manifest_with_no_signature() {
+        let server = MockServer::start().await;
+        serve(&server, "/SHA256SUMS", fixture("yt-dlp-newer.sums")).await;
+
+        let err = verified_checksum(&server)
+            .await
+            .expect_err("an unsigned manifest must be refused");
+        assert!(err.to_string().contains("SHA256SUMS.sig"), "{err}");
+    }
+
+    /// The signature covers the manifest's exact bytes, so a manifest that
+    /// was swapped after signing fails even though both files are well formed.
+    #[tokio::test]
+    async fn verified_checksum_refuses_a_manifest_the_signature_does_not_cover() {
+        let server = MockServer::start().await;
+        serve(&server, "/SHA256SUMS", fixture("yt-dlp-broken.sums")).await;
+        serve(&server, "/SHA256SUMS.sig", fixture("yt-dlp-newer.sums.sig")).await;
+
+        let err = verified_checksum(&server)
+            .await
+            .expect_err("a swapped manifest must be refused");
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn checksum_manifest_rejects_an_oversized_response() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/SHA256SUMS",
+            vec![b'a'; MAX_CHECKSUM_MANIFEST_BYTES + 1],
+        )
+        .await;
+        serve(&server, "/SHA256SUMS.sig", fixture("yt-dlp-newer.sums.sig")).await;
+
+        let err = verified_checksum(&server)
+            .await
+            .expect_err("oversized checksum manifest must fail");
+        assert!(
+            err.to_string().contains("checksum manifest is too large"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checksum_signature_rejects_an_oversized_response() {
+        let server = MockServer::start().await;
+        serve(&server, "/SHA256SUMS", fixture("yt-dlp-newer.sums")).await;
+        serve(
+            &server,
+            "/SHA256SUMS.sig",
+            vec![0x89; MAX_SIGNATURE_BYTES + 1],
+        )
+        .await;
+
+        let err = verified_checksum(&server)
+            .await
+            .expect_err("oversized signature must fail");
+        assert!(
+            err.to_string().contains("checksum signature is too large"),
+            "{err}"
+        );
     }
 }

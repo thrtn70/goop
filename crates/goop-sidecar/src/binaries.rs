@@ -162,24 +162,16 @@ pub(crate) fn version_marker(binary: &Path) -> PathBuf {
 
 /// Record `version` as the version of the update-dir binary at `binary`.
 /// The resolver judges the binary by this, so an updater writes it only once
-/// the download is in place, and removes it with [`discard_update`] if the
-/// download turns out not to be that version.
+/// the vetted download is in place.
+///
+/// If the write fails, the download is left where it is. The resolver only
+/// compares a record with the bundled version, and an updater only installs a
+/// release newer than the bundled copy, so an older record still beside the
+/// download can't make the resolver prefer it wrongly; with no record the
+/// resolver ignores it until the next check installs and records it again.
+/// Removing it would also lose the update it replaced.
 pub(crate) async fn record_update_version(binary: &Path, version: &str) -> std::io::Result<()> {
     tokio::fs::write(version_marker(binary), version).await
-}
-
-/// Remove an update-dir binary and its version marker, logging (under
-/// `label`) whatever can't be removed. The marker goes first: once it is gone
-/// the resolver ignores the binary, even one Windows won't delete because it
-/// is still running.
-pub(crate) async fn discard_update(binary: &Path, label: &str) {
-    for path in [version_marker(binary), binary.to_path_buf()] {
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("{label}: failed to remove {}: {e}", path.display()),
-        }
-    }
 }
 
 /// The version recorded for `binary`, if its marker holds exactly one plain
