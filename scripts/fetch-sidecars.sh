@@ -479,5 +479,11 @@ mkdir -p "$OUT_DIR/tesseract-data"
 fetch_verified "${TESSDATA_BASE}/eng.traineddata" "$TESSDATA_ENG_SHA256" \
   "$OUT_DIR/tesseract-data/eng.traineddata"
 
+# Audit CI sets GOOP_SIDECAR_CACHE and saves the directory after this script
+# succeeds. Drop whatever this target's downloads did not use, so a snapshot
+# restored from an older pin set does not carry dead pins into the next save.
+# Last on purpose: anything pruned before a download would not be cached.
+prune_download_cache
+
 echo "Sidecars written to $OUT_DIR/"
 ls -la "$OUT_DIR/"
