@@ -1323,11 +1323,11 @@ export function createAccessibilityDriver({ platform = process.platform, appName
 
 const throwIfAborted = abortSignal => { if (abortSignal?.aborted) throw Error('Responsiveness operation aborted'); };
 
-async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate = null, abortSignal = null }) {
+async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate = null, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep }) {
   if (!isAbsolute(path)) throw Error(`${label} path must be absolute`);
-  const deadline = performance.now() + timeoutMs;
+  const deadline = nowMs() + timeoutMs;
   let mismatch = false;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     if (existsSync(path)) {
       try {
@@ -1339,7 +1339,7 @@ async function waitForJson(path, expected, { timeoutMs, pollMs, label, validate 
         if (!/JSON|byte limit/.test(error.message)) throw error;
       }
     }
-    await sleep(pollMs);
+    await sleepMs(pollMs);
   }
   throwIfAborted(abortSignal);
   if (mismatch) throw Error(`${label} identity mismatch`);
@@ -1355,8 +1355,8 @@ function validateReadinessMarker(value, kind) {
   if (value.native_clock.domain !== 'native_monotonic' || value.native_clock.unit !== 'us' || !Number.isSafeInteger(value.native_clock.elapsed_us) || value.native_clock.elapsed_us < 0) throw Error('Invalid readiness native clock');
 }
 
-export function waitForRecorderReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
-  return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, label: 'Recorder readiness marker', validate: value => validateReadinessMarker(value, 'recorder_ready') });
+export function waitForRecorderReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null, nowMs, sleepMs } = {}) {
+  return waitForJson(path, identity, { timeoutMs, pollMs, abortSignal, nowMs, sleepMs, label: 'Recorder readiness marker', validate: value => validateReadinessMarker(value, 'recorder_ready') });
 }
 
 export function waitForControlReady(path, identity, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
@@ -1365,11 +1365,11 @@ export function waitForControlReady(path, identity, { timeoutMs = 30_000, pollMs
 
 export function waitForActionReady(reportDirectory, { session_id, sample_id, page_instance_id, action_id, pid }, options = {}) {
   const path = join(reportDirectory, `action-ready-${action_id}-${page_instance_id}.json`);
-  return waitForJson(path, { schema_version: 2, component_kind: 'action_ready', session_id, sample_id, page_instance_id, action_id, pid }, { timeoutMs: options.timeoutMs ?? 2_000, pollMs: options.pollMs ?? 10, abortSignal: options.abortSignal ?? null, label: 'Action readiness marker', validate: value => validateReadinessMarker(value, 'action_ready') });
+  return waitForJson(path, { schema_version: 2, component_kind: 'action_ready', session_id, sample_id, page_instance_id, action_id, pid }, { timeoutMs: options.timeoutMs ?? 2_000, pollMs: options.pollMs ?? 10, abortSignal: options.abortSignal ?? null, nowMs: options.nowMs, sleepMs: options.sleepMs, label: 'Action readiness marker', validate: value => validateReadinessMarker(value, 'action_ready') });
 }
 
-export function waitForStartupReady(path, pid, { timeoutMs = 30_000, pollMs = 10, abortSignal = null } = {}) {
-  return waitForJson(path, { schema_version: 1, pid }, { timeoutMs, pollMs, abortSignal, label: 'Startup readiness marker' });
+export function waitForStartupReady(path, pid, { timeoutMs = 30_000, pollMs = 10, abortSignal = null, nowMs, sleepMs } = {}) {
+  return waitForJson(path, { schema_version: 1, pid }, { timeoutMs, pollMs, abortSignal, nowMs, sleepMs, label: 'Startup readiness marker' });
 }
 
 export async function waitForRecorderOrFailedPage({ recorderPath, reportDirectory, identity, descriptor, timeoutMs = 30_000, pollMs = 10, abortSignal = null }) {
@@ -1399,32 +1399,32 @@ export async function waitForRecorderOrFailedPage({ recorderPath, reportDirector
   throw Error('Page startup timed out before recorder readiness or a failed component');
 }
 
-export async function waitForAxPreflight(driver, labels, { timeoutMs = 5000, pollMs = 25, abortSignal = null } = {}) {
-  const deadline = performance.now() + timeoutMs;
+export async function waitForAxPreflight(driver, labels, { timeoutMs = 5000, pollMs = 25, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep } = {}) {
+  const deadline = nowMs() + timeoutMs;
   let lastError = null;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     try { return await driver.preflight(labels); }
     catch (error) {
       if (!/accessibility label is missing/i.test(error.message)) throw error;
-      lastError = error; await sleep(pollMs);
+      lastError = error; await sleepMs(pollMs);
     }
   }
   throwIfAborted(abortSignal);
   throw lastError ?? Error('Accessibility targets did not mount before timeout');
 }
 
-export async function waitForAxActivation(driver, { timeoutMs = 5000, pollMs = 25, abortSignal = null } = {}) {
+export async function waitForAxActivation(driver, { timeoutMs = 5000, pollMs = 25, abortSignal = null, nowMs = () => performance.now(), sleepMs = sleep } = {}) {
   if (!driver || typeof driver.activate !== 'function') throw Error('Invalid accessibility activation driver');
-  const deadline = performance.now() + timeoutMs;
+  const deadline = nowMs() + timeoutMs;
   let lastError = null;
-  while (performance.now() < deadline) {
+  while (nowMs() < deadline) {
     throwIfAborted(abortSignal);
     try { return await driver.activate(); }
     catch (error) {
       if (!/(process|main window) is not ready|main window is not frontmost yet/i.test(error.message)) throw error;
       lastError = error;
-      await sleep(pollMs);
+      await sleepMs(pollMs);
     }
   }
   throwIfAborted(abortSignal);

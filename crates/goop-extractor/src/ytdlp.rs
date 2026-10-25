@@ -536,13 +536,16 @@ impl<'a> YtDlp<'a> {
                         // written — and the progress lines that do survive
                         // carry no filename.
                         //
-                        // Do NOT propagate. An early return here leaves the
-                        // child neither killed nor waited for, and nothing
-                        // downstream kills it either: no spawn in this tree
-                        // sets `kill_on_drop`. yt-dlp carries on downloading
-                        // into the user's folder after the job has already
-                        // reported failure, and the Retry button then lands
-                        // a second one on the same `--continue`d `.part`.
+                        // Do NOT propagate. An early return here skips
+                        // `tree.finish`, so nothing waits for the process
+                        // tree to stop: dropping an unfinished `tree` kills
+                        // the group (SIGKILL on Unix, closing the job on
+                        // Windows) and moves on. It also skips
+                        // `recovery.set_writer(false)`, so the checkpoint
+                        // still names a writer, and a retry sets this
+                        // workspace aside and starts over in a fresh one.
+                        // And the job fails a download that one unreadable
+                        // line need not have ended.
                         //
                         // Counted, unlike stderr, where losing one line of a
                         // message is cosmetic: lose the path line and the
