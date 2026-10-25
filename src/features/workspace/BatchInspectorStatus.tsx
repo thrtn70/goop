@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { BatchState } from "./batchStamp";
 import { inspectorBatchStatus, USE_BATCH_SETTINGS } from "./batchCopy";
 
@@ -16,14 +16,20 @@ export default function BatchInspectorStatus({
   onRestore: (() => boolean) | null;
 }) {
   const statusRef = useRef<HTMLSpanElement>(null);
+  const focusAfterCommit = useRef(false);
   // A successful restore unmounts the focused button, so focus moves to the
-  // status line, which now reads the restored state.
+  // status line once it has re-rendered with the restored state.
+  useLayoutEffect(() => {
+    if (!focusAfterCommit.current) return;
+    focusAfterCommit.current = false;
+    statusRef.current?.focus();
+  });
   const restore = () => {
-    if (onRestore?.()) statusRef.current?.focus();
+    if (onRestore?.()) focusAfterCommit.current = true;
   };
   return (
     <>
-      <span className="block">{"Editing " + name}</span>
+      <span className="block wrap-anywhere">{"Editing " + name}</span>
       {state && (
         <span ref={statusRef} tabIndex={-1} className="mt-1 block text-fg-secondary wrap-anywhere focus-visible:outline-accent">
           {inspectorBatchStatus(state, label)}

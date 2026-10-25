@@ -663,8 +663,15 @@ describe("mixed batches in Convert", () => {
     expect(tag("b.jpg").getByText("Edited")).toBeTruthy(); expect(tag("a.jpg").getByText("Batch")).toBeTruthy();
     expect(tag("b.jpg").getByText("→ JPEG · Quality 70 · Fit 2048 × 2048")).toBeTruthy();
     expect(screen.getByText("Changed for this file.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    const focus = HTMLElement.prototype.focus;
+    const focusedText: string[] = [];
+    const spy = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      focusedText.push(this.textContent ?? ""); focus.call(this, options);
+    });
+    try { fireEvent.click(screen.getByRole("button", { name: "Use batch settings" })); } finally { spy.mockRestore(); }
     expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    // Focus moves after the re-render, so it lands on the restored words.
+    expect(focusedText).toEqual(["Batch settings from a.jpg."]);
     expect(document.activeElement?.textContent).toBe("Batch settings from a.jpg.");
     expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("90");
   });
@@ -824,6 +831,18 @@ describe("mixed batches in Compress", () => {
     expect(document.activeElement?.textContent).toBe("Batch settings from a.png.");
     expect((screen.getByRole("slider", { name: "Compression quality" }) as HTMLInputElement).value).toBe("60");
     expect(crow("/b.jpg").target).toBe("jpeg");
+  });
+  it("offers no Apply for subtitle files, which Compress cannot shrink", async () => {
+    const subtitle = inspect(false);
+    Object.assign(subtitle.probe, { source_kind: "subtitle", image_format: null, width: null, height: null });
+    subtitle.capabilities = { targets: [], compression: { quality: false, target_size: false, lossless: false, reason: "Subtitles cannot be compressed." } } as never;
+    mocks.inspect.mockResolvedValue(subtitle);
+    mocks.open.mockResolvedValue(["/a.srt", "/b.srt"]);
+    render(compressPage());
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    expect(await screen.findByRole("button", { name: "Select b.srt" })).toBeTruthy();
+    await waitFor(() => expect(screen.queryAllByText("Inspecting source…")).toEqual([]));
+    expect(screen.queryByRole("button", { name: /^Apply to/ })).toBeNull();
   });
   it("scopes a Compress preset to the files that can take its format", async () => {
     mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 50 } } as Preset;

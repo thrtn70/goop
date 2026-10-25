@@ -328,7 +328,9 @@ function CompressPage() {
   });
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
   const selectedIndex = selected ? files.indexOf(selected) : -1;
-  const selectedKind = batchKind(byId[selected?.id ?? ""]);
+  const kind = batchKind(byId[selected?.id ?? ""]);
+  // Compress has no settings for subtitle files, so there is nothing to apply.
+  const selectedKind = kind === "subtitle" ? null : kind;
   const applyScope = selectedKind ? kindScope(files, byId, selectedKind) : null;
   // Only the source row's own problems block Apply; applying may fix the others.
   const selectedProblem = selectedIndex < 0 ? null : problems[selectedIndex] ?? null;
