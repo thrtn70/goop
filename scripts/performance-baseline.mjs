@@ -3,6 +3,7 @@ import {readFileSync,writeFileSync,mkdirSync,statSync,lstatSync,existsSync,readd
 import {resolve,join,basename,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
 import {directoryBytes,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
@@ -28,7 +29,9 @@ export function effectiveHardware(metrics,hardwareEnabled) {
  return {effective_encoder:null,effective_hardware:hardwareEnabled?'unknown':'software_or_copy'};
 }
 export async function run(binary,sidecars,request,stem,options={}) {
- const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env}=options;
+ // The default sleep coerces its delay as setTimeout does, so a numeric-string
+ // limit still fires instead of rejecting and leaving the run without a timer.
+ const {timeoutMs=120000,killGraceMs=2000,logLimitBytes=1024*1024,budgetBytes=512*1024*1024,hardwareEnabled=false,ffprobe=null,expectedOutput=null,abortSignal=null,environment=process.env,nowMs=()=>performance.now(),sleepMs=(ms,wait)=>delay(Number(ms),undefined,wait)}=options;
  if(abortSignal?.aborted)throw Error('Conversion run aborted before launch');
  const directory=dirname(stem);
  const existingEntries=new Set(readdirSync(directory));
@@ -37,12 +40,12 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
  const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
  const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
- let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killTimer,killEscalation=null,stopRequested=false;
+ let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false,killEscalation=null,stopRequested=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});
  child.stderr.on('data',chunk=>{stderr=retain(stderr,chunk);});
  const signal=name=>{try{if(process.platform==='win32')execFileSync('taskkill',['/pid',String(child.pid),'/t',...(name==='SIGKILL'?['/f']:[])],{stdio:'ignore',timeout:Math.max(1000,killGraceMs)});else process.kill(-child.pid,name);return true;}catch{return false;}};
- const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=new Promise(resolveKill=>{killTimer=setTimeout(()=>{signal('SIGKILL');resolveKill();},killGraceMs);});};
+ const stop=()=>{if(stopRequested)return;stopRequested=true;if(!signal('SIGTERM')){killEscalation=Promise.resolve();return;}killEscalation=sleepMs(killGraceMs).then(()=>{signal('SIGKILL');});};
  const abort=()=>{aborted=true;stop();};abortSignal?.addEventListener('abort',abort,{once:true});
  const timer=setInterval(()=>{
   try {
@@ -51,16 +54,19 @@ export async function run(binary,sidecars,request,stem,options={}) {
    if(directoryBytes(directory)+stdout.length+stderr.length>budgetBytes-Math.min(65536,budgetBytes/4)){budgetExceeded=true;stop();}
   } catch {/* A process or output can disappear between snapshots. */}
  },100);
- const timeout=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
- const start=performance.now();let code;
+ const start=nowMs();let code;
+ // sleepMs(ms,{signal}) must reject once signal aborts, as the default does, so
+ // a run that closes first cancels its timeout instead of stopping a dead group.
+ const timeout=new AbortController();
+ sleepMs(timeoutMs,{signal:timeout.signal}).then(()=>{timedOut=true;stop();},()=>{/* Cancelled: the root closed first. */});
  try{code=await new Promise((res,rej)=>{child.on('error',rej);child.on('close',res);});}
- finally{clearInterval(timer);clearTimeout(timeout);abortSignal?.removeEventListener('abort',abort);}
-  const lifetimeMs=performance.now()-start;
+ finally{clearInterval(timer);timeout.abort();abortSignal?.removeEventListener('abort',abort);}
+  const lifetimeMs=nowMs()-start;
  // A clean root exit is not a clean sample if owned descendants remain. Reap
  // before any post-exit file I/O, so no throw below can leave the group running
  // and every check below sees a tree the child can no longer change.
  stop();
- if(killEscalation)await killEscalation;else clearTimeout(killTimer);
+ if(killEscalation)await killEscalation;
   writeFileSync(`${stem}.stdout`,stdout);writeFileSync(`${stem}.stderr`,stderr);
  let metrics={success:false,error:'No metrics produced'};
  const metricsPath=`${stem}.metrics.json`;
@@ -77,7 +83,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
  } catch {/* Missing, a link, or not openable: no metrics. */}
  finally{if(metricsFd!==null)closeSync(metricsFd);}
  budgetExceeded ||= directoryBytes(directory)>budgetBytes-Math.min(65536,budgetBytes/4);
- const verificationStart=performance.now();
+ const verificationStart=nowMs();
  const createdSymlinks=ownedSymlinks(directory).filter(path=>!initialSymlinks.has(path));
  let outputError=createdSymlinks.length?`Owned conversion created symbolic-link output: ${createdSymlinks.map(path=>basename(path)).join(', ')}`:null;
  for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
@@ -98,7 +104,7 @@ export async function run(binary,sidecars,request,stem,options={}) {
   const effective=effectiveHardware(metrics,hardwareEnabled);
  if(normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted) && expectedOutput)try{validateEffectiveExecution(metrics.result?.video_execution,request);}catch(error){metrics.success=false;verification={...verification,execution_error:error.message};}
  const timePeak=stderr.toString().match(/(\d+)\s+maximum resident set size/);
- const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:performance.now()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
+ const sample={...metrics,...effective,verification,metrics_success:metrics.success,success:normalizeSuccess(metrics,code,timedOut||budgetExceeded||aborted)&&outputError===null,exit_code:code,timed_out:timedOut,budget_exceeded:budgetExceeded,aborted,output_error:outputError,removed_symlink_outputs:createdSymlinks.length,log_bytes_retained:retainedLogBytes,lifetime_ms:lifetimeMs,verification_ms:nowMs()-verificationStart,sampled_tree_peak_KiB:rssKiB,sampling_interval_ms:100,observed_children:children,time_peak_bytes:timePeak?Number(timePeak[1]):null};
  writeFileSync(`${stem}.sample.json`,JSON.stringify(sample,null,2));
  // The request output is created uniquely inside this suite. Preserve measurements
  // before dropping only that owned media when it caused the storage limit.
