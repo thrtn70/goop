@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { File, X } from "lucide-react";
 import type { ProbeState } from "@/hooks/useProbe";
 import type { BatchState } from "./batchStamp";
@@ -44,6 +45,10 @@ export default function SourceRow({
   onRetry: () => void;
   onResponsivenessAction?: (action: SourceRowResponsivenessAction) => void;
 }) {
+  // The select button's aria-label replaces its content, so the probe facts,
+  // tag and settings line are attached as its description instead.
+  const factsId = useId();
+  const summaryId = useId();
   const p = state.phase === "ready" ? state.probe : null;
   const metadata = p
     ? [
@@ -91,6 +96,7 @@ export default function SourceRow({
           type="button"
           aria-label={`Select ${sourceName(path)}`}
           aria-pressed={selected}
+          aria-describedby={summary ? `${factsId} ${summaryId}` : factsId}
           data-responsiveness-role={sourceId ? "button" : undefined}
           data-responsiveness-name={sourceId ? `Select ${sourceName(path)}` : undefined}
           onClick={(event) => runAction("select", event.nativeEvent.isTrusted, onSelect)}
@@ -108,14 +114,14 @@ export default function SourceRow({
             >
               {sourceName(path)}
             </span>
-            <span className="block text-xs text-fg-secondary">
+            <span id={factsId} className="block text-xs text-fg-secondary">
               {metadata ??
                 (state.phase === "probing"
                   ? "Inspecting source…"
                   : "Inspection failed")}
             </span>
             {summary && (
-              <span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-fg-secondary">
+              <span id={summaryId} className="mt-1 flex min-w-0 items-center gap-2 text-xs text-fg-secondary">
                 {batchState && (
                   <span className={batchState === "batch"
                     ? "shrink-0 rounded-full border border-accent/45 bg-accent-subtle px-1.5 font-semibold text-accent"

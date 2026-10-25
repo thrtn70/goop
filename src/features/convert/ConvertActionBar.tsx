@@ -269,7 +269,7 @@ export default function ConvertActionBar({
           onClick={applyScope.onApply}
           title={applyScope.disabledReason ?? applyScope.title}
           aria-describedby={applyScope.disabledReason ? applyReasonId : undefined}
-          className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
+          className="text-xs text-fg-secondary transition duration-fast ease-out enabled:hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
         >
           {applyScope.label}
         </button>

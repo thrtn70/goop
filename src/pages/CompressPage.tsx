@@ -18,7 +18,9 @@ import { useCallback, useEffect, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
 import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
-import { applyButtonLabel, applyOutcome, applyTooltip, compressSettingsLine, FIX_SELECTED_FIRST, inspectorBatchStatus, noPresetTarget, presetOutcome, USE_BATCH_SETTINGS, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import { applyButtonLabel, applyOutcome, applyTooltip, compressSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import BatchInspectorStatus from "@/features/workspace/BatchInspectorStatus";
+import { OutcomeStatus, useOutcomeStatus } from "@/features/workspace/OutcomeStatus";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -233,7 +235,7 @@ function CompressPage() {
   );
 
   const [applicationError, setApplicationError] = useState<string | null>(null);
-  const [applicationStatus, setApplicationStatus] = useState<string | null>(null);
+  const [applicationStatus, setApplicationStatus] = useOutcomeStatus(files.map(file => file.id ?? file.path).join("\n"));
   const refuse = (message: string) => { setApplicationError(message); setApplicationStatus(null); };
   // Validate every row in scope before changing any; rows outside it are
   // returned untouched. Without an explicit target each row keeps its own
@@ -351,12 +353,13 @@ function CompressPage() {
   const resetSource = selected && selectedBatchState === "edited" ? batchResetSource(selected, files) : null;
   // Copies an unedited batch member's compression back onto this row alone.
   const restoreBatchSettings = () => {
-    if (!selected?.id || !selected.batch || !resetSource) return;
+    if (!selected?.id || !selected.batch || !resetSource) return false;
     const restored = applyCompressionToScope(
       { mode: resetSource.mode, metadataPolicy: resetSource.metadataPolicy ?? "preserve" },
       { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
     );
     if (restored) setApplicationStatus(null);
+    return restored;
   };
   const settled = (file: CompressFileEntry) => file.optionsReady === true && byId[file.id ?? ""]?.phase === "ready";
   return (
@@ -385,22 +388,12 @@ function CompressPage() {
           title="Compression"
           description={
             selected ? (
-              <>
-                <span className="block">{"Editing " + sourceName(selected.path)}</span>
-                {selectedBatchState && (
-                  <span className="mt-1 block text-fg-secondary">
-                    {inspectorBatchStatus(selectedBatchState, selected.batch?.label ?? "")}
-                    {resetSource && (
-                      <>
-                        {" "}
-                        <button type="button" onClick={restoreBatchSettings} className="text-accent underline">
-                          {USE_BATCH_SETTINGS}
-                        </button>
-                      </>
-                    )}
-                  </span>
-                )}
-              </>
+              <BatchInspectorStatus
+                name={sourceName(selected.path)}
+                state={selectedBatchState}
+                label={selected.batch?.label ?? ""}
+                onRestore={resetSource ? restoreBatchSettings : null}
+              />
             ) : "Select a source to get started."
           }
           actions={<>
@@ -411,8 +404,7 @@ function CompressPage() {
               onSettled={onSettled}
               applyScope={applyScopeAction}
             />
-            {/* Always mounted, so VoiceOver hears the empty-to-text change. */}
-            <p role="status" className={applicationStatus ? "mt-2 text-xs text-fg-secondary" : "text-xs"}>{applicationStatus}</p>
+            <OutcomeStatus outcome={applicationStatus} />
           </>}
         >
           {selected &&

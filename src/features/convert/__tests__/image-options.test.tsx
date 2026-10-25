@@ -637,11 +637,14 @@ const strictReload = () => {
 /** Several controls already own a status region, so the outcome is found by its words. */
 const outcome = () => {
   const node = screen.queryByText(/^Applied /);
-  if (node) expect(node.getAttribute("role")).toBe("status");
+  if (node) expect(node.closest("[role=status]")).not.toBeNull();
   return node?.textContent ?? null;
 };
 
 const tag = (name: string) => within(screen.getByRole("button", { name: `Select ${name}` }).closest("li")!);
+/** What a screen reader hears after a row's name: the button's aria-describedby text. */
+const description = (name: string) => (screen.getByRole("button", { name: `Select ${name}` }).getAttribute("aria-describedby") ?? "")
+  .split(" ").filter(Boolean).map(id => document.getElementById(id)?.textContent ?? "").join(" ");
 async function typeQuality(value: string) {
   const user = userEvent.setup();
   await user.clear(screen.getByRole("textbox", { name: "JPEG quality" }));
@@ -662,7 +665,28 @@ describe("mixed batches in Convert", () => {
     expect(screen.getByText("Changed for this file.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
     expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Batch settings from a.jpg.");
     expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("90");
+  });
+  it("describes each row's tag and settings to screen readers", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(description("b.jpg")).toContain("Batch");
+    expect(description("b.jpg")).toContain("→ JPEG · Quality 90 · Fit 2048 × 2048");
+  });
+  it("announces a repeated outcome again", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    const first = screen.getByText("Applied to all 2 files.");
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(screen.getByText("Applied to all 2 files.")).not.toBe(first);
+  });
+  it("clears the outcome once the list changes", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg", "/c.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 3" }));
+    expect(outcome()).toBe("Applied to all 3 files.");
+    fireEvent.click(screen.getByRole("button", { name: "Remove c.jpg" }));
+    expect(outcome()).toBeNull();
   });
   it("keeps tags across a route remount and drops reset when no unedited member is left", async () => {
     const view = render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
@@ -745,6 +769,7 @@ describe("mixed batches in Convert", () => {
       await add(["/a.jpg", "/slow.jpg"]);
       const pending = screen.getByRole("button", { name: "Apply to matching files" }) as HTMLButtonElement;
       expect(pending.disabled).toBe(true); expect(pending.title).toBe("Wait for every file to finish inspecting.");
+      expect(pending.className).toContain("disabled:opacity-50");
     } finally {
       // Inspections run one at a time app-wide; a stuck one would starve later tests.
       await act(async () => release?.(inspect(false)));
@@ -781,6 +806,7 @@ describe("mixed batches in Compress", () => {
     const byPath = Object.fromEntries(mocks.enqueue.mock.calls.map(([request]) => [request.input_path, request]));
     expect(byPath["/a.png"]).toMatchObject({ target: "png", compress_mode: { kind: "quality", value: 60 } });
     expect(byPath["/b.jpg"]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 } });
+    for (const [request] of mocks.enqueue.mock.calls) expect(request).not.toHaveProperty("batch");
   });
   it("applies to images only in a mixed batch, and tags and restores like Convert", async () => {
     render(compressPage()); await addCompress(["/a.png", "/b.jpg", "/clip.mp4"]);
@@ -795,6 +821,7 @@ describe("mixed batches in Compress", () => {
     expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
     expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Batch settings from a.png.");
     expect((screen.getByRole("slider", { name: "Compression quality" }) as HTMLInputElement).value).toBe("60");
     expect(crow("/b.jpg").target).toBe("jpeg");
   });

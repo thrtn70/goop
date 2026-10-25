@@ -31,7 +31,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
 import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
-import { applyButtonLabel, applyOutcome, applyTooltip, convertSettingsLine, FIX_SELECTED_FIRST, inspectorBatchStatus, noPresetTarget, outputBreakdown, presetOutcome, USE_BATCH_SETTINGS, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import { applyButtonLabel, applyOutcome, applyTooltip, convertSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, outputBreakdown, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import BatchInspectorStatus from "@/features/workspace/BatchInspectorStatus";
+import { OutcomeStatus, useOutcomeStatus } from "@/features/workspace/OutcomeStatus";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -112,7 +114,7 @@ function ConvertPage() {
   const { byId, retry } = useSourceInspections(files);
   const draftEntries = useWorkspaceDraftEntries();
   const [applicationError, setApplicationError] = useState<string | null>(null);
-  const [applicationStatus, setApplicationStatus] = useState<string | null>(null);
+  const [applicationStatus, setApplicationStatus] = useOutcomeStatus(files.map(file => file.id ?? file.path).join("\n"));
   const [alphaDraftProblems, setAlphaDraftProblems] = useState<Record<string, string>>({});
   const handleAlphaValidityChange = useCallback((id: string, problem: string | null) => {
     setAlphaDraftProblems(previous => {
@@ -745,13 +747,14 @@ function ConvertPage() {
   const resetSource = selected && selectedBatchState === "edited" ? batchResetSource(selected, files) : null;
   // Copies an unedited batch member's settings back onto this row alone.
   const restoreBatchSettings = () => {
-    if (!selected?.id || !selected.batch || !resetSource) return;
+    if (!selected?.id || !selected.batch || !resetSource) return false;
     const source = plannedFiles[files.indexOf(resetSource)];
     const restored = applySettings(
       { ...source, audioOptions: audioRequestOptions(source), videoOptions: videoRequestOptions(source) },
       { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
     );
     if (restored) setApplicationStatus(null);
+    return restored;
   };
   const settled = (file: FileEntry) => file.optionsReady === true && byId[file.id ?? ""]?.phase === "ready";
   const breakdown = files.length > 1 ? outputBreakdown(files.filter(settled)) : "";
@@ -786,22 +789,12 @@ function ConvertPage() {
           title="Output settings"
           description={
             selected ? (
-              <>
-                <span className="block">{"Editing " + sourceName(selected.path)}</span>
-                {selectedBatchState && (
-                  <span className="mt-1 block text-fg-secondary">
-                    {inspectorBatchStatus(selectedBatchState, selected.batch?.label ?? "")}
-                    {resetSource && (
-                      <>
-                        {" "}
-                        <button type="button" onClick={restoreBatchSettings} className="text-accent underline">
-                          {USE_BATCH_SETTINGS}
-                        </button>
-                      </>
-                    )}
-                  </span>
-                )}
-              </>
+              <BatchInspectorStatus
+                name={sourceName(selected.path)}
+                state={selectedBatchState}
+                label={selected.batch?.label ?? ""}
+                onRestore={resetSource ? restoreBatchSettings : null}
+              />
             ) : "Select a source to get started."
           }
           actions={<>
@@ -817,8 +810,7 @@ function ConvertPage() {
               onSettled={onSettled}
               applyScope={applyScopeAction}
             />
-            {/* Always mounted, so VoiceOver hears the empty-to-text change. */}
-            <p role="status" className={applicationStatus ? "mt-2 text-xs text-fg-secondary" : "text-xs"}>{applicationStatus}</p>
+            <OutcomeStatus outcome={applicationStatus} />
           </>}
         >
           {selected &&
