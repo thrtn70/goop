@@ -17,11 +17,12 @@ const MAX_FACTS = 3;
 const VIDEO_TARGETS: ReadonlySet<TargetFormat> = new Set(["mp4", "mkv", "webm", "mov", "avi"]);
 const QUALITY_PRESET_NAMES: Record<QualityPreset, string> = { original: "Original quality", fast: "Fast", balanced: "Balanced", small: "Small" };
 const GIF_SIZE_NAMES = { small: "Small", medium: "Medium", large: "Large" } as const;
-const KINDS = ["image", "video", "audio", "unknown"] as const;
+const KINDS = ["image", "video", "audio", "subtitle", "unknown"] as const;
 const NOUNS: Record<(typeof KINDS)[number], readonly [string, string]> = {
   image: ["image", "images"],
   video: ["video", "videos"],
   audio: ["audio file", "audio files"],
+  subtitle: ["subtitle file", "subtitle files"],
   unknown: ["file", "files"],
 };
 

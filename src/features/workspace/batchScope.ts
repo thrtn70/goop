@@ -1,8 +1,8 @@
 import type { ProbeState } from "@/hooks/useProbe";
 import type { TargetFormat } from "@/types";
 
-export type BatchKind = "image" | "video" | "audio";
-export type KindCounts = { image: number; video: number; audio: number; unknown: number };
+export type BatchKind = "image" | "video" | "audio" | "subtitle";
+export type KindCounts = { image: number; video: number; audio: number; subtitle: number; unknown: number };
 export type BatchScope = { ids: string[]; kept: KindCounts; pending: boolean };
 /** Both action bars' Apply control; null hides it. */
 export type ApplyScopeAction = { label: string; title: string; disabledReason: string | null; onApply: () => void };
@@ -16,7 +16,7 @@ type ReadyState = Extract<ProbeState, { phase: "ready" }>;
 export function batchKind(state: ProbeState | undefined): BatchKind | null {
   if (state?.phase !== "ready") return null;
   const kind = state.probe.source_kind;
-  if (kind === "image" || kind === "audio") return kind;
+  if (kind === "image" || kind === "audio" || kind === "subtitle") return kind;
   if (kind !== "video") return null;
   const video = state.probe.video_details?.streams.filter(stream => stream.codec_type === "video") ?? [];
   return video.length > 0 && video.every(stream => stream.attached_pic) ? "audio" : "video";
@@ -28,7 +28,7 @@ function scope(
   admits: (state: ReadyState) => boolean,
 ): BatchScope {
   const ids: string[] = [];
-  const kept: KindCounts = { image: 0, video: 0, audio: 0, unknown: 0 };
+  const kept: KindCounts = { image: 0, video: 0, audio: 0, subtitle: 0, unknown: 0 };
   let pending = false;
   for (const entry of entries) {
     const state = entry.id === undefined ? undefined : states[entry.id];
@@ -60,7 +60,7 @@ export function targetScope(
 }
 
 export function kindCounts(ids: readonly string[], states: Readonly<Record<string, ProbeState>>): KindCounts {
-  const counts: KindCounts = { image: 0, video: 0, audio: 0, unknown: 0 };
+  const counts: KindCounts = { image: 0, video: 0, audio: 0, subtitle: 0, unknown: 0 };
   for (const id of ids) counts[batchKind(states[id]) ?? "unknown"] += 1;
   return counts;
 }

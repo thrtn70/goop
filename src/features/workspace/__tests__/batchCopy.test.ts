@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyButtonLabel, applyOutcome, applyTooltip, compressSettingsLine, convertSettingsLine, inspectorBatchStatus, noPresetTarget, outputBreakdown, presetOutcome } from "../batchCopy";
 
-const none = { image: 0, video: 0, audio: 0, unknown: 0 };
+const none = { image: 0, video: 0, audio: 0, subtitle: 0, unknown: 0 };
 const base = { imageOptions: null, videoOptions: null, audioOptions: undefined, gifOptions: null, metadataPolicy: "preserve", imageColorPolicy: "preserve", qualityPreset: null } as const;
 const fit = { jpeg_quality: 80, resize: { kind: "fit_within", width: 2048, height: 2048 } } as const;
 
@@ -41,6 +41,7 @@ it("labels Apply by scope", () => {
   expect(applyButtonLabel("image", 9, 12, false)).toBe("Apply to 9 images");
   expect(applyButtonLabel("video", 2, 12, false)).toBe("Apply to 2 videos");
   expect(applyButtonLabel("audio", 3, 12, false)).toBe("Apply to 3 audio files");
+  expect(applyButtonLabel("subtitle", 2, 5, false)).toBe("Apply to 2 subtitle files");
   expect(applyButtonLabel("video", 1, 12, false)).toBeNull();
   expect(applyButtonLabel("image", 1, 3, true)).toBe("Apply to matching files");
   expect(applyTooltip("b.jpg", "image", false)).toBe("Copy b.jpg's settings to every image in the list");
@@ -56,6 +57,7 @@ it("reports outcomes in singular and plural", () => {
   expect(presetOutcome("Photo", { ...none, image: 1 }, none)).toBe("Applied Photo to 1 image.");
   expect(presetOutcome("Photo", { ...none, image: 2 }, { ...none, image: 4, unknown: 1 })).toBe("Applied Photo to 2 images. 4 images and 1 file kept their settings.");
   expect(presetOutcome("Photo", { ...none, image: 2 }, { ...none, video: 1 })).toBe("Applied Photo to 2 images. 1 video kept its settings.");
+  expect(presetOutcome("Photo", { ...none, image: 2 }, { ...none, subtitle: 1 })).toBe("Applied Photo to 2 images. 1 subtitle file kept its settings.");
   expect(noPresetTarget("webp")).toBe("None of these files can become WebP.");
   expect(inspectorBatchStatus("batch", "Web Image")).toBe("Batch settings from Web Image.");
   expect(inspectorBatchStatus("edited", "Web Image")).toBe("Changed for this file.");

@@ -1044,6 +1044,17 @@ describe("ConvertPage", () => {
     expect(screen.getByRole("button", { name: "SRT" })).toBeDefined();
   });
 
+  it("offers Apply across a batch of subtitle files", async () => {
+    mockOpen.mockResolvedValue(["/tmp/a.srt", "/tmp/b.srt"]);
+    mockProbe.mockResolvedValue(srtProbe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("b.srt")).toBeDefined());
+
+    expect(await screen.findByRole("button", { name: "Apply to all 2" })).toBeDefined();
+  });
+
   it("removes file row when remove is clicked", async () => {
     mockProbe.mockResolvedValue(mp4Probe);
     renderPage();

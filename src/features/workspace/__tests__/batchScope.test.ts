@@ -23,6 +23,7 @@ describe("batchKind", () => {
     expect(batchKind(ready("video"))).toBe("video");
     expect(batchKind(ready("audio"))).toBe("audio");
     expect(batchKind(ready("image"))).toBe("image");
+    expect(batchKind(ready("subtitle"))).toBe("subtitle");
     expect(batchKind(ready("pdf"))).toBeNull();
     expect(batchKind(probing)).toBeNull();
     expect(batchKind(undefined)).toBeNull();
@@ -33,17 +34,17 @@ describe("scopes", () => {
   const entries = ["a", "b", "c", "d", "m"].map(id => ({ id, optionsReady: true }));
   const states = { a: ready("image", { targets: ["jpeg"] }), b: ready("image", { targets: ["jpeg"] }), c: ready("video", { targets: ["mp4"] }), d: failed, m: ready("video", { streams: cover, targets: ["mp3"] }) };
   it("scopes Apply to one kind in list order and counts the rest", () => {
-    expect(kindScope(entries, states, "image")).toEqual({ ids: ["a", "b"], kept: { image: 0, video: 1, audio: 1, unknown: 1 }, pending: false });
+    expect(kindScope(entries, states, "image")).toEqual({ ids: ["a", "b"], kept: { image: 0, video: 1, audio: 1, subtitle: 0, unknown: 1 }, pending: false });
   });
   it("reports pending while a file is probing or not yet seeded", () => {
     expect(kindScope([...entries, { id: "p", optionsReady: false }], { ...states, p: probing }, "image").pending).toBe(true);
     expect(kindScope([{ id: "a", optionsReady: false }], { a: ready("image") }, "image").pending).toBe(true);
   });
   it("counts scoped ids by kind, with unknown for anything unclassified", () => {
-    expect(kindCounts(["a", "c", "m", "d", "missing"], states)).toEqual({ image: 1, video: 1, audio: 1, unknown: 2 });
+    expect(kindCounts(["a", "c", "m", "d", "missing"], states)).toEqual({ image: 1, video: 1, audio: 1, subtitle: 0, unknown: 2 });
   });
   it("scopes presets by available target capability", () => {
-    expect(targetScope(entries, { ...states, b: ready("image", { unavailable: ["jpeg"] }) }, "jpeg")).toEqual({ ids: ["a"], kept: { image: 1, video: 1, audio: 1, unknown: 1 }, pending: false });
+    expect(targetScope(entries, { ...states, b: ready("image", { unavailable: ["jpeg"] }) }, "jpeg")).toEqual({ ids: ["a"], kept: { image: 1, video: 1, audio: 1, subtitle: 0, unknown: 1 }, pending: false });
   });
 });
 
