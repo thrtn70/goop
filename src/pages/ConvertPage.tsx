@@ -60,6 +60,7 @@ import {
   trackRequestOptions,
   trackSelectionProblem,
 } from "@/features/convert/trackOptions";
+import { restoredTracks } from "@/features/convert/restoreTracks";
 import {
   resolvedVideoTrackOptions,
   videoTrackOptionsProblem,
@@ -749,12 +750,16 @@ function ConvertPage() {
   // alone. Stored, not request-validated: an edit marks a row Edited, so the
   // member holds exactly what the batch wrote, including a Hardware required
   // intent this machine cannot run, which applySettings admits as before.
+  // Track choices the batch left to each file stay the row's own; naming the
+  // row as source makes applySettings keep the track fields it is given.
   const restoreBatchSettings = () => {
     if (!selected?.id || !selected.batch || !resetSource) return false;
     const source = plannedFiles[files.indexOf(resetSource)];
+    const withAudio = source.audioOptions != null;
     const restored = applySettings(
-      source,
+      { ...source, ...restoredTracks(resetSource, selected, withAudio) },
       { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
+      selected.id,
     );
     if (restored) setApplicationStatus(null);
     return restored;

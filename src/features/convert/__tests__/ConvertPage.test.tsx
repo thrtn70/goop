@@ -387,6 +387,9 @@ function renderPage() {
   );
 }
 
+/** The row list item for a staged source, for its Batch or Edited tag. */
+const row = (name: string) => within(screen.getByRole("button",{name:`Select ${name}`}).closest("li")!);
+
 // --- Tests ---
 
 describe("ConvertPage", () => {
@@ -791,6 +794,41 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Select first.mkv" }));
     expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
     expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", true);
+  });
+
+  it("keeps the row's own audio track when restoring batch settings that leave tracks to each file", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    useAppStore.setState({ presets: [] });
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => expect(screen.getByText("first.mkv")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "encode");
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to all 2" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(row("second.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("checked", true);
+
+    await userEvent.selectOptions(screen.getByLabelText("Audio channels"), "mono");
+    expect(row("first.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(row("first.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("Audio channels")).toHaveProperty("value", "preserve");
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("checked", true);
+
+    // The other row restores from the apply source, which holds first.mkv's own track.
+    await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio channels"), "mono");
+    expect(row("second.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(row("second.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("Audio channels")).toHaveProperty("value", "preserve");
+    expect(screen.getByRole("radio", { name: /commentary/i })).toHaveProperty("checked", true);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", false));
   });
 
   it("shows error state with retry on probe failure", async () => {
@@ -1481,7 +1519,6 @@ describe("explicit video inspector", () => {
   beforeEach(() => { cleanup(); vi.clearAllMocks(); clearWorkspaceDrafts("convert"); useAppStore.setState({presets:[]}); mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]); mockProbe.mockResolvedValue(mp4Probe); mockSave.mockResolvedValue("/tmp/out.mp4"); mockFromFile.mockResolvedValue("job"); });
   afterEach(cleanup);
   async function stage() { renderPage(); await userEvent.click(screen.getByRole("button",{name:"Add files"})); await screen.findByLabelText("Processing"); }
-  const row = (name: string) => within(screen.getByRole("button",{name:`Select ${name}`}).closest("li")!);
   const noAudioPlan = {
     requested: {kind:"copy" as const}, video_codec:"h264" as const, video_stream_index:0,
     audio_stream_index:null, audio_codec:null, audio_copied:false, width:1920, height:1080, notices:[],
@@ -1686,6 +1723,43 @@ describe("explicit video inspector", () => {
     expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
     expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","6000");
     expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
+  });
+  it("keeps the row's own chosen video streams when restoring batch settings", async () => {
+    mockOpen.mockResolvedValue(["/tmp/multi-video.mkv","/tmp/multi-video-2.mkv"]);
+    mockProbe.mockResolvedValue(multiVideoProbe);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.click(screen.getByRole("radio",{name:"Choose audio streams"}));
+    await userEvent.click(screen.getByRole("checkbox",{name:/Commentary/}));
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
+    expect(row("multi-video-2.mkv").getByText("Batch")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"30"}});
+    expect(row("multi-video.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Commentary/})).toHaveProperty("checked",false);
+
+    // Keep all subtitles is copied to every row, so restore takes it from the batch.
+    await userEvent.click(screen.getByRole("radio",{name:"None subtitle streams"}));
+    expect(row("multi-video.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByRole("radio",{name:"Keep all subtitle streams"})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",true);
+
+    // The other row chooses its own stream, then restores from the apply source.
+    await userEvent.click(screen.getByRole("button",{name:"Select multi-video-2.mkv"}));
+    await userEvent.click(screen.getByRole("checkbox",{name:/Commentary/}));
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"30"}});
+    expect(row("multi-video-2.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video-2.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    expect(screen.getByRole("checkbox",{name:/Commentary/})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",false);
   });
   it("marks a batch row Edited when its rate text changes, so restore copies only applied values", async () => {
     mockOpen.mockResolvedValue(["/tmp/first.mp4","/tmp/second.mp4"]);
