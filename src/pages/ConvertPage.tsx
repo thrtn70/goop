@@ -29,6 +29,9 @@ import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
+import { batchKind, kindScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
+import { newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
+import { applyButtonLabel, applyOutcome, applyTooltip, FIX_SELECTED_FIRST, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -109,6 +112,7 @@ function ConvertPage() {
   const { byId, retry } = useSourceInspections(files);
   const draftEntries = useWorkspaceDraftEntries();
   const [applicationError, setApplicationError] = useState<string | null>(null);
+  const [applicationStatus, setApplicationStatus] = useState<string | null>(null);
   const [alphaDraftProblems, setAlphaDraftProblems] = useState<Record<string, string>>({});
   const handleAlphaValidityChange = useCallback((id: string, problem: string | null) => {
     setAlphaDraftProblems(previous => {
@@ -494,13 +498,20 @@ function ConvertPage() {
     [files, selectedId, setSelectedId, setFiles],
   );
 
-  // Validate the whole proposed batch before changing any entry or raw editor.
-  const applySettings = (settings: FileRowOptions, sourceId?: string) => {
+  // Validate every row in scope before changing any entry or raw editor;
+  // rows outside the scope are returned untouched.
+  const applySettings = (
+    settings: FileRowOptions,
+    scope: { ids: ReadonlySet<string>; stamp: { id: string; label: string } },
+    sourceId?: string,
+  ): boolean => {
+    const inScope = (file: FileEntry) => file.id !== undefined && scope.ids.has(file.id);
     const carriesTrackIntent = settings.trackOptions !== undefined;
     const portableVideoPolicy = settings.pendingTrackPolicy?.kind === "video"
       ? settings.pendingTrackPolicy
       : videoTrackPolicyForPreset(settings.trackOptions);
     const next = files.map(file => {
+      if (!inScope(file)) return file;
       const state = byId[file.id ?? ""];
       const videoTrackSettings = state?.phase === "ready"
         ? state.capabilities.targets.find(target => target.target === settings.target)?.video_track_settings
@@ -534,7 +545,7 @@ function ConvertPage() {
       subtitle: settings.subtitle ? { ...settings.subtitle } : null,
       });
     });
-    const incompatible = next.map(withAudioInspection).flatMap(file => {
+    const incompatible = next.filter(inScope).map(withAudioInspection).flatMap(file => {
       const state = byId[file.id ?? ""] ?? PROBING;
       const capability = state.phase === "ready" ? state.capabilities.targets.find(c => c.target === file.target)?.video_settings : null;
       const metadataProblem = state.phase === "ready"
@@ -588,16 +599,19 @@ function ConvertPage() {
     });
     if (incompatible.length) {
       setApplicationError(`Settings were not applied. ${incompatible.join(" ")}`);
-      return;
+      setApplicationStatus(null);
+      return false;
     }
     setApplicationError(null);
     const replaceableVideoDrafts = videoDraftSlots.filter(slot => slot !== "VideoOptionsPanel.savedSoftware");
-    files.forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
-    setFiles(next);
+    files.filter(inScope).forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
+    setFiles(stampEntries(next, scope.ids, scope.stamp));
+    return true;
   };
 
   const applyPreset = (preset: Preset) => {
     if (preset.compress_mode) { setApplicationError("Compression settings cannot be applied in Convert."); return; }
+    const ids = new Set(files.flatMap(file => file.id ? [file.id] : []));
     applySettings({
       target: preset.target,
       imageOptions: cloneImageOptions(preset.image_options),
@@ -613,13 +627,9 @@ function ConvertPage() {
       trackOptions: preset.track_policy ? null : undefined,
       pendingTrackPolicy: preset.track_policy ?? undefined,
       videoTrackOptionsEnabled: preset.track_policy?.kind === "video" || undefined,
-    });
+    }, { ids, stamp: { id: newBatchStampId(), label: preset.name || "a preset" } });
   };
 
-  const applyFirstToAll = () => {
-    if (files.length < 2 || imageProblems.some(Boolean) || videoProblems.some(Boolean) || audioProblems.some(Boolean) || metadataProblems.some(Boolean) || colorProblems.some(Boolean)) return;
-    applySettings({...plannedFiles[0],audioOptions:audioRequestOptions(plannedFiles[0]),videoOptions:videoRequestOptions(plannedFiles[0])}, files[0].id);
-  };
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -699,6 +709,31 @@ function ConvertPage() {
     unavailableReason: file.trackSourceUnavailableReason, pendingPolicy: file.pendingTrackPolicy,
   }) : trackSelectionProblem(file)) ?? baseProblems[index]);
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
+  const selectedIndex = selected ? files.indexOf(selected) : -1;
+  const selectedKind = batchKind(byId[selected?.id ?? ""]);
+  const applyScope = selectedKind ? kindScope(files, byId, selectedKind) : null;
+  // Only the source row's own settings problems block Apply; applying may fix
+  // the others. A plan still being checked is not a settings problem.
+  const selectedProblem = selectedIndex < 0 ? null : problems[selectedIndex] ?? null;
+  const applySelectedToKind = () => {
+    if (!selected?.id || !selectedKind || !applyScope || applyScope.pending || selectedProblem) return;
+    const source = plannedFiles[selectedIndex];
+    const applied = applySettings(
+      { ...source, audioOptions: audioRequestOptions(source), videoOptions: videoRequestOptions(source) },
+      { ids: new Set(applyScope.ids), stamp: { id: newBatchStampId(), label: sourceName(selected.path) } },
+      selected.id,
+    );
+    if (applied) setApplicationStatus(applyOutcome(applyScope.ids.length, selectedKind, applyScope.kept));
+  };
+  const applyLabel = selected && selectedKind && applyScope
+    ? applyButtonLabel(selectedKind, applyScope.ids.length, files.length, applyScope.pending)
+    : null;
+  const applyScopeAction: ApplyScopeAction | null = applyLabel && selected && selectedKind && applyScope ? {
+    label: applyLabel,
+    title: applyTooltip(sourceName(selected.path), selectedKind, applyScope.ids.length === files.length),
+    disabledReason: applyScope.pending ? WAIT_FOR_INSPECTION : selectedProblem ? FIX_SELECTED_FIRST : null,
+    onApply: applySelectedToKind,
+  } : null;
   return (
     <WorkspaceFrame
       title="Convert"
@@ -730,7 +765,7 @@ function ConvertPage() {
               ? "Editing " + sourceName(selected.path)
               : "Select a source to get started."
           }
-          actions={
+          actions={<>
             <ConvertActionBar
               files={plannedFiles}
               presetSource={selectedPlanned}
@@ -741,9 +776,11 @@ function ConvertPage() {
               planningBlocked={plannedFiles.some(file => !!planProblem(file))}
               onEnqueued={() => {}}
               onSettled={onSettled}
-              onApplyToAll={applyFirstToAll}
+              applyScope={applyScopeAction}
             />
-          }
+            {/* Always mounted, so VoiceOver hears the empty-to-text change. */}
+            <p role="status" className={applicationStatus ? "mt-2 text-xs text-fg-secondary" : "text-xs"}>{applicationStatus}</p>
+          </>}
         >
           {selected &&
           selectedState.phase === "ready" &&

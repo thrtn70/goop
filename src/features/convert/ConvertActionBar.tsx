@@ -20,7 +20,9 @@ import type {
   SubmissionReceipt,
 } from "@/features/workspace/entries";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
+import { useId, useState } from "react";
+import type { ApplyScopeAction } from "@/features/workspace/batchScope";
+import type { BatchStamp } from "@/features/workspace/batchStamp";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -65,6 +67,7 @@ export interface FileEntry extends EntryIdentity, VideoDraftFile, AudioDraftFile
   qualityPreset: QualityPreset | null;
   resolutionCap: ResolutionCap | null;
   audioPlanReady?: boolean;
+  batch?: BatchStamp | null;
 }
 
 interface ConvertActionBarProps {
@@ -77,8 +80,8 @@ interface ConvertActionBarProps {
   planningBlocked?: boolean;
   onEnqueued: () => void;
   onSettled?: (success: SubmissionReceipt[]) => void;
-  /** Optional: copies the first file's per-row settings to every other staged file. */
-  onApplyToAll?: () => void;
+  /** Copies the selected row's settings to rows of its kind; null hides the control. */
+  applyScope?: ApplyScopeAction | null;
 }
 
 function dirname(p: string): string {
@@ -103,8 +106,9 @@ export default function ConvertActionBar({
   planningBlocked = false,
   onEnqueued,
   onSettled,
-  onApplyToAll,
+  applyScope,
 }: ConvertActionBarProps) {
+  const applyReasonId = useId();
   const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>(
     "ConvertActionBar.overrideDir",
     null,
@@ -258,17 +262,19 @@ export default function ConvertActionBar({
             : "Change output folder..."}
         </button>
       )}
-      {count > 1 && onApplyToAll && (
+      {applyScope && (
         <button
           type="button"
-          disabled={blocked}
-          onClick={onApplyToAll}
-          title="Copy the first file's settings to every other file"
+          disabled={applyScope.disabledReason !== null}
+          onClick={applyScope.onApply}
+          title={applyScope.disabledReason ?? applyScope.title}
+          aria-describedby={applyScope.disabledReason ? applyReasonId : undefined}
           className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
         >
-          Apply first to all
+          {applyScope.label}
         </button>
       )}
+      {applyScope?.disabledReason && <span id={applyReasonId} className="sr-only">{applyScope.disabledReason}</span>}
       {count > 0 && (
         <button
           type="button"

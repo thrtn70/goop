@@ -674,8 +674,8 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "M4A" }));
     await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
     await userEvent.click(screen.getByRole("radio", { name: /main/i }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Apply first to all" })).toHaveProperty("disabled", false));
-    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to all 2" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
 
     await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
     expect(screen.getByLabelText("Audio processing")).toHaveProperty("value", "copy");
@@ -1012,7 +1012,7 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Select a.mp4" }));
     await userEvent.click(screen.getByRole("button", { name: "GIF" }));
     await userEvent.click(
-      screen.getByRole("button", { name: /apply first to all/i }),
+      screen.getByRole("button", { name: "Apply to all 2" }),
     );
     await userEvent.click(
       screen.getByRole("button", { name: /convert 2 files/i }),
@@ -1678,7 +1678,7 @@ describe("explicit video inspector", () => {
   it("validates every batch source before applying and clones compatible rows", async () => {
     mockOpen.mockResolvedValue(["/tmp/test-video.mp4","/tmp/unsupported.mp4"]);
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     expect(screen.getByText(/Settings were not applied/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button",{name:"Select unsupported.mp4"}));
     expect(screen.getByLabelText("Processing")).toHaveProperty("value","automatic");
@@ -1688,7 +1688,7 @@ describe("explicit video inspector", () => {
     mockProbe.mockResolvedValue(multiVideoProbe);
     await stage();
     await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
-    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
     expect(screen.getByText(/Settings were not applied.*Not every audio stream can be copied/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Select unsupported-tracks.mkv" }));
     expect(screen.getByLabelText("Processing")).toHaveProperty("value", "automatic");
@@ -1760,7 +1760,7 @@ describe("explicit video inspector", () => {
     await userEvent.selectOptions(screen.getByLabelText("Dimensions"),"fit_within");
     fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"1280"}});
     await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"24/1");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"19"}});
     fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"640"}});
     await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"60/1");
@@ -1850,7 +1850,7 @@ describe("explicit video inspector", () => {
       .mockImplementationOnce(()=>new Promise((_r,fail)=>{reject=fail;}));
     mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     await waitFor(()=>expect(mockVideoPlan).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",true);
     const area=screen.getByRole("region",{name:"Video processing plans"});
