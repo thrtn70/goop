@@ -558,11 +558,103 @@ function stepScript(step) {
   return block.join("\n");
 }
 
+// The workflow's lines without its full-line comments, which talk about
+// caches freely.
+function uncommented(body) {
+  return body
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("release neither restores nor saves a cache", () => {
+  // A tag run can restore what main's runs saved, and main's audit runs
+  // compile crates resolved fresh on every push (Cargo.lock is gitignored).
+  // Their build scripts run before any post-step save, so whatever a release
+  // restored could have been rewritten by one of them, and it would ship
+  // signed. A rehearsal on main would also save into main's scope.
+  const code = uncommented(workflow);
+  assert.deepEqual(code.match(/^[ -]*uses: [^\s@]*cache[^\s@]*@.*$/gim) ?? [], [], "a cache action in release.yml");
+  // setup-node, setup-python and friends cache through an input instead.
+  assert.deepEqual(code.match(/(?:^[ -]*|[{,]\s*)cache(?:-[a-z-]+)?:.*$/gm) ?? [], [], "a cache input in release.yml");
+  assert.doesNotMatch(code, /\.heif-deps$/m, "release restores no HEIC stack; the script builds one");
+  // Some actions cache with no input asking for it. Each one release runs is
+  // listed here, so a new one has to be checked for that before it is added.
+  const actions = new Set([...code.matchAll(/^[ -]*uses: ([^@\s]+)@/gm)].map((match) => match[1]));
+  assert.deepEqual([...actions].sort(), [
+    "actions/checkout",
+    "actions/download-artifact",
+    "actions/github-script",
+    "actions/setup-node",
+    "actions/setup-python",
+    "actions/upload-artifact",
+    "dtolnay/rust-toolchain",
+    "tauri-apps/tauri-action",
+  ]);
+  // setup-node is one: it caches npm whenever package.json names npm as its
+  // packageManager, unless package-manager-cache is false.
+  const setupNodes = code.match(/^[ -]*uses: actions\/setup-node@/gm) ?? [];
+  assert.ok(setupNodes.length > 0);
+  assert.equal(code.match(/\bpackage-manager-cache: false\b/g)?.length ?? 0, setupNodes.length);
+  // So the stack is built here, from the checksum-pinned sources.
+  const stack = namedStep(job("build"), "Static HEIC decode stack (macOS)");
+  assert.match(runBlock(stack), /^\.\/scripts\/build-static-heif-deps\.sh$/m);
+});
+
+// Every job name in a workflow, in order.
+function jobNames(body) {
+  const jobsAt = body.indexOf("\njobs:\n");
+  assert.notEqual(jobsAt, -1, "no jobs: block");
+  return [...body.slice(jobsAt).matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm)].map((match) => match[1]);
+}
+
+test("audit saves the HEIC cache only from a job that compiles nothing", () => {
+  // The rust and sidecar-smoke jobs run build scripts from crates resolved
+  // fresh on every push. Saved from one of them, .heif-deps could be
+  // rewritten between the stack's build and the post-step save.
+  const writer = auditJob("heif-deps");
+  // Exactly these steps, so nothing else can run before the save.
+  const writerSteps = steps(writer).map(uncommented);
+  assert.deepEqual(
+    writerSteps.map((step) => step.match(/^ {6}- (?:uses: ([^@\s]+)@\S+|name: (.+))$/m)?.slice(1).find(Boolean)),
+    [
+      "actions/checkout",
+      "actions/setup-node",
+      "macOS deployment floor",
+      "actions/cache",
+      "Static HEIC decode stack (libde265 + libheif)",
+    ],
+  );
+  assert.match(writerSteps.at(-1), /^ {8}run: \.\/scripts\/build-static-heif-deps\.sh$/m);
+  assert.doesNotMatch(writer, /^ {4}needs:/m);
+  // Its setup-node must not save an npm cache of its own (see release).
+  assert.match(writer, /^ {8}with: \{ node-version: "22", package-manager-cache: false \}$/m);
+  // One leg for each runner a consumer restores on.
+  assert.match(writer, /^ {8}os: \[ubuntu-24\.04, macos-14\]$/m);
+  assert.match(auditJob("rust"), /^ {4}runs-on: ubuntu-24\.04$/m);
+  assert.match(auditJob("sidecar-smoke"), /^ {8}os: \[macos-14, windows-latest\]$/m);
+
+  const uses = [];
+  for (const name of jobNames(auditWorkflow)) {
+    for (const step of steps(auditJob(name))) {
+      if (!/^ {10}path: \.heif-deps$/m.test(step)) continue;
+      uses.push([name, step.match(/^ {6}- uses: (\S+)@/m)?.[1]]);
+    }
+  }
+  assert.deepEqual(uses.sort(([a], [b]) => a.localeCompare(b)), [
+    ["heif-deps", "actions/cache"],
+    ["rust", "actions/cache/restore"],
+    ["sidecar-smoke", "actions/cache/restore"],
+  ]);
+  const cached = auditWorkflow.match(/^ {10}path: \.heif-deps$/gm) ?? [];
+  assert.equal(cached.length, uses.length, "a .heif-deps cache step the parser missed");
+});
+
 test("every HEIC cache key carries the macOS floor the stack was built for", () => {
   // Not hashFiles('src-tauri/tauri.conf.json'): that file also holds the app
   // version, so every release would throw away a stack that is still good.
   const jobs = [
-    ["release build", job("build")],
+    ["audit heif-deps", auditJob("heif-deps")],
     ["audit rust", auditJob("rust")],
     ["audit sidecar-smoke", auditJob("sidecar-smoke")],
   ];
@@ -579,6 +671,9 @@ test("every HEIC cache key carries the macOS floor the stack was built for", () 
     assert.equal(condition(list[floorAt]), condition(cache), `${name}: the floor step and the cache run together`);
     floorScripts.add(stepScript(list[floorAt]));
   }
+  // Release has no HEIC cache, but its floor step is the one runFloorStep
+  // exercises, so tying audit's to it carries those checks over to them.
+  floorScripts.add(stepScript(steps(job("build")).find((step) => /^ {8}id: macos-floor$/m.test(step))));
   assert.equal(floorScripts.size, 1, "every job reads the floor the same way");
   const cached = `${workflow}\n${auditWorkflow}`.match(/^ {10}path: \.heif-deps$/gm) ?? [];
   assert.equal(cached.length, jobs.length, "a HEIC cache outside these jobs would need the same key");
@@ -665,11 +760,13 @@ test("macOS jobs export the floor before any Rust cache or native build, and key
   // Only setup that compiles nothing may come first. Everything else, the
   // Rust cache included, runs after the floor is exported.
   const setup = /^ {6}- uses: (?:actions\/checkout|dtolnay\/rust-toolchain|actions\/setup-python|actions\/setup-node)@/m;
+  // The release build restores no cache at all; see "release neither
+  // restores nor saves a cache".
   const jobs = [
-    ["release build", job("build")],
-    ["audit sidecar-smoke", auditJob("sidecar-smoke")],
+    ["release build", job("build"), 0],
+    ["audit sidecar-smoke", auditJob("sidecar-smoke"), 1],
   ];
-  for (const [name, body] of jobs) {
+  for (const [name, body, rustCaches] of jobs) {
     const list = steps(body).map(stepCode);
     const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
     assert.notEqual(floorAt, -1, `${name} has no macos-floor step`);
@@ -678,10 +775,12 @@ test("macOS jobs export the floor before any Rust cache or native build, and key
       assert.match(step, setup, `${name}: this step runs before the floor is exported:\n${step}`);
     }
     const caches = list.filter((step) => /Swatinem\/rust-cache@/.test(step));
-    assert.equal(caches.length, 1, `${name} restores one Rust cache`);
+    assert.equal(caches.length, rustCaches, `${name} restores ${rustCaches} Rust cache(s)`);
     // rust-cache hashes the variables it is told about into the key, and only
     // when they are set, so the Windows leg's key is untouched.
-    assert.match(caches[0], /^ {10}env-vars: MACOSX_DEPLOYMENT_TARGET$/m, `${name}: a new floor must start a new Rust cache`);
+    for (const cache of caches) {
+      assert.match(cache, /^ {10}env-vars: MACOSX_DEPLOYMENT_TARGET$/m, `${name}: a new floor must start a new Rust cache`);
+    }
   }
 });
 
@@ -703,15 +802,13 @@ test("audit relinks libheif-sys against the HEIC stack the job just built or res
       assert.ok(script.indexOf(clean) > built, `${name}: "${clean}" must follow the stack build`);
     }
   }
-  // The release build needs no clean because its Rust cache is always cold:
-  // it restores without saving, and only a job with the same id could save
-  // under its key.
-  const releaseCache = steps(job("build")).find((step) => /Swatinem\/rust-cache@/.test(step));
-  assert.match(releaseCache, /^ {10}save-if: "false"$/m);
-  for (const { name, body } of workflows) {
-    if (name === "release.yml") continue;
-    assert.doesNotMatch(body, /^ {2}build:$/m, `${name} has a job named build, whose Rust cache the release build would restore`);
-  }
+  // The release build needs no clean because it restores no Rust cache; see
+  // "release neither restores nor saves a cache".
+  assert.equal(
+    steps(job("build")).filter((step) => /Swatinem\/rust-cache@/.test(step)).length,
+    0,
+    "the release build restores no Rust cache",
+  );
 });
 
 // A rust-cache entry is 0.2-2.2 GB per job. One saved from a pull request is
@@ -746,16 +843,6 @@ test("audit saves the Rust cache from main only, so PR runs restore main's", () 
   assert.equal(rustCacheUses(auditWorkflow), jobs.length, "a rust-cache step outside these jobs needs the same save-if");
 });
 
-test("release restores the Rust cache but never saves one", () => {
-  const jobs = ["build", "legal"];
-  for (const name of jobs) {
-    const cached = rustCacheSteps(job(name));
-    assert.equal(cached.length, 1, `release ${name} has one rust-cache step`);
-    assert.equal(saveIf(cached[0]), '"false"', `release ${name}:\n${cached[0]}`);
-  }
-  assert.equal(rustCacheUses(workflow), jobs.length, "a rust-cache step outside these jobs needs the same save-if");
-});
-
 test("no workflow saves a Rust cache outside main", () => {
   for (const { name, body } of workflows) {
     assert.equal(rustCacheSteps(body).length, rustCacheUses(body), `${name}: a rust-cache step the parser missed`);
@@ -776,8 +863,9 @@ test("both quality gates run the HEIC stack tests, and audit runs them on macOS 
 });
 
 // scripts/build-tesseract-macos.sh builds tesseract for the floor inside
-// fetch-sidecars.sh, so its cache must be restored before that step runs, and
-// keyed like the HEIC stack: a new floor or a changed script restores nothing.
+// fetch-sidecars.sh, so audit's cache must be restored before that step runs,
+// and keyed like the HEIC stack: a new floor or a changed script restores
+// nothing. A release restores no cache, so it builds tesseract every time.
 // It is keyed on the runner image too, because the image fixes the Homebrew
 // leptonica and libarchive the build links. The script rebuilds when they
 // change, and actions/cache never re-saves a key it restored, so without the
@@ -788,10 +876,7 @@ const tesseractCacheKey =
   "${{ hashFiles('scripts/build-tesseract-macos.sh') }}";
 
 test("every tesseract cache carries the floor and the build script, and is restored before the sidecars are fetched", () => {
-  const jobs = [
-    ["release build", job("build"), "Fetch sidecars"],
-    ["audit sidecar-smoke", auditJob("sidecar-smoke"), "Fetch sidecars"],
-  ];
+  const jobs = [["audit sidecar-smoke", auditJob("sidecar-smoke"), "Fetch sidecars"]];
   for (const [name, body, fetchName] of jobs) {
     const list = steps(body);
     const cacheAt = list.findIndex((step) => /^ {10}path: \.tesseract-deps$/m.test(step));

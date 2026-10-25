@@ -15,6 +15,12 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Nothing in this workflow restores or saves an Actions cache. A tag run can
+# restore whatever main's runs saved, and main's audit runs compile crates
+# resolved fresh on every push (Cargo.lock is gitignored), whose build scripts
+# run before the post-step save and could rewrite what it saves. Anything
+# restored here would ship signed. With no cache step, a rehearsal on main
+# also stops saving its own build into main's cache scope.
 jobs:
   # Reject a tag whose manifests disagree before any expensive build starts.
   # This job is read-only; draft creation happens only after the builder passes.
@@ -114,11 +120,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-      # Restore only, as in the build job. A tag push would save under that
-      # tag, where no later release or audit run can restore it.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          save-if: "false"
       - name: Rust dep graph clear of mupdf-*
         run: |
           if cargo tree --workspace --prefix none --edges normal,build,dev 2>/dev/null | grep -i mupdf; then
@@ -150,16 +151,17 @@ jobs:
         id: python
         if: matrix.os == 'macos-14'
         with: { python-version: "3.14.6" }
+      # setup-node caches npm by itself once package.json names npm as its
+      # packageManager; package-manager-cache: false keeps it from doing so.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with: { node-version: "22", cache: "npm" }
+        with: { node-version: "22", package-manager-cache: false }
       # bundle.macOS.minimumSystemVersion in tauri.conf.json, the oldest
       # macOS Goop declares. Every later step gets it as
       # MACOSX_DEPLOYMENT_TARGET, which rustc and the cc and cmake build
       # scripts compile for; without it they take the SDK's own version.
       # `tauri build` exports the same value for its cargo build, so this
       # keeps the release from depending on that, and the same step in
-      # audit.yml makes the tested build match this one. It runs before the
-      # Rust cache so the floor is part of that cache's key.
+      # audit.yml makes the tested build match this one.
       - name: macOS deployment floor
         id: macos-floor
         if: matrix.os == 'macos-14'
@@ -170,31 +172,16 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             echo "MACOSX_DEPLOYMENT_TARGET=$floor" >> "$GITHUB_ENV"
           fi
-      # Restore only. Tag builds happen rarely (a few per quarter) and each
-      # would add ~500MB to the 10GB cache quota; once that fills, the
-      # post-step save can fail. The key includes this job's id, `build`, and
-      # no job of that name ever saves, so the restore finds nothing and every
-      # release compiles from scratch: no Rust artifact built against an
-      # earlier floor or HEIC stack can reach a release.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
-        with:
-          save-if: "false"
-          env-vars: MACOSX_DEPLOYMENT_TARGET
       # v0.2.8: static HEIC decode stack (libheif + libde265, no other
       # codecs). DEPENDENCY-PREP ONLY — the tauri-action invocation and
       # upload flow below are untouched. Nothing needs bundling at
       # packaging time because the link is fully static; audit.yml's
       # per-PR link guards enforce that property stays true.
       #
-      # The stack is built for the declared macOS floor, so the floor is in
-      # the cache key: a new one restores nothing built for the old. The
-      # value goes in rather than hashFiles('src-tauri/tauri.conf.json'),
-      # which would also change with every version bump.
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        if: matrix.os == 'macos-14'
-        with:
-          path: .heif-deps
-          key: heif-deps-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-${{ hashFiles('scripts/build-static-heif-deps.sh') }}
+      # Built here every time from the checksum-verified sources, for the
+      # declared macOS floor, which the script reads and refuses to run
+      # without. Before it reuses an existing stack, the script checks only
+      # that the archives exist and target the floor, not what is in them.
       - name: Static HEIC decode stack (macOS)
         if: matrix.os == 'macos-14'
         run: |
@@ -203,22 +190,8 @@ jobs:
           echo "SYSTEM_DEPS_LIBHEIF_LINK=static" >> "$GITHUB_ENV"
       # fetch-sidecars.sh builds tesseract and libtesseract.5.dylib from
       # source for the declared floor (scripts/build-tesseract-macos.sh).
-      # The build is cached like the HEIC stack, and the script checks a
-      # restored one before it reuses it. The runner image is in the key as
-      # well: it fixes the Homebrew leptonica and libarchive the build links,
-      # which the script also checks, and a cache restored by its exact key
-      # is never saved again, so a new image would otherwise rebuild on
-      # every run.
-      - name: Runner image
-        id: runner-image
-        if: matrix.os == 'macos-14'
-        run: |
-          echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        if: matrix.os == 'macos-14'
-        with:
-          path: .tesseract-deps
-          key: tesseract-${{ runner.os }}-macos-${{ steps.macos-floor.outputs.version }}-image-${{ steps.runner-image.outputs.version }}-${{ hashFiles('scripts/build-tesseract-macos.sh') }}
+      # Like the HEIC stack, it is built here every time: nothing a release
+      # links or bundles comes from a cache.
       - name: Fetch sidecars
         shell: bash
         run: ./scripts/fetch-sidecars.sh "${{ matrix.target }}"

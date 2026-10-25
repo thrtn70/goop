@@ -24,8 +24,8 @@
 # and link. A build is reused only when both Mach-O files are linked for the
 # floor, tesseract loads the libtesseract.5.dylib in this prefix, and
 # BUILD-INFO records the same source, floor, leptonica, libarchive and
-# script. Anything else is rebuilt. The workflows cache the prefix keyed on
-# the floor and this script.
+# script. Anything else is rebuilt. audit.yml caches the prefix, keyed on the
+# floor, the runner image and this script; release.yml builds it every run.
 #
 # --check reports whether the prefix is reusable (exit 0) or why not
 # (exit 1), and never downloads or builds.
