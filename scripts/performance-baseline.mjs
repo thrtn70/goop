@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {validateEffectiveExecution,validateMediaProbe} from './performance-manifest.mjs';
-import {createEvidenceFile,createOwnedGroupStopper,directoryBytes,readOwnedRegularFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
+import {createEvidenceFile,createOwnedGroupStopper,directoryBytes,ownedLaunch,readOwnedRegularFile,replaceEvidenceFile,runtimeSidecarEnvironment,withTerminationSignals} from './performance-shared.mjs';
 export function treeRss(snapshot,root){
  const rows=snapshot.trim().split('\n').map(line=>line.trim().split(/\s+/).slice(0,3).map(Number));
  const ids=new Set([root]); let changed=true;
@@ -37,12 +37,11 @@ export async function run(binary,sidecars,request,stem,options={}) {
  const directory=dirname(stem);
  // Tests inject a failing symbolic-link scan here; no caller passes one.
  const {listSymlinks=ownedSymlinks}=options;
+ const launch=ownedLaunch(binary,[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]);
  const existingEntries=new Set(readdirSync(directory));
  const initialSymlinks=new Set(listSymlinks(directory));
  createEvidenceFile(`${stem}.request.json`,JSON.stringify(request,null,2));
- const timedCommand=process.platform==='darwin'?'/usr/bin/time':binary;
- const timedArgs=process.platform==='darwin'?['-l',binary,sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)]:[sidecars,`${stem}.request.json`,`${stem}.metrics.json`,String(hardwareEnabled)];
- const child=spawn(timedCommand,timedArgs,{stdio:['ignore','pipe','pipe'],detached:process.platform!=='win32',env:environment});
+ const child=spawn(launch.command,launch.args,{stdio:[launch.stdin,'pipe','pipe'],detached:process.platform!=='win32',env:environment});
  let stdout=Buffer.alloc(0),stderr=Buffer.alloc(0),retainedLogBytes=0,rssKiB=null,children=null,timedOut=false,budgetExceeded=false,aborted=false;
  const retain=(current,chunk)=>{const kept=chunk.subarray(0,Math.max(0,logLimitBytes-retainedLogBytes));retainedLogBytes+=kept.length;return Buffer.concat([current,kept]);};
  child.stdout.on('data',chunk=>{stdout=retain(stdout,chunk);});

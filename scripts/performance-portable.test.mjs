@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { chmodSync, constants, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { createOwnedGroupStopper, directoryBytes, readOwnedRegularFile, runBoundedProcess } from './performance-shared.mjs';
+import { createOwnedGroupStopper, directoryBytes, ownedLaunch, ownedRunPath, readOwnedRegularFile, runBoundedProcess } from './performance-shared.mjs';
 import { directoryBytes as baselineDirectoryBytes } from './performance-baseline.mjs';
 import { resolveRuntimeSidecars } from './performance-suite.mjs';
 import { run } from './performance-baseline.mjs';
+
+const require = createRequire(import.meta.url);
 
 // On Windows, Node puts each child it spawns in a job that ends with its
 // parent, so a plain node descendant dies with the root and never tests the
@@ -457,88 +460,126 @@ test('portable bounded runner rejects and removes child-created symlinks without
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 
-// Stands in for taskkill and the process table, given as [pid, parent pid,
-// creation in ms]. A creation left out is a minute from now, so after any
-// launch in the test; null is a process Windows reports no creation for.
-// Console processes refuse a soft taskkill, as real ones do. A forced one ends
-// that pid only: whatever /t adds is Windows' own walk, so only the pids the
-// stopper picks are under test.
-const windowsFileTime = ms => ms === null ? 0n : (BigInt(Math.round(ms)) + 11644473600000n) * 10000n;
-function fakeWindows(table) {
-  const later = Date.now() + 60000;
-  const live = new Map(table.map(([pid, parent, created = later]) => [pid, { parent, created }])), calls = [];
-  const execFile = (command, args) => {
-    if (command === 'powershell.exe') { calls.push('process table'); return `${[...live].map(([pid, { parent, created }]) => `${pid} ${parent} ${windowsFileTime(created)}`).join('\r\n')}\r\n`; }
-    const pid = Number(args[args.indexOf('/pid') + 1]), forced = args.includes('/f');
-    calls.push(`taskkill ${pid}${forced ? ' /f' : ''}`);
-    if (!forced || !live.has(pid)) throw Error('taskkill refused');
-    live.delete(pid);
-    return '';
-  };
-  return { live, calls, execFile };
-}
 // A grace the test ends by hand, so no wall clock decides the order. A wait
 // nobody ends never settles, so these tests carry a timeout.
 function heldGrace() { const waits = []; return { waits, sleep: ms => new Promise(resolve => { waits.push({ ms, resolve }); }) }; }
-const fakeRoot = pid => Object.assign(new EventEmitter(), { pid });
+const turn = () => new Promise(resolve => setImmediate(resolve));
+// Records each call a stop could name a pid with: process.kill, and every
+// child_process function a taskkill or a process-table query would go through.
+// syncBuiltinESMExports carries the stand-ins into the module's own imports.
+const childProcess = require('node:child_process'), runnerNames = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync'];
+const realPidCallers = { kill: process.kill, ...Object.fromEntries(runnerNames.map(name => [name, childProcess[name]])) };
+function recordPidCalls(t) {
+  const calls = [];
+  process.kill = (...args) => { calls.push(['kill', ...args]); return true; };
+  for (const name of runnerNames) childProcess[name] = (...args) => { calls.push([name, ...args]); throw Error(`a stop ran ${name}`); };
+  syncBuiltinESMExports();
+  t.after(() => { process.kill = realPidCallers.kill; for (const name of runnerNames) childProcess[name] = realPidCallers[name]; syncBuiltinESMExports(); });
+  return calls;
+}
 
-test('owned group stopper reaps the orphans of an exited Windows root from the process table', { timeout: 10000 }, async () => {
-  const windows = fakeWindows([[200, 100], [300, 200], [400, 1], [500, 999]]), grace = heldGrace(), root = fakeRoot(100);
-  const group = createOwnedGroupStopper(root, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32', execFile: windows.execFile });
-  root.emit('close', 0);
+// The launcher as a Windows stop sees it. Closing its stdin asks it to end its
+// job, kill() is TerminateProcess on Node's own handle, and exit() is the
+// launcher reporting, which it does only once its job is empty or closed.
+function fakeLauncher(pid) {
+  const launcher = Object.assign(new EventEmitter(), { pid, exitCode: null, signalCode: null, kills: 0, stopRequested: false });
+  launcher.stdin = { end() { launcher.stopRequested = true; }, destroy() { launcher.stopRequested = true; } };
+  launcher.kill = () => { launcher.kills += 1; return true; };
+  launcher.exit = (code, signal = null) => { Object.assign(launcher, { exitCode: code, signalCode: signal }); launcher.emit('exit', code, signal); launcher.emit('close', code, signal); };
+  return launcher;
+}
+
+test('a Windows stop ends the launcher job and never names a pid', { timeout: 10000 }, async t => {
+  const pidCalls = recordPidCalls(t), grace = heldGrace(), launcher = fakeLauncher(100);
+  const group = createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32' });
   const stopped = group.stop();
   assert.equal(group.stop(), stopped, 'a second stop must not signal again');
-  assert.deepEqual(grace.waits.map(wait => wait.ms), [250]);
-  assert.ok(windows.calls.includes('process table'));
-  assert.deepEqual([...windows.live.keys()], [200, 300, 400, 500], 'nothing is forced before the grace ends');
   grace.waits[0].resolve();
+  await turn();
+  assert.deepEqual(pidCalls, [], 'a Windows stop named a pid');
+  assert.equal(launcher.stopRequested, true, 'the launcher was not asked to end its job');
+  assert.equal(launcher.kills, 1, 'a launcher still running after the grace must be killed through Node');
+  let settled = false;
+  stopped.then(() => { settled = true; });
+  await turn();
+  assert.equal(settled, false, 'a forced stop settled before the launcher exited');
+  launcher.exit(null, 'SIGKILL');
   await stopped;
-  assert.deepEqual([...windows.live.keys()], [400, 500]);
-  assert.ok(!windows.calls.some(call => /^taskkill (400|500)/.test(call)), `unowned process signalled: ${windows.calls}`);
+  assert.deepEqual(pidCalls, []);
 });
 
-test('owned group stopper leaves processes whose Windows parent id is stale', { timeout: 10000 }, async () => {
-  const launch = Date.now(), hourBefore = launch - 3600000;
-  // Windows never clears a parent id, so these only look owned: 250 and 215 were
-  // made under earlier holders of the root's pid (215 just past the slack), 300,
-  // 320 and 330 are older than the 200 and 310 they name, and 270 has no stamp.
-  // 260 is reached only through 250. 210's stamp precedes the launch read, as a
-  // coarse clock can stamp a child made right after the spawn.
-  const windows = fakeWindows([[200, 100, launch + 50000], [210, 100, launch - 100], [310, 200, launch + 60000], [250, 100, hourBefore], [215, 100, launch - 1500], [260, 250, launch + 60000], [270, 100, null], [300, 200, hourBefore], [320, 310, launch + 30000], [330, 310, launch + 59990]]);
-  const grace = heldGrace(), root = fakeRoot(100);
-  const group = createOwnedGroupStopper(root, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32', execFile: windows.execFile });
-  root.emit('close', 0);
-  const stopped = group.stop();
+test('a forced Windows stop settles after a second grace even if the launcher never exits', { timeout: 10000 }, async t => {
+  const pidCalls = recordPidCalls(t), grace = heldGrace(), launcher = fakeLauncher(100);
+  const stopped = createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32' }).stop();
   grace.waits[0].resolve();
+  await turn();
+  assert.deepEqual(pidCalls, [], 'a Windows stop named a pid');
+  assert.deepEqual(grace.waits.map(wait => wait.ms), [250, 250]);
+  grace.waits[1].resolve();
   await stopped;
-  assert.deepEqual([...windows.live.keys()].sort((a, b) => a - b), [215, 250, 260, 270, 300, 320, 330]);
-  assert.ok(!windows.calls.some(call => /^taskkill (215|250|260|270|300|320|330)\b/.test(call)), `unowned process signalled: ${windows.calls}`);
+  assert.equal(launcher.kills, 1);
+  assert.deepEqual(pidCalls, []);
 });
 
-test('owned group stopper forces a live Windows root that refuses the soft stop', { timeout: 10000 }, async () => {
-  const windows = fakeWindows([[100, 1]]), grace = heldGrace(), root = fakeRoot(100);
-  const stopped = createOwnedGroupStopper(root, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32', execFile: windows.execFile }).stop();
-  assert.deepEqual(grace.waits.map(wait => wait.ms), [250], 'a refused soft stop must still lead to the forced one');
-  assert.equal(windows.live.has(100), true);
-  grace.waits[0].resolve();
+test('a launcher that empties its job within the grace is left to exit', { timeout: 10000 }, async t => {
+  const pidCalls = recordPidCalls(t), grace = heldGrace(), launcher = fakeLauncher(100);
+  const stopped = createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32' }).stop();
+  assert.deepEqual(pidCalls, [], 'a Windows stop named a pid');
+  assert.equal(launcher.stopRequested, true, 'the launcher was not asked to end its job');
+  launcher.exit(3);
   await stopped;
-  assert.equal(windows.live.has(100), false);
+  // The grace can still end after the exit, when Node no longer holds the launcher.
+  for (const wait of grace.waits) wait.resolve();
+  await turn();
+  assert.equal(launcher.kills, 0, 'a launcher Node no longer holds was killed');
+  assert.equal(grace.waits.length, 1, 'a launcher that exited by itself was given a second grace');
+  assert.deepEqual(pidCalls, []);
 });
 
-test('owned group stopper forces at once when the grace wait fails', { timeout: 10000 }, async () => {
-  const windows = fakeWindows([[100, 1]]), root = fakeRoot(100);
-  await createOwnedGroupStopper(root, { killGraceMs: 250, sleep: () => Promise.reject(Error('no clock')), platform: 'win32', execFile: windows.execFile }).stop();
-  assert.equal(windows.live.has(100), false);
+test('a Windows stop after the launcher exits does nothing, whoever holds its pid now', { timeout: 10000 }, async t => {
+  // The launcher emptied its job before it exited, by itself or killed; its pid
+  // may since belong to anyone.
+  const pidCalls = recordPidCalls(t);
+  for (const [code, signal] of [[0, null], [null, 'SIGKILL']]) {
+    const grace = heldGrace(), launcher = fakeLauncher(100);
+    const group = createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32' });
+    launcher.exit(code, signal);
+    const stopped = group.stop();
+    assert.deepEqual(pidCalls, [], `the exited launcher's pid was named after ${signal ?? `exit ${code}`}`);
+    assert.deepEqual(grace.waits, [], `nothing was left to stop after ${signal ?? `exit ${code}`}, yet the stop waits out the grace`);
+    await stopped;
+    assert.equal(launcher.stopRequested, false);
+    assert.equal(launcher.kills, 0);
+    assert.deepEqual(pidCalls, []);
+  }
 });
 
-test('owned group stopper returns at once for an exited Windows root with nothing left', { timeout: 10000 }, async () => {
-  const windows = fakeWindows([[400, 1]]), grace = heldGrace(), root = fakeRoot(100);
-  const group = createOwnedGroupStopper(root, { killGraceMs: 250, sleep: grace.sleep, platform: 'win32', execFile: windows.execFile });
-  root.emit('close', 0);
-  const stopped = group.stop();
-  assert.deepEqual(grace.waits, [], 'nothing was left to force, yet the stop waits out the grace');
-  await stopped;
-  assert.ok(!windows.calls.some(call => call.endsWith('/f')), `forced kill sent: ${windows.calls}`);
+test('a Windows stop kills the launcher at once when the grace wait fails', { timeout: 10000 }, async t => {
+  const pidCalls = recordPidCalls(t), launcher = fakeLauncher(100);
+  await createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: () => Promise.reject(Error('no clock')), platform: 'win32' }).stop();
+  assert.deepEqual(pidCalls, [], 'a Windows stop named a pid');
+  assert.equal(launcher.kills, 1);
+});
+
+test('a Windows stop settles even when killing the launcher fails', { timeout: 10000 }, async t => {
+  const pidCalls = recordPidCalls(t), launcher = fakeLauncher(100);
+  launcher.kill = () => { launcher.kills += 1; throw Error('kill EINVAL'); };
+  await createOwnedGroupStopper(launcher, { killGraceMs: 250, sleep: () => Promise.reject(Error('no clock')), platform: 'win32' }).stop();
+  assert.deepEqual(pidCalls, [], 'a Windows stop named a pid');
+  assert.equal(launcher.kills, 1);
+});
+
+test('owned launches run under time on macOS, in the launcher on Windows, and as given elsewhere', t => {
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-launch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const launcher = join(root, 'goop-owned-run.exe'); writeFileSync(launcher, '');
+  assert.deepEqual(ownedLaunch('/bin/x', ['a', 'b'], { platform: 'darwin' }), { command: '/usr/bin/time', args: ['-l', '/bin/x', 'a', 'b'], stdin: 'ignore' });
+  assert.deepEqual(ownedLaunch('/bin/x', ['a'], { platform: 'linux' }), { command: '/bin/x', args: ['a'], stdin: 'ignore' });
+  assert.deepEqual(ownedLaunch('C:\\x.exe', ['a'], { platform: 'win32', environment: { GOOP_OWNED_RUN: launcher } }), { command: launcher, args: ['C:\\x.exe', 'a'], stdin: 'pipe' });
+  assert.throws(() => ownedLaunch('x', [], { platform: 'win32', environment: { GOOP_OWNED_RUN: join(root, 'missing.exe') } }), /owned-process launcher/);
+  assert.throws(() => ownedLaunch('x', [], { platform: 'win32', environment: { GOOP_OWNED_RUN: root } }), /owned-process launcher/, 'a directory is not the launcher');
+  const linked = join(root, 'linked.exe'); symlinkSync(launcher, linked);
+  assert.throws(() => ownedLaunch('x', [], { platform: 'win32', environment: { GOOP_OWNED_RUN: linked } }), /owned-process launcher/, 'a link is not the launcher');
 });
 
 // Windows has no O_NOFOLLOW. Stripping it makes every platform open the way
@@ -574,14 +615,20 @@ const running = pid => {
   try { state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim(); } catch (error) { if (error.status !== 1) throw error; }
   return state !== '' && !/[ZE]/.test(state);
 };
-// A process nothing killed never leaves, so a bounded wait cannot turn a
-// survivor into a pass.
-async function outlives(pid) {
-  for (let polls = 0; running(pid) && polls < 250; polls++) await new Promise(resolve => setTimeout(resolve, 20));
-  return running(pid);
-}
 const recordedPid = path => { try { const pid = Number(readFileSync(path, 'utf8')); return Number.isInteger(pid) && pid > 1 ? pid : null; } catch { return null; } };
-// Only a survivor is killed, so a pid reused after a clean reap is left alone.
+// Whether the process a pid file names is still running. A process nothing
+// killed never leaves, so a bounded wait cannot turn a survivor into a pass.
+// Once the process is seen gone its pid file goes too, so no cleanup can
+// signal whoever reuses that pid.
+async function outlives(path) {
+  const pid = recordedPid(path);
+  for (let polls = 0; running(pid) && polls < 250; polls++) await new Promise(resolve => setTimeout(resolve, 20));
+  const alive = running(pid);
+  if (!alive) rmSync(path, { force: true });
+  return alive;
+}
+// Only a survivor still on record is killed, so a pid reused after a test saw
+// its process gone is left alone.
 const killRecorded = path => { const pid = recordedPid(path); if (pid && running(pid)) try { process.kill(pid, 'SIGKILL'); } catch { /* Already gone. */ } };
 // A pid file published by rename, so a reader never sees a partial pid.
 const publishPid = path => `require('node:fs').writeFileSync(${JSON.stringify(`${path}.tmp`)},String(process.pid));require('node:fs').renameSync(${JSON.stringify(`${path}.tmp`)},${JSON.stringify(path)});`;
@@ -609,7 +656,7 @@ test('single conversion reaps a descendant that outlives a clean root exit', { t
   assert.equal(result.success, true);
   const pid = recordedPid(armed);
   assert.ok(pid, 'descendant never armed');
-  assert.equal(await outlives(pid), false, 'descendant outlived the run');
+  assert.equal(await outlives(armed), false, 'descendant outlived the run');
 });
 
 test('single conversion stop forces a root that survives the soft stop', { timeout: 60000 }, async t => {
@@ -623,7 +670,7 @@ test('single conversion stop forces a root that survives the soft stop', { timeo
   assert.equal(result.success, false);
   const pid = recordedPid(armed);
   assert.ok(pid, 'root never armed');
-  assert.equal(await outlives(pid), false, 'root outlived the run');
+  assert.equal(await outlives(armed), false, 'root outlived the run');
 });
 
 test('single conversion never reads metrics through a child-made symbolic link', { timeout: 60000 }, async t => {
@@ -635,6 +682,130 @@ test('single conversion never reads metrics through a child-made symbolic link',
   assert.equal(result.error, 'No metrics produced');
   assert.equal(result.removed_symlink_outputs, 1);
   assert.equal(result.success, false);
+});
+
+// A grandchild that arms only once its own parent has exited, so no living
+// process between it and the root is left to walk from. The middle process
+// exits as soon as it has started it.
+function orphanedGrandchildRunner(armed, middleDetached) {
+  // The middle passes its own pid: by the time the grandchild runs, POSIX may
+  // already have reparented it.
+  const grandchild = `const parent=Number(process.argv[1]);process.on('SIGTERM',()=>{});const wait=setInterval(()=>{try{process.kill(parent,0);return;}catch(error){if(error.code!=='ESRCH')return;}clearInterval(wait);${publishPid(armed)}},5);setInterval(()=>{},1000);`;
+  const middle = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)},String(process.pid)],{stdio:'ignore',detached:${windowsNativeChild}}).unref();`;
+  return `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(middle)}],{stdio:'ignore',detached:${middleDetached}}).unref();const wait=setInterval(()=>{if(!fs.existsSync(${JSON.stringify(armed)}))return;clearInterval(wait);fs.writeFileSync(process.argv[3],JSON.stringify({success:true,process_ms:1}));},5);`;
+}
+
+test('single conversion reaps a grandchild whose detached parent exited first', { timeout: 60000 }, async t => {
+  const [armed] = pidDirectory(t, 'grandchild.pid');
+  const result = await portableConversion(t, orphanedGrandchildRunner(armed, windowsNativeChild), { timeoutMs: 30000, killGraceMs: 100 });
+  assert.equal(result.success, true);
+  const pid = recordedPid(armed);
+  assert.ok(pid, 'grandchild never armed');
+  assert.equal(await outlives(armed), false, 'grandchild outlived the run');
+});
+
+// On Windows the middle process sits in the root's own Node job, which lets
+// its children leave it; they must still stay in the launcher's job.
+test('single conversion reaps a grandchild whose parent in the root\'s Node job exited first', { timeout: 60000 }, async t => {
+  const [armed] = pidDirectory(t, 'grandchild.pid');
+  const result = await portableConversion(t, orphanedGrandchildRunner(armed, false), { timeoutMs: 30000, killGraceMs: 100 });
+  assert.equal(result.success, true);
+  const pid = recordedPid(armed);
+  assert.ok(pid, 'grandchild never armed');
+  assert.equal(await outlives(armed), false, 'grandchild outlived the run');
+});
+
+const windowsOnly = process.platform !== 'win32' && 'only Windows runs owned processes through the launcher';
+async function armedWithin(path) {
+  for (let polls = 0; !existsSync(path) && polls < 500; polls++) await new Promise(resolve => setTimeout(resolve, 20));
+  return existsSync(path);
+}
+
+// POSIX has no group the kernel ends with the harness; withTerminationSignals
+// covers a TERM there, and nothing can cover a KILL.
+test('a Windows harness that dies mid-run takes its owned tree with it', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const [armed] = pidDirectory(t, 'descendant.pid');
+  const root = mkdtempSync(join(tmpdir(), 'goop-portable-harness-death-')), output = join(root, 'output');
+  mkdirSync(output); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runner = join(root, 'runner.cjs'), harness = join(root, 'harness.mjs');
+  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`${publishPid(armed)}setInterval(()=>{},1000);`)}],{stdio:'ignore',detached:true}).unref();setInterval(()=>{},1000);`);
+  writeFileSync(harness, `import{runBoundedProcess}from${JSON.stringify(pathToFileURL(join(import.meta.dirname, 'performance-shared.mjs')).href)};await runBoundedProcess({command:process.execPath,args:[${JSON.stringify(runner)}],outputDirectory:${JSON.stringify(output)},timeoutMs:30000,killGraceMs:100,logLimitBytes:1024,storageBudgetBytes:1048576});`);
+  const child = spawn(process.execPath, [harness], { stdio: 'ignore' });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  t.after(() => { child.kill(); });
+  assert.ok(await armedWithin(armed), 'descendant never armed');
+  child.kill();
+  await closed;
+  assert.equal(await outlives(armed), false, 'descendant outlived its harness');
+});
+
+test('a Windows run refuses to start without the owned-process launcher', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const saved = process.env.GOOP_OWNED_RUN, scratch = mkdtempSync(join(tmpdir(), 'goop-portable-no-launcher-'));
+  t.after(() => { if (saved === undefined) delete process.env.GOOP_OWNED_RUN; else process.env.GOOP_OWNED_RUN = saved; rmSync(scratch, { recursive: true, force: true }); });
+  process.env.GOOP_OWNED_RUN = join(scratch, 'missing.exe');
+  const marker = join(scratch, 'ran'), output = join(scratch, 'output'), mark = `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran');`;
+  mkdirSync(output);
+  await assert.rejects(portableConversion(t, mark, { timeoutMs: 30000, killGraceMs: 100 }), /owned-process launcher/);
+  await assert.rejects(runBoundedProcess({ command: process.execPath, args: ['-e', mark], outputDirectory: output, timeoutMs: 30000, killGraceMs: 100, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 }), /owned-process launcher/);
+  assert.equal(existsSync(marker), false, 'a command ran without the launcher');
+});
+
+// The launcher run directly. Its stdin stays open, as the harness keeps it,
+// until a test closes it.
+function launched(args) {
+  const launcher = spawn(ownedRunPath(), args, { stdio: ['pipe', 'ignore', 'pipe'] });
+  let stderr = '';
+  launcher.stderr.on('data', chunk => { stderr += chunk; });
+  const done = new Promise((resolve, reject) => { launcher.once('error', reject); launcher.once('close', code => resolve({ code, stderr })); });
+  return { launcher, done };
+}
+
+test('the owned-process launcher passes the command exit code through', { skip: windowsOnly, timeout: 60000 }, async () => {
+  assert.equal((await launched([process.execPath, '-e', 'process.exit(7)']).done).code, 7);
+});
+
+test('the owned-process launcher refuses to run without a command', { skip: windowsOnly, timeout: 60000 }, async () => {
+  const { code, stderr } = await launched([]).done;
+  assert.equal(code, 2);
+  assert.match(stderr, /usage/);
+});
+
+test('the owned-process launcher ends what its command left running', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const [armed] = pidDirectory(t, 'descendant.pid');
+  const command = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`${publishPid(armed)}setInterval(()=>{},1000);`)}],{stdio:'ignore',detached:true}).unref();const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(armed)}))clearInterval(wait);},5);`;
+  assert.equal((await launched([process.execPath, '-e', command]).done).code, 0);
+  const pid = recordedPid(armed);
+  assert.ok(pid, 'descendant never armed');
+  assert.equal(await outlives(armed), false, 'descendant outlived the launcher');
+});
+
+test('closing the owned-process launcher stdin ends its command and everything it started', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const [rootArmed, armed] = pidDirectory(t, 'root.pid', 'descendant.pid');
+  const command = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`${publishPid(armed)}setInterval(()=>{},1000);`)}],{stdio:'ignore',detached:true}).unref();${publishPid(rootArmed)}setInterval(()=>{},1000);`;
+  const { launcher, done } = launched([process.execPath, '-e', command]);
+  t.after(() => { launcher.kill(); });
+  assert.ok(await armedWithin(rootArmed) && await armedWithin(armed), 'command or descendant never armed');
+  launcher.stdin.destroy();
+  assert.notEqual((await done).code, 0);
+  assert.equal(await outlives(rootArmed), false, 'command outlived the stop');
+  assert.equal(await outlives(armed), false, 'descendant outlived the stop');
+});
+
+// The harness's last resort: the launcher killed while its stdin stays open,
+// so nothing but the job closing with it can end the command.
+test('killing the owned-process launcher ends its command and everything it started', { skip: windowsOnly, timeout: 60000 }, async t => {
+  const [rootArmed, armed] = pidDirectory(t, 'root.pid', 'descendant.pid');
+  const command = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`${publishPid(armed)}setInterval(()=>{},1000);`)}],{stdio:'ignore',detached:true}).unref();${publishPid(rootArmed)}setInterval(()=>{},1000);`;
+  const { launcher, done } = launched([process.execPath, '-e', command]);
+  // A command that survives keeps the launcher's stderr open, so wait for the
+  // exit, not the close; `done` still reports a launcher that failed to start.
+  const exited = new Promise(resolve => launcher.once('exit', resolve));
+  t.after(() => { launcher.kill(); });
+  assert.ok(await armedWithin(rootArmed) && await armedWithin(armed), 'command or descendant never armed');
+  launcher.kill();
+  await Promise.race([exited, done]);
+  assert.equal(await outlives(rootArmed), false, 'command outlived the killed launcher');
+  assert.equal(await outlives(armed), false, 'descendant outlived the killed launcher');
 });
 
 // Hooks reproduce the app removing a publication temp file or SQLite journal mid-scan.
