@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStartup, summarizeStartup } from './startup-baseline.mjs';
@@ -178,6 +178,28 @@ test('startup returns its held-pipe evidence when the app blocks its log', { ski
   assert.match(result.evidence_error ?? '', /stdout\.log/);
   assert.equal(JSON.parse(readFileSync(join(root, 'run', 'sample.json'), 'utf8')).stdio_error, result.stdio_error);
 });
+// A scan that fails part-way must still remove the links it reached, and one
+// that cannot list the run directory at all leaves the evidence writes to refuse
+// a link rather than follow it out of the run directory. Links come first: once
+// the tree is unreadable, the live storage check can stop the app.
+for (const [label, lock] of [['fails part-way', "fs.mkdirSync(path.join(dir,'aaa-blocked'),{mode:0});"], ['cannot list the run directory', 'fs.chmodSync(dir,0o300);']]) {
+  // Root reads an unreadable directory, so its scan would not fail.
+  test(`startup whose symlink scan ${label} never follows a link the app left`, { skip: process.platform === 'win32' || process.getuid?.() === 0, timeout: 60000 }, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'goop-startup-scan-link-')), outside = join(root, 'outside.txt'), run = join(root, 'run'), evidence = ['stdout.log', 'stderr.log', 'sample.json'];
+    t.after(() => {
+      for (const path of [run, join(run, 'aaa-blocked')]) try { chmodSync(path, 0o700); } catch { /* Never made. */ }
+      rmSync(root, { recursive: true, force: true });
+    });
+    writeFileSync(outside, 'outside');
+    writeFileSync(join(root, 'app.cjs'), `const fs=require('node:fs'),path=require('node:path'),dir=path.dirname(process.env.GOOP_STARTUP_REPORT);for(const name of ${JSON.stringify(evidence)})fs.symlinkSync(${JSON.stringify(outside)},path.join(dir,name));${lock}`);
+    const result = await runStartup({ binary: process.execPath, args: [join(root, 'app.cjs')], directory: run, settings: {}, readinessTimeoutMs: 30000, idleMs: 30, killGraceMs: 200 });
+    chmodSync(run, 0o700);
+    assert.match(result.output_error ?? '', /could not be checked for symbolic links/);
+    assert.equal(readFileSync(outside, 'utf8'), 'outside');
+    if (label === 'fails part-way') for (const name of evidence) assert.equal(lstatSync(join(run, name)).isFile(), true, name);
+    else assert.match(result.evidence_error ?? '', /stdout\.log/);
+  });
+}
 // Root reads an unreadable directory, so its scan would not fail.
 test('startup returns its held-pipe evidence when the app leaves an entry its symlink scan cannot read', { skip: process.platform === 'win32' || process.getuid?.() === 0, timeout: 60000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-scan-')), armed = join(root, 'holder.pid'), blocked = join(root, 'run', 'blocked');
@@ -198,26 +220,26 @@ test('startup returns its held-pipe evidence when the app leaves an entry its sy
 });
 test('startup refuses what the app leaves at an evidence path and keeps the held-pipe evidence', { skip: process.platform === 'win32', concurrency: true, timeout: 60000 }, async t => {
   const cases = ['stdout.log', 'stderr.log', 'sample.json'].flatMap(name => ['symbolic link', 'hard link', 'directory'].map(kind => [name, kind]));
-  // Root reads an unreadable directory, so its scan would remove the link first.
+  // Root lists an unlistable directory, so its scan would remove the link first.
   await Promise.all(cases.map(([name, kind]) => t.test(`${kind} at ${name}`, { skip: kind === 'symbolic link' && process.getuid?.() === 0 }, async t => {
     const root = mkdtempSync(join(tmpdir(), 'goop-startup-evidence-')), armed = join(root, 'holder.pid'), run = join(root, 'run'), outside = join(root, 'outside');
     // The holder outlives the run, so only this ends it, on a timeout too.
     t.after(() => {
       try { process.kill(Number(readFileSync(armed, 'utf8')), 'SIGKILL'); } catch { /* Never armed or already gone. */ }
-      try { chmodSync(join(run, 'blocked'), 0o700); } catch { /* Never made. */ }
+      try { chmodSync(run, 0o700); } catch { /* Never made. */ }
       rmSync(root, { recursive: true, force: true });
     });
     writeFileSync(outside, 'outside');
-    // The symlink scan never sees a hard link or a directory. It removes a
-    // symbolic link it finds, so an unreadable entry stops the scan first, as an
-    // entry a live holder removes mid-scan does, and the link reaches the write
-    // as one planted after the scan would. The link comes first: the live storage
-    // check fails closed on the unreadable entry and stops the app, which must
-    // not land before the link exists.
+    // The symlink scan never sees a hard link or a directory. It removes every
+    // symbolic link it can reach, so a run directory it cannot list hides the
+    // link, and the link reaches the write as one planted after the scan would.
+    // The link comes first: the live storage check fails closed on the
+    // unlistable directory and stops the app, which must not land before the
+    // link exists.
     const path = JSON.stringify(join(run, name)), target = JSON.stringify(outside);
     const plant = kind === 'directory' ? `fs.mkdirSync(${path});`
       : kind === 'hard link' ? `fs.linkSync(${target},${path});`
-        : `fs.symlinkSync(${target},${path});fs.mkdirSync(${JSON.stringify(join(run, 'blocked'))},{mode:0});`;
+        : `fs.symlinkSync(${target},${path});fs.chmodSync(${JSON.stringify(run)},0o300);`;
     writeFileSync(join(root, 'app.cjs'), escapedApp(armed, plant));
     const result = await runStartup({ binary: process.execPath, args: [join(root, 'app.cjs')], directory: run, settings: {}, readinessTimeoutMs: 30000, idleMs: 30, killGraceMs: 200 });
     assert.ok(existsSync(armed), 'the holder never armed');

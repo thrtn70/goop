@@ -19,6 +19,7 @@ import {
   createOwnedDirectory,
   createRunLogs,
   directoryBytes,
+  readChildFile,
   removeOwnedDirectory,
   runtimeSidecarEnvironment,
   runBoundedProcess,
@@ -478,8 +479,9 @@ export async function executeWorkloadAdapter(run, drivers) {
   }
   let metrics = null;
   try {
-    if (statSync(metricsPath).size > Math.min(run.limits.log_limit_bytes, 1024 * 1024)) throw Error('Metrics exceed bound');
-    metrics = JSON.parse(readFileSync(metricsPath, 'utf8'));
+    // A link or FIFO the driver left at the metrics path is refused rather than
+    // followed or waited on.
+    metrics = JSON.parse(readChildFile(metricsPath, Math.min(run.limits.log_limit_bytes, 1024 * 1024)));
     if (metrics === null || typeof metrics !== 'object' || Array.isArray(metrics)) throw Error('Metrics must be a JSON object');
   } catch (error) {
     return { ...processResult, stdout: undefined, stderr: undefined, success: false, error: `Invalid workload metrics: ${error.message}` };
