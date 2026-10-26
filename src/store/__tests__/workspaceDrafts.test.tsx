@@ -279,6 +279,54 @@ it.each([
   act(() => rotation.pending());
   expect(rotation.degrees()).toBe("cw270");
   expect(rotation.parentDone).not.toHaveBeenCalled();
+
+  act(() => rotation.complete());
+  expect(rotation.degrees()).toBe("cw90");
+  expect(rotation.parentDone).toHaveBeenCalledTimes(1);
+});
+
+const refusedSave = (entries: Record<string, { value: unknown }>, tool: string) =>
+  JSON.stringify({ version: 2, entries: { ...entries, [JSON.stringify([tool, "Unknown.slot"])]: { value: "x" } } });
+
+it("keeps another source's recovered drafts from a pending operation whose parent forgets every source", async () => {
+  const otherKey = JSON.stringify(["image", "source", "/b.png", "ImageRotateFlow.degrees"]);
+  const values = new Map([["goop.workspace-drafts.v2", refusedSave({ [otherKey]: { value: "cw270" } }, "image")]]);
+  const rotation = await renderPendingRotation(values, { current: false });
+  rotation.parentDone.mockImplementation(() => {
+    rotation.drafts.forgetWorkspaceSource("image", "/a.png");
+    rotation.drafts.forgetWorkspaceSource("image", "/b.png");
+  });
+  const entries = renderHook(() => rotation.drafts.useWorkspaceDraftEntries());
+
+  act(() => { rotation.drafts.recoverSavedDrafts(); });
+  expect(entries.result.current[otherKey]).toEqual({ value: "cw270" });
+  act(() => rotation.pending());
+  expect(rotation.parentDone).not.toHaveBeenCalled();
+  expect(entries.result.current[otherKey]).toEqual({ value: "cw270" });
+});
+
+it("leaves a pending operation's completion alone when recovered drafts belong to another tool", async () => {
+  const convertKey = JSON.stringify(["convert", "source", "/c.mov", "ConvertActionBar.overrideDir"]);
+  const values = new Map([["goop.workspace-drafts.v2", refusedSave({ [convertKey]: { value: "/out" } }, "convert")]]);
+  const rotation = await renderPendingRotation(values, { current: false });
+  const entries = renderHook(() => rotation.drafts.useWorkspaceDraftEntries());
+
+  act(() => { rotation.drafts.recoverSavedDrafts(); });
+  expect(entries.result.current[convertKey]).toEqual({ value: "/out" });
+  act(() => rotation.pending());
+  expect(rotation.degrees()).toBe("cw90");
+  expect(rotation.parentDone).toHaveBeenCalledTimes(1);
+  expect(entries.result.current[convertKey]).toEqual({ value: "/out" });
+});
+
+it("leaves a pending operation's completion alone when Retry hydrates no saved drafts", async () => {
+  const values = new Map([["goop.workspace-drafts.v2", "{"]]);
+  const rotation = await renderPendingRotation(values, { current: false });
+
+  values.set("goop.workspace-drafts.v2", JSON.stringify({ version: 2, entries: {} }));
+  act(() => rotation.drafts.retryDraftPersistence());
+  act(() => rotation.pending());
+  expect(rotation.parentDone).toHaveBeenCalledTimes(1);
 });
 
 it("retains immediate edits after a failed migration and retries only after re-reading exact v1", async () => {
