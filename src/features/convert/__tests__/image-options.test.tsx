@@ -528,6 +528,36 @@ it("blocks every effective action while custom background text differs from the 
   expect(await enabledPreview()).toBeTruthy();
 });
 
+it("discards an invalid custom background draft when batch settings are restored", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  fireEvent.change(screen.getByRole("textbox", {name:"Custom background"}), {target:{value:"#12zz34"}});
+  expect(disabled("Convert 2 files")).toBe(true);
+
+  await userEvent.setup().click(screen.getByRole("button", {name:"Use batch settings"}));
+  expect(screen.queryByRole("button", {name:"Use batch settings"})).toBeNull();
+  expect((screen.getByRole("textbox", {name:"Custom background"}) as HTMLInputElement).value).toBe("#FFFFFF");
+  expect(screen.queryByText(/six hexadecimal digits/)).toBeNull();
+  expect(disabled("Convert 2 files")).toBe(false);
+});
+
+it("an equal-background preset replaces an invalid custom background draft", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  fireEvent.change(screen.getByRole("textbox", {name:"Custom background"}), {target:{value:"#12zz34"}});
+  expect(disabled("Convert 2 files")).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  expect((screen.getByRole("textbox", {name:"Custom background"}) as HTMLInputElement).value).toBe("#FFFFFF");
+  expect(disabled("Convert 2 files")).toBe(false);
+});
+
 it("refuses an alpha preset atomically across different required color-policy groups", async () => {
   mocks.preset = preset(null);
   mocks.preset.image_color_policy = "convert_to_srgb";
