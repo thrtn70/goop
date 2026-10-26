@@ -1,5 +1,6 @@
 //! Private staging and no-replace publication for completed outputs.
 use crate::publication::PublicationObserver;
+use crate::workspace::OwnedWorkspace;
 use crate::{GoopError, JobResult, ResultKind};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,7 @@ pub struct StagedOutput {
     directory: PathBuf,
     path: PathBuf,
     preserve_directory: bool,
+    owned: Option<OwnedWorkspace>,
 }
 impl StagedOutput {
     pub fn new(destination: &Path) -> Result<Self, GoopError> {
@@ -64,6 +66,7 @@ impl StagedOutput {
                 Ok(()) => {
                     return Ok(Self {
                         path: directory.join(filename),
+                        owned: OwnedWorkspace::capture(directory.clone()),
                         directory,
                         preserve_directory: false,
                     })
@@ -223,6 +226,9 @@ impl StagedOutput {
                 Ok(()) => {
                     published.path = path.clone();
                     observer.published(&path, &observed_result)?;
+                    if let Some(workspace) = self.owned.take() {
+                        observer.adopt_workspace(workspace);
+                    }
                     return Ok(published);
                 }
                 Err(error)
@@ -411,6 +417,7 @@ mod tests {
         fail_published: bool,
         cancel_before_move: Option<CancellationToken>,
         cancel_after_move: Option<CancellationToken>,
+        adopted: Mutex<Vec<OwnedWorkspace>>,
     }
 
     impl PublicationObserver for RecordingObserver {
@@ -445,6 +452,10 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn adopt_workspace(&self, workspace: OwnedWorkspace) {
+            self.adopted.lock().push(workspace);
         }
     }
 
@@ -489,6 +500,7 @@ mod tests {
 
         assert!(!dest.exists());
         assert_eq!(private_workspaces(dir.path()).len(), 1);
+        assert!(observer.adopted.lock().is_empty());
     }
 
     #[test]
@@ -546,6 +558,7 @@ mod tests {
 
         assert_eq!(std::fs::read(dest).unwrap(), b"new");
         assert_eq!(private_workspaces(dir.path()).len(), 1);
+        assert!(observer.adopted.lock().is_empty());
     }
 
     #[test]
@@ -574,6 +587,7 @@ mod tests {
         assert!(!dest.exists());
         assert_eq!(private_workspaces(dir.path()).len(), 1);
         assert!(observer.published.lock().is_empty());
+        assert!(observer.adopted.lock().is_empty());
     }
 
     #[test]
@@ -602,7 +616,13 @@ mod tests {
         assert!(cancel.is_cancelled());
         assert_eq!(published.path, dest);
         assert_eq!(std::fs::read(&published.path).unwrap(), b"new");
-        assert_eq!(private_workspaces(dir.path()).len(), 1);
+        // The observer owns the workspace until the job is committed done.
+        let workspaces = private_workspaces(dir.path());
+        assert_eq!(workspaces.len(), 1);
+        let adopted = observer.adopted.lock().pop().unwrap();
+        assert_eq!(adopted.path(), workspaces[0]);
+        adopted.remove_if_empty().unwrap();
+        assert!(private_workspaces(dir.path()).is_empty());
     }
 
     #[test]
