@@ -1406,7 +1406,8 @@ test('a workload sample refuses what its driver leaves at a log path and keeps t
  }))));
 });
 
-test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32',timeout:60000},async t=>{
+// Root reads an unreadable directory, so its scan would not fail.
+test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'goop-process-held-scan-')),armed=join(root,'holder.pid'),output=join(root,'output'),runner=join(root,'runner.cjs'),blocked=join(output,'blocked');
  // The holder outlives the run, so only this ends it, on a timeout too.
  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});

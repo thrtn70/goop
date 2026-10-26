@@ -178,7 +178,8 @@ test('startup returns its held-pipe evidence when the app blocks its log', { ski
   assert.match(result.evidence_error ?? '', /stdout\.log/);
   assert.equal(JSON.parse(readFileSync(join(root, 'run', 'sample.json'), 'utf8')).stdio_error, result.stdio_error);
 });
-test('startup returns its held-pipe evidence when the app leaves an entry its symlink scan cannot read', { skip: process.platform === 'win32', timeout: 60000 }, async t => {
+// Root reads an unreadable directory, so its scan would not fail.
+test('startup returns its held-pipe evidence when the app leaves an entry its symlink scan cannot read', { skip: process.platform === 'win32' || process.getuid?.() === 0, timeout: 60000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'goop-startup-held-scan-')), armed = join(root, 'holder.pid'), blocked = join(root, 'run', 'blocked');
   // The holder outlives the run, so only this ends it, on a timeout too.
   t.after(() => {
