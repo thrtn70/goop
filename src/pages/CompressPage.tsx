@@ -1,4 +1,5 @@
 import SettingsPreview from "@/features/preview/SettingsPreview";
+import InspectorPlayer, { useMediaPlayerEnabled } from "@/features/player/InspectorPlayer";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import WorkspaceList from "@/components/workspace/WorkspaceList";
@@ -102,6 +103,7 @@ function CompressPage() {
   }, [files, setFiles]);
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
+  const mediaPlayerEnabled = useMediaPlayerEnabled();
   useEffect(() => {
     if (selected?.id !== selectedId) setSelectedId(selected?.id ?? null);
   }, [selected?.id, selectedId, setSelectedId]);
@@ -345,6 +347,7 @@ function CompressPage() {
       }
       inspector={
         <WorkspaceInspector
+          media={mediaPlayerEnabled ? <InspectorPlayer path={selected?.path ?? null} state={selectedState} /> : undefined}
           title="Compression"
           description={
             selected

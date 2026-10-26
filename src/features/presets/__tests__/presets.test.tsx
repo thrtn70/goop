@@ -257,6 +257,7 @@ describe("UpdateBanner", () => {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    media_player_enabled: true,
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",

@@ -35,6 +35,11 @@ has_seen_onboarding: boolean,
  */
 notifications_enabled: boolean, 
 /**
+ * Shows the selected source at the top of Convert's and Compress's
+ * settings panel. On by default; off restores the panel without it.
+ */
+media_player_enabled: boolean, 
+/**
  * Optional override for where URL extracts land. `None` means use
  * `output_dir` (the global default). Useful for users who want
  * downloads kept separate from conversions.

@@ -58,7 +58,7 @@ describe("thumbnail cache", () => {
 describe("ui state", () => {
   beforeEach(() => {
     useAppStore.setState({
-      ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
+      ui: { queueCollapsed: false, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 },
     });
   });
 
