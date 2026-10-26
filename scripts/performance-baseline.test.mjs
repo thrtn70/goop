@@ -1495,7 +1495,8 @@ test('suite ends its ledger failed when the output becomes unreadable before its
  assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','success','excluded','success']);assert.match(state.evidence_io_error,/EACCES/);
 });
 
-test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32',timeout:60000},async t=>{
+// Root reads an unreadable directory, so its scan would not fail.
+test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'goop-process-held-scan-')),armed=join(root,'holder.pid'),output=join(root,'output'),runner=join(root,'runner.cjs'),blocked=join(output,'blocked');
  // The holder outlives the run, so only this ends it, on a timeout too.
  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
@@ -1507,6 +1508,29 @@ test('bounded process returns its held-pipe evidence when the run leaves an entr
  assert.ok(armedPid(armed),'the holder never armed');
  assert.match(result.stdio_error??'',/output pipes/i);assert.match(result.output_error??'',/could not be checked for symbolic links/);assert.equal(result.success,false);
 });
+
+// A scan that fails part-way must still remove the links it reached, and one
+// that cannot list the run directory at all leaves the log writes and the
+// metrics read to refuse a link rather than follow it out of the run directory.
+// Links come first: once the tree is unreadable, the live storage check can stop the group.
+for(const [label,links,lock,check] of [
+ ['fails part-way',['stdout.log','stderr.log','metrics.json'],"fs.mkdirSync(path.join(dir,'aaa-blocked'),{mode:0});",(result,output)=>{assert.equal(lstatSync(join(output,'stdout.log')).isFile(),true);assert.equal(lstatSync(join(output,'stderr.log')).isFile(),true);assert.equal(existsSync(join(output,'metrics.json')),false);}],
+ ['cannot list the run directory, logs linked',['stdout.log','stderr.log'],'fs.chmodSync(dir,0o300);',result=>assert.match(result.evidence_error??'',/stdout\.log/)],
+ ['cannot list the run directory, metrics linked',['metrics.json'],'fs.chmodSync(dir,0o300);',result=>assert.match(result.error??'',/Invalid workload metrics/)],
+]){
+ // Root reads an unreadable directory, so its scan would not fail.
+ test(`a workload sample whose symlink scan ${label} never follows a link its driver left`,{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-workload-scan-link-')),output=join(root,'output'),outside=join(root,'outside.json'),driver=join(root,'driver'),sidecars=join(root,'sidecars');
+  t.after(()=>{for(const path of [output,join(output,'aaa-blocked')])try{chmodSync(path,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'{"leaked":true}');mkdirSync(sidecars);
+  writeFileSync(driver,`#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path'),dir=path.dirname(process.argv[3]);for(const name of ${JSON.stringify(links)})fs.symlinkSync(${JSON.stringify(outside)},path.join(dir,name));${lock}`);chmodSync(driver,0o700);
+  const result=await executeWorkloadAdapter({output_directory:output,bindings:{inspect_mixed:{path:outside,sha256:'0'.repeat(64)}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}},{workloadDriver:driver,runtimeSidecarsDirectory:sidecars,runtimeSidecars:{}});
+  chmodSync(output,0o700);
+  assert.equal(readFileSync(outside,'utf8'),'{"leaked":true}');assert.equal(result.leaked,undefined);
+  assert.match(result.output_error??result.process?.output_error??'',/could not be checked for symbolic links/);assert.equal(result.success,false);
+  check(result,output);
+ });
+}
 
 test('normal suite refuses an existing output without writing into it', async () => {
  const root = mkdtempSync(join(tmpdir(), 'goop-normal-existing-'));
