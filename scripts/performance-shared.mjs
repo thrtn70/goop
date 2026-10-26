@@ -308,6 +308,29 @@ function symlinksBelow(directory) {
   return links;
 }
 
+/**
+ * Every symbolic link a walk below `directory` reaches, and the first entry it
+ * could not read. A scan that fails part-way still names the links it reached,
+ * so its caller can remove them; an entry that vanished mid-walk is skipped.
+ */
+export function reachableSymlinks(directory) {
+  const links = [];
+  let error = null;
+  const walk = path => {
+    let names;
+    try { names = readdirSync(path); } catch (failure) { if (!vanished(failure)) error ??= failure; return; }
+    for (const name of names) {
+      const entry = join(path, name);
+      let stats;
+      try { stats = lstatSync(entry); } catch (failure) { if (!vanished(failure)) error ??= failure; continue; }
+      if (stats.isSymbolicLink()) links.push(entry);
+      else if (stats.isDirectory()) walk(entry);
+    }
+  };
+  walk(directory);
+  return { links, error };
+}
+
 export function pruneOwnedEntriesToBudget(directory, budgetBytes, preserveNames = new Set(), additionalBytes = 0) {
   if (!existsSync(directory)) return true;
   const candidates = readdirSync(directory).filter(name => !preserveNames.has(name)).map(name => {
@@ -360,6 +383,19 @@ export function createEvidenceFile(path, data) {
 export function replaceEvidenceFile(path, data) {
   rmSync(path, { force: true });
   createEvidenceFile(path, data);
+}
+
+/**
+ * Write a run's stdout.log and stderr.log as evidence files in the directory its
+ * child shared. A refusal at one path does not cost the other log. Returns the
+ * first refusal's message, or null when both logs were written.
+ */
+export function createRunLogs(directory, { stdout, stderr }) {
+  let refusal = null;
+  for (const [name, data] of [['stdout.log', stdout], ['stderr.log', stderr]]) {
+    try { createEvidenceFile(join(directory, name), data); } catch (error) { refusal ??= error.message; }
+  }
+  return refusal;
 }
 
 /**
@@ -742,13 +778,14 @@ export async function runBoundedProcess({
     budgetExceeded = true;
   }
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
-  // A scan that cannot read the tree fails the run instead of rejecting it and
-  // losing what the run reported, held pipes included.
-  let createdSymlinks = [];
-  try { createdSymlinks = symlinksBelow(outputDirectory); } catch (error) { outputError = `Owned output could not be checked for symbolic links: ${error.message}`; }
-  if (createdSymlinks.length > 0) {
-    outputError = 'Owned process created symbolic-link output';
-    for (const path of createdSymlinks) try { rmSync(path, { force: true }); } catch (error) { cleanupError ??= error.message; }
+  // A scan that cannot read part of the tree fails the run instead of rejecting
+  // it and losing what the run reported, held pipes included. It still removes
+  // every link it reached, so no later write or read follows one out.
+  const scan = reachableSymlinks(outputDirectory);
+  if (scan.error !== null) outputError = `Owned output could not be checked for symbolic links: ${scan.error.message}`;
+  if (scan.links.length > 0) {
+    outputError ??= 'Owned process created symbolic-link output';
+    for (const path of scan.links) try { rmSync(path, { force: true }); } catch (error) { cleanupError ??= error.message; }
   }
   if (timedOut || budgetExceeded || aborted || outputError !== null) {
     try {
