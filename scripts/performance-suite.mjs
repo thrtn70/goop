@@ -16,9 +16,11 @@ import { run as runSingleConversion } from './performance-baseline.mjs';
 import { runStartup } from './startup-baseline.mjs';
 import {
   captureIdentity,
-  createOwnedDirectory,
   closingEvidenceWriter,
+  createOwnedDirectory,
+  createRunLogs,
   directoryBytes,
+  readChildFile,
   removeOwnedDirectory,
   runtimeSidecarEnvironment,
   runBoundedProcess,
@@ -538,18 +540,18 @@ export async function executeWorkloadAdapter(run, drivers) {
     storageBudgetBytes: run.limits.storage_budget_bytes,
     abortSignal: run.abort_signal,
   });
-  // The driver shared this directory and can make a log write fail; the sample
-  // still carries the runner's evidence, held pipes included.
-  try {
-    writeFileSync(join(run.output_directory, 'stdout.log'), processResult.stdout);
-    writeFileSync(join(run.output_directory, 'stderr.log'), processResult.stderr);
-  } catch (error) {
-    return { ...processResult, stdout: undefined, stderr: undefined, success: false, error: `Workload logs could not be retained: ${error.message}` };
+  // The driver shared this directory, so whatever it left at a log path is
+  // refused rather than followed or truncated. The refusal fails the sample,
+  // which still carries the runner's evidence, held pipes included.
+  const evidenceError = createRunLogs(run.output_directory, processResult);
+  if (evidenceError !== null) {
+    return { ...processResult, stdout: undefined, stderr: undefined, success: false, evidence_error: evidenceError, error: `Workload logs could not be retained: ${evidenceError}` };
   }
   let metrics = null;
   try {
-    if (statSync(metricsPath).size > Math.min(run.limits.log_limit_bytes, 1024 * 1024)) throw Error('Metrics exceed bound');
-    metrics = JSON.parse(readFileSync(metricsPath, 'utf8'));
+    // A link or FIFO the driver left at the metrics path is refused rather than
+    // followed or waited on.
+    metrics = JSON.parse(readChildFile(metricsPath, Math.min(run.limits.log_limit_bytes, 1024 * 1024)));
     if (metrics === null || typeof metrics !== 'object' || Array.isArray(metrics)) throw Error('Metrics must be a JSON object');
   } catch (error) {
     return { ...processResult, stdout: undefined, stderr: undefined, success: false, error: `Invalid workload metrics: ${error.message}` };
