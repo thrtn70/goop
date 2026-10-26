@@ -215,6 +215,72 @@ it.each([
   expect(writes).toEqual([]);
 });
 
+async function renderPendingRotation(values: Map<string, string>, failWrites: { current: boolean }) {
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => {
+      if (failWrites.current) throw new Error("quota");
+      values.set(storageKey, value);
+    },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const parentDone = vi.fn();
+  let complete: () => void = () => {};
+  function Form({ onDone }: { onDone: () => void }) {
+    const [degrees, setDegrees] = drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "cw90");
+    complete = onDone;
+    return <input aria-label="degrees" value={degrees} onChange={event => setDegrees(event.target.value)} />;
+  }
+  const ScopedForm = drafts.withWorkspaceDrafts(Form, "image", () => ["source", "/a.png"]);
+  render(<ScopedForm onDone={parentDone} />);
+  fireEvent.change(screen.getByLabelText("degrees"), { target: { value: "cw180" } });
+  return { drafts, parentDone, pending: complete, complete: () => complete(), degrees: () => (screen.getByLabelText("degrees") as HTMLInputElement).value };
+}
+const rotationKey = JSON.stringify(["image", "source", "/a.png", "ImageRotateFlow.degrees"]);
+const savedRotation = (version: 1 | 2) => JSON.stringify({ version, entries: { [rotationKey]: { value: "cw270" } } });
+
+it("keeps recovered drafts when an operation submitted before recovery completes", async () => {
+  const v2Key = "goop.workspace-drafts.v2";
+  const refused = JSON.stringify({ version: 2, entries: { [rotationKey]: { value: "cw270" }, [JSON.stringify(["image", "Unknown.slot"])]: { value: "x" } } });
+  const values = new Map([[v2Key, refused]]);
+  const rotation = await renderPendingRotation(values, { current: false });
+
+  let recovered = false;
+  act(() => { recovered = rotation.drafts.recoverSavedDrafts(); });
+  expect(recovered).toBe(true);
+  expect(rotation.degrees()).toBe("cw270");
+  act(() => rotation.pending());
+  expect(rotation.degrees()).toBe("cw270");
+  expect(rotation.parentDone).not.toHaveBeenCalled();
+  const persistence = await import("../workspacePersistence");
+  expect(persistence.decodeDraftEntries(values.get(v2Key) ?? "")[rotationKey]).toEqual({ value: "cw270" });
+
+  act(() => rotation.complete());
+  expect(rotation.degrees()).toBe("cw90");
+  expect(rotation.parentDone).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["unreadable v2 is repaired", [["goop.workspace-drafts.v2", "{"]], false, (values: Map<string, string>) => values.set("goop.workspace-drafts.v2", savedRotation(2))],
+  ["a failed migration finds v2", [["goop.workspace-drafts.v1", savedRotation(1).replace("cw270", "cw90")]], true, (values: Map<string, string>) => values.set("goop.workspace-drafts.v2", savedRotation(2))],
+  ["a failed migration finds changed v1", [["goop.workspace-drafts.v1", savedRotation(1).replace("cw270", "cw90")]], true, (values: Map<string, string>) => values.set("goop.workspace-drafts.v1", savedRotation(1))],
+  ["a failed write finds only v1", [], true, (values: Map<string, string>) => values.set("goop.workspace-drafts.v1", savedRotation(1))],
+] as const)("keeps drafts Retry hydrates when %s under a pending operation", async (_label, initial, failAtLaunch, change) => {
+  const values = new Map<string, string>(initial);
+  const failWrites = { current: failAtLaunch };
+  const rotation = await renderPendingRotation(values, failWrites);
+  expect(rotation.degrees()).toBe("cw180");
+
+  change(values);
+  failWrites.current = false;
+  act(() => rotation.drafts.retryDraftPersistence());
+  expect(rotation.degrees()).toBe("cw270");
+  act(() => rotation.pending());
+  expect(rotation.degrees()).toBe("cw270");
+  expect(rotation.parentDone).not.toHaveBeenCalled();
+});
+
 it("retains immediate edits after a failed migration and retries only after re-reading exact v1", async () => {
   const legacyKey = "goop.workspace-drafts.v1";
   const v2Key = "goop.workspace-drafts.v2";

@@ -42,6 +42,17 @@ useDraftStore.subscribe((state, previous) => {
   if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
 });
 export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
+// A pending operation never submitted saved values, so hydrating them retires
+// cleanup in every tool they belong to, as a new operation choice does: its
+// parent callback may remove any source of that tool, not just its own scope.
+function hydrateSavedEntries(state: DraftState, saved: Record<string, DraftEntry>, entries = saved): Pick<DraftState, "entries" | "completionEpochs"> {
+  const completionEpochs = { ...state.completionEpochs };
+  for (const tool of new Set(Object.keys(saved).map(key => (JSON.parse(key) as string[])[0]))) {
+    const toolKey = JSON.stringify([tool]);
+    completionEpochs[toolKey] = (completionEpochs[toolKey] ?? 0) + 1;
+  }
+  return { entries, completionEpochs };
+}
 export function retryDraftPersistence() {
   try {
     const state = useDraftStore.getState();
@@ -61,7 +72,7 @@ export function retryDraftPersistence() {
       const entries = read.kind === "v2" ? read.entries : read.kind === "legacy" ? read.entries : {};
       // Hydrate while protection is still active so the subscription cannot
       // turn an error-derived state into an authoritative write.
-      useDraftStore.setState({ entries });
+      useDraftStore.setState(current => hydrateSavedEntries(current, entries));
       if (read.kind === "legacy" && !saveDraftEntries(window.localStorage, entries)) {
         useDraftStore.setState({ persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
         return;
@@ -71,7 +82,7 @@ export function retryDraftPersistence() {
     }
     if (state.protection?.kind === "migration") {
       if (read.kind === "v2") {
-        useDraftStore.setState({ entries: read.entries });
+        useDraftStore.setState(current => hydrateSavedEntries(current, read.entries));
         useDraftStore.setState({ persistenceFailed: false, protection: null });
         return;
       }
@@ -81,7 +92,7 @@ export function retryDraftPersistence() {
       }
       const legacyChanged = read.legacy_raw !== state.protection.legacyRaw;
       const entries = legacyChanged ? read.entries : state.entries;
-      if (legacyChanged) useDraftStore.setState({ entries });
+      if (legacyChanged) useDraftStore.setState(current => hydrateSavedEntries(current, entries));
       const ok = saveDraftEntries(window.localStorage, entries);
       useDraftStore.setState(ok
         ? { persistenceFailed: false, protection: null }
@@ -89,7 +100,7 @@ export function retryDraftPersistence() {
       return;
     }
     if (read.kind === "legacy") {
-      useDraftStore.setState({ entries: read.entries, persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, read.entries), persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } }));
       return;
     }
     const ok = saveDraftEntries(window.localStorage, state.entries);
@@ -144,9 +155,10 @@ export function recoverSavedDrafts(): boolean {
     return false;
   }
   try {
-    const entries = { ...useDraftStore.getState().entries, ...decodeDraftEntries(raw) };
+    const saved = decodeDraftEntries(raw);
+    const entries = { ...useDraftStore.getState().entries, ...saved };
     // Hydrate while protection is still active, so only the save below writes.
-    useDraftStore.setState({ entries, recoveryFailed: false });
+    useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, saved, entries), recoveryFailed: false }));
     const ok = saveDraftEntries(window.localStorage, entries);
     useDraftStore.setState(ok ? { persistenceFailed: false, protection: null } : { persistenceFailed: true });
     return ok;
