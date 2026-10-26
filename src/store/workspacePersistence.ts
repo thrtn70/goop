@@ -275,6 +275,11 @@ function storedValue(_key: string, value: unknown): unknown {
   return value;
 }
 
+/** A draft value as it would be stored, or null when it cannot be stored. */
+export function storedDraftValue(value: unknown): string | null {
+  try { return JSON.stringify(value, storedValue) ?? null; } catch { return null; }
+}
+
 function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
   const raw = JSON.stringify({version:2, entries}, storedValue);
   const encodedBytes = new TextEncoder().encode(raw).length;

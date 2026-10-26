@@ -4,10 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 const recorderState = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
+const ipc = vi.hoisted(() => ({ save: vi.fn(), open: vi.fn(), run: vi.fn() }));
 
 vi.mock("@/performance/responsiveness", () => ({
   getResponsivenessRecorder: () => recorderState.current,
 }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: ipc.save, open: ipc.open }));
+vi.mock("@/ipc/commands", () => ({ api: { image: { run: ipc.run } }, imageRotate: vi.fn(), imageRecompress: vi.fn(), imageAppIcon: vi.fn() }));
 vi.mock("../LeftNav", () => ({ default: () => null }));
 vi.mock("../TopBar", () => ({ default: () => null }));
 vi.mock("../CommandPalette", () => ({ default: () => null }));
@@ -22,6 +25,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.resetModules();
+  Object.values(ipc).forEach(mock => mock.mockReset());
 });
 
 function recorder(mode: "noop" | "enabled" | "faulted") {
@@ -111,6 +115,7 @@ describe("recovering saved edits a strict load refused", () => {
   const rotation = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
   const oversized = JSON.stringify(["compress", "pdf", ...Array.from({ length: 18 }, (_, i) => `/doc-${i}.pdf`), "PdfFlow.op"]);
   const refusedRaw = JSON.stringify({ version: 2, entries: { [files]: { value: ["/kept.png"] }, [oversized]: { value: "merge" } } });
+  const rotationOf = (image: string) => JSON.stringify(["image", "source", image, "ImageRotateFlow.degrees"]);
 
   async function boot(saved: Record<string, string>, options: { failBackup?: boolean; unreadable?: boolean } = {}) {
     // Each boot loads the draft store afresh against its own saved data.
@@ -136,8 +141,83 @@ describe("recovering saved edits a strict load refused", () => {
     const rotationDraft = renderHook(() => drafts.useWorkspaceDraftState<string>("ImageRotateFlow.degrees", "cw180"), { wrapper });
     act(() => rotationDraft.result.current[1]("cw90"));
     const strictLoad = () => persistence.loadDraftEntriesOutcome({ getItem: key => values.get(key) ?? null, setItem: () => undefined });
-    return { values, strictLoad, filesDraft, rotationDraft };
+    return { values, strictLoad, filesDraft, rotationDraft, drafts };
   }
+
+  async function recoverWhilePending(finish: () => void) {
+    fireEvent.click(screen.getByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await act(async () => finish());
+  }
+
+  it.each([
+    ["keeps a recovered rotation the pending rotate never submitted", "cw270", "90° CCW", 0],
+    ["lets the pending rotate finish when recovery restores the rotation it submitted", "cw180", "90° CW", 1],
+    ["lets the pending rotate finish when nothing was saved for its image", null, "90° CW", 1],
+  ] as const)("%s", async (_label, savedRotation, selectedAfter, completions) => {
+    const saved = { [files]: { value: ["/kept.png"] }, [oversized]: { value: "merge" }, ...(savedRotation === null ? {} : { [rotationOf("/a.png")]: { value: savedRotation } }) };
+    const { drafts } = await boot({ [V2]: JSON.stringify({ version: 2, entries: saved }) });
+    const { default: ImageRotateFlow } = await import("@/features/image/ImageRotateFlow");
+    const onDone = vi.fn();
+    let finishRotate = () => {};
+    ipc.save.mockResolvedValue("/out/a-rotated.png");
+    ipc.run.mockImplementation(() => new Promise<void>(resolve => { finishRotate = resolve; }));
+    render(<drafts.WorkspaceDraftProvider tool="image"><ImageRotateFlow file="/a.png" onDone={onDone} /></drafts.WorkspaceDraftProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "180°" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rotate image" }));
+    await waitFor(() => expect(ipc.run).toHaveBeenCalledTimes(1));
+    await recoverWhilePending(() => finishRotate());
+
+    expect(screen.getByRole("button", { name: "Rotate image" })).toBeTruthy();
+    expect(screen.getByRole("button", { pressed: true }).textContent).toBe(selectedAfter);
+    expect(onDone).toHaveBeenCalledTimes(completions);
+  });
+
+  it.each([
+    ["keeps a recovered platform selection the pending icon export never submitted", ["windows"], "Generate 1 icon set", 0],
+    ["lets the pending icon export finish when recovery restores the selection it submitted", ["macos", "windows"], "Generate 3 icon sets", 1],
+  ] as const)("%s", async (_label, savedPlatforms, generateAfter, completions) => {
+    const selection = JSON.stringify(["image", "source", "/a.png", "ImageAppIconFlow.selected"]);
+    const saved = { [selection]: { value: { set: savedPlatforms } }, [oversized]: { value: "merge" } };
+    const { drafts } = await boot({ [V2]: JSON.stringify({ version: 2, entries: saved }) });
+    const { default: ImageAppIconFlow } = await import("@/features/image/ImageAppIconFlow");
+    const onDone = vi.fn();
+    let finishExport = () => {};
+    ipc.open.mockResolvedValue("/out");
+    ipc.run.mockImplementation(() => new Promise<void>(resolve => { finishExport = resolve; }));
+    render(<drafts.WorkspaceDraftProvider tool="image"><ImageAppIconFlow file="/a.png" onDone={onDone} /></drafts.WorkspaceDraftProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Web/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate 2 icon sets" }));
+    await waitFor(() => expect(ipc.run).toHaveBeenCalledTimes(1));
+    await recoverWhilePending(() => finishExport());
+
+    expect(screen.getByRole("button", { name: generateAfter })).toBeTruthy();
+    expect(onDone).toHaveBeenCalledTimes(completions);
+  });
+
+  it.each([
+    ["keeps a recovered edit for an image the pending batch would forget", "/a.png", 0],
+    ["lets the pending batch finish when recovery restores edits only for other images", "/c.png", 1],
+  ] as const)("%s", async (_label, recoveredImage, completions) => {
+    const saved = { [rotationOf(recoveredImage)]: { value: "cw270" }, [oversized]: { value: "merge" } };
+    const { drafts } = await boot({ [V2]: JSON.stringify({ version: 2, entries: saved }) });
+    const { default: ImageRecompressFlow } = await import("@/features/image/ImageRecompressFlow");
+    // The page forgets a finished batch's images, and every edit made for them.
+    const onDone = vi.fn();
+    let finishRecompress = () => {};
+    ipc.open.mockResolvedValue("/out");
+    ipc.run.mockImplementation(() => new Promise<void>(resolve => { finishRecompress = resolve; }));
+    render(<drafts.WorkspaceDraftProvider tool="image"><ImageRecompressFlow files={["/a.png", "/b.png"]} onDone={onDone} /></drafts.WorkspaceDraftProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Recompress 2 images" }));
+    await waitFor(() => expect(ipc.run).toHaveBeenCalledTimes(1));
+    await recoverWhilePending(() => finishRecompress());
+
+    expect(screen.getByRole("button", { name: "Recompress 2 images" })).toBeTruthy();
+    expect(onDone).toHaveBeenCalledTimes(completions);
+  });
 
   it("backs up what was saved, then restores every entry that can be read and keeps entries only this session has", async () => {
     const { values, strictLoad, filesDraft, rotationDraft } = await boot({ [V2]: refusedRaw });

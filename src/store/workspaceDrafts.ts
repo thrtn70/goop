@@ -13,6 +13,7 @@ import {
   loadBrowserDraftEntriesOutcome,
   readDraftEntriesOutcome,
   saveDraftEntries,
+  storedDraftValue,
   type DraftProtectionReason,
 } from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
@@ -42,6 +43,37 @@ useDraftStore.subscribe((state, previous) => {
   if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
 });
 export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
+
+/**
+ * Advances `revisions` in place, retiring every completion submitted before
+ * this edit of `key`. Seeds and route restoration are not edits.
+ */
+function recordDraftEdit(revisions: Record<string, number>, key: string, sources: readonly string[]): void {
+  const parts = JSON.parse(key) as string[];
+  for (let length = 1; length < parts.length; length++) {
+    const scopeKey = JSON.stringify(parts.slice(0, length));
+    revisions[scopeKey] = (revisions[scopeKey] ?? 0) + 1;
+  }
+  for (const source of sources) {
+    const sourceKey = JSON.stringify(["source-edit", parts[0], source]);
+    revisions[sourceKey] = (revisions[sourceKey] ?? 0) + 1;
+  }
+}
+/**
+ * Saved values that replace this session's are edits made now: a completion
+ * submitted before them cannot clear what it never saw. Values a load leaves
+ * as they were keep their completion authority. Values compare as they are
+ * stored, so a bigint or a set compares by what it holds.
+ */
+function hydratedRevisions(state: DraftState, entries: Record<string, DraftEntry>): Record<string, number> {
+  const revisions = { ...state.revisions };
+  for (const [key, entry] of Object.entries(entries)) {
+    if (storedDraftValue(state.entries[key]?.value) === storedDraftValue(entry.value)) continue;
+    // A key does not say which path parts are sources, so each one counts.
+    recordDraftEdit(revisions, key, (JSON.parse(key) as string[]).slice(1, -1));
+  }
+  return revisions;
+}
 export function retryDraftPersistence() {
   try {
     const state = useDraftStore.getState();
@@ -61,7 +93,7 @@ export function retryDraftPersistence() {
       const entries = read.kind === "v2" ? read.entries : read.kind === "legacy" ? read.entries : {};
       // Hydrate while protection is still active so the subscription cannot
       // turn an error-derived state into an authoritative write.
-      useDraftStore.setState({ entries });
+      useDraftStore.setState(current => ({ entries, revisions: hydratedRevisions(current, entries) }));
       if (read.kind === "legacy" && !saveDraftEntries(window.localStorage, entries)) {
         useDraftStore.setState({ persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
         return;
@@ -71,7 +103,7 @@ export function retryDraftPersistence() {
     }
     if (state.protection?.kind === "migration") {
       if (read.kind === "v2") {
-        useDraftStore.setState({ entries: read.entries });
+        useDraftStore.setState(current => ({ entries: read.entries, revisions: hydratedRevisions(current, read.entries) }));
         useDraftStore.setState({ persistenceFailed: false, protection: null });
         return;
       }
@@ -81,7 +113,7 @@ export function retryDraftPersistence() {
       }
       const legacyChanged = read.legacy_raw !== state.protection.legacyRaw;
       const entries = legacyChanged ? read.entries : state.entries;
-      if (legacyChanged) useDraftStore.setState({ entries });
+      if (legacyChanged) useDraftStore.setState(current => ({ entries, revisions: hydratedRevisions(current, entries) }));
       const ok = saveDraftEntries(window.localStorage, entries);
       useDraftStore.setState(ok
         ? { persistenceFailed: false, protection: null }
@@ -89,7 +121,7 @@ export function retryDraftPersistence() {
       return;
     }
     if (read.kind === "legacy") {
-      useDraftStore.setState({ entries: read.entries, persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      useDraftStore.setState(current => ({ entries: read.entries, revisions: hydratedRevisions(current, read.entries), persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } }));
       return;
     }
     const ok = saveDraftEntries(window.localStorage, state.entries);
@@ -146,7 +178,7 @@ export function recoverSavedDrafts(): boolean {
   try {
     const entries = { ...useDraftStore.getState().entries, ...decodeDraftEntries(raw) };
     // Hydrate while protection is still active, so only the save below writes.
-    useDraftStore.setState({ entries, recoveryFailed: false });
+    useDraftStore.setState(current => ({ entries, revisions: hydratedRevisions(current, entries), recoveryFailed: false }));
     const ok = saveDraftEntries(window.localStorage, entries);
     useDraftStore.setState(ok ? { persistenceFailed: false, protection: null } : { persistenceFailed: true });
     return ok;
@@ -248,20 +280,11 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
       const value = Object.is(current, nextValue) ? current : ownMediaDraft(slot, nextValue);
       if (Object.is(current, value) && s.entries[key]) return s;
       const revisions = { ...s.revisions };
-      const parts = JSON.parse(key) as string[];
       // A successful old callback may clear only the form values it submitted.
-      // Seeds do not increment this counter; route restoration is not an edit.
-      for (let length = 1; length < parts.length; length++) {
-        const scopeKey = JSON.stringify(parts.slice(0, length));
-        revisions[scopeKey] = (revisions[scopeKey] ?? 0) + 1;
-      }
-      for (const source of sources) {
-        const sourceKey = JSON.stringify(["source-edit", tool, source]);
-        revisions[sourceKey] = (revisions[sourceKey] ?? 0) + 1;
-      }
+      recordDraftEdit(revisions, key, sources);
       return { entries: { ...s.entries, [key]: { value } }, revisions };
     });
-  }, [epoch, epochKey, key, seed, slot, sources, tool]);
+  }, [epoch, epochKey, key, seed, slot, sources]);
   return [entry ? entry.value as T : seed, setValue];
 }
 

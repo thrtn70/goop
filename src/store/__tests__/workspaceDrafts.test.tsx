@@ -325,3 +325,71 @@ it("keeps a failed migration pending when its retained v1 disappears before Retr
   expect(values.has(v2Key)).toBe(false);
   expect(writes).toHaveLength(1);
 });
+
+const rotationKey = JSON.stringify(["image", "source", "/a.png", "ImageRotateFlow.degrees"]);
+const savedRotation = (version: 1 | 2, value: string) => JSON.stringify({ version, entries: { [rotationKey]: { value } } });
+it.each([
+  ["a repaired save", { "goop.workspace-drafts.v2": "{" }, { "goop.workspace-drafts.v2": savedRotation(2, "cw270") }],
+  ["a save another window migrated", { "goop.workspace-drafts.v1": savedRotation(1, "cw90") }, { "goop.workspace-drafts.v2": savedRotation(2, "cw270") }],
+  ["older-format edits that changed", { "goop.workspace-drafts.v1": savedRotation(1, "cw90") }, { "goop.workspace-drafts.v1": savedRotation(1, "cw270") }],
+  ["older-format edits found after a failed write", {}, { "goop.workspace-drafts.v1": savedRotation(1, "cw270") }],
+] as const)("keeps edits Retry restores from %s when a completion submitted before them arrives", async (_label, initial, later) => {
+  const values = new Map<string, string>(Object.entries(initial));
+  let failWrites = true;
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => {
+      if (failWrites) throw new Error("quota");
+      values.set(storageKey, value);
+    },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const parentDone = vi.fn();
+  let complete: () => void = () => {};
+  function Form({ onDone }: { onDone: () => void }) {
+    const [value, setValue] = drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "cw90");
+    complete = onDone;
+    return <input aria-label="draft" value={value} onChange={event => setValue(event.target.value)} />;
+  }
+  const ScopedForm = drafts.withWorkspaceDrafts(Form, "image", () => ["source", "/a.png"]);
+  render(<ScopedForm onDone={parentDone} />);
+  fireEvent.change(screen.getByLabelText("draft"), { target: { value: "cw180" } });
+  const pending = complete;
+
+  Object.entries(later).forEach(([storageKey, raw]) => values.set(storageKey, raw));
+  failWrites = false;
+  act(() => drafts.retryDraftPersistence());
+  act(() => pending());
+
+  expect((screen.getByLabelText("draft") as HTMLInputElement).value).toBe("cw270");
+  expect(parentDone).not.toHaveBeenCalled();
+});
+
+const compressFilesKey = JSON.stringify(["compress", "CompressPage.files"]);
+const unreadableKey = JSON.stringify(["compress", "pdf", ...Array.from({ length: 18 }, (_, i) => `/doc-${i}.pdf`), "PdfFlow.op"]);
+// Stored as a plain number; loading restores the size as a bigint.
+const targetSizeRow = { id: "clip-1", revision: 2, path: "/clip.jpg", sourceDir: "/", target: "jpeg", qualityPreset: "original", resolutionCap: "original",
+  imageOptions: null, metadataPolicy: "preserve", imageColorPolicy: "preserve", mode: { kind: "target_size_bytes", value: 2000 } };
+it.each([
+  ["Retry", "{", JSON.stringify({ version: 2, entries: { [compressFilesKey]: { value: [targetSizeRow] } } }), "retryDraftPersistence"],
+  ["recovery", JSON.stringify({ version: 2, entries: { [compressFilesKey]: { value: [targetSizeRow] }, [unreadableKey]: { value: "merge" } } }), null, "recoverSavedDrafts"],
+] as const)("restores a saved Compress target size through %s", async (_label, initial, later, restore) => {
+  const v2Key = "goop.workspace-drafts.v2";
+  const values = new Map([[v2Key, initial]]);
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => { values.set(storageKey, value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const failed = renderHook(() => drafts.useDraftPersistenceFailed());
+  if (later !== null) values.set(v2Key, later);
+
+  act(() => { drafts[restore](); });
+
+  expect(failed.result.current).toBe(false);
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "compress" }, children);
+  const files = renderHook(() => drafts.useWorkspaceDraftState<Array<{ mode: { value: unknown } }>>("CompressPage.files", []), { wrapper });
+  expect(files.result.current[0][0].mode.value).toBe(2000n);
+});
