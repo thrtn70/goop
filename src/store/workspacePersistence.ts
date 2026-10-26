@@ -7,7 +7,7 @@ import {
   type CausalOwner,
   type ResponsivenessRecorder,
 } from "@/performance/responsiveness";
-import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
+import type { RotationDegrees, TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 import { consumeNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
@@ -17,6 +17,9 @@ export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
 const MAX_BYTES = 512 * 1024;
 const TOOLS = new Set(["extract", "convert", "compress", "image", "metadata", "recognize"]);
+// The clockwise turns a PDF page card stores; null, no change, is checked
+// beside it. Keyed by the union so an added or removed turn fails to compile.
+const PAGE_ROTATIONS: ReadonlySet<string> = new Set(Object.keys({ cw90: true, cw180: true, cw270: true } satisfies Record<RotationDegrees, true>));
 const SLOTS = new Set<string>([...videoDraftSlots,"ImageOptionsPanel.qualityDraft", "ImageOptionsPanel.widthDraft", "ImageOptionsPanel.heightDraft", "ImageOptionsPanel.appliedQuality", "ImageOptionsPanel.appliedWidth", "ImageOptionsPanel.appliedHeight", "AudioBatchEditor.album", "AudioBatchEditor.albumArtist", "AudioBatchEditor.artist", "AudioBatchEditor.backup", "AudioBatchEditor.comment", "AudioBatchEditor.composer", "AudioBatchEditor.cover", "AudioBatchEditor.disc", "AudioBatchEditor.genre", "AudioBatchEditor.titles", "AudioBatchEditor.tracks", "AudioBatchEditor.year", "AudioTagForm.album", "AudioTagForm.albumArtist", "AudioTagForm.artist", "AudioTagForm.backup", "AudioTagForm.comment", "AudioTagForm.composer", "AudioTagForm.cover", "AudioTagForm.disc", "AudioTagForm.genre", "AudioTagForm.title", "AudioTagForm.track", "AudioTagForm.year", "CompressActionBar.overrideDir", "CompressControls.appliedMode", "CompressControls.lastQuality", "CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressPage.files", "CompressPage.pdfs", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "ConvertPage.files", "ConvertPage.pdfs", "ConvertPage.selectedId", "CropEditor.aspect", "CropEditor.crop", "CropEditor.zoom", "GifOptionsPanel.appliedEnd", "GifOptionsPanel.appliedStart", "GifOptionsPanel.endDraft", "GifOptionsPanel.startDraft", "ImageAppIconFlow.selected", "ImageCropFlow.rect", "ImageOcrFlow.images", "ImageOcrFlow.lang", "ImageOcrFlow.outputKind", "ImagePage.files", "ImagePage.op", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.mode", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageRotateFlow.degrees", "ImageWatermarkFlow.opacity", "ImageWatermarkFlow.position", "ImageWatermarkFlow.text", "ImagesToPdfFlow.images", "MetadataPage.files", "PdfDeleteFlow.pages", "PdfExtractFlow.ranges", "PdfFlow.op", "PdfFlow.quality", "PdfFlow.ranges", "PdfInsertBlankFlow.draft", "PdfInsertBlankFlow.positions", "PdfMetadataForm.author", "PdfMetadataForm.keywords", "PdfMetadataForm.subject", "PdfMetadataForm.title", "PdfOcrFlow.lang", "PdfReorderFlow.pages", "PdfRotateFlow.pages", "PdfSplitEditor.input", "PdfToImagesFlow.dpi", "PdfToImagesFlow.format", "ProbeCard.audioOnly", "ProbeCard.selected", "RecognizePage.input", "RecognizePage.lang", "RecognizePage.outputKind", "TopBar.url", "UrlHero.lastUrl"]);
 SLOTS.add("AudioOptionsPanel.savedCustom");
 SLOTS.add("AudioOptionsPanel.bitrateDraft");
@@ -222,7 +225,7 @@ function validSlot(slot: string, value: unknown, allowHardware: boolean): boolea
   if (slot === "CompressPage.files") return validFiles(value, true, allowHardware);
   if (["ImagePage.files", "MetadataPage.files", "ConvertPage.pdfs", "CompressPage.pdfs", "ImagesToPdfFlow.images", "ImageOcrFlow.images"].includes(slot)) return strings(value);
   if (slot === "ImageAppIconFlow.selected") return object(value) && strings(value.set) && value.set.every(platform => ["macos", "windows", "web"].includes(platform));
-  if (slot.endsWith(".pages")) return Array.isArray(value) && value.every(page => object(page) && Number.isSafeInteger(page.originalPage) && typeof page.deleted === "boolean" && typeof page.rotation === "number" && [0,90,180,270].includes(page.rotation));
+  if (slot.endsWith(".pages")) return Array.isArray(value) && value.every(page => object(page) && Number.isSafeInteger(page.originalPage) && typeof page.deleted === "boolean" && (page.rotation === null || (typeof page.rotation === "string" && PAGE_ROTATIONS.has(page.rotation))));
   if (slot.endsWith(".ranges")) return Array.isArray(value) && value.every(range => object(range) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && Number(range.start) >= 1 && Number(range.end) >= Number(range.start));
   if (slot === "PdfInsertBlankFlow.positions") return Array.isArray(value) && value.every(position => Number.isSafeInteger(position) && position >= 0);
   if (slot.endsWith(".cover")) return object(value) && ["keep", "remove", "replace"].includes(String(value.kind)) && (value.kind !== "replace" || typeof value.source_path === "string");

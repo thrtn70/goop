@@ -182,6 +182,17 @@ describe("durable editable drafts", () => {
     expect(load(null)).toEqual({ kind: "protected", reason: "malformed" });
   });
 
+  it("restores PDF page drafts with the rotations page cards write and protects any other", () => {
+    const slot = JSON.stringify(["compress", "pdf", "/doc.pdf", "PdfRotateFlow.pages"]);
+    const load = (rotation: unknown) => {
+      const raw = JSON.stringify({ version: 2, entries: { [slot]: { value: [{ originalPage: 1, deleted: false, rotation }] } } });
+      return loadDraftEntriesOutcome({ getItem: () => raw, setItem: () => { throw new Error("strict v2 load must not write"); } });
+    };
+    for (const rotation of [null, "cw90", "cw180", "cw270"]) expect(load(rotation).kind).toBe("ready");
+    // The old numeric degrees, an unknown turn, and a missing field (JSON drops undefined).
+    for (const rotation of [0, 90, "cw45", undefined]) expect(load(rotation)).toEqual({ kind: "protected", reason: "malformed" });
+  });
+
   it("does not inspect v1 when the v2 read itself fails", () => {
     const reads: string[] = [];
     const outcome = loadDraftEntriesOutcome({
