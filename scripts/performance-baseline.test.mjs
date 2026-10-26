@@ -1250,6 +1250,72 @@ test('suite stops immediately after the total retained-log budget is exceeded', 
  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
+test('suite stops once a sample reports its output pipes held after the reap', async () => {
+ // The workload adapter nests the bounded runner's result under `process`, the
+ // single-conversion and startup harnesses report it at the top, and an
+ // oversized result or a budget override rebuilds what the ledger keeps. The
+ // budget cases stop on their own; they pin that the ledger keeps the held pipes
+ // and that the suite names them as the cause.
+ const held='The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group';
+ for(const [shape,heldResult,rebuiltBy] of [
+  ['nested',{success:true,process_ms:1,process:{stdio_error:held}},null],
+  ['top-level',{success:true,process_ms:1,stdio_error:held},null],
+  ['oversized',{success:true,process_ms:1,padding:'x'.repeat(300000),process:{stdio_error:held}},'evidence_compacted'],
+  ['past the evidence budget',{success:true,process_ms:1,padding:'x'.repeat(2*1024*1024),process:{stdio_error:held}},'budget_exceeded'],
+  ['past the log budget',{success:true,process_ms:1,process:{stdio_error:held,log_bytes_retained:2*1048576}},'log_budget_exceeded'],
+ ]){
+  const root=mkdtempSync(join(tmpdir(),'goop-suite-held-'));
+  try {
+   const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+   const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=manifest.workloads.slice(0,2);
+   const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+   const visited=[],output=join(root,'output');
+   await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{visited.push(run.id);return visited.length===2?heldResult:{success:true,process_ms:1,process:{stdio_error:null}};}}),/output pipes/i,shape);
+   assert.deepEqual(visited,['raw-single/warmup-0','raw-single/0'],shape);
+   const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+   assert.equal(state.status,'failed',shape);assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed'],shape);
+   assert.equal(state.samples[1].result.success,false,shape);assert.equal(state.samples[1].result.stdio_error,held,shape);
+   if(rebuiltBy)assert.equal(state.samples[1].result[rebuiltBy],true,shape);
+  } finally {rmSync(root,{recursive:true,force:true});}
+ }
+});
+
+// A directory where the adapter writes the run's stdout log makes that write
+// fail, and null metrics are no object; both come after the runner has already
+// reported the held pipes.
+for(const [label,leftover,metrics] of [['','','{}'],[' and blocks its log',"fs.mkdirSync(require('node:path').join(require('node:path').dirname(process.argv[3]),'stdout.log'));",'{}'],[' and reports null metrics','','null']]){
+ test(`a suite launches nothing after a sample whose output pipes a process outside the owned group still holds${label}`,{skip:process.platform==='win32',timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-suite-held-run-')),armed=join(root,'holder.pid'),launches=join(root,'launches'),driver=join(root,'driver'),sidecars=join(root,'sidecars'),output=join(root,'output');
+  // The holder outlives the suite, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}rmSync(root,{recursive:true,force:true});});
+  // Only the first launch leaves a holder, so a suite that kept going would launch every later sample.
+  writeFileSync(driver,`#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(launches)},'launch\\n');require('node:fs').writeFileSync(process.argv[4],${JSON.stringify(metrics)});if(!require('node:fs').existsSync(${JSON.stringify(armed)})){${escapedHolder(armed,leftover)}}`);chmodSync(driver,0o700);mkdirSync(sidecars);
+  const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+  const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+  const manifest=validManifest();manifest.defaults.timeout_ms=20000;manifest.defaults.repetitions=2;manifest.workloads=[manifest.workloads[1]];
+  const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+  await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:run=>executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:sidecars,runtimeSidecars:{}})}),/output pipes/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(launches,'utf8'),'launch\n');
+  const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+  assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['failed']);assert.match(state.samples[0].result.stdio_error??'',/output pipes/i);
+ });
+}
+
+test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32',timeout:60000},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-process-held-scan-')),armed=join(root,'holder.pid'),output=join(root,'output'),runner=join(root,'runner.cjs'),blocked=join(output,'blocked');
+ // The holder outlives the run, so only this ends it, on a timeout too.
+ t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ mkdirSync(output);
+ // An unreadable directory stands in for an entry the live holder removes
+ // between the scan's listing and its stat.
+ writeFileSync(runner,escapedHolder(armed,`fs.mkdirSync(${JSON.stringify(blocked)},{mode:0});`));
+ const result=await runBoundedProcess({command:process.execPath,args:[runner],outputDirectory:output,timeoutMs:20000,killGraceMs:200,logLimitBytes:4096,storageBudgetBytes:1048576});
+ assert.ok(armedPid(armed),'the holder never armed');
+ assert.match(result.stdio_error??'',/output pipes/i);assert.match(result.output_error??'',/could not be checked for symbolic links/);assert.equal(result.success,false);
+});
+
 test('normal suite refuses an existing output without writing into it', async () => {
  const root = mkdtempSync(join(tmpdir(), 'goop-normal-existing-'));
  try {

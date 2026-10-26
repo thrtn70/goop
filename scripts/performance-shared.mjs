@@ -742,7 +742,10 @@ export async function runBoundedProcess({
     budgetExceeded = true;
   }
   let removedStagingDirectories = 0, cleanupError = null, outputError = null;
-  const createdSymlinks = symlinksBelow(outputDirectory);
+  // A scan that cannot read the tree fails the run instead of rejecting it and
+  // losing what the run reported, held pipes included.
+  let createdSymlinks = [];
+  try { createdSymlinks = symlinksBelow(outputDirectory); } catch (error) { outputError = `Owned output could not be checked for symbolic links: ${error.message}`; }
   if (createdSymlinks.length > 0) {
     outputError = 'Owned process created symbolic-link output';
     for (const path of createdSymlinks) try { rmSync(path, { force: true }); } catch (error) { cleanupError ??= error.message; }

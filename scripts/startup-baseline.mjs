@@ -130,14 +130,24 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   } catch {
     budgetExceeded = true;
   }
-  const createdSymlinks=ownedSymlinks(directory);let outputError=createdSymlinks.length?`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`:null;
+  // A scan that cannot read the tree fails the sample instead of rejecting the
+  // run and losing what it reported, held pipes included.
+  let createdSymlinks=[],outputError=null;
+  try{createdSymlinks=ownedSymlinks(directory);}catch(error){outputError=`Owned output could not be checked for symbolic links: ${error.message}`;}
+  if(createdSymlinks.length)outputError=`Startup created symbolic-link output: ${createdSymlinks.map(path=>path.slice(directory.length+1)).join(', ')}`;
   for(const path of createdSymlinks)try{rmSync(path,{force:true});}catch(error){outputError=`${outputError}; cleanup failed: ${error.message}`;}
   const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: nowMs() - start };
   result.stdio_error = stdioError;
   if (stdioError !== null) result.success = false;
-  writeFileSync(join(directory, 'stdout.log'), stdout);
-  writeFileSync(join(directory, 'stderr.log'), stderr);
-  writeFileSync(join(directory, 'sample.json'), JSON.stringify(result, null, 2));
+  // The app shared this directory and can make a write fail; the result still
+  // carries the run's evidence, held pipes included.
+  result.evidence_error = null;
+  const saveEvidence = (name, content) => {
+    try { writeFileSync(join(directory, name), content); } catch (error) { result.evidence_error ??= error.message; result.success = false; }
+  };
+  saveEvidence('stdout.log', stdout);
+  saveEvidence('stderr.log', stderr);
+  saveEvidence('sample.json', JSON.stringify(result, null, 2));
   return result;
 }
 
