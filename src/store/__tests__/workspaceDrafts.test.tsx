@@ -83,7 +83,7 @@ it("preserves completion authority across route unmount and sibling clearing", (
 
 it("owns nested video draft settings independently of caller objects", () => {
   const value = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23},resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
-  const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedCustom",value),{wrapper:scope("convert","video")});
+  const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedSoftware",value),{wrapper:scope("convert","video")});
   value.rate_control.crf=44;
   value.resize.width=640;
   value.frame_rate.numerator=60;

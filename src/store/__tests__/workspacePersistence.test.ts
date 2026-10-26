@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  admitDraftEntries,
   decodeDraftEntries,
   DRAFT_STORAGE_KEY,
   encodeDraftEntries,
@@ -208,6 +209,53 @@ describe("durable editable drafts", () => {
   });
 });
 
+// Every entry is admissible on its own; together they pass the 500-entry limit.
+const overEntryLimit = Object.fromEntries(Array.from({ length: 501 }, (_, i) =>
+  [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
+
+describe("write-side admission", () => {
+  const valid = key("ImageRotateFlow.degrees");
+  const refused = {
+    unknownSlot: key("Runtime.promise"),
+    tooManyKeyParts: JSON.stringify(["compress", "pdf", ...Array.from({ length: 18 }, (_, i) => `/doc-${i}.pdf`), "PdfFlow.op"]),
+    longKeyPart: JSON.stringify(["extract", "source", "x".repeat(4097), "UrlHero.lastUrl"]),
+    longList: key("ImagePage.files"),
+    longText: JSON.stringify(["recognize", "RecognizePage.input"]),
+    unsafeNumber: key("ImageResizeFlow.width"),
+  };
+  const entries = {
+    [valid]: { value: "cw90" },
+    [refused.unknownSlot]: { value: {} },
+    [refused.tooManyKeyParts]: { value: "merge" },
+    [refused.longKeyPart]: { value: "https://example.com/video" },
+    [refused.longList]: { value: Array.from({ length: 1001 }, (_, i) => `/photo-${i}.png`) },
+    [refused.longText]: { value: "x".repeat(65537) },
+    [refused.unsafeNumber]: { value: 0x20_0000_0000_0000n },
+  };
+
+  it("names every entry a strict load would refuse and admits the rest", () => {
+    const { admitted, skipped } = admitDraftEntries(entries);
+    expect(admitted).toEqual({ [valid]: { value: "cw90" } });
+    expect(skipped).toEqual(Object.values(refused));
+  });
+
+  it("saves only admissible entries, so the saved store always loads strictly", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    expect(persistDraftEntries(storage, entries, NOOP_RESPONSIVENESS_RECORDER).ok).toBe(true);
+    expect(loadDraftEntriesOutcome(storage)).toEqual({ kind: "ready", entries: { [valid]: { value: "cw90" } } });
+  });
+
+  it("drops a previously saved value once its entry becomes inadmissible", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    const files = key("ImagePage.files");
+    expect(saveDraftEntries(storage, { [files]: { value: ["/a.png"] } })).toBe(true);
+    expect(saveDraftEntries(storage, { [files]: { value: Array.from({ length: 1001 }, (_, i) => `/p-${i}.png`) } })).toBe(true);
+    expect(loadDraftEntriesOutcome(storage)).toEqual({ kind: "ready", entries: {} });
+  });
+});
+
 describe("instrumented draft persistence", () => {
   it("encodes and writes once with ordered bounded spans", () => {
     const { calls, recorder, owner } = recordingRecorder();
@@ -239,12 +287,12 @@ describe("instrumented draft persistence", () => {
     let writes = 0;
     const result = persistDraftEntries(
       { getItem: () => null, setItem: () => { writes += 1; } },
-      { [key("test.value")]: { value: 0x20_0000_0000_0000n } },
+      overEntryLimit,
       recorder,
     );
     expect(result).toEqual({ ok: false, phase: "encode" });
     expect(writes).toBe(0);
-    expect(JSON.stringify(result)).not.toContain("Draft number");
+    expect(JSON.stringify(result)).not.toContain("storage limit");
     expect(calls).toEqual([
       ["startSetup", "workspace_drafts"],
       ["startSpan", "draft_encode"],

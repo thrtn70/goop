@@ -11,7 +11,7 @@ import type { RotationDegrees, TrackConvertOptions, TrackDispositionFacts, Track
 import { consumeNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
-export { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
+export { DRAFT_BACKUP_KEY, DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
@@ -260,16 +260,19 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
   });
 }
 
+// How runtime values are stored: bigints as safe numbers, sets as {set}.
+function storedValue(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number)) throw new Error("Draft number is too large");
+    return number;
+  }
+  if (value instanceof Set) return {set:[...value]};
+  return value;
+}
+
 function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
-  const raw = JSON.stringify({version:2, entries}, (_key, value: unknown) => {
-    if (typeof value === "bigint") {
-      const number = Number(value);
-      if (!Number.isSafeInteger(number)) throw new Error("Draft number is too large");
-      return number;
-    }
-    if (value instanceof Set) return {set:[...value]};
-    return value;
-  });
+  const raw = JSON.stringify({version:2, entries}, storedValue);
   const encodedBytes = new TextEncoder().encode(raw).length;
   if (raw.length > MAX_BYTES || encodedBytes > MAX_BYTES || Object.keys(entries).length > 500) throw new Error("Draft storage limit reached");
   return { raw, encodedBytes };
@@ -279,7 +282,7 @@ export function encodeDraftEntries(entries: DraftEntries): string {
   return encodeDraftEntriesWithSize(entries).raw;
 }
 
-type DraftProtectionReason = "malformed" | "future" | "read_error";
+export type DraftProtectionReason = "malformed" | "future" | "read_error";
 export type DraftLoadOutcome =
   | { kind: "ready"; entries: DraftEntries }
   | { kind: "migration_pending"; entries: DraftEntries; legacy_raw: string }
@@ -294,6 +297,43 @@ class DraftDecodeError extends Error {
   constructor(readonly reason: Exclude<DraftProtectionReason, "read_error">) { super(reason); }
 }
 
+/** Whether a strict read keeps one stored entry. The writer applies the same test. */
+function admissible(key: string, entry: Record<string, unknown>, version: 1 | 2): boolean {
+  let parts: unknown;
+  try { parts = JSON.parse(key); } catch { return false; }
+  if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) return false;
+  const slot = parts[parts.length - 1];
+  const allowed = version === 1 && slot.startsWith("VideoOptionsPanel.")
+    ? LEGACY_VIDEO_SLOTS.has(slot)
+    : SLOTS.has(slot);
+  return allowed && bounded(entry.value) && validSlot(slot, entry.value, version === 2);
+}
+
+// Entries are replaced, never mutated, so a verdict holds while its object lives.
+const admissions = new WeakMap<object, { key: string; admitted: boolean }>();
+
+/**
+ * Splits entries into those a strict read would keep and the keys of those it
+ * would refuse. Saving only the first part means one oversized or unknown
+ * draft is not restored after a restart, instead of every draft being refused.
+ */
+export function admitDraftEntries(entries: DraftEntries): { admitted: DraftEntries; skipped: string[] } {
+  const admitted: DraftEntries = {};
+  const skipped: string[] = [];
+  for (const [key, entry] of Object.entries(entries)) {
+    let verdict = admissions.get(entry);
+    if (verdict?.key !== key) {
+      let stored: unknown;
+      try { stored = JSON.parse(JSON.stringify(entry, storedValue)); } catch { stored = null; }
+      verdict = { key, admitted: object(stored) && admissible(key, stored, 2) };
+      admissions.set(entry, verdict);
+    }
+    if (verdict.admitted) admitted[key] = entry;
+    else skipped.push(key);
+  }
+  return { admitted, skipped };
+}
+
 function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
   if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError("malformed");
   let data: unknown;
@@ -303,23 +343,12 @@ function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): Draf
   if (data.version !== version || !object(data.entries) || Object.keys(data.entries).length > 500) throw new DraftDecodeError("malformed");
   const entries: DraftEntries = {};
   for (const [key, entry] of Object.entries(data.entries)) {
-    let parts: unknown;
-    try { parts = JSON.parse(key); } catch {
+    if (!object(entry) || !admissible(key, entry, version)) {
       if (strict) throw new DraftDecodeError("malformed");
       continue;
     }
-    if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) {
-      if (strict) throw new DraftDecodeError("malformed");
-      continue;
-    }
+    const parts = JSON.parse(key) as string[];
     const slot = parts[parts.length - 1];
-    const allowed = version === 1 && slot.startsWith("VideoOptionsPanel.")
-      ? LEGACY_VIDEO_SLOTS.has(slot)
-      : SLOTS.has(slot);
-    if (!allowed || !object(entry) || !bounded(entry.value) || !validSlot(slot, entry.value, version === 2)) {
-      if (strict) throw new DraftDecodeError("malformed");
-      continue;
-    }
     const value = slot === "ImageAppIconFlow.selected"
       ? new Set((entry.value as {set:string[]}).set)
       : normalizeSlotValue(slot, entry.value);
@@ -413,7 +442,7 @@ export function persistDraftEntries(
   });
   let encoded: { raw: string; encodedBytes: number };
   try {
-    encoded = encodeDraftEntriesWithSize(entries);
+    encoded = encodeDraftEntriesWithSize(admitDraftEntries(entries).admitted);
   } catch {
     closeFailedPersistence(recorder, owner, encodeSpan);
     return { ok: false, phase: "encode" };
