@@ -23,6 +23,14 @@ describe("convertSettingsLine", () => {
     [{ ...base, target: "mp3" }, "→ MP3 · Automatic settings"],
     [{ ...base, target: "gif", gifOptions: { size_preset: "medium", trim_start_ms: null, trim_end_ms: null } }, "→ GIF · Medium"],
   ])("%#", (entry, line) => expect(convertSettingsLine(entry as never)).toBe(line));
+
+  it("leaves out settings the row's checks reject for its format", () => {
+    const entry = { ...base, target: "png", imageOptions: fit, imageColorPolicy: "convert_to_srgb", metadataPolicy: "remove_personal" } as const;
+    expect(convertSettingsLine(entry, { image: true })).toBe("→ PNG · sRGB · No personal data");
+    expect(convertSettingsLine(entry, { color: true })).toBe("→ PNG · Quality 80 · Fit 2048 × 2048 · No personal data");
+    expect(convertSettingsLine(entry, { metadata: true })).toBe("→ PNG · Quality 80 · Fit 2048 × 2048 · sRGB");
+    expect(convertSettingsLine(entry, { image: true, color: true, metadata: true })).toBe("→ PNG");
+  });
 });
 
 it("describes Compress modes", () => {

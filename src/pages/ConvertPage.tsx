@@ -898,7 +898,7 @@ function ConvertPage() {
               state={byId[f.id ?? ""] ?? PROBING}
               problem={problems[i] ?? planProblem(plannedFiles[i])}
               edited={f.submittedEdit}
-              summary={settled(f) ? convertSettingsLine(f) : null}
+              summary={settled(f) ? convertSettingsLine(f, { image: Boolean(imageProblems[i]), color: Boolean(colorProblems[i]), metadata: Boolean(metadataProblems[i]) }) : null}
               batchState={batchState(f)}
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}

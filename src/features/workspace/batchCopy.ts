@@ -7,6 +7,8 @@ import type { BatchKind, KindCounts } from "./batchScope";
 import type { BatchState } from "./batchStamp";
 
 export type ConvertLineEntry = Pick<FileEntry, "target" | "imageOptions" | "videoOptions" | "audioOptions" | "gifOptions" | "metadataPolicy" | "imageColorPolicy" | "qualityPreset">;
+/** Settings the row's own checks reject for its current target; the line leaves them out. */
+export type InvalidSettings = Partial<Record<"image" | "color" | "metadata", boolean>>;
 
 export const WAIT_FOR_INSPECTION = "Wait for every file to finish inspecting.";
 export const FIX_SELECTED_FIRST = "Fix this file's settings first.";
@@ -34,12 +36,12 @@ const joinList = (items: readonly string[]) => items.length < 2
 const keptClause = (total: number) => `kept ${total === 1 ? "its" : "their"} settings.`;
 const line = (target: TargetFormat, facts: readonly string[]) => [`→ ${targetLabel(target)}`, ...facts.slice(0, MAX_FACTS)].join(" · ");
 
-function imageFacts(entry: ConvertLineEntry): string[] {
-  const options = entry.imageOptions;
+function imageFacts(entry: ConvertLineEntry, invalid: InvalidSettings): string[] {
+  const options = invalid.image ? null : entry.imageOptions;
   const facts = options
     ? [`Quality ${options.jpeg_quality}`, ...(options.resize.kind === "fit_within" ? [`Fit ${options.resize.width} × ${options.resize.height}`] : [])]
     : [];
-  return entry.imageColorPolicy === "convert_to_srgb" ? [...facts, "sRGB"] : facts;
+  return !invalid.color && entry.imageColorPolicy === "convert_to_srgb" ? [...facts, "sRGB"] : facts;
 }
 
 function videoFacts(entry: ConvertLineEntry): string[] {
@@ -74,13 +76,13 @@ function metadataFacts(entry: ConvertLineEntry): string[] {
 }
 
 /** What a Convert row will send, in words. Never predicts an output size. */
-export function convertSettingsLine(entry: ConvertLineEntry): string {
+export function convertSettingsLine(entry: ConvertLineEntry, invalid: InvalidSettings = {}): string {
   return line(entry.target, [
-    ...imageFacts(entry),
+    ...imageFacts(entry, invalid),
     ...videoFacts(entry),
     ...audioFacts(entry),
     ...(entry.gifOptions ? [GIF_SIZE_NAMES[entry.gifOptions.size_preset]] : []),
-    ...metadataFacts(entry),
+    ...(invalid.metadata ? [] : metadataFacts(entry)),
   ]);
 }
 

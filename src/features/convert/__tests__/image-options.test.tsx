@@ -717,6 +717,17 @@ describe("mixed batches in Convert", () => {
     expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Use batch settings" })).toBeNull();
   });
+  it("leaves settings that do not apply to a row's new format out of its line", async () => {
+    render(page()); await add(["/a.jpg"]);
+    await typeQuality("70");
+    fireEvent.click(screen.getByRole("button", { name: "Remove personal data" }));
+    expect(tag("a.jpg").getByText("→ JPEG · Quality 70 · No personal data")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "PNG" }));
+    expect(tag("a.jpg").getByText(/Image settings are unavailable/)).toBeTruthy();
+    expect(tag("a.jpg").getByText("→ PNG")).toBeTruthy();
+    expect(description("a.jpg")).not.toContain("Quality");
+    expect(description("a.jpg")).not.toContain("No personal data");
+  });
   it("summarises outputs by format", async () => {
     render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]); await setFit();
     fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
