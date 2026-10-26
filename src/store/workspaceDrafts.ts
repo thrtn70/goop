@@ -156,10 +156,9 @@ export function recoverSavedDrafts(): boolean {
   }
   try {
     const saved = decodeDraftEntries(raw);
-    const entries = { ...useDraftStore.getState().entries, ...saved };
     // Hydrate while protection is still active, so only the save below writes.
-    useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, saved, entries), recoveryFailed: false }));
-    const ok = saveDraftEntries(window.localStorage, entries);
+    useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, saved, { ...current.entries, ...saved }), recoveryFailed: false }));
+    const ok = saveDraftEntries(window.localStorage, useDraftStore.getState().entries);
     useDraftStore.setState(ok ? { persistenceFailed: false, protection: null } : { persistenceFailed: true });
     return ok;
   } catch {
