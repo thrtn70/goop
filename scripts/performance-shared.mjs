@@ -363,6 +363,19 @@ export function replaceEvidenceFile(path, data) {
 }
 
 /**
+ * Write a run's stdout.log and stderr.log as evidence files in the directory its
+ * child shared. A refusal at one path does not cost the other log. Returns the
+ * first refusal's message, or null when both logs were written.
+ */
+export function createRunLogs(directory, { stdout, stderr }) {
+  let refusal = null;
+  for (const [name, data] of [['stdout.log', stdout], ['stderr.log', stderr]]) {
+    try { createEvidenceFile(join(directory, name), data); } catch (error) { refusal ??= error.message; }
+  }
+  return refusal;
+}
+
+/**
  * Read a small file the measured child left in a directory it shares. Only a
  * regular file with one link under maxBytes is read; anything else returns null.
  * Windows has no O_NOFOLLOW, so the entry is checked unopened first: a link

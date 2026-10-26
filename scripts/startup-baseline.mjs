@@ -4,7 +4,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeRss, summarize, directoryBytes, ownedSymlinks } from './performance-baseline.mjs';
-import { drainChildOutput, readChildFile, withTerminationSignals } from './performance-shared.mjs';
+import { createEvidenceFile, drainChildOutput, readChildFile, withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -139,11 +139,12 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const result = { success: marker !== null && idleRss !== null && spawnError === null && !budgetExceeded && !aborted && outputError === null, pid: child.pid ?? null, binary, argv: args, marker, launch_to_ready_ms: launchMs, idle_tree_rss_KiB: idleRss, idle_delay_ms: idleMs, sampled_tree_peak_KiB: samples.length ? Math.max(...samples.map(v => v.rssKiB)) : null, sampling_interval_ms: 100, samples, timed_out: timedOut, budget_exceeded: budgetExceeded, aborted, output_error: outputError, removed_symlink_outputs:createdSymlinks.length, log_bytes_retained: retainedLogBytes, exit_code: exitCode, exit_signal: exitSignal, spawn_error: spawnError, lifetime_ms: nowMs() - start };
   result.stdio_error = stdioError;
   if (stdioError !== null) result.success = false;
-  // The app shared this directory and can make a write fail; the result still
-  // carries the run's evidence, held pipes included.
+  // The app shared this directory, so whatever it left at an evidence path is
+  // refused rather than followed or truncated. The refusal fails the result,
+  // which still carries the run's evidence, held pipes included.
   result.evidence_error = null;
   const saveEvidence = (name, content) => {
-    try { writeFileSync(join(directory, name), content); } catch (error) { result.evidence_error ??= error.message; result.success = false; }
+    try { createEvidenceFile(join(directory, name), content); } catch (error) { result.evidence_error ??= error.message; result.success = false; }
   };
   saveEvidence('stdout.log', stdout);
   saveEvidence('stderr.log', stderr);

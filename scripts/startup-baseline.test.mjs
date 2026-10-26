@@ -195,6 +195,40 @@ test('startup returns its held-pipe evidence when the app leaves an entry its sy
   assert.match(result.output_error ?? '', /could not be checked for symbolic links/);
   assert.equal(result.success, false);
 });
+test('startup refuses what the app leaves at an evidence path and keeps the held-pipe evidence', { skip: process.platform === 'win32', concurrency: true, timeout: 60000 }, async t => {
+  const cases = ['stdout.log', 'stderr.log', 'sample.json'].flatMap(name => ['symbolic link', 'hard link', 'directory'].map(kind => [name, kind]));
+  // Root reads an unreadable directory, so its scan would remove the link first.
+  await Promise.all(cases.map(([name, kind]) => t.test(`${kind} at ${name}`, { skip: kind === 'symbolic link' && process.getuid?.() === 0 }, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'goop-startup-evidence-')), armed = join(root, 'holder.pid'), run = join(root, 'run'), outside = join(root, 'outside');
+    // The holder outlives the run, so only this ends it, on a timeout too.
+    t.after(() => {
+      try { process.kill(Number(readFileSync(armed, 'utf8')), 'SIGKILL'); } catch { /* Never armed or already gone. */ }
+      try { chmodSync(join(run, 'blocked'), 0o700); } catch { /* Never made. */ }
+      rmSync(root, { recursive: true, force: true });
+    });
+    writeFileSync(outside, 'outside');
+    // The symlink scan never sees a hard link or a directory. It removes a
+    // symbolic link it finds, so an unreadable entry stops the scan first, as an
+    // entry a live holder removes mid-scan does, and the link reaches the write
+    // as one planted after the scan would. The link comes first: the live storage
+    // check fails closed on the unreadable entry and stops the app, which must
+    // not land before the link exists.
+    const path = JSON.stringify(join(run, name)), target = JSON.stringify(outside);
+    const plant = kind === 'directory' ? `fs.mkdirSync(${path});`
+      : kind === 'hard link' ? `fs.linkSync(${target},${path});`
+        : `fs.symlinkSync(${target},${path});fs.mkdirSync(${JSON.stringify(join(run, 'blocked'))},{mode:0});`;
+    writeFileSync(join(root, 'app.cjs'), escapedApp(armed, plant));
+    const result = await runStartup({ binary: process.execPath, args: [join(root, 'app.cjs')], directory: run, settings: {}, readinessTimeoutMs: 30000, idleMs: 30, killGraceMs: 200 });
+    assert.ok(existsSync(armed), 'the holder never armed');
+    assert.equal(readFileSync(outside, 'utf8'), 'outside', `${kind} at ${name} was written through`);
+    for (const other of ['stdout.log', 'stderr.log'].filter(log => log !== name)) assert.ok(statSync(join(run, other)).isFile(), `${kind} at ${name} cost ${other}`);
+    assert.equal(result.success, false);
+    assert.match(result.stdio_error ?? '', /output pipes/i);
+    assert.ok(result.evidence_error?.includes(name), `${kind} at ${name}: ${result.evidence_error}`);
+    // A refused log still leaves the sample, its refusal included, on disk.
+    if (name !== 'sample.json') assert.equal(JSON.parse(readFileSync(join(run, 'sample.json'), 'utf8')).evidence_error, result.evidence_error);
+  })));
+});
 test('clean startup records no held pipes', async () => {
   const result = await fake("require('node:fs').writeFileSync(process.env.GOOP_STARTUP_REPORT,JSON.stringify({schema_version:1,backend_ready_ms:1,pid:process.pid}));setInterval(()=>{},10)");
   assert.equal(result.success, true);
