@@ -17,7 +17,9 @@ import { runStartup } from './startup-baseline.mjs';
 import {
   captureIdentity,
   createOwnedDirectory,
+  createRunLogs,
   directoryBytes,
+  readChildFile,
   removeOwnedDirectory,
   runtimeSidecarEnvironment,
   runBoundedProcess,
@@ -110,7 +112,7 @@ function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory,
 
 function ledgerResult(result, fullResult) {
   if (fullResult === null) return result;
-  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'sidecars', 'sidecar_identity_error'];
+  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'sidecars', 'sidecar_identity_error'];
   return {
     ...Object.fromEntries(fields.filter(field => result[field] !== undefined).map(field => [field, result[field]])),
     evidence_compacted: true,
@@ -238,6 +240,12 @@ export async function runPerformanceSuite({
     } catch (error) {
       result = { success: false, error: error.message };
     }
+    // Read before an oversized result is compacted away or a budget override
+    // rebuilds it. A process outside the owned group held the sample's output
+    // pipes after the reap and may still be running, so this sample is
+    // contaminated and no later one can be isolated from it.
+    const stdioError = result.stdio_error ?? result.process?.stdio_error ?? null;
+    if (stdioError !== null) result = { ...result, success: false, stdio_error: stdioError };
     const runDirectory = join(outputDirectory, run.destination);
     const maxAdditionalBytes = Math.max(0, Math.min(
       effectiveRun.limits.storage_budget_bytes - directoryBytes(runDirectory),
@@ -254,6 +262,7 @@ export async function runPerformanceSuite({
     retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
     const logBudgetExceeded = retainedLogBytes > manifest.defaults.suite_log_limit_bytes;
     const timeBudgetExceeded = performance.now() - suiteStarted > manifest.defaults.suite_timeout_ms;
+    if (stdioError !== null) fatal ??= `Workload output pipes still held after the reap, most likely by a process outside the owned group; later runs could not be isolated from it: ${run.id}`;
     if (runBudgetExceeded) {
       status = 'failed';
       result = { ...result, success: false, budget_exceeded: true, ...(evidenceWriteBudgetExceeded ? { full_result_retained: false } : {}), error: 'Workload storage budget exceeded while retaining full evidence' };
@@ -301,7 +310,7 @@ export async function runPerformanceSuite({
     }
     state.summary = summarizeSuite(summarySamples, manifest);
     writeState();
-    if (sourceIntegrityFailed || runBudgetExceeded || totalBudgetExceeded || timeBudgetExceeded || logBudgetExceeded) break;
+    if (sourceIntegrityFailed || runBudgetExceeded || totalBudgetExceeded || timeBudgetExceeded || logBudgetExceeded || stdioError !== null) break;
   }
   state.status = fatal ? 'failed' : 'complete';
   state.summary = summarizeSuite(summarySamples, manifest);
@@ -461,12 +470,19 @@ export async function executeWorkloadAdapter(run, drivers) {
     storageBudgetBytes: run.limits.storage_budget_bytes,
     abortSignal: run.abort_signal,
   });
-  writeFileSync(join(run.output_directory, 'stdout.log'), processResult.stdout);
-  writeFileSync(join(run.output_directory, 'stderr.log'), processResult.stderr);
+  // The driver shared this directory, so whatever it left at a log path is
+  // refused rather than followed or truncated. The refusal fails the sample,
+  // which still carries the runner's evidence, held pipes included.
+  const evidenceError = createRunLogs(run.output_directory, processResult);
+  if (evidenceError !== null) {
+    return { ...processResult, stdout: undefined, stderr: undefined, success: false, evidence_error: evidenceError, error: `Workload logs could not be retained: ${evidenceError}` };
+  }
   let metrics = null;
   try {
-    if (statSync(metricsPath).size > Math.min(run.limits.log_limit_bytes, 1024 * 1024)) throw Error('Metrics exceed bound');
-    metrics = JSON.parse(readFileSync(metricsPath, 'utf8'));
+    // A link or FIFO the driver left at the metrics path is refused rather than
+    // followed or waited on.
+    metrics = JSON.parse(readChildFile(metricsPath, Math.min(run.limits.log_limit_bytes, 1024 * 1024)));
+    if (metrics === null || typeof metrics !== 'object' || Array.isArray(metrics)) throw Error('Metrics must be a JSON object');
   } catch (error) {
     return { ...processResult, stdout: undefined, stderr: undefined, success: false, error: `Invalid workload metrics: ${error.message}` };
   }
