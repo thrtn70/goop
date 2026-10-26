@@ -970,6 +970,48 @@ test('paired collector compacts oversized direct adapter results before ledger w
  } finally {rmSync(root,{recursive:true,force:true});}
 });
 
+test('paired collection stops once a sample reports its output pipes held after the reap', async () => {
+ // runPairedPlan nests the bounded runner's result under `process`, a direct
+ // adapter can report it at the top, and an oversized result is compacted away.
+ const held='The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group';
+ for(const [shape,heldResult] of [['nested',{success:true,process_ms:1,process:{stdio_error:held}}],['top-level',{success:true,process_ms:1,stdio_error:held}],['oversized',{success:true,process_ms:1,padding:'x'.repeat(100000),process:{stdio_error:held}}]]){
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-held-')),output=join(root,'output');
+  try {
+   const visited=[];
+   const state=await collectPairedSamples({workloadIds:['copy','encode'],repetitions:1,outputDirectory:output,execute:async step=>{visited.push(`${step.workload_id}:${step.phase}:${step.revision}`);return visited.length===2?heldResult:{success:true,process_ms:1,process:{stdio_error:null}};}});
+   assert.deepEqual(visited,['copy:warmup:baseline','copy:warmup:candidate'],shape);
+   assert.equal(state.status,'failed',shape);assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed'],shape);assert.equal(state.samples[1].result.stdio_error,held,shape);
+   assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state,shape);
+  } finally {rmSync(root,{recursive:true,force:true});}
+ }
+});
+
+// A directory where the adapter writes the run's stdout log makes that write
+// fail after the runner has already reported the held pipes.
+for(const [label,leftover] of [['',''],[' and blocks its log',"fs.mkdirSync(require('node:path').join(process.env.GOOP_PERF_OUTPUT_DIR,'stdout.log'));"]]){
+ test(`a paired plan launches nothing after a sample whose output pipes a process outside the owned group still holds${label}`,{skip:process.platform==='win32',timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-held-plan-')),armed=join(root,'holder.pid'),launches=join(root,'launches'),runner=join(root,'runner.cjs'),output=join(root,'output');
+  // The holder outlives the suite, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}rmSync(root,{recursive:true,force:true});});
+  // Only the first launch leaves a holder, so a suite that kept going would launch every later sample.
+  writeFileSync(runner,`require('node:fs').appendFileSync(${JSON.stringify(launches)},'launch\\n');if(!require('node:fs').existsSync(${JSON.stringify(armed)})){${escapedHolder(armed,leftover)}}`);
+  const crypto=await import('node:crypto');
+  const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+  const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+  const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+  const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+  const plan={schema_version:1,repetitions:1,workload_ids:['copy','encode'],workload_contracts:{copy:contract,encode:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(launches,'utf8'),'launch\n');
+  const state=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8'));
+  assert.equal(state.status,'failed');assert.equal(state.samples.length,1);assert.match(state.samples[0].result.process.stdio_error??'',/output pipes/i);assert.equal(state.comparison_error,undefined);
+  // The workload the stop never reached says so instead of failing a comparison it never had.
+  const comparisons=JSON.parse(readFileSync(join(output,'comparison.json'),'utf8'));
+  assert.equal(comparisons.copy.success,false);assert.equal(comparisons.encode.success,false);assert.equal(comparisons.encode.not_run,true);
+ });
+}
+
 test('workload metrics accept phase-separated Rust evidence and reject partial failure or contradictory process status', () => {
  const request = { mode: 'conversion_batch', concurrency: 2, items: [{ id: 'one' }, { id: 'two' }] };
  const evidence = { memory_evidence: 'external process tree required', path_safety_limitation: 'path namespace can change after validation' };
