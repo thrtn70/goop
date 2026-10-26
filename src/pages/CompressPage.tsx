@@ -14,6 +14,7 @@ import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
@@ -30,6 +31,7 @@ import {
   defaultMode,
 } from "@/features/compress/CompressFileRow";
 import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
+import { compressDraftSlots } from "@/features/compress/CompressControls";
 import CompressActionBar from "@/features/compress/CompressActionBar";
 import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
 import PresetChips from "@/features/presets/PresetChips";
@@ -271,6 +273,11 @@ function CompressPage() {
       return false;
     }
     setApplicationError(null);
+    // An unfinished Target size edit would outlive a mode it already matches.
+    // Under another mode the text is only the tab's memory, so it stays.
+    if (settings.mode.kind === "target_size_bytes") {
+      files.filter(inScope).forEach(file => clearWorkspaceDraftSlots("compress", ["source", file.path], compressDraftSlots));
+    }
     setFiles(stampEntries(next, scope.ids, scope.stamp));
     return true;
   };

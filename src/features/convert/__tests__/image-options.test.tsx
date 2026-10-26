@@ -826,6 +826,51 @@ describe("mixed batches in Compress", () => {
     expect(byPath["/b.jpg"]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 } });
     for (const [request] of mocks.enqueue.mock.calls) expect(request).not.toHaveProperty("batch");
   });
+  it("shows the batch's target size again after restoring or reapplying over an emptied field", async () => {
+    mocks.inspect.mockImplementation(() => {
+      const inspected = inspect(false);
+      inspected.capabilities.compression = { quality: true, target_size: true, lossless: false, reason: null };
+      return Promise.resolve(inspected);
+    });
+    render(compressPage()); await addCompress(["/a.jpg", "/b.jpg"]);
+    const size = () => screen.getByRole("spinbutton", { name: "Target size value" }) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    fireEvent.change(size(), { target: { value: "5" } }); fireEvent.blur(size());
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    expect(size().value).toBe("5");
+    fireEvent.change(size(), { target: { value: "" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target size unit" }), { target: { value: "kb" } });
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(size().value).toBe("5");
+    expect((screen.getByRole("combobox", { name: "Target size unit" }) as HTMLSelectElement).value).toBe("mb");
+    expect(Number(crow("/b.jpg").mode.value)).toBe(5 * 1024 * 1024);
+
+    fireEvent.change(size(), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    expect(size().value).toBe("5");
+  });
+  it("keeps a remembered target size when applying another compression mode", async () => {
+    mocks.inspect.mockImplementation(() => {
+      const inspected = inspect(false);
+      inspected.capabilities.compression = { quality: true, target_size: true, lossless: false, reason: null };
+      return Promise.resolve(inspected);
+    });
+    render(compressPage()); await addCompress(["/a.jpg", "/b.jpg"]);
+    const size = () => screen.getByRole("spinbutton", { name: "Target size value" }) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    fireEvent.change(size(), { target: { value: "500" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target size unit" }), { target: { value: "kb" } });
+    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    expect(size().value).toBe("500");
+    expect(Number(crow("/a.jpg").mode.value)).toBe(500 * 1024);
+  });
   it("applies to images only in a mixed batch, and tags and restores like Convert", async () => {
     render(compressPage()); await addCompress(["/a.png", "/b.jpg", "/clip.mp4"]);
     const clipBefore = crow("/clip.mp4");
