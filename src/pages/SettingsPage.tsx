@@ -53,6 +53,7 @@ export default function SettingsPage() {
   const torboxKeyFieldId = useId();
   const extractConcurrencyFieldId = useId();
   const convertConcurrencyFieldId = useId();
+  const mediaPlayerFieldId = useId();
 
   useEffect(() => {
     if (settings?.theme) {
@@ -386,6 +387,19 @@ export default function SettingsPage() {
             />
             <span>Notify me when jobs finish</span>
           </label>
+        </Field>
+        <Field
+          label="Media player"
+          hint="Show the selected file at the top of the settings panel in Convert and Compress."
+          htmlFor={mediaPlayerFieldId}
+        >
+          <input
+            id={mediaPlayerFieldId}
+            type="checkbox"
+            checked={settings.media_player_enabled}
+            onChange={(e) => void patch({ media_player_enabled: e.target.checked })}
+            className="h-4 w-4 rounded border-subtle bg-surface-2 accent-accent"
+          />
         </Field>
         <div id={COOKIES_ANCHOR_ID}>
           <Field

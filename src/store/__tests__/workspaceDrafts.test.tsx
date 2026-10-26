@@ -83,7 +83,7 @@ it("preserves completion authority across route unmount and sibling clearing", (
 
 it("owns nested video draft settings independently of caller objects", () => {
   const value = {kind:"encode" as const,codec:"h264" as const,processor:"software" as const,speed:"medium" as const,rate_control:{kind:"constant_quality" as const,crf:23},resize:{kind:"fit_within" as const,width:1920,height:1080},frame_rate:{kind:"constant" as const,numerator:24000,denominator:1001}};
-  const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedCustom",value),{wrapper:scope("convert","video")});
+  const saved = renderHook(() => useWorkspaceDraftState("VideoOptionsPanel.savedSoftware",value),{wrapper:scope("convert","video")});
   value.rate_control.crf=44;
   value.resize.width=640;
   value.frame_rate.numerator=60;
@@ -159,6 +159,34 @@ it.each([
   act(() => drafts.retryDraftPersistence());
   act(() => drafts.resetWorkspaceDrafts());
   expect(failed.result.current).toBe(true);
+  expect(writes).toEqual([]);
+});
+
+it.each([
+  ["found at launch", true],
+  ["found after launch", false],
+] as const)("never recovers over newer-format v2 data that exceeds the size limit, %s", async (_label, atLaunch) => {
+  const v2Key = "goop.workspace-drafts.v2";
+  const newer = JSON.stringify({ version: 3, entries: { [JSON.stringify(["image", "ImagePage.files"])]: { value: ["x".repeat(600 * 1024)] } } });
+  const values = new Map([[v2Key, atLaunch ? newer : "{"]]);
+  const writes: string[] = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => { writes.push(storageKey); values.set(storageKey, value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+  const available = renderHook(() => drafts.useDraftRecoveryAvailable());
+  const edit = renderHook(() => drafts.useWorkspaceDraftState("ImageRotateFlow.degrees", "cw90"), { wrapper });
+  act(() => edit.result.current[1]("ccw90"));
+  values.set(v2Key, newer);
+
+  let recovered = true;
+  act(() => { recovered = drafts.recoverSavedDrafts(); });
+  expect(recovered).toBe(false);
+  expect(available.result.current).toBe(false);
+  expect(values.get(v2Key)).toBe(newer);
   expect(writes).toEqual([]);
 });
 
