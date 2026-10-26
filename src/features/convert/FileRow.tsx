@@ -130,6 +130,7 @@ export function ConvertSettingsPanel({
   onAlphaValidityChange,
   onReinspect,
   draftIdentity,
+  settingsEpoch,
 }: {
   path: string;
   options: FileRowOptions;
@@ -139,6 +140,8 @@ export function ConvertSettingsPanel({
   onAlphaValidityChange?: (problem: string | null) => void;
   onReinspect?: () => void;
   draftIdentity?: string;
+  /** Changes when Apply or Use batch settings writes this row, so editors holding local text start over. */
+  settingsEpoch?: string;
 }) {
   const p = state.probe;
   const { target, gifOptions, imageColorPolicy = "preserve", metadataPolicy, subtitle } = opts;
@@ -444,6 +447,7 @@ export function ConvertSettingsPanel({
       {showMetadataPolicy && (
         ((alphaCapabilities?.source_has_alpha === true && target === "jpeg") || opts.imageAlphaPolicy) && (
           <ImageAlphaPolicyControl
+            key={settingsEpoch}
             value={opts.imageAlphaPolicy}
             capabilities={alphaCapabilities}
             target={target}

@@ -43,6 +43,14 @@ export function stampEntries<T extends StampableEntry>(
 }
 
 /** The batch baseline is whichever other member still has its batch settings. */
+/**
+ * Changes exactly when Apply or Use batch settings writes the entry: edits bump
+ * the entry's revision but not its stamp. Editors holding local text key on it.
+ */
+export function batchEpoch(entry: StampableEntry): string | undefined {
+  return entry.batch ? `${entry.batch.id}:${entry.batch.revision}` : undefined;
+}
+
 export function batchResetSource<T extends StampableEntry>(entry: T, entries: readonly T[]): T | null {
   const id = entry.batch?.id;
   if (!id) return null;

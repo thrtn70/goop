@@ -30,7 +30,7 @@ import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
-import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
+import { batchEpoch, batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
 import { applyButtonLabel, applyOutcome, applyTooltip, convertSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, outputBreakdown, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
 import BatchInspectorStatus from "@/features/workspace/BatchInspectorStatus";
 import { OutcomeStatus, useOutcomeStatus } from "@/features/workspace/OutcomeStatus";
@@ -45,6 +45,7 @@ import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import { cloneImageOptions, imageDraftProblem, imageDraftSlots, type ImageDraftText } from "@/features/convert/imageOptions";
+import { gifDraftSlots } from "@/features/convert/GifOptionsPanel";
 import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { useWorkspaceDraftEntries, clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { smartDefault } from "@/features/convert/TargetPicker";
@@ -607,7 +608,11 @@ function ConvertPage() {
     }
     setApplicationError(null);
     const replaceableVideoDrafts = videoDraftSlots.filter(slot => slot !== "VideoOptionsPanel.savedSoftware");
-    files.filter(inScope).forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
+    files.filter(inScope).forEach(file => {
+      clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]);
+      // GIF trim text sits beside the per-file panels, keyed by path alone.
+      clearWorkspaceDraftSlots("convert", ["source", file.path], gifDraftSlots);
+    });
     setFiles(stampEntries(next, scope.ids, scope.stamp));
     return true;
   };
@@ -830,6 +835,7 @@ function ConvertPage() {
                 onAlphaValidityChange={(problem) => selected.id && handleAlphaValidityChange(selected.id, problem)}
                 path={selected.path}
                 draftIdentity={selected.id}
+                settingsEpoch={batchEpoch(selected)}
                 options={selectedPlanned ?? selected}
                 state={selectedState}
                 onReinspect={() => selected.id && retry(selected.id)}

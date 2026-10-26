@@ -796,6 +796,27 @@ describe("ConvertPage", () => {
     expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", true);
   });
 
+  it("clears unfinished GIF trim text when restoring a batch with no trim", async () => {
+    mockOpen.mockResolvedValue(["/tmp/a.mp4", "/tmp/b.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    renderPage();
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("a.mp4")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "GIF" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to all 2" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Select b.mp4" }));
+    const start = () => screen.getByRole("textbox", { name: "Start" }) as HTMLInputElement;
+    // Unparseable text stays visible after blur while the stored trim stays empty.
+    await userEvent.type(start(), "abc");
+    await userEvent.tab();
+    expect(start().value).toBe("abc");
+    expect(row("b.mp4").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(row("b.mp4").getByText("Batch")).toBeTruthy();
+    expect(start().value).toBe("");
+  });
+
   it("keeps the row's own audio track when restoring batch settings that leave tracks to each file", async () => {
     clearWorkspaceDrafts("convert");
     mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
