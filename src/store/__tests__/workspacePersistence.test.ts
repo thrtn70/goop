@@ -171,6 +171,17 @@ describe("durable editable drafts", () => {
       .toEqual({ kind: "protected", reason: "malformed" });
   });
 
+  it("restores a remembered Compress quality and protects one that is not a number", () => {
+    const slot = JSON.stringify(["compress", "source", "/a.jpg", "CompressControls.lastQuality"]);
+    const load = (value: unknown) => {
+      const raw = JSON.stringify({ version: 2, entries: { [slot]: { value } } });
+      return loadDraftEntriesOutcome({ getItem: () => raw, setItem: () => undefined });
+    };
+    expect(load(63)).toEqual({ kind: "ready", entries: { [slot]: { value: 63 } } });
+    expect(load("63")).toEqual({ kind: "protected", reason: "malformed" });
+    expect(load(null)).toEqual({ kind: "protected", reason: "malformed" });
+  });
+
   it("does not inspect v1 when the v2 read itself fails", () => {
     const reads: string[] = [];
     const outcome = loadDraftEntriesOutcome({
