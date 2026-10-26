@@ -558,6 +558,20 @@ it("an equal-background preset replaces an invalid custom background draft", asy
   expect(disabled("Convert 2 files")).toBe(false);
 });
 
+it("keeps an invalid custom background draft through an ordinary edit", async () => {
+  mocks.preset = preset(null);
+  mocks.preset.image_color_policy = "convert_to_srgb";
+  mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
+  render(page()); await add(["/a.png", "/b.png"]);
+  fireEvent.click(screen.getByRole("button", {name:"Apply test preset"}));
+  fireEvent.change(screen.getByRole("textbox", {name:"Custom background"}), {target:{value:"#12zz34"}});
+  expect(disabled("Convert 2 files")).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", {name:"Remove all"}));
+  expect((screen.getByRole("textbox", {name:"Custom background"}) as HTMLInputElement).value).toBe("#12zz34");
+  expect(disabled("Convert 2 files")).toBe(true);
+});
+
 it("refuses an alpha preset atomically across different required color-policy groups", async () => {
   mocks.preset = preset(null);
   mocks.preset.image_color_policy = "convert_to_srgb";
