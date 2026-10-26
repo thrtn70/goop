@@ -4,6 +4,10 @@ import clsx from "clsx";
 import type { CompressMode, ProbeResult, CompressionCapabilities } from "@/types";
 import { adviseTargetSize, bytesFromInput, formatBytes, type SizeUnit } from "./sizeMath";
 
+/** Raw Target size text and the mode it mirrors; cleared, they reseed from the row's mode. */
+export const compressDraftSlots = ["CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressControls.appliedMode"] as const;
+const [SIZE_INPUT, SIZE_UNIT, APPLIED_MODE] = compressDraftSlots;
+
 function sourceKindLabel(probe: ProbeResult): "video" | "audio" | "image" | "pdf" {
   // A subtitle file has no size worth compressing and the Compress tab
   // offers it no useful controls, but nothing stops one being dropped
@@ -26,7 +30,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
   const durationMs = Number(probe.duration_ms);
 
   // Local draft for the Target size input (so the user can type freely before we parse on blur).
-  const [sizeInput, setSizeInput] = useWorkspaceDraftState<string>("CompressControls.sizeInput", () => {
+  const [sizeInput, setSizeInput] = useWorkspaceDraftState<string>(SIZE_INPUT, () => {
     if (mode.kind === "target_size_bytes") {
       const mb = Number(mode.value) / (1024 * 1024);
       if (mb >= 1) return String(mb);
@@ -35,7 +39,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
     }
     return "10";
   });
-  const [sizeUnit, setSizeUnit] = useWorkspaceDraftState<SizeUnit>("CompressControls.sizeUnit", () => {
+  const [sizeUnit, setSizeUnit] = useWorkspaceDraftState<SizeUnit>(SIZE_UNIT, () => {
     if (mode.kind === "target_size_bytes" && Number(mode.value) < 1024 * 1024) return "kb";
     return "mb";
   });
@@ -45,7 +49,7 @@ export default function CompressControls({ probe, mode, onChange, capabilities, 
   );
 
   const modeKey = mode.kind === "lossless_reoptimize" ? mode.kind : `${mode.kind}:${mode.value}`;
-  const [appliedMode, setAppliedMode] = useWorkspaceDraftState("CompressControls.appliedMode", modeKey);
+  const [appliedMode, setAppliedMode] = useWorkspaceDraftState(APPLIED_MODE, modeKey);
   useEffect(() => {
     if (appliedMode === modeKey) return;
     setAppliedMode(modeKey);

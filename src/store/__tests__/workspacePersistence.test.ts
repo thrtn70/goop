@@ -368,6 +368,31 @@ describe("JPEG draft persistence", () => {
     const entries = { [fileKey]: { value: [{ ...file, imageAlphaPolicy }] } };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
   });
+  it("keeps a well-formed batch stamp through a strict v2 restart", () => {
+    const stamped = { ...file, batch: { id: "s1", label: "Web Image", revision: 2 } };
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    expect(saveDraftEntries(storage as Storage, { [fileKey]: { value: [stamped] } })).toBe(true);
+    const outcome = loadDraftEntriesOutcome(storage as Storage);
+    expect(outcome.kind).toBe("ready");
+    expect((outcome as { entries: Record<string, { value: Array<{ batch?: unknown }> }> }).entries[fileKey].value[0].batch).toEqual(stamped.batch);
+  });
+  it("drops only a malformed batch stamp and keeps the file and the store", () => {
+    for (const batch of [{ id: "", label: "x", revision: 1 }, { id: "s", label: "l".repeat(257), revision: 1 }, { id: "s", label: "x", revision: -1 }, "stamp"]) {
+      const values = new Map<string, string>();
+      const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+      values.set(DRAFT_STORAGE_KEY, encodeDraftEntries({ [fileKey]: { value: [{ ...file, batch }] } }));
+      const outcome = loadDraftEntriesOutcome(storage as Storage);
+      expect(outcome.kind).toBe("ready");
+      const restored = (outcome as { entries: Record<string, { value: Array<Record<string, unknown>> }> }).entries[fileKey].value[0];
+      expect("batch" in restored).toBe(false);
+      expect(restored.imageOptions).toEqual(file.imageOptions);
+    }
+  });
+  it("adds no batch key to an entry that never had one", () => {
+    const restored = decodeDraftEntries(encodeDraftEntries({ [fileKey]: { value: [file] } }))[fileKey].value as Array<Record<string, unknown>>;
+    expect("batch" in restored[0]).toBe(false);
+  });
 });
 
 

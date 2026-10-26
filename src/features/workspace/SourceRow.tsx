@@ -1,5 +1,7 @@
+import { useId } from "react";
 import { File, X } from "lucide-react";
 import type { ProbeState } from "@/hooks/useProbe";
+import type { BatchState } from "./batchStamp";
 import {
   claimResponsivenessAction,
   expectsResponsivenessAction,
@@ -22,6 +24,8 @@ export default function SourceRow({
   state,
   problem,
   edited,
+  summary,
+  batchState,
   onSelect,
   onRemove,
   onRetry,
@@ -33,11 +37,18 @@ export default function SourceRow({
   state: ProbeState;
   problem: string | null;
   edited?: boolean;
+  /** What the row will become, e.g. "→ JPEG · Quality 80". */
+  summary?: string | null;
+  batchState?: BatchState;
   onSelect: () => void;
   onRemove: () => void;
   onRetry: () => void;
   onResponsivenessAction?: (action: SourceRowResponsivenessAction) => void;
 }) {
+  // The select button's aria-label replaces its content, so the probe facts,
+  // tag and settings line are attached as its description instead.
+  const factsId = useId();
+  const summaryId = useId();
   const p = state.phase === "ready" ? state.probe : null;
   const metadata = p
     ? [
@@ -85,6 +96,7 @@ export default function SourceRow({
           type="button"
           aria-label={`Select ${sourceName(path)}`}
           aria-pressed={selected}
+          aria-describedby={summary ? `${factsId} ${summaryId}` : factsId}
           data-responsiveness-role={sourceId ? "button" : undefined}
           data-responsiveness-name={sourceId ? `Select ${sourceName(path)}` : undefined}
           onClick={(event) => runAction("select", event.nativeEvent.isTrusted, onSelect)}
@@ -102,12 +114,24 @@ export default function SourceRow({
             >
               {sourceName(path)}
             </span>
-            <span className="block text-xs text-fg-secondary">
+            <span id={factsId} className="block text-xs text-fg-secondary">
               {metadata ??
                 (state.phase === "probing"
                   ? "Inspecting source…"
                   : "Inspection failed")}
             </span>
+            {summary && (
+              <span id={summaryId} className="mt-1 flex min-w-0 items-center gap-2 text-xs text-fg-secondary">
+                {batchState && (
+                  <span className={batchState === "batch"
+                    ? "shrink-0 rounded-full border border-accent/45 bg-accent-subtle px-1.5 font-semibold text-accent"
+                    : "shrink-0 rounded-full border bg-surface-2 px-1.5 font-semibold text-fg-secondary"}>
+                    {batchState === "batch" ? "Batch" : "Edited"}
+                  </span>
+                )}
+                <span className="truncate" title={summary}>{summary}</span>
+              </span>
+            )}
           </span>
         </button>
         <button
