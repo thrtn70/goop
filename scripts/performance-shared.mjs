@@ -326,13 +326,17 @@ export function createOwnedDirectory(directory, label = 'Output directory') {
   mkdirSync(directory, { recursive: true });
 }
 
+// The code on a refused budgeted write, so a caller can tell the refusal from a
+// failure to measure the budget directory.
+export const STORAGE_BUDGET_REFUSED = 'ERR_STORAGE_BUDGET_REFUSED';
+
 export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetBytes = null } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
   const serialized = `${JSON.stringify(value)}\n`;
   if (budgetDirectory !== null) {
     if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 1) throw Error('Atomic JSON budget must be a positive safe integer');
-    if (directoryBytes(budgetDirectory) + Buffer.byteLength(serialized) > budgetBytes) throw Error('Atomic JSON replacement would exceed the storage budget');
+    if (directoryBytes(budgetDirectory) + Buffer.byteLength(serialized) > budgetBytes) throw Object.assign(Error('Atomic JSON replacement would exceed the storage budget'), { code: STORAGE_BUDGET_REFUSED });
   }
   // Budget calculations use the exact compact representation retained here.
   // Pretty printing can multiply nested-array evidence well beyond its measured
