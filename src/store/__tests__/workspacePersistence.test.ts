@@ -160,6 +160,25 @@ describe("durable editable drafts", () => {
     expect(reads).toEqual([DRAFT_STORAGE_KEY]);
   });
 
+  const oversizedEntries = { [key("ImagePage.files")]: { value: ["x".repeat(600 * 1024)] } };
+  it.each([
+    ["a newer version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, entries: oversizedEntries }), "future"],
+    ["a newer version first, over the limit only in bytes", DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, entries: { [key("ImagePage.files")]: { value: ["€".repeat(200 * 1024)] } } }), "future"],
+    ["a newer version after the entries", DRAFT_STORAGE_KEY, JSON.stringify({ entries: oversizedEntries, version: 3 }), "future"],
+    ["a newer version in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "future"],
+    ["the current version too far from the start", DRAFT_STORAGE_KEY, `{${" ".repeat(64)}${JSON.stringify({ version: 2, entries: oversizedEntries }).slice(1)}`, "future"],
+    ["no envelope", DRAFT_STORAGE_KEY, "x".repeat(600 * 1024), "future"],
+    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "malformed"],
+    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+  ] as const)("protects saved drafts over the size limit that hold %s", (_label, storageKey, raw, reason) => {
+    const outcome = loadDraftEntriesOutcome({
+      getItem: candidate => candidate === storageKey ? raw : null,
+      setItem: () => { throw new Error("must not write"); },
+    });
+    expect(outcome).toEqual({ kind: "protected", reason });
+  });
+
   it("protects v2 when a known slot is invalid instead of silently erasing it", () => {
     const invalid = JSON.stringify({ version: 2, entries: {
       [key("ImageRotateFlow.degrees")]: { value: "cw90" },

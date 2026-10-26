@@ -334,8 +334,17 @@ export function admitDraftEntries(entries: DraftEntries): { admitted: DraftEntri
   return { admitted, skipped };
 }
 
+// A save too large to parse is judged by the version leading its first few
+// characters, where every writer puts it; one without may be newer.
+const LEADING_VERSION_CHARS = 64;
+const LEADING_VERSION = /^\s*\{\s*"version"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*[,}]/;
+function oversizedReason(raw: string, version: 1 | 2): DraftDecodeError["reason"] {
+  const match = LEADING_VERSION.exec(raw.slice(0, LEADING_VERSION_CHARS));
+  return match !== null && Number(match[1]) <= version ? "malformed" : "future";
+}
+
 function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
-  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError("malformed");
+  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError(oversizedReason(raw, version));
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
   if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
