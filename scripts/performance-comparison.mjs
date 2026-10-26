@@ -1,7 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, STORAGE_BUDGET_REFUSED, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
+import { boundedLedgerField, createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, STORAGE_BUDGET_REFUSED, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
@@ -43,8 +43,8 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
   // The budget check walks the whole output tree, which a process outside the
   // owned group can make unreadable at any time. Once that happens the ledger
   // is written without the check. A result over the result limit is replaced
-  // before it is recorded; only a held-pipe report is carried past that, and
-  // through runPairedPlan it is the runner's own short message.
+  // before it is recorded, and the only field carried past that, a direct
+  // adapter's held-pipe report, is clipped before such a write.
   const writeLedger = () => {
     if (!evidenceIoFailed) {
       try {
@@ -56,6 +56,7 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
         state.status = 'failed';
       }
     }
+    state.samples = state.samples.map(sample => sample.result?.stdio_error === undefined ? sample : { ...sample, result: { ...sample.result, stdio_error: boundedLedgerField(sample.result.stdio_error) } });
     writeJsonAtomic(statePath, state);
   };
   for (const [planIndex, step] of plan.entries()) {

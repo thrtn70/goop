@@ -1058,6 +1058,8 @@ for(const [label,leave,adapterResult,totalLimits,check] of [
  ['an unreadable directory',leaveUnreadable,{success:true,process_ms:1},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},result=>assert.match(result.evidence_io_error,/EACCES/)],
  ['an unreadable directory and held pipes under no total limits',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:heldPipes}},null,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.stdio_error,heldPipes);}],
  ['an undeletable directory past the total storage budget',leaveUndeletable,{success:true,process_ms:1},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:2097152},result=>{assert.equal(result.storage_budget_exceeded,true);assert.equal(result.owned_payload_removed,undefined);}],
+ // A direct adapter's held-pipe report is carried past the result bound, and this entry is written unmeasured.
+ ['an unreadable directory and an oversized held-pipe report',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:'x'.repeat(2*1024*1024)}},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},result=>{assert.match(result.evidence_io_error,/EACCES/);assert.match(result.stdio_error,/ \[truncated\]$/);assert.ok(result.stdio_error.length<4096);}],
 ]){
  test(`paired collector records the sample and stops when its run leaves ${label}`,{skip:unreadableSkip},async t=>{
   const root=mkdtempSync(join(tmpdir(),'goop-paired-evidence-io-')),output=join(root,'output'),blocked=[];
@@ -1093,6 +1095,17 @@ test('paired collector ends its ledger failed when the output becomes unreadable
  const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,execute:async()=>{runs+=1;if(runs===4)trigger.armed=true;return {success:true,process_ms:1};}});
  assert.equal(runs,4);assert.equal(state.success,false);assert.equal(state.status,'failed');assert.match(state.evidence_io_error,/EACCES/);
  assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','excluded','success','success']);
+ assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
+});
+
+// The budget accepts a large held-pipe report once, then the tree turns
+// unreadable before the final write, which goes unmeasured.
+test('paired collector clips a held-pipe report its final unmeasured write carries',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-unreadable-held-')),output=join(root,'output');
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'paired-state.json'),join(output,'late'));
+ const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},execute:async()=>{trigger.armed=true;return {success:true,process_ms:1,process:{stdio_error:'x'.repeat(2*1024*1024)}};}});
+ assert.equal(state.status,'failed');assert.match(state.evidence_io_error,/EACCES/);assert.equal(state.samples.length,1);
+ assert.match(state.samples[0].result.stdio_error,/ \[truncated\]$/);assert.ok(state.samples[0].result.stdio_error.length<4096);
  assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
 });
 

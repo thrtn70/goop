@@ -353,6 +353,18 @@ export function createOwnedDirectory(directory, label = 'Output directory') {
 // failure to measure the budget directory.
 export const STORAGE_BUDGET_REFUSED = 'ERR_STORAGE_BUDGET_REFUSED';
 
+const LEDGER_FIELD_LIMIT_CHARS = 2048;
+
+/**
+ * A child decides how long a failed result's fields are. A ledger entry keeps
+ * only the start of a long one, so it fits its share of the ledger even when it
+ * is written without a measured budget check.
+ */
+export function boundedLedgerField(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length <= LEDGER_FIELD_LIMIT_CHARS ? value : `${text.slice(0, LEDGER_FIELD_LIMIT_CHARS)} [truncated]`;
+}
+
 export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetBytes = null } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;

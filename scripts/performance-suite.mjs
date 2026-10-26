@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { run as runSingleConversion } from './performance-baseline.mjs';
 import { runStartup } from './startup-baseline.mjs';
 import {
+  boundedLedgerField,
   captureIdentity,
   createOwnedDirectory,
   createRunLogs,
@@ -41,7 +42,6 @@ import {
 
 const modulePath = fileURLToPath(import.meta.url);
 const STATE_RESULT_LIMIT_BYTES = 256 * 1024;
-const LEDGER_FIELD_LIMIT_CHARS = 2048;
 const LEDGER_FIXED_RESERVE_BYTES = 65536;
 const LEDGER_SAMPLE_RESERVE_BYTES = STATE_RESULT_LIMIT_BYTES + 2048;
 const futureAtomicLedgerReserveBytes = (totalSamples, completedSamples) => LEDGER_FIXED_RESERVE_BYTES + (2 * totalSamples - completedSamples) * LEDGER_SAMPLE_RESERVE_BYTES;
@@ -112,13 +112,8 @@ function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory,
   return { evidence_directory: evidenceDirectory, full_result_path: join(evidenceDirectory, 'full-result.json'), full_result_bytes: statSync(absolutePath).size, full_result_sha256: sha256File(absolutePath), full_result_retained: true };
 }
 
-// A child decides how long a failed result's fields are, so a compacted entry
-// keeps only the start of a long one and always fits the result limit.
-function boundedLedgerField(value) {
-  const text = typeof value === 'string' ? value : JSON.stringify(value);
-  return text.length <= LEDGER_FIELD_LIMIT_CHARS ? value : `${text.slice(0, LEDGER_FIELD_LIMIT_CHARS)} [truncated]`;
-}
-
+// A compacted entry clips each field with boundedLedgerField, so it always fits
+// the result limit.
 function ledgerResult(result, fullResult) {
   if (fullResult === null) return result;
   const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'evidence_io_error', 'sidecars', 'sidecar_identity_error'];
