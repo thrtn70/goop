@@ -190,6 +190,31 @@ it.each([
   expect(writes).toEqual([]);
 });
 
+it.each([
+  ["with its version after the entries", "goop.workspace-drafts.v2", (entries: object) => JSON.stringify({ entries, version: 3 })],
+  ["in the older slot", "goop.workspace-drafts.v1", (entries: object) => JSON.stringify({ version: 2, entries })],
+] as const)("never recovers over oversized newer-format data %s", async (_label, slot, encode) => {
+  const newer = encode({ [JSON.stringify(["image", "ImagePage.files"])]: { value: ["x".repeat(600 * 1024)] } });
+  const values = new Map<string, string>([[slot, "{"]]);
+  const writes: string[] = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (storageKey: string) => values.get(storageKey) ?? null,
+    setItem: (storageKey: string, value: string) => { writes.push(storageKey); values.set(storageKey, value); },
+  });
+  vi.resetModules();
+  const drafts = await import("../workspaceDrafts");
+  const available = renderHook(() => drafts.useDraftRecoveryAvailable());
+  expect(available.result.current).toBe(true);
+  values.set(slot, newer);
+
+  let recovered = true;
+  act(() => { recovered = drafts.recoverSavedDrafts(); });
+  expect(recovered).toBe(false);
+  expect(available.result.current).toBe(false);
+  expect(values.get(slot)).toBe(newer);
+  expect(writes).toEqual([]);
+});
+
 it("retains immediate edits after a failed migration and retries only after re-reading exact v1", async () => {
   const legacyKey = "goop.workspace-drafts.v1";
   const v2Key = "goop.workspace-drafts.v2";
