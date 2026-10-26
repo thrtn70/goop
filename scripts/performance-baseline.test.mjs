@@ -928,6 +928,27 @@ test('paired plan is runnable and writes bound comparisons', async () => {
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+// A run directory the symlink scan cannot list hides every link in it, so the
+// paired log writes must refuse a link rather than follow it out. The suite's
+// own checks may then fail on the same directory, so only the outside file and
+// the surviving link are checked.
+test('a paired run whose directory the symlink scan cannot list never follows a link left at a log path',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-scan-link-')),outside=join(root,'outside.txt'),runner=join(root,'runner.cjs'),runs=join(root,'run-directories');
+ t.after(()=>{try{for(const path of readFileSync(runs,'utf8').split('\n').filter(Boolean))chmodSync(path,0o700);}catch{/* Never ran. */}rmSync(root,{recursive:true,force:true});});
+ writeFileSync(outside,'outside');
+ writeFileSync(runner,`const fs=require('node:fs'),path=require('node:path'),dir=process.env.GOOP_PERF_OUTPUT_DIR;fs.appendFileSync(${JSON.stringify(runs)},dir+'\\n');for(const name of ['stdout.log','stderr.log'])fs.symlinkSync(${JSON.stringify(outside)},path.join(dir,name));fs.chmodSync(dir,0o300);`);
+ const crypto=await import('node:crypto');
+ const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+ const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+ const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+ const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+ const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+ await runPairedPlan({plan,outputDirectory:join(root,'output')}).catch(()=>{/* The suite's own checks fail on the same directory. */});
+ const [first]=readFileSync(runs,'utf8').split('\n');chmodSync(first,0o700);
+ assert.equal(readFileSync(outside,'utf8'),'outside');
+ assert.equal(lstatSync(join(first,'stdout.log')).isSymbolicLink(),true);
+});
+
 test('paired verification binds media codecs, inspection source order, and startup jobs', () => {
  const step={workload_id:'work',revision:'baseline'};
  const makeContract=(evidenceKind,expectedFacts)=>({evidence_kind:evidenceKind,expected_facts:expectedFacts,contract_sha256:sha256Text(stableStringify(expectedFacts))});

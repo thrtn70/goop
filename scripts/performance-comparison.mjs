@@ -1,7 +1,7 @@
-import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
+import { createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
@@ -240,10 +240,13 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
         storageBudgetBytes: Math.min(plan.limits.storage_budget_bytes, step.suite_remaining_storage_bytes),
         abortSignal,
       });
-      writeFileSync(join(runDirectory, 'stdout.log'), processResult.stdout);
-      writeFileSync(join(runDirectory, 'stderr.log'), processResult.stderr);
       const sanitizedProcess = { ...processResult, stdout: undefined, stderr: undefined };
       try {
+        // The child shared this directory, so whatever it left at a log path is
+        // refused rather than followed or truncated. The refusal fails the
+        // sample, which still carries the runner's evidence, held pipes included.
+        const evidenceError = createRunLogs(runDirectory, processResult);
+        if (evidenceError !== null) return { success: false, aborted: processResult.aborted, process: sanitizedProcess, evidence_error: evidenceError, error: `Paired workload logs could not be retained: ${evidenceError}` };
         if (sha256File(revision.command) !== revision.command_sha256) return { success: false, process: sanitizedProcess, error: 'Paired command changed during execution' };
         if (!processResult.success || statSync(resultPath).size > PAIRED_RESULT_LIMIT_BYTES) return { success: false, aborted: processResult.aborted, process: sanitizedProcess, error: 'Paired workload process failed or produced oversized evidence' };
         const result = JSON.parse(readFileSync(resultPath, 'utf8'));
