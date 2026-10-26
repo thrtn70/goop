@@ -1,7 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, STORAGE_BUDGET_REFUSED, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
+import { closingEvidenceWriter, createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, STORAGE_BUDGET_REFUSED, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
@@ -10,6 +10,10 @@ const PAIRED_LEDGER_FIXED_RESERVE_BYTES = 65536;
 const PAIRED_LEDGER_SAMPLE_RESERVE_BYTES = PAIRED_RESULT_LIMIT_BYTES + 2048;
 const futureAtomicPairedLedgerReserveBytes = (totalSamples, completedSamples) => PAIRED_LEDGER_FIXED_RESERVE_BYTES + (2 * totalSamples - completedSamples) * PAIRED_LEDGER_SAMPLE_RESERVE_BYTES;
 const pairedStepName = step => step.phase === 'warmup' ? `warmup-${step.revision}` : `${step.repetition}-${step.revision}`;
+// The collector records an evidence I/O failure on the sample that hit it, or
+// at the top level when its own ledger walk did. In both cases it writes the
+// ledger without the walk from then on.
+const recordsEvidenceIoFailure = state => typeof state.evidence_io_error === 'string' || state.samples.some(sample => typeof sample.result.evidence_io_error === 'string');
 
 const median = values => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -308,6 +312,8 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
       }
     },
   });
+  // Once the tree may no longer be readable, these writes skip the walk too.
+  const writer = closingEvidenceWriter(outputDirectory, plan.limits.suite_storage_budget_bytes, !recordsEvidenceIoFailure(state));
   const comparisons = {};
   try {
     for (const workloadId of plan.workload_ids) {
@@ -336,12 +342,13 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
     state.success = false;
     state.status = 'failed';
     state.comparison_error = error.message;
-    writeJsonAtomic(join(outputDirectory, 'paired-state.json'), state, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
-    writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
+    writer.write(join(outputDirectory, 'paired-state.json'), state);
+    writer.write(join(outputDirectory, 'comparison.json'), comparisons);
     throw error;
   }
-  writeJsonAtomic(join(outputDirectory, 'comparison.json'), comparisons, { budgetDirectory: outputDirectory, budgetBytes: plan.limits.suite_storage_budget_bytes });
+  writer.write(join(outputDirectory, 'comparison.json'), comparisons);
   if (!state.success) throw Error('Paired execution failed; retained incremental evidence');
+  if (writer.error) throw writer.error;
   return { state, comparisons };
 }
 

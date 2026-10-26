@@ -1021,18 +1021,20 @@ const leaveUnreadable=directory=>mkdirSync(join(directory,'blocked'),{mode:0});
 const leaveUndeletable=directory=>{mkdirSync(join(directory,'blocked'));writeFileSync(join(directory,'blocked','payload'),Buffer.alloc(2*1024*1024));chmodSync(join(directory,'blocked'),0o500);};
 // A mode-0 directory is readable to root.
 const unreadableSkip=process.platform==='win32'||process.getuid?.()===0;
-// A process outside the owned group can make the output tree unreadable at any
-// moment. This does it right after one chosen filesystem call once armed, which
-// places it between two of a collector's own walks of the tree. The hook also
-// owns cleanup, so the mode is restored before the root is removed.
-async function unreadableAfter(t,root,call,matches,directory){
+// A process outside the owned group can change the output tree at any moment.
+// This does it right after one chosen filesystem call once armed, which places
+// it between two of a collector's own walks of the tree, or between its last
+// one and its caller's. The hook also owns cleanup, so `restore` runs before
+// the root is removed.
+async function changedAfter(t,root,call,matches,change,restore=()=>{}){
  const fs=(await import('node:fs')).default,{syncBuiltinESMExports}=await import('node:module');
  const original=fs[call],trigger={armed:false};
- fs[call]=function(...args){const value=original.apply(this,args);if(trigger.armed&&matches(...args)){trigger.armed=false;mkdirSync(directory,{mode:0});}return value;};
+ fs[call]=function(...args){const value=original.apply(this,args);if(trigger.armed&&matches(...args)){trigger.armed=false;change();}return value;};
  syncBuiltinESMExports();
- t.after(()=>{fs[call]=original;syncBuiltinESMExports();try{chmodSync(directory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ t.after(()=>{fs[call]=original;syncBuiltinESMExports();restore();rmSync(root,{recursive:true,force:true});});
  return trigger;
 }
+const unreadableAfter=(t,root,call,matches,directory)=>changedAfter(t,root,call,matches,()=>mkdirSync(directory,{mode:0}),()=>{try{chmodSync(directory,0o700);}catch{/* Never made. */}});
 for(const [label,leave,adapterResult,totalLimits,check] of [
  ['an unreadable directory',leaveUnreadable,{success:true,process_ms:1},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},result=>assert.match(result.evidence_io_error,/EACCES/)],
  ['an unreadable directory and held pipes under no total limits',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:heldPipes}},null,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.stdio_error,heldPipes);}],
@@ -1553,4 +1555,250 @@ const fs=require('node:fs'),path=require('node:path');const request=JSON.parse(f
   const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));const integrity=JSON.parse(readFileSync(join(output,'integrity.json'),'utf8'));
   assert.equal(state.status,'failed');assert.equal(integrity.success,false);assert.notEqual(integrity.post,null);assert.notEqual(integrity.pre.sidecars.ffmpeg.sha256,integrity.post.sidecars.ffmpeg.sha256);
  } finally {if(prior===undefined)delete process.env.GOOP_TEST_RUNTIME_FFMPEG;else process.env.GOOP_TEST_RUNTIME_FFMPEG=prior;rmSync(root,{recursive:true,force:true});}
+});
+
+// The callers write their own closing evidence once the collector is done: the
+// comparisons or the integrity record, and the ledger again when either fails.
+// A collector that recorded an evidence I/O failure wrote its ledger without
+// the budget walk from then on, since the tree may no longer be readable. A
+// caller that walks it anyway throws the walk's error in place of the run's.
+const callerPairedPlan=async(root,{runnerPrefix='',candidateParameters={test:true}}={})=>{
+ const contractFacts={expected_output:{extension:'mp4',probe:'media',format_names:['mov','mp4'],required_streams:[{codec_type:'video',codec_name:'h264'}]},request:{video_options:{kind:'copy'}}};
+ const contractSha256=sha256Text(stableStringify(contractFacts));
+ const runner=join(root,'runner.cjs');
+ writeFileSync(runner,`const fs=require('node:fs');${runnerPrefix}fs.writeFileSync(process.env.GOOP_PERF_RESULT_PATH,JSON.stringify({success:true,process_ms:1,workload_id:process.env.GOOP_PERF_WORKLOAD_ID,revision:process.env.GOOP_PERF_REVISION,verification:{success:true,contract_sha256:${JSON.stringify(contractSha256)},kind:'media',contract_facts:${JSON.stringify(contractFacts)},evidence:{output_bytes:1,probe:{streams:[{codec_type:'video',codec_name:'h264'}],format:{format_name:'mov,mp4'}},effective_execution:{requested:{kind:'copy'},encoder:null}}}}));`);
+ const crypto=await import('node:crypto');
+ const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+ const revision=parameters=>({command:process.execPath,command_sha256:commandSha256,args:[runner],identity:{source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters,machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}}});
+ return {schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:{contract_sha256:contractSha256,evidence_kind:'media',expected_facts:contractFacts}},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision({test:true}),candidate:revision(candidateParameters)}};
+};
+
+test('a paired plan whose output became unreadable before its first launch still writes its comparisons and throws its own failure',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-unmeasured-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+ const plan=await callerPairedPlan(root);
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===ledger,join(output,'late'));
+ trigger.armed=true;
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed; retained incremental evidence/i);
+ const state=JSON.parse(readFileSync(ledger,'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples,[]);assert.match(state.evidence_io_error,/EACCES/);
+ assert.equal(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')).copy.not_run,true);
+});
+
+test('a paired plan whose run left an unreadable directory still writes its comparisons and throws its own failure',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-unmeasured-run-')),output=join(root,'output'),blocked=join(output,'runs','copy','warmup-baseline','blocked');
+ t.after(()=>{try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ const plan=await callerPairedPlan(root,{runnerPrefix:`fs.mkdirSync(${JSON.stringify(blocked)},{mode:0});`});
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed; retained incremental evidence/i);
+ const state=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.equal(state.samples.length,1);assert.match(state.samples[0].result.evidence_io_error,/EACCES/);
+ assert.equal(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')).copy.success,false);
+});
+
+test('a paired plan whose comparison fails after its output became unreadable still records and throws that failure',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-unmeasured-compare-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+ // Revisions run with different parameters cannot be compared, which shows only once every sample ran.
+ const plan=await callerPairedPlan(root,{candidateParameters:{test:false}});
+ // Right after the last sample's ledger write, so the collector's closing write meets it.
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===ledger&&JSON.parse(readFileSync(to,'utf8')).samples.length===plan.workload_ids.length*2*(1+plan.repetitions),join(output,'late'));
+ trigger.armed=true;
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/identity mismatch: parameters/i);
+ const state=JSON.parse(readFileSync(ledger,'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','excluded','success','success']);
+ assert.match(state.evidence_io_error,/EACCES/);assert.match(state.comparison_error,/identity mismatch: parameters/i);
+ assert.deepEqual(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')),{});
+});
+
+test('a paired plan that recorded no evidence I/O failure still refuses a closing write past the storage budget',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-refused-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+ const plan=await callerPairedPlan(root);
+ // Filled right after the collector's closing write, so only the caller's own write meets it.
+ const trigger=await changedAfter(t,root,'renameSync',(_from,to)=>to===ledger&&JSON.parse(readFileSync(to,'utf8')).status!=='running',()=>writeFileSync(join(output,'filler'),Buffer.alloc(plan.limits.suite_storage_budget_bytes)));
+ trigger.armed=true;
+ // An interrupted run failed for its own reason, which skips no budget walk.
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output,abortSignal:AbortSignal.abort()}),/would exceed the storage budget/);
+ assert.equal(JSON.parse(readFileSync(ledger,'utf8')).status,'failed');assert.equal(existsSync(join(output,'comparison.json')),false);
+});
+
+const callerNormalSuite=async(root,driverPrefix='',budget=4194304)=>{
+ const fixture=join(root,'source.jpg');writeFileSync(fixture,'source');
+ const manifest=validManifest();manifest.defaults.repetitions=1;manifest.defaults.suite_storage_budget_bytes=budget;manifest.workloads=[manifest.workloads[0]];
+ const manifestPath=join(root,'manifest.json'),bindingsPath=join(root,'bindings.json'),startupConfig=join(root,'startup.json');
+ const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+ writeFileSync(manifestPath,JSON.stringify(manifest));writeFileSync(bindingsPath,JSON.stringify({schema_version:1,fixtures:{raw_48mp:{path:fixture,sha256:sha(fixture),bytes:6},inspect_mixed:{path:fixture,sha256:sha(fixture),bytes:6}}}));writeFileSync(startupConfig,'{}');
+ const driver=join(root,'driver');writeFileSync(driver,`#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path');const request=JSON.parse(fs.readFileSync(process.argv[3]));${driverPrefix}fs.writeFileSync(request.output_path,'media');const sidecars=Object.fromEntries(['ffmpeg','ffprobe'].map(name=>[name,{canonical_path:fs.realpathSync(path.join(process.argv[2],name)),source_is_path:false}]));fs.writeFileSync(process.argv[4],JSON.stringify({success:true,process_ms:1,result:{bytes:5},sidecars}));
+`);chmodSync(driver,0o700);
+ const ffmpeg=join(root,'ffmpeg');writeFileSync(ffmpeg,'#!/bin/sh\nprintf "ffmpeg version test"\n');chmodSync(ffmpeg,0o700);const probe=join(root,'ffprobe');writeFileSync(probe,'#!/bin/sh\nif [ "$1" = "-version" ]; then printf "ffprobe version test"; else printf \'{"streams":[{"codec_type":"video","codec_name":"mjpeg"}],"format":{"format_name":"image2"}}\'; fi\n');chmodSync(probe,0o700);
+ const startup=join(root,'startup');writeFileSync(startup,'#!/bin/sh\nexit 0\n');chmodSync(startup,0o700);
+ return {budget:manifest.defaults.suite_storage_budget_bytes,options:{manifest:manifestPath,bindings:bindingsPath,output:join(root,'output'),'single-driver':driver,'workload-driver':driver,'runtime-sidecars':root,'startup-binary':startup,'startup-config':startupConfig,'build-command':'test build','hardware-enabled':'false'}};
+};
+
+test('a normal suite whose output became unreadable before its first launch still writes its integrity record and throws its own failure',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-unmeasured-'));
+ const {options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===ledger,join(options.output,'late'));
+ trigger.armed=true;
+ await assert.rejects(normalSuite(options),/could not be measured before launching raw-single\/warmup-0/);
+ const state=JSON.parse(readFileSync(ledger,'utf8')),integrity=JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples,[]);assert.match(state.evidence_io_error,/EACCES/);
+ assert.equal(integrity.success,true);assert.notEqual(integrity.post,null);
+});
+
+test('a normal suite whose run left an unreadable directory and changed a sidecar still records both and throws its own failure',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-unmeasured-run-')),blocked=join(root,'output','raw-single','warmup-0','blocked');
+ t.after(()=>{try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ const {options}=await callerNormalSuite(root,`fs.mkdirSync(${JSON.stringify(blocked)},{mode:0});fs.appendFileSync(path.join(process.argv[2],'ffmpeg'),'\\n# mutated');`);
+ await assert.rejects(normalSuite(options),/evidence I\/O failed: raw-single\/warmup-0/i);
+ const state=JSON.parse(readFileSync(join(options.output,'suite-state.json'),'utf8')),integrity=JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.equal(state.samples.length,1);assert.match(state.samples[0].result.evidence_io_error,/EACCES/);assert.match(state.integrity_error,/identity changed/i);
+ assert.equal(integrity.success,false);assert.match(integrity.error,/identity changed/i);
+});
+
+test('a normal suite that recorded no evidence I/O failure still refuses a closing write past the storage budget',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-refused-'));
+ const {budget,options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+ // Filled right after the suite's closing write, so only the caller's own write meets it.
+ const trigger=await changedAfter(t,root,'renameSync',(_from,to)=>to===ledger&&JSON.parse(readFileSync(to,'utf8')).status!=='running',()=>writeFileSync(join(options.output,'filler'),Buffer.alloc(budget)));
+ trigger.armed=true;
+ // An interrupted suite failed for its own reason, which skips no budget walk.
+ await assert.rejects(normalSuite(options,AbortSignal.abort()),/would exceed the storage budget/);
+ assert.equal(JSON.parse(readFileSync(ledger,'utf8')).status,'failed');assert.equal(existsSync(join(options.output,'integrity.json')),false);
+});
+
+// The tree turns unreadable at the ledger's first write, then readable but full
+// at its closing one. Only a caller that walks it again after the ledger
+// recorded the failure meets the budget, and is refused in place of the run.
+const unreadableThenFull=async(t,root,output,ledger,bytes)=>{
+ const late=join(output,'late');let closing=false;
+ const trigger=await changedAfter(t,root,'renameSync',(_from,to)=>to===ledger&&(!closing||JSON.parse(readFileSync(to,'utf8')).status!=='running'),()=>{
+  if(closing){chmodSync(late,0o700);writeFileSync(join(late,'filler'),Buffer.alloc(bytes));return;}
+  mkdirSync(late,{mode:0});closing=true;trigger.armed=true;
+ },()=>{try{chmodSync(late,0o700);}catch{/* Never made. */}});
+ trigger.armed=true;
+};
+
+test('a paired plan whose ledger recorded an evidence I/O failure skips the budget walk even once its output is readable again',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-recorded-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+ const plan=await callerPairedPlan(root);
+ await unreadableThenFull(t,root,output,ledger,plan.limits.suite_storage_budget_bytes);
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed; retained incremental evidence/i);
+ assert.match(JSON.parse(readFileSync(ledger,'utf8')).evidence_io_error,/EACCES/);assert.equal(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')).copy.not_run,true);
+});
+
+test('a normal suite whose ledger recorded an evidence I/O failure skips the budget walk even once its output is readable again',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-recorded-'));
+ const {budget,options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+ await unreadableThenFull(t,root,options.output,ledger,budget);
+ await assert.rejects(normalSuite(options),/could not be measured before launching raw-single\/warmup-0/);
+ assert.match(JSON.parse(readFileSync(ledger,'utf8')).evidence_io_error,/EACCES/);assert.equal(JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8')).success,true);
+});
+
+// The tree turns unreadable only after the collector's closing write, so the
+// ledger records nothing and the caller's own walk is the first to meet it.
+// The walk's failure is thrown only when the run has none of its own.
+const afterClosingWrite=ledger=>(_from,to)=>to===ledger&&JSON.parse(readFileSync(to,'utf8')).status!=='running';
+for(const [label,abortSignal,stopsWith,status] of [
+ ['an interrupted run',AbortSignal.abort(),/paired execution failed; retained incremental evidence/i,'failed'],
+ ['a clean run',null,/EACCES/,'complete'],
+]){
+ test(`a paired plan still writes its comparisons when its output becomes unreadable after ${label}`,{skip:unreadableSkip},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-unreadable-late-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+  const plan=await callerPairedPlan(root);
+  const trigger=await unreadableAfter(t,root,'renameSync',afterClosingWrite(ledger),join(output,'late'));
+  trigger.armed=true;
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output,abortSignal}),stopsWith);
+  const state=JSON.parse(readFileSync(ledger,'utf8'));
+  assert.equal(state.status,status);assert.equal(state.evidence_io_error,undefined);
+  assert.equal(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')).copy.success,status==='complete');
+ });
+}
+
+for(const [label,abortSignal,stopsWith,status] of [
+ ['an interrupted suite',AbortSignal.abort(),/suite interrupted/i,'failed'],
+ ['a clean suite',null,/EACCES/,'complete'],
+]){
+ test(`a normal suite still writes its integrity record when its output becomes unreadable after ${label}`,{skip:unreadableSkip},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-normal-unreadable-late-'));
+  const {options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+  const trigger=await unreadableAfter(t,root,'renameSync',afterClosingWrite(ledger),join(options.output,'late'));
+  trigger.armed=true;
+  await assert.rejects(normalSuite(options,abortSignal),stopsWith);
+  const state=JSON.parse(readFileSync(ledger,'utf8'));
+  assert.equal(state.status,status);assert.equal(state.evidence_io_error,undefined);
+  assert.equal(JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8')).success,true);
+ });
+}
+
+// After the closing write the ledger becomes unreadable, and the startup
+// configuration changes, which fails the integrity check.
+for(const [label,abortSignal,stopsWith] of [['an interrupted suite',AbortSignal.abort(),/suite interrupted/i],['a clean suite',null,/identity changed/i]]){
+ test(`a normal suite whose ledger cannot be read back still records its integrity failure after ${label}`,{skip:unreadableSkip},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-normal-ledger-unreadable-'));
+  const {options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+  const trigger=await changedAfter(t,root,'renameSync',afterClosingWrite(ledger),()=>{chmodSync(ledger,0);writeFileSync(options['startup-config'],'{"changed":true}');},()=>{try{chmodSync(ledger,0o600);}catch{/* Never made. */}});
+  trigger.armed=true;
+  await assert.rejects(normalSuite(options,abortSignal),stopsWith);
+  const integrity=JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8'));
+  assert.equal(integrity.success,false);assert.match(integrity.error,/identity changed/i);
+ });
+}
+
+test('closing evidence writer measures until a write fails, then skips the walk and keeps that failure',{skip:unreadableSkip},async t=>{
+ const {closingEvidenceWriter}=await import('./performance-shared.mjs');
+ const root=mkdtempSync(join(tmpdir(),'goop-closing-writer-')),blocked=join(root,'blocked'),budget=1048576;
+ t.after(()=>{try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ // A refusal is thrown, kept by no one, and leaves the writer measuring.
+ const refusing=closingEvidenceWriter(root,1,true);
+ for(let attempt=0;attempt<2;attempt++)assert.throws(()=>refusing.write(join(root,'refused.json'),{}),/would exceed the storage budget/);
+ assert.equal(refusing.error,null);assert.equal(existsSync(join(root,'refused.json')),false);
+ // A writer that starts unmeasured never walks.
+ closingEvidenceWriter(root,1,false).write(join(root,'unmeasured.json'),{unmeasured:true});
+ assert.deepEqual(JSON.parse(readFileSync(join(root,'unmeasured.json'),'utf8')),{unmeasured:true});
+ // A failed walk is kept and the write still lands.
+ mkdirSync(blocked,{mode:0});
+ const writer=closingEvidenceWriter(root,budget,true);
+ writer.write(join(root,'first.json'),{first:true});
+ assert.match(writer.error.message,/EACCES/);assert.deepEqual(JSON.parse(readFileSync(join(root,'first.json'),'utf8')),{first:true});
+ // Later writes skip the walk, even once the tree is readable again and full.
+ chmodSync(blocked,0o700);writeFileSync(join(blocked,'filler'),Buffer.alloc(budget));
+ writer.write(join(root,'second.json'),{second:true});
+ assert.deepEqual(JSON.parse(readFileSync(join(root,'second.json'),'utf8')),{second:true});
+ // A write that fails unmeasured too is not thrown, and the first failure is the one kept.
+ mkdirSync(join(root,'third.json'));
+ writer.write(join(root,'third.json'),{third:true});
+ assert.match(writer.error.message,/EACCES/);assert.equal(lstatSync(join(root,'third.json')).isDirectory(),true);
+});
+
+// A process outside the owned group plants a directory where the caller's
+// closing file goes, right after the collector's closing write, so that write
+// fails measured or not.
+test('a normal suite whose integrity record cannot be written still throws its own failure',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-integrity-planted-'));
+ const {options}=await callerNormalSuite(root),ledger=join(options.output,'suite-state.json');
+ const trigger=await changedAfter(t,root,'renameSync',afterClosingWrite(ledger),()=>mkdirSync(join(options.output,'integrity.json')));
+ trigger.armed=true;
+ await assert.rejects(normalSuite(options,AbortSignal.abort()),/suite interrupted/i);
+ assert.equal(JSON.parse(readFileSync(ledger,'utf8')).status,'failed');assert.equal(lstatSync(join(options.output,'integrity.json')).isDirectory(),true);
+});
+
+for(const [label,candidateParameters,abortSignal,stopsWith] of [
+ ['an interrupted run',{test:true},AbortSignal.abort(),/paired execution failed; retained incremental evidence/i],
+ ['a failed comparison',{test:false},null,/identity mismatch: parameters/i],
+]){
+ test(`a paired plan whose comparisons cannot be written still throws its own failure after ${label}`,async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-comparison-planted-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+  const plan=await callerPairedPlan(root,{candidateParameters});
+  const trigger=await changedAfter(t,root,'renameSync',afterClosingWrite(ledger),()=>mkdirSync(join(output,'comparison.json')));
+  trigger.armed=true;
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output,abortSignal}),stopsWith);
+  assert.equal(lstatSync(join(output,'comparison.json')).isDirectory(),true);
+ });
+}
+
+test('a normal suite that fails before creating its ledger still writes its integrity record and throws that failure',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-normal-no-ledger-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const {options}=await callerNormalSuite(root,'',100000);
+ await assert.rejects(normalSuite(options),/too small for the bounded evidence ledger/);
+ assert.equal(existsSync(join(options.output,'suite-state.json')),false);assert.equal(JSON.parse(readFileSync(join(options.output,'integrity.json'),'utf8')).success,true);
 });
