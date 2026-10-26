@@ -101,3 +101,133 @@ describe.each(["noop", "enabled", "faulted"] as const)("draft persistence alert 
     });
   });
 });
+
+describe("recovering saved edits a strict load refused", () => {
+  const V2 = "goop.workspace-drafts.v2";
+  const V1 = "goop.workspace-drafts.v1";
+  const BACKUP = "goop.workspace-drafts.v2.unreadable";
+  const RECOVER = "Back up and recover what can be read";
+  const files = JSON.stringify(["image", "ImagePage.files"]);
+  const rotation = JSON.stringify(["image", "ImageRotateFlow.degrees"]);
+  const oversized = JSON.stringify(["compress", "pdf", ...Array.from({ length: 18 }, (_, i) => `/doc-${i}.pdf`), "PdfFlow.op"]);
+  const refusedRaw = JSON.stringify({ version: 2, entries: { [files]: { value: ["/kept.png"] }, [oversized]: { value: "merge" } } });
+
+  async function boot(saved: Record<string, string>, options: { failBackup?: boolean; unreadable?: boolean } = {}) {
+    // Each boot loads the draft store afresh against its own saved data.
+    vi.resetModules();
+    const values = new Map<string, string>(Object.entries(saved));
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => {
+        if (options.unreadable) throw new Error("storage unavailable");
+        return values.get(key) ?? null;
+      },
+      setItem: (key: string, value: string) => {
+        if (options.failBackup && key.startsWith(BACKUP)) throw new Error("quota");
+        values.set(key, value);
+      },
+    });
+    recorderState.current = recorder("noop");
+    const drafts = await import("@/store/workspaceDrafts");
+    const persistence = await import("@/store/workspacePersistence");
+    const { default: Layout } = await import("../Layout");
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+    render(<MemoryRouter><Layout /></MemoryRouter>);
+    const filesDraft = renderHook(() => drafts.useWorkspaceDraftState<string[]>("ImagePage.files", []), { wrapper });
+    const rotationDraft = renderHook(() => drafts.useWorkspaceDraftState<string>("ImageRotateFlow.degrees", "cw180"), { wrapper });
+    act(() => rotationDraft.result.current[1]("cw90"));
+    const strictLoad = () => persistence.loadDraftEntriesOutcome({ getItem: key => values.get(key) ?? null, setItem: () => undefined });
+    return { values, strictLoad, filesDraft, rotationDraft };
+  }
+
+  it("backs up what was saved, then restores every entry that can be read and keeps entries only this session has", async () => {
+    const { values, strictLoad, filesDraft, rotationDraft } = await boot({ [V2]: refusedRaw });
+    expect((await screen.findByRole("alert")).textContent).toContain("Some saved edits can't be read.");
+    expect(filesDraft.result.current[0]).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe(refusedRaw);
+    expect(filesDraft.result.current[0]).toEqual(["/kept.png"]);
+    expect(rotationDraft.result.current[0]).toBe("cw90");
+    expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: ["/kept.png"] }, [rotation]: { value: "cw90" } } });
+    expect(document.activeElement?.id).toBe("main");
+  });
+
+  it("keeps an earlier backup and adds the new one beside it", async () => {
+    const { values } = await boot({ [V2]: refusedRaw, [`${BACKUP}.0`]: "earlier unreadable drafts" });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe("earlier unreadable drafts");
+    expect(values.get(`${BACKUP}.1`)).toBe(refusedRaw);
+  });
+
+  it("reuses an identical backup wherever it is kept", async () => {
+    const { values } = await boot({ [V2]: refusedRaw, [`${BACKUP}.0`]: "earlier unreadable drafts", [`${BACKUP}.2`]: refusedRaw });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.has(`${BACKUP}.1`)).toBe(false);
+    expect(values.get(`${BACKUP}.2`)).toBe(refusedRaw);
+  });
+
+  it("keeps drafts a newer Goop added in the backup while recovering the rest", async () => {
+    const newer = JSON.stringify({ version: 2, entries: { [files]: { value: ["/kept.png"] }, [JSON.stringify(["image", "FutureFeature.option"])]: { value: "on" } } });
+    const { values, strictLoad } = await boot({ [V2]: newer });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe(newer);
+    expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: ["/kept.png"] }, [rotation]: { value: "cw90" } } });
+  });
+
+  it("changes nothing when the backup cannot be written, and says so", async () => {
+    const { values, filesDraft } = await boot({ [V2]: refusedRaw }, { failBackup: true });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+
+    expect(screen.getByRole("alert").textContent).toContain("Nothing was recovered.");
+    expect(values.get(V2)).toBe(refusedRaw);
+    expect([...values.keys()].some(key => key.startsWith(BACKUP))).toBe(false);
+    expect(filesDraft.result.current[0]).toEqual([]);
+  });
+
+  it("keeps entries only this session has when nothing saved can be read", async () => {
+    const { values } = await boot({ [V2]: "{" });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe("{");
+    expect(JSON.parse(values.get(V2) ?? "{}").entries)
+      .toEqual({ [files]: { value: [] }, [rotation]: { value: "cw90" } });
+  });
+
+  it("recovers from unreadable drafts in the older format too", async () => {
+    const legacy = JSON.stringify({ version: 1, entries: "not entries" });
+    const { values, strictLoad } = await boot({ [V1]: legacy });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe(legacy);
+    expect(strictLoad().kind).toBe("ready");
+  });
+
+  it("does not overwrite edits a newer Goop saved after this one started", async () => {
+    const { values } = await boot({ [V2]: refusedRaw });
+    const newer = JSON.stringify({ version: 3, entries: {} });
+    values.set(V2, newer);
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+
+    expect(values.get(V2)).toBe(newer);
+    expect([...values.keys()].some(key => key.startsWith(BACKUP))).toBe(false);
+  });
+
+  it.each([
+    ["edits saved by a newer Goop", { [V2]: JSON.stringify({ version: 3, entries: {} }) }, {}],
+    ["storage that cannot be read", { [V2]: refusedRaw }, { unreadable: true }],
+  ])("offers no recovery for %s", async (_label, saved, options) => {
+    await boot(saved, options);
+    expect((await screen.findByRole("alert")).textContent).toContain("Unfinished edits could not be saved for restart");
+    expect(screen.queryByRole("button", { name: RECOVER })).toBeNull();
+  });
+});
