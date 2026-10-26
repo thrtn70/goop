@@ -12,7 +12,9 @@ import type {
   SubmissionReceipt,
 } from "@/features/workspace/entries";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
-import { useState } from "react";
+import { useId, useState } from "react";
+import type { ApplyScopeAction } from "@/features/workspace/batchScope";
+import type { BatchStamp } from "@/features/workspace/batchStamp";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, type IpcCompressMode } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -28,15 +30,18 @@ export interface CompressFileEntry extends EntryIdentity {
   sourceDir: string;
   mode: CompressMode;
   metadataPolicy?: MetadataPolicy;
+  batch?: BatchStamp | null;
 }
 
 interface CompressActionBarProps {
   files: CompressFileEntry[];
+  /** Source currently shown in the inspector. Preset save snapshots this row. */
+  presetSource?: CompressFileEntry | null;
   disabled: boolean;
   onEnqueued: () => void;
   onSettled?: (success: SubmissionReceipt[]) => void;
-  /** Optional: copies the first file's compression mode to every other staged file. */
-  onApplyToAll?: () => void;
+  /** Copies the selected row's compression to rows of its kind; null hides the control. */
+  applyScope?: ApplyScopeAction | null;
 }
 
 function dirname(p: string): string {
@@ -105,11 +110,13 @@ function shortenPath(p: string): string {
 
 export default function CompressActionBar({
   files,
+  presetSource,
   disabled,
   onEnqueued,
   onSettled,
-  onApplyToAll,
+  applyScope,
 }: CompressActionBarProps) {
+  const applyReasonId = useId();
   const [overrideDir, setOverrideDir] = useWorkspaceDraftState<string | null>(
     "CompressActionBar.overrideDir",
     null,
@@ -120,6 +127,7 @@ export default function CompressActionBar({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
+  const presetFile = presetSource ?? files[0];
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("compress");
@@ -224,16 +232,19 @@ export default function CompressActionBar({
             : "Change output folder..."}
         </button>
       )}
-      {count > 1 && onApplyToAll && (
+      {applyScope && (
         <button
           type="button"
-          onClick={onApplyToAll}
-          title="Copy the first file's settings to every other file"
-          className="text-xs text-fg-secondary transition duration-fast ease-out hover:text-accent"
+          disabled={applyScope.disabledReason !== null}
+          onClick={applyScope.onApply}
+          title={applyScope.disabledReason ?? applyScope.title}
+          aria-describedby={applyScope.disabledReason ? applyReasonId : undefined}
+          className="text-xs text-fg-secondary transition duration-fast ease-out enabled:hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Apply first to all
+          {applyScope.label}
         </button>
       )}
+      {applyScope?.disabledReason && <span id={applyReasonId} className="sr-only">{applyScope.disabledReason}</span>}
       {count > 0 && (
         <button
           type="button"
@@ -253,9 +264,9 @@ export default function CompressActionBar({
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
-          target: files[0]?.target ?? "mp4",
-          compress_mode: files[0]?.mode ?? null,
-          metadata_policy: files[0]?.metadataPolicy ?? null,
+          target: presetFile?.target ?? "mp4",
+          compress_mode: presetFile?.mode ?? null,
+          metadata_policy: presetFile?.metadataPolicy ?? null,
         }}
       />
     </div>

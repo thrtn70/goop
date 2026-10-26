@@ -77,7 +77,7 @@ describe("PresetChips", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders every preset on the Convert page", () => {
+  it("hides compression presets on the Convert page, which always refuses them", () => {
     resetStore({
       presets: [
         makePreset({ id: "a", name: "YouTube Upload" }),
@@ -87,11 +87,26 @@ describe("PresetChips", () => {
           target: "webp",
           compress_mode: { kind: "quality", value: 85 },
         }),
+        makePreset({
+          id: "c",
+          name: "Podcast MP3",
+          target: "mp3",
+          compress_mode: { kind: "quality", value: 75 },
+        }),
       ],
     });
     render(<PresetChips kind="convert" onApply={() => {}} />);
     expect(screen.getByRole("button", { name: "YouTube Upload" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "Web Image" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Web Image" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Podcast MP3" })).toBeNull();
+  });
+
+  it("renders nothing on the Convert page when every preset is a compression preset", () => {
+    resetStore({
+      presets: [makePreset({ id: "b", name: "Web Image", target: "webp", compress_mode: { kind: "quality", value: 85 } })],
+    });
+    const { container } = render(<PresetChips kind="convert" onApply={() => {}} />);
+    expect(container.firstChild).toBeNull();
   });
 
   it("hides presets without a compress_mode on the Compress page", () => {
@@ -181,7 +196,7 @@ describe("PresetChips", () => {
     resetStore({ presets: [preset] });
     const onApply = vi.fn();
     const user = userEvent.setup();
-    render(<PresetChips kind="convert" onApply={onApply} />);
+    render(<PresetChips kind="compress" onApply={onApply} />);
 
     const list = screen.getByRole("list", { name: "Saved presets" });
     expect(list.getAttribute("role")).toBe("list");
@@ -257,6 +272,7 @@ describe("UpdateBanner", () => {
     cookies_from_browser: null,
     has_seen_onboarding: true,
     notifications_enabled: false,
+    media_player_enabled: true,
     output_dir_extract: null,
     extract_naming_scheme: "title",
     default_metadata_policy: "preserve",

@@ -14,12 +14,14 @@ interface PresetChipsProps {
  * full preset; the page decides which fields are relevant to its form.
  *
  * On the Compress page we hide presets without a `compress_mode` since
- * they'd be no-ops there. Convert shows every preset.
+ * they'd be no-ops there. Convert hides presets with one, since it refuses
+ * compression settings.
  */
 export default function PresetChips({ kind, onApply }: PresetChipsProps) {
   const presets = useAppStore((s) => s.presets);
-  const filtered =
-    kind === "compress" ? presets.filter((p) => p.compress_mode !== null) : presets;
+  const filtered = kind === "compress"
+    ? presets.filter((p) => p.compress_mode !== null)
+    : presets.filter((p) => !p.compress_mode);
 
   if (filtered.length === 0) return null;
 

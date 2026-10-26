@@ -40,6 +40,11 @@ const TARGETS: TargetOption[] = [
   { value: "vtt", label: "WebVTT", hint: "Subtitle format for web players", group: "subtitle" },
 ];
 
+/** The name the picker shows for a format. */
+export function targetLabel(target: TargetFormat): string {
+  return TARGETS.find(option => option.value === target)?.label ?? target.toUpperCase();
+}
+
 const GROUP_LABELS: Record<TargetGroup, string> = {
   video: "Video",
   audio: "Audio",
