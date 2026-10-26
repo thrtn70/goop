@@ -911,6 +911,23 @@ describe("mixed batches in Compress", () => {
     await waitFor(() => expect(screen.queryAllByText("Inspecting source…")).toEqual([]));
     expect(screen.queryByRole("button", { name: /^Apply to/ })).toBeNull();
   });
+  it("saves a preset from the selected file, not the first", async () => {
+    const { useAppStore } = await import("@/store/appStore");
+    const originalSave = useAppStore.getState().savePreset;
+    const savePreset = vi.fn().mockResolvedValue(null);
+    useAppStore.setState({ savePreset });
+    try {
+      render(compressPage()); await addCompress(["/a.png", "/b.jpg"]);
+      fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+      fireEvent.change(await screen.findByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+      fireEvent.click(screen.getByRole("button", { name: "Remove all" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save as preset" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Preset name" }), { target: { value: "Small JPEG" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
+      expect(savePreset.mock.calls[0][0]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 }, metadata_policy: "strip_all" });
+    } finally { useAppStore.setState({ savePreset: originalSave }); }
+  });
   it("scopes a Compress preset to the files that can take its format", async () => {
     mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 50 } } as Preset;
     render(compressPage()); await addCompress(["/a.png", "/clip.mp4"]);

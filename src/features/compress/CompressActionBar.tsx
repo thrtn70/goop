@@ -35,6 +35,8 @@ export interface CompressFileEntry extends EntryIdentity {
 
 interface CompressActionBarProps {
   files: CompressFileEntry[];
+  /** Source currently shown in the inspector. Preset save snapshots this row. */
+  presetSource?: CompressFileEntry | null;
   disabled: boolean;
   onEnqueued: () => void;
   onSettled?: (success: SubmissionReceipt[]) => void;
@@ -108,6 +110,7 @@ function shortenPath(p: string): string {
 
 export default function CompressActionBar({
   files,
+  presetSource,
   disabled,
   onEnqueued,
   onSettled,
@@ -124,6 +127,7 @@ export default function CompressActionBar({
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const count = files.length;
+  const presetFile = presetSource ?? files[0];
 
   async function pickOverrideDir() {
     const generation = beginDestinationChoice("compress");
@@ -260,9 +264,9 @@ export default function CompressActionBar({
         open={saveOpen}
         onClose={() => setSaveOpen(false)}
         snapshot={{
-          target: files[0]?.target ?? "mp4",
-          compress_mode: files[0]?.mode ?? null,
-          metadata_policy: files[0]?.metadataPolicy ?? null,
+          target: presetFile?.target ?? "mp4",
+          compress_mode: presetFile?.mode ?? null,
+          metadata_policy: presetFile?.metadataPolicy ?? null,
         }}
       />
     </div>

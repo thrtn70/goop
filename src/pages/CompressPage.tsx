@@ -408,6 +408,7 @@ function CompressPage() {
           actions={<>
             <CompressActionBar
               files={files}
+              presetSource={selected}
               disabled={blocked}
               onEnqueued={() => {}}
               onSettled={onSettled}
