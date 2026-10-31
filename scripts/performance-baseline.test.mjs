@@ -588,25 +588,24 @@ test('captured identity fails closed on unavailable toolchain or sidecar facts',
  assert.throws(()=>validateCapturedIdentity({...identity,sidecars:{ffprobe:{...identity.sidecars.ffprobe,version:'unavailable'}}}),/sidecar version/i);
 });
 
-test('bounded process cleanup reaps a TERM-resistant descendant before returning', { skip: process.platform === 'win32' }, async () => {
+// The timeout falls due only once the descendant ignores TERM, so only the
+// group SIGKILL after the grace can stop it. The runner itself dies of TERM.
+test('bounded process cleanup reaps a TERM-resistant descendant before returning', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
  const root = mkdtempSync(join(tmpdir(), 'goop-process-tree-'));
  const output = join(root, 'output'); mkdirSync(output);
- const pidPath = join(root, 'descendant.pid');
- const runner = join(root, 'runner.cjs');
- const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
+ const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+ const guard = killArmedAfter(t, root, armed);
+ const clock = clockAfter(armed);
+ const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
- let descendantPid = null;
- try {
-  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1000, killGraceMs: 50, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-  descendantPid = Number(readFileSync(pidPath, 'utf8'));
-  assert.equal(result.timed_out, true);
-  let state = '';
-  try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
-  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
- } finally {
-  if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already reaped. */ } }
-  rmSync(root, { recursive: true, force: true });
- }
+ const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1000, killGraceMs: 50, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+ assert.equal(clock.missed, false);
+ assert.equal(result.timed_out, true);
+ assert.deepEqual(clock.sleeps, [1000, 50]);
+ const pid = Number(readFileSync(armed, 'utf8'));
+ assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+ assert.equal(await runnableAfterKill(pid), null, 'descendant outlived the run');
+ guard.passed = true;
 });
 
 import { existsSync, readFileSync, mkdirSync, statSync } from 'node:fs';
