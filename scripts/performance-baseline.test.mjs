@@ -1592,6 +1592,39 @@ test('a workload sample refuses what its driver leaves at a log path and keeps t
  }))));
 });
 
+// The adapter writes its request into the run directory before launch. A
+// process left over from an earlier run can reach that directory, so whatever
+// already sits at the request path is refused, and the driver never launches.
+test('a workload sample refuses what is already at its request path before launch',{skip:process.platform==='win32'},async t=>{
+ const crypto=await import('node:crypto');
+ for(const kind of evidencePlants){
+  await t.test(kind,async t=>{
+   const root=mkdtempSync(join(tmpdir(),'goop-workload-request-')),output=join(root,'output'),outside=join(root,'outside'),launched=join(root,'launched'),driver=join(root,'driver'),inspect=join(root,'inspect.bin');
+   t.after(()=>rmSync(root,{recursive:true,force:true}));
+   writeFileSync(outside,'outside');writeFileSync(inspect,'inspect');
+   writeFileSync(driver,`#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(launched)},'1');`);chmodSync(driver,0o700);
+   mkdirSync(output);
+   const request=join(output,'request.json');
+   if(kind==='directory')mkdirSync(request);else if(kind==='hard link')linkSync(outside,request);else symlinkSync(outside,request);
+   const run={output_directory:output,bindings:{inspect_mixed:{path:inspect,sha256:crypto.createHash('sha256').update('inspect').digest('hex')}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}};
+   await assert.rejects(executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars:{}}),/EEXIST/);
+   assert.equal(readFileSync(outside,'utf8'),'outside');assert.equal(existsSync(launched),false);
+  });
+ }
+});
+
+test('a compacted ledger result keeps its evidence error',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-ledger-evidence-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+ const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=[manifest.workloads[0]];
+ const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha256Text('raw'),bytes:3},inspect_mixed:{path:inspect,sha256:sha256Text('inspect'),bytes:7}}}),output=join(root,'output');
+ // The padding pushes the result past the ledger limit, so the entry is compacted.
+ await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async()=>({success:false,evidence_error:'EEXIST: stdout.log',padding:'x'.repeat(300000)})}),/workload failed/i);
+ const result=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8')).samples[0].result;
+ assert.equal(result.evidence_compacted,true);assert.equal(result.evidence_error,'EEXIST: stdout.log');
+});
+
 // Root reads an unreadable directory, so its scan would not fail.
 test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
  const root=mkdtempSync(join(tmpdir(),'goop-process-held-scan-')),armed=join(root,'holder.pid'),output=join(root,'output'),runner=join(root,'runner.cjs'),blocked=join(output,'blocked');
