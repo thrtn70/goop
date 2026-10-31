@@ -4,7 +4,7 @@
 # to src-tauri/bin/gallery-dl-<triple>.
 #
 # Why: Codeberg ships gallery-dl binaries for Windows + Linux but not
-# macOS. The CI macos-14 runner has Python 3 preinstalled; we install
+# macOS. The CI macOS runner has Python 3 preinstalled; we install
 # gallery-dl + pyinstaller into an isolated venv and freeze.
 #
 # Pinned to the same gallery-dl version as fetch-sidecars.sh so all

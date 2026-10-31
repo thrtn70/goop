@@ -6,9 +6,12 @@
 #
 # Why not Homebrew's: its bottles are linked for the macOS of the machine
 # that built them. tesseract 5.5.3's arm64_sonoma bottle, the one the
-# macos-14 runner installs, is minos 14.8.5, above the 14.0 floor, while its
-# dependencies (leptonica, libarchive) are 14.0. Homebrew's gs links the
-# same libtesseract.5.dylib, so the gap is not OCR's alone.
+# macos-14 runner installed, is minos 14.8.5, above the 14.0 floor, while its
+# dependencies (leptonica, libarchive) were 14.0. On the macos-15 runner
+# every bottle, those dependencies included, is built for 15.0, and this
+# build only sets the floor for tesseract and libtesseract.5.dylib
+# themselves. Homebrew's gs links the same libtesseract.5.dylib, so the gap
+# is not OCR's alone.
 #
 # The build is Homebrew's own recipe with the floor added: the same pinned
 # source, autotools (libtool gives libtesseract.5.dylib the compatibility

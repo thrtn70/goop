@@ -139,7 +139,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin, bundle: "app,dmg" }
+          - { os: macos-15, target: aarch64-apple-darwin, bundle: "app,dmg" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -149,7 +149,7 @@ jobs:
         with: { targets: "${{ matrix.target }}" }
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         id: python
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         with: { python-version: "3.14.6" }
       # setup-node caches npm by itself once package.json names npm as its
       # packageManager; package-manager-cache: false keeps it from doing so.
@@ -164,7 +164,7 @@ jobs:
       # audit.yml makes the tested build match this one.
       - name: macOS deployment floor
         id: macos-floor
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         run: |
           floor="$(node scripts/macos-deployment-target.mjs)"
           [ -n "$floor" ] || { echo "::error::no macOS floor in src-tauri/tauri.conf.json"; exit 1; }
@@ -183,7 +183,7 @@ jobs:
       # without. Before it reuses an existing stack, the script checks only
       # that the archives exist and target the floor, not what is in them.
       - name: Static HEIC decode stack (macOS)
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         run: |
           ./scripts/build-static-heif-deps.sh
           echo "PKG_CONFIG_PATH=$PWD/.heif-deps/lib/pkgconfig" >> "$GITHUB_ENV"
@@ -204,7 +204,7 @@ jobs:
       # and the release silently ships binaries that SIGKILL on launch. The
       # plist is easy to leave untracked — fail loud here before building.
       - name: Verify macOS entitlements file is present
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           ent=$(node -e 'const c=JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json","utf8")); process.stdout.write((c.bundle&&c.bundle.macOS&&c.bundle.macOS.entitlements)||"")')
@@ -244,7 +244,7 @@ jobs:
       # This runs before the sidecar smoke test so a failing sidecar cannot
       # take the report down with it.
       - name: Verify the macOS deployment floor
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -343,7 +343,7 @@ jobs:
       # here against the exact failure mode users hit (bootloader dlopen of the
       # extracted Python).
       - name: Verify signed sidecars run (macOS)
-        if: matrix.os == 'macos-14'
+        if: runner.os == 'macOS'
         shell: bash
         env:
           GALLERY_DL_PYTHON: ${{ steps.python.outputs.python-version }}
