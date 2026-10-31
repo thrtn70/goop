@@ -110,7 +110,8 @@ export function retryDraftPersistence() {
 /**
  * Saved drafts a strict read refused as malformed. A newer Goop that changed
  * the format version is never offered; one that only added drafts is, and its
- * entries survive in the backup.
+ * entries survive in the backup. An oversized save is never offered either:
+ * recovery could read none of it.
  */
 export function useDraftRecoveryAvailable() {
   return useDraftStore(state => state.protection?.kind === "load" && state.protection.reason === "malformed");

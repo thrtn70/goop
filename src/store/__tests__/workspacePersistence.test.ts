@@ -14,6 +14,9 @@ import type { CausalOwner, ResponsivenessRecorder, SpanKind } from "@/performanc
 import { NOOP_RESPONSIVENESS_RECORDER } from "@/performance/responsiveness";
 import { armNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 const key = (slot: string) => JSON.stringify(["image", slot]);
+// Every entry is admissible on its own; together they pass the 500-entry limit.
+const overEntryLimit = Object.fromEntries(Array.from({ length: 501 }, (_, i) =>
+  [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
 
 function recordingRecorder() {
   const calls: Array<readonly unknown[]> = [];
@@ -168,9 +171,12 @@ describe("durable editable drafts", () => {
     ["a newer version in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "future"],
     ["the current version too far from the start", DRAFT_STORAGE_KEY, `{${" ".repeat(64)}${JSON.stringify({ version: 2, entries: oversizedEntries }).slice(1)}`, "future"],
     ["no envelope", DRAFT_STORAGE_KEY, "x".repeat(600 * 1024), "future"],
-    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "malformed"],
-    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
-    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "oversized"],
+    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "oversized"],
+    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "oversized"],
+    ["more entries than a save holds", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: overEntryLimit }), "oversized"],
+    // Recovery reads such a save at its own version, where the limit still applies.
+    ["more entries than a save holds at an older version", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: overEntryLimit }), "oversized"],
   ] as const)("protects saved drafts over the size limit that hold %s", (_label, storageKey, raw, reason) => {
     const outcome = loadDraftEntriesOutcome({
       getItem: candidate => candidate === storageKey ? raw : null,
@@ -227,10 +233,6 @@ describe("durable editable drafts", () => {
     expect(reads).toEqual([DRAFT_STORAGE_KEY]);
   });
 });
-
-// Every entry is admissible on its own; together they pass the 500-entry limit.
-const overEntryLimit = Object.fromEntries(Array.from({ length: 501 }, (_, i) =>
-  [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
 
 describe("write-side admission", () => {
   const valid = key("ImageRotateFlow.degrees");
