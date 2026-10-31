@@ -387,6 +387,31 @@ test('a ready marker cannot turn an absent process into a successful idle sample
   assert.equal(result.idle_tree_rss_KiB, null);
   assert.equal(result.sampled_tree_peak_KiB, null);
 });
+// Each run directory sits inside the standalone output directory, so a child
+// can reach the summary path. A FIFO there would block a plain open, a link
+// would redirect the write outside the output, and a directory cannot be
+// replaced, which must not hide why the run stopped.
+test('standalone startup never follows or blocks on a child-planted summary path',{skip:process.platform!=='darwin',timeout:150000},async t=>{
+  for(const plant of ['fifo','hard link','directory']){
+    await t.test(plant,t=>{
+      const root=mkdtempSync(join(tmpdir(),'goop-startup-main-')),outside=join(root,'outside'),script=join(root,'app.cjs'),binary=join(root,'app'),config=join(root,'settings.json'),output=join(root,'output');
+      t.after(()=>rmSync(root,{recursive:true,force:true}));
+      writeFileSync(outside,'outside');writeFileSync(config,'{}');
+      const planted={fifo:"require('node:child_process').execFileSync('/usr/bin/mkfifo',[summary]);",'hard link':`require('node:fs').linkSync(${JSON.stringify(outside)},summary);`,directory:"require('node:fs').mkdirSync(summary);"}[plant];
+      // The first app plants the summary path one level above its run directory
+      // and exits without a marker, so main() saves the summary and stops.
+      writeFileSync(script,`const summary=require('node:path').join(process.env.GOOP_STARTUP_REPORT,'..','..','summary.json');${planted}`);
+      writeFileSync(binary,`#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)}\n`);chmodSync(binary,0o700);
+      // The harness traps SIGTERM, which a blocked open would never service.
+      const cli=spawnSync(process.execPath,[fileURLToPath(new URL('./startup-baseline.mjs',import.meta.url)),'--binary',binary,'--config',config,'--output',output],{encoding:'utf8',timeout:60000,killSignal:'SIGKILL'});
+      assert.equal(cli.signal,null,'the harness hung');assert.equal(cli.status,1);assert.match(cli.stderr,/Startup failed for 0 jobs, run -1/);
+      assert.equal(readFileSync(outside,'utf8'),'outside');
+      if(plant==='directory'){assert.match(cli.stderr,/summary not saved/);assert.ok(lstatSync(join(output,'summary.json')).isDirectory());return;}
+      assert.ok(lstatSync(join(output,'summary.json')).isFile());
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(output,'summary.json'),'utf8'))),['0']);
+    });
+  }
+});
 test('startup rejects and removes child-created symlink output', async () => {
   const {result}=await fakeStartingAt('ready.json',"const fs=require('node:fs'),path=require('node:path');fs.symlinkSync(path.join(process.env.GOOP_CONFIG_DIR,'settings.json'),path.join(process.env.GOOP_DATA_DIR,'link'));publishReady({schema_version:1,backend_ready_ms:1,pid:process.pid});setInterval(()=>{},10)");
   assert.equal(result.success,false);assert.match(result.output_error,/symbolic-link/i);assert.equal(result.removed_symlink_outputs,1);
@@ -396,27 +421,6 @@ test('startup rejects and removes child-created symlink output', async () => {
 // renamed into place: the clock starts when the overrun lands.
 const STORAGE_BUDGET = 64 * 1024;
 const OVERRUN = "{const fs=require('node:fs'),path=require('node:path'),large=path.join(process.env.GOOP_DATA_DIR,'large');fs.writeFileSync(large+'.tmp',Buffer.alloc(128*1024));fs.renameSync(large+'.tmp',large);}";
-// Each run directory sits inside the standalone output directory, so a child
-// can reach the summary path. A FIFO there would block a plain open, and a link
-// would redirect the write outside the output.
-test('standalone startup never follows or blocks on a child-planted summary path',{skip:process.platform==='win32',timeout:150000},async t=>{
-  for(const plant of ['fifo','hard link']){
-    await t.test(plant,()=>{
-      const root=mkdtempSync(join(tmpdir(),'goop-startup-main-')),outside=join(root,'outside'),script=join(root,'app.cjs'),binary=join(root,'app'),config=join(root,'settings.json'),output=join(root,'output');
-      t.after(()=>rmSync(root,{recursive:true,force:true}));
-      writeFileSync(outside,'outside');writeFileSync(config,'{}');
-      // The first app plants the summary path one level above its run directory
-      // and exits without a marker, so main() saves the summary and stops.
-      writeFileSync(script,`const summary=require('node:path').join(process.env.GOOP_STARTUP_REPORT,'..','..','summary.json');${plant==='fifo'?"require('node:child_process').execFileSync('/usr/bin/mkfifo',[summary]);":`require('node:fs').linkSync(${JSON.stringify(outside)},summary);`}`);
-      writeFileSync(binary,`#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)}\n`);chmodSync(binary,0o700);
-      // The harness traps SIGTERM, which a blocked open would never service.
-      const cli=spawnSync(process.execPath,[fileURLToPath(new URL('./startup-baseline.mjs',import.meta.url)),'--binary',binary,'--config',config,'--output',output],{encoding:'utf8',timeout:60000,killSignal:'SIGKILL'});
-      assert.equal(cli.signal,null,'the harness hung');assert.equal(cli.status,1);assert.match(cli.stderr,/Startup failed for 0 jobs, run -1/);
-      assert.equal(readFileSync(outside,'utf8'),'outside');assert.ok(lstatSync(join(output,'summary.json')).isFile());
-      assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(output,'summary.json'),'utf8'))),['0']);
-    });
-  }
-});
 test('startup logs and owned storage are bounded', async () => {
   // Both logs are flushed before the overrun, so stopping the child for it
   // cannot discard them.
