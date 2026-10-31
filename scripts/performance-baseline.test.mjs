@@ -1033,6 +1033,91 @@ for(const [label,leftover] of [['',''],[' and blocks its log',"fs.mkdirSync(requ
  });
 }
 
+// After an adapter returns, the collectors walk the output tree to measure it,
+// remove an over-budget run and write the ledger. A run that leaves an
+// unreadable directory fails the walk; a read-only one holding its payload
+// fails the removal after the sample is already in the ledger.
+const heldPipes='The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group';
+const leaveUnreadable=directory=>mkdirSync(join(directory,'blocked'),{mode:0});
+const leaveUndeletable=directory=>{mkdirSync(join(directory,'blocked'));writeFileSync(join(directory,'blocked','payload'),Buffer.alloc(2*1024*1024));chmodSync(join(directory,'blocked'),0o500);};
+// A mode-0 directory is readable to root.
+const unreadableSkip=process.platform==='win32'||process.getuid?.()===0;
+// A process outside the owned group can make the output tree unreadable at any
+// moment. This does it right after one chosen filesystem call once armed, which
+// places it between two of a collector's own walks of the tree. The hook also
+// owns cleanup, so the mode is restored before the root is removed.
+async function unreadableAfter(t,root,call,matches,directory){
+ const fs=(await import('node:fs')).default,{syncBuiltinESMExports}=await import('node:module');
+ const original=fs[call],trigger={armed:false};
+ fs[call]=function(...args){const value=original.apply(this,args);if(trigger.armed&&matches(...args)){trigger.armed=false;mkdirSync(directory,{mode:0});}return value;};
+ syncBuiltinESMExports();
+ t.after(()=>{fs[call]=original;syncBuiltinESMExports();try{chmodSync(directory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ return trigger;
+}
+for(const [label,leave,adapterResult,totalLimits,check] of [
+ ['an unreadable directory',leaveUnreadable,{success:true,process_ms:1},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},result=>assert.match(result.evidence_io_error,/EACCES/)],
+ ['an unreadable directory and held pipes under no total limits',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:heldPipes}},null,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.stdio_error,heldPipes);}],
+ ['an undeletable directory past the total storage budget',leaveUndeletable,{success:true,process_ms:1},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:2097152},result=>{assert.equal(result.storage_budget_exceeded,true);assert.equal(result.owned_payload_removed,undefined);}],
+ // A direct adapter's held-pipe report is carried past the result bound, and this entry is written unmeasured.
+ ['an unreadable directory and an oversized held-pipe report',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:'x'.repeat(2*1024*1024)}},{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},result=>{assert.match(result.evidence_io_error,/EACCES/);assert.match(result.stdio_error,/ \[truncated\]$/);assert.ok(result.stdio_error.length<4096);}],
+]){
+ test(`paired collector records the sample and stops when its run leaves ${label}`,{skip:unreadableSkip},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-evidence-io-')),output=join(root,'output'),blocked=[];
+  t.after(()=>{for(const directory of blocked)try{chmodSync(directory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  const visited=[];
+  const state=await collectPairedSamples({workloadIds:['copy','encode'],repetitions:1,outputDirectory:output,totalLimits,execute:async step=>{
+   visited.push(`${step.workload_id}:${step.phase}:${step.revision}`);
+   if(visited.length!==2)return {success:true,process_ms:1};
+   const directory=join(output,'runs',step.workload_id,`warmup-${step.revision}`);mkdirSync(directory,{recursive:true});blocked.push(join(directory,'blocked'));leave(directory);
+   return adapterResult;
+  }});
+  assert.deepEqual(visited,['copy:warmup:baseline','copy:warmup:candidate']);
+  assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed']);
+  assert.equal(state.samples[1].result.success,false);assert.equal(typeof state.samples[1].result.evidence_io_error,'string');check(state.samples[1].result);
+  assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
+ });
+}
+
+test('paired collector ends its ledger failed when the output becomes unreadable between samples',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-unreadable-between-')),output=join(root,'output');
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'paired-state.json'),join(output,'late'));
+ const visited=[];
+ const state=await collectPairedSamples({workloadIds:['copy','encode'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},execute:async step=>{visited.push(`${step.workload_id}:${step.phase}:${step.revision}`);trigger.armed=true;return {success:true,process_ms:1};}});
+ assert.deepEqual(visited,['copy:warmup:baseline']);
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded']);assert.match(state.evidence_io_error,/EACCES/);
+ assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
+});
+
+test('paired collector ends its ledger failed when the output becomes unreadable before its final write',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-unreadable-final-')),output=join(root,'output');
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'paired-state.json'),join(output,'late'));
+ let runs=0;
+ const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,execute:async()=>{runs+=1;if(runs===4)trigger.armed=true;return {success:true,process_ms:1};}});
+ assert.equal(runs,4);assert.equal(state.success,false);assert.equal(state.status,'failed');assert.match(state.evidence_io_error,/EACCES/);
+ assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','excluded','success','success']);
+ assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
+});
+
+// The budget accepts a large held-pipe report once, then the tree turns
+// unreadable before the final write, which goes unmeasured.
+test('paired collector clips a held-pipe report its final unmeasured write carries',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-unreadable-held-')),output=join(root,'output');
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'paired-state.json'),join(output,'late'));
+ const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:4194304},execute:async()=>{trigger.armed=true;return {success:true,process_ms:1,process:{stdio_error:'x'.repeat(2*1024*1024)}};}});
+ assert.equal(state.status,'failed');assert.match(state.evidence_io_error,/EACCES/);assert.equal(state.samples.length,1);
+ assert.match(state.samples[0].result.stdio_error,/ \[truncated\]$/);assert.ok(state.samples[0].result.stdio_error.length<4096);
+ assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state);
+});
+
+test('paired collector still refuses a ledger write past the storage budget',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-refused-')),output=join(root,'output'),budget=1048576;
+ try {
+  // A direct adapter's held-pipe text is kept whole, so it can outgrow the ledger's share.
+  await assert.rejects(collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:budget},execute:async()=>({success:true,process_ms:1,process:{stdio_error:'x'.repeat(2*budget)}})}),/would exceed the storage budget/);
+  assert.ok(directoryBytes(output)<=budget);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});
+
 // What a group leaves at an evidence path before the reap. The symlink sweep
 // never sees a hard link or a directory. It removes every symbolic link it can
 // reach, so a run directory it cannot list hides the link, and the link reaches
@@ -1063,16 +1148,18 @@ test('a paired sample refuses what its group leaves at a log path and keeps the 
   const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
   const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
   // The unlistable run directory also throws from the collector's own storage
-  // count, so that plan rejects before it records the sample, and the sample's
-  // held-pipe evidence is lost with it. Only the refused write is checked there.
+  // count. The ledger still records the sample as an evidence I/O failure, held
+  // pipes included, but the plan's comparison write walks the same tree and
+  // rejects with that error.
   await assert.rejects(runPairedPlan({plan,outputDirectory:output}),kind==='symbolic link'?/EACCES/:/paired execution failed/i);
   assert.ok(armedPid(armed),'the holder never armed');
   assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
   assert.ok(lstatSync(join(runDirectory,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
-  if(kind==='symbolic link'){assert.ok(lstatSync(join(runDirectory,name)).isSymbolicLink(),'the link did not reach the log write');return;}
+  if(kind==='symbolic link')assert.ok(lstatSync(join(runDirectory,name)).isSymbolicLink(),'the link did not reach the log write');
   const [sample]=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')).samples;
   assert.equal(sample.result.success,false);assert.match(sample.result.process.stdio_error??'',/output pipes/i);
   assert.ok(sample.result.evidence_error?.includes(name),`${kind} at ${name}: ${sample.result.evidence_error}`);
+  if(kind==='symbolic link')assert.match(sample.result.evidence_io_error??'',/EACCES/);
  }))));
 });
 
@@ -1408,6 +1495,84 @@ for(const [label,leftover,metrics] of [['','','{}'],[' and blocks its log',"fs.m
   assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['failed']);assert.match(state.samples[0].result.stdio_error??'',/output pipes/i);
  });
 }
+
+for(const [label,leave,adapterResult,stopsWith,check] of [
+ ['an unreadable directory',leaveUnreadable,{success:true,process_ms:1},/evidence I\/O failed/i,result=>assert.match(result.evidence_io_error,/EACCES/)],
+ ['an unreadable directory and held pipes',leaveUnreadable,{success:true,process_ms:1,process:{stdio_error:heldPipes}},/output pipes/i,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.stdio_error,heldPipes);}],
+ ['an unreadable directory, held pipes and an oversized result',leaveUnreadable,{success:true,process_ms:1,padding:'x'.repeat(300000),process:{stdio_error:heldPipes}},/output pipes/i,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.stdio_error,heldPipes);assert.equal(result.evidence_compacted,true);assert.equal(result.full_result_retained,false);assert.equal(result.padding,undefined);}],
+ // The entry is written unmeasured, so an error the child sized is clipped to keep it within its share.
+ ['an unreadable directory and an oversized error',leaveUnreadable,{success:false,process_ms:1,error:'x'.repeat(300000)},/evidence I\/O failed/i,result=>{assert.match(result.evidence_io_error,/EACCES/);assert.equal(result.evidence_compacted,true);assert.match(result.error,/ \[truncated\]$/);assert.ok(result.error.length<4096);}],
+ ['an undeletable directory past its storage budget',leaveUndeletable,{success:true,process_ms:1},/storage budget/i,result=>{assert.equal(result.budget_exceeded,true);assert.equal(result.owned_payload_removed,undefined);}],
+]){
+ test(`suite records the sample and stops when its run leaves ${label}`,{skip:unreadableSkip},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-suite-evidence-io-')),output=join(root,'output'),blocked=[];
+  t.after(()=>{for(const directory of blocked)try{chmodSync(directory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+  const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+  const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=manifest.workloads.slice(0,2);
+  const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+  const visited=[];
+  await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{
+   visited.push(run.id);
+   if(visited.length!==2)return {success:true,process_ms:1};
+   mkdirSync(run.output_directory,{recursive:true});blocked.push(join(run.output_directory,'blocked'));leave(run.output_directory);
+   return adapterResult;
+  }}),stopsWith);
+  assert.deepEqual(visited,['raw-single/warmup-0','raw-single/0']);
+  const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+  assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed']);assert.equal(state.summary.workloads['raw-single'].failed,1);
+  assert.equal(state.samples[1].result.success,false);assert.equal(typeof state.samples[1].result.evidence_io_error,'string');check(state.samples[1].result);
+ });
+}
+
+const suiteFixtures=async root=>{
+ const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+ const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+ const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=manifest.workloads.slice(0,2);
+ return {raw,manifest,bindings:validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}})};
+};
+
+// The fixtures are rehashed after the run's evidence is measured and before the
+// ledger write that records it, the widest window a live holder has.
+test('suite records the sample when its output becomes unreadable before the ledger write',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-unreadable-ledger-')),output=join(root,'output');
+ const {raw,manifest,bindings}=await suiteFixtures(root);
+ const trigger=await unreadableAfter(t,root,'readFileSync',path=>path===raw,join(output,'raw-single','0','late'));
+ const visited=[];
+ await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{
+  visited.push(run.id);
+  if(visited.length!==2)return {success:true,process_ms:1};
+  mkdirSync(run.output_directory,{recursive:true});trigger.armed=true;
+  return {success:true,process_ms:1,process:{stdio_error:heldPipes}};
+ }}),/output pipes/i);
+ assert.deepEqual(visited,['raw-single/warmup-0','raw-single/0']);
+ const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed']);
+ // Only a walk after the rehash can meet the directory it made.
+ assert.equal(state.samples[1].result.stdio_error,heldPipes);assert.match(state.samples[1].result.evidence_io_error,/EACCES.*late/);
+});
+
+test('suite ends its ledger failed when the output becomes unreadable between samples',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-unreadable-between-')),output=join(root,'output');
+ const {manifest,bindings}=await suiteFixtures(root);
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'suite-state.json'),join(output,'late'));
+ const visited=[];
+ await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{visited.push(run.id);trigger.armed=true;return {success:true,process_ms:1};}}),/could not be measured before launching raw-single\/0/);
+ assert.deepEqual(visited,['raw-single/warmup-0']);
+ const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded']);assert.match(state.evidence_io_error,/EACCES/);
+});
+
+test('suite ends its ledger failed when the output becomes unreadable before its final write',{skip:unreadableSkip},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-unreadable-final-')),output=join(root,'output');
+ const {manifest,bindings}=await suiteFixtures(root);
+ const trigger=await unreadableAfter(t,root,'renameSync',(_from,to)=>to===join(output,'suite-state.json'),join(output,'late'));
+ let runs=0;
+ await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async()=>{runs+=1;if(runs===4)trigger.armed=true;return {success:true,process_ms:1};}}),/could not be measured against the storage budget/);
+ assert.equal(runs,4);
+ const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+ assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','success','excluded','success']);assert.match(state.evidence_io_error,/EACCES/);
+});
 
 test('a workload sample refuses what its driver leaves at a log path and keeps the held-pipe evidence',{skip:process.platform==='win32',concurrency:true,timeout:60000},async t=>{
  const crypto=await import('node:crypto');
