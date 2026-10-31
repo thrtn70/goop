@@ -1,3 +1,10 @@
 {
-  "advisories": []
+  "advisories": [
+    {
+      "id": "GHSA-g3hv-75wg-m249",
+      "package": "minimatch",
+      "expires": "2026-12-10",
+      "reason": "Build-time only: reached through eslint 9 (minimatch 3 via eslint, @eslint/config-array and @eslint/eslintrc) and typescript-eslint (minimatch 10 via @typescript-eslint/typescript-estree), and absent from shipped dependencies. The fix is minimatch 11.0.1; no eslint or typescript-eslint release accepts it yet. Remove this entry once they do."
+    }
+  ]
 }
