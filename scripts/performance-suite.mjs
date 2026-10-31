@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { run as runSingleConversion } from './performance-baseline.mjs';
 import { runStartup } from './startup-baseline.mjs';
 import {
+  boundedLedgerField,
   captureIdentity,
   createOwnedDirectory,
   createRunLogs,
@@ -25,6 +26,7 @@ import {
   runBoundedProcess,
   sha256File,
   stableStringify,
+  STORAGE_BUDGET_REFUSED,
   validateCapturedIdentity,
   withTerminationSignals,
   writeJsonAtomic,
@@ -110,14 +112,22 @@ function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory,
   return { evidence_directory: evidenceDirectory, full_result_path: join(evidenceDirectory, 'full-result.json'), full_result_bytes: statSync(absolutePath).size, full_result_sha256: sha256File(absolutePath), full_result_retained: true };
 }
 
+// A compacted entry clips each field with boundedLedgerField, so it always fits
+// the result limit.
 function ledgerResult(result, fullResult) {
   if (fullResult === null) return result;
-  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'sidecars', 'sidecar_identity_error'];
+  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'evidence_io_error', 'sidecars', 'sidecar_identity_error'];
   return {
-    ...Object.fromEntries(fields.filter(field => result[field] !== undefined).map(field => [field, result[field]])),
+    ...Object.fromEntries(fields.filter(field => result[field] !== undefined).map(field => [field, boundedLedgerField(result[field])])),
     evidence_compacted: true,
     ...fullResult,
   };
+}
+
+// The ledger write after an evidence I/O failure skips the measured budget
+// check, so an entry over the result limit is compacted, and so bounded.
+function failedLedgerResult(result, fullResult) {
+  return Buffer.byteLength(JSON.stringify(result)) > STATE_RESULT_LIMIT_BYTES ? ledgerResult(result, fullResult ?? { full_result_retained: false }) : result;
 }
 
 function markOwnedPayloadRemoved(result) {
@@ -181,6 +191,31 @@ export async function runPerformanceSuite({
   const writeState = () => writeJsonAtomic(statePath, state, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
   writeState();
   let fatal = null;
+  let evidenceIoFailed = false;
+  // A failure to measure, retain or remove evidence stops the suite. A refused
+  // budgeted write is not one, and still throws as before.
+  const evidenceIoFailure = (error, cause) => {
+    if (error.code === STORAGE_BUDGET_REFUSED) throw error;
+    evidenceIoFailed = true;
+    fatal ??= `${cause}: ${error.message}`;
+    return error.message;
+  };
+  // The budget check walks the whole output tree, which a process outside the
+  // owned group can make unreadable at any time. Once that happens the ledger
+  // is written without the check. An entry over the result limit is compacted,
+  // and compaction clips the fields a child sizes, so the ledger stays bounded.
+  const writeLedger = () => {
+    if (!evidenceIoFailed) {
+      try {
+        writeState();
+        return;
+      } catch (error) {
+        state.evidence_io_error = evidenceIoFailure(error, 'Suite ledger could not be measured against the storage budget');
+        state.status = 'failed';
+      }
+    }
+    writeJsonAtomic(statePath, state);
+  };
   const suiteStarted = performance.now();
   let retainedLogBytes = 0;
   const summarySamples = [];
@@ -189,13 +224,19 @@ export async function runPerformanceSuite({
       fatal = 'Suite interrupted';
       break;
     }
-    if (directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes) {
+    let currentBytes;
+    try { currentBytes = directoryBytes(outputDirectory); }
+    catch (error) {
+      state.evidence_io_error = evidenceIoFailure(error, `Suite output could not be measured before launching ${run.id}`);
+      break;
+    }
+    if (currentBytes > manifest.defaults.suite_storage_budget_bytes) {
       const result = { success: false, not_run: true, budget_exceeded: true, error: 'Suite storage budget exceeded before launch' };
       const sample = { id: run.id, workload_id: run.workload_id, phase: run.phase, repetition: run.repetition, status: 'failed', result };
       summarySamples.push(sample);state.samples.push(sample);
       fatal = 'Suite storage budget exceeded before launch';
       state.summary = summarizeSuite(summarySamples, manifest);
-      writeState();
+      writeLedger();
       break;
     }
     const rawRemainingMs = manifest.defaults.suite_timeout_ms - (performance.now() - suiteStarted);
@@ -205,11 +246,10 @@ export async function runPerformanceSuite({
       summarySamples.push(sample);state.samples.push(sample);
       fatal = 'Suite time budget exceeded before launch';
       state.summary = summarizeSuite(summarySamples, manifest);
-      writeState();
+      writeLedger();
       break;
     }
     const remainingMs = Math.max(1, Math.floor(rawRemainingMs));
-    const currentBytes = directoryBytes(outputDirectory);
     const reservedLedgerBytes = futureAtomicLedgerReserveBytes(plan.length, planIndex);
     const remainingStorageBytes = manifest.defaults.suite_storage_budget_bytes - currentBytes - reservedLedgerBytes;
     const remainingLogBytes = manifest.defaults.suite_log_limit_bytes - retainedLogBytes;
@@ -220,7 +260,7 @@ export async function runPerformanceSuite({
       summarySamples.push(sample); state.samples.push(sample);
       fatal = result.error;
       state.summary = summarizeSuite(summarySamples, manifest);
-      writeState();
+      writeLedger();
       break;
     }
     const effectiveRun = {
@@ -245,76 +285,99 @@ export async function runPerformanceSuite({
     // pipes after the reap and may still be running, so this sample is
     // contaminated and no later one can be isolated from it.
     const stdioError = result.stdio_error ?? result.process?.stdio_error ?? null;
-    if (stdioError !== null) result = { ...result, success: false, stdio_error: stdioError };
+    if (stdioError !== null) {
+      result = { ...result, success: false, stdio_error: stdioError };
+      fatal ??= `Workload output pipes still held after the reap, most likely by a process outside the owned group; later runs could not be isolated from it: ${run.id}`;
+    }
     const runDirectory = join(outputDirectory, run.destination);
-    const maxAdditionalBytes = Math.max(0, Math.min(
-      effectiveRun.limits.storage_budget_bytes - directoryBytes(runDirectory),
-      manifest.defaults.suite_storage_budget_bytes - directoryBytes(outputDirectory) - futureAtomicLedgerReserveBytes(plan.length, planIndex),
-    ));
-    const persistedResult = persistFullResult(result, runDirectory, run.destination, maxAdditionalBytes);
-    const evidenceWriteBudgetExceeded = persistedResult?.budget_exceeded === true;
-    const fullResult = evidenceWriteBudgetExceeded
-      ? { full_result_retained: false, full_result_bytes: persistedResult.retained_bytes }
-      : persistedResult;
-    let status = result.success === true ? (run.phase === 'warmup' ? 'excluded' : 'success') : 'failed';
-    const runBudgetExceeded = evidenceWriteBudgetExceeded || directoryBytes(runDirectory) > effectiveRun.limits.storage_budget_bytes;
-    const totalBudgetExceeded = directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes;
-    retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
-    const logBudgetExceeded = retainedLogBytes > manifest.defaults.suite_log_limit_bytes;
-    const timeBudgetExceeded = performance.now() - suiteStarted > manifest.defaults.suite_timeout_ms;
-    if (stdioError !== null) fatal ??= `Workload output pipes still held after the reap, most likely by a process outside the owned group; later runs could not be isolated from it: ${run.id}`;
-    if (runBudgetExceeded) {
-      status = 'failed';
-      result = { ...result, success: false, budget_exceeded: true, ...(evidenceWriteBudgetExceeded ? { full_result_retained: false } : {}), error: 'Workload storage budget exceeded while retaining full evidence' };
-      fatal ??= `Workload storage budget exceeded: ${run.id}`;
-    } else if (totalBudgetExceeded) {
-      status = 'failed';
-      result = { ...result, success: false, budget_exceeded: true, error: 'Suite storage budget exceeded' };
-      fatal ??= 'Suite storage budget exceeded';
+    let fullResult = null;
+    let recorded = false;
+    try {
+      const maxAdditionalBytes = Math.max(0, Math.min(
+        effectiveRun.limits.storage_budget_bytes - directoryBytes(runDirectory),
+        manifest.defaults.suite_storage_budget_bytes - directoryBytes(outputDirectory) - futureAtomicLedgerReserveBytes(plan.length, planIndex),
+      ));
+      const persistedResult = persistFullResult(result, runDirectory, run.destination, maxAdditionalBytes);
+      const evidenceWriteBudgetExceeded = persistedResult?.budget_exceeded === true;
+      fullResult = evidenceWriteBudgetExceeded
+        ? { full_result_retained: false, full_result_bytes: persistedResult.retained_bytes }
+        : persistedResult;
+      let status = result.success === true ? (run.phase === 'warmup' ? 'excluded' : 'success') : 'failed';
+      const runBudgetExceeded = evidenceWriteBudgetExceeded || directoryBytes(runDirectory) > effectiveRun.limits.storage_budget_bytes;
+      const totalBudgetExceeded = directoryBytes(outputDirectory) > manifest.defaults.suite_storage_budget_bytes;
+      retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
+      const logBudgetExceeded = retainedLogBytes > manifest.defaults.suite_log_limit_bytes;
+      const timeBudgetExceeded = performance.now() - suiteStarted > manifest.defaults.suite_timeout_ms;
+      if (runBudgetExceeded) {
+        status = 'failed';
+        result = { ...result, success: false, budget_exceeded: true, ...(evidenceWriteBudgetExceeded ? { full_result_retained: false } : {}), error: 'Workload storage budget exceeded while retaining full evidence' };
+        fatal ??= `Workload storage budget exceeded: ${run.id}`;
+      } else if (totalBudgetExceeded) {
+        status = 'failed';
+        result = { ...result, success: false, budget_exceeded: true, error: 'Suite storage budget exceeded' };
+        fatal ??= 'Suite storage budget exceeded';
+      }
+      if (timeBudgetExceeded) {
+        status = 'failed';
+        result = { ...result, success: false, time_budget_exceeded: true, error: 'Suite time budget exceeded' };
+        fatal ??= 'Suite time budget exceeded';
+      }
+      if (logBudgetExceeded) {
+        status = 'failed';
+        result = { ...result, success: false, log_budget_exceeded: true, error: 'Suite retained-log budget exceeded' };
+        fatal ??= 'Suite retained-log budget exceeded';
+      }
+      const summarySample = {
+        id: run.id,
+        workload_id: run.workload_id,
+        phase: run.phase,
+        repetition: run.repetition,
+        status,
+        result,
+      };
+      const ledgerSample = { ...summarySample, result: ledgerResult(result, fullResult) };
+      summarySamples.push(summarySample);
+      state.samples.push(ledgerSample);
+      recorded = true;
+      if (status === 'failed') fatal ??= `Workload failed: ${run.id}`;
+      let sourceIntegrityFailed = false;
+      try { revalidateBindings(manifest, bindings); }
+      catch (error) {
+        fatal ??= error.message;
+        sourceIntegrityFailed = true;
+        state.samples.at(-1).status = 'failed';
+        state.samples.at(-1).result = { ...state.samples.at(-1).result, success: false, source_integrity_error: error.message };
+        summarySamples.at(-1).status = 'failed';
+        summarySamples.at(-1).result = { ...summarySamples.at(-1).result, success: false, source_integrity_error: error.message };
+      }
+      if (runBudgetExceeded || totalBudgetExceeded) {
+        removeOwnedDirectory(runDirectory);
+        state.samples.at(-1).result = markOwnedPayloadRemoved(state.samples.at(-1).result);
+        summarySamples.at(-1).result = { ...summarySamples.at(-1).result, owned_payload_removed: true };
+      }
+      state.summary = summarizeSuite(summarySamples, manifest);
+      writeState();
+      if (sourceIntegrityFailed || runBudgetExceeded || totalBudgetExceeded || timeBudgetExceeded || logBudgetExceeded || stdioError !== null) break;
+    } catch (error) {
+      // Measuring, retaining or removing the run's evidence failed, or so did
+      // the walk of the ledger write recording it. The sample still goes in
+      // the ledger as failed, and nothing more launches.
+      const message = evidenceIoFailure(error, `Workload evidence I/O failed: ${run.id}`);
+      const failed = sampleResult => ({ ...sampleResult, success: false, error: sampleResult.error ?? message, evidence_io_error: message });
+      if (recorded) {
+        summarySamples[summarySamples.length - 1] = { ...summarySamples.at(-1), status: 'failed', result: failed(summarySamples.at(-1).result) };
+        state.samples[state.samples.length - 1] = { ...state.samples.at(-1), status: 'failed', result: failedLedgerResult(failed(state.samples.at(-1).result), fullResult) };
+      } else {
+        const sample = { id: run.id, workload_id: run.workload_id, phase: run.phase, repetition: run.repetition, status: 'failed', result: failed(result) };
+        summarySamples.push(sample);
+        state.samples.push({ ...sample, result: failedLedgerResult(sample.result, fullResult) });
+      }
+      break;
     }
-    if (timeBudgetExceeded) {
-      status = 'failed';
-      result = { ...result, success: false, time_budget_exceeded: true, error: 'Suite time budget exceeded' };
-      fatal ??= 'Suite time budget exceeded';
-    }
-    if (logBudgetExceeded) {
-      status = 'failed';
-      result = { ...result, success: false, log_budget_exceeded: true, error: 'Suite retained-log budget exceeded' };
-      fatal ??= 'Suite retained-log budget exceeded';
-    }
-    const summarySample = {
-      id: run.id,
-      workload_id: run.workload_id,
-      phase: run.phase,
-      repetition: run.repetition,
-      status,
-      result,
-    };
-    summarySamples.push(summarySample);
-    state.samples.push({ ...summarySample, result: ledgerResult(result, fullResult) });
-    if (status === 'failed') fatal ??= `Workload failed: ${run.id}`;
-    let sourceIntegrityFailed = false;
-    try { revalidateBindings(manifest, bindings); }
-    catch (error) {
-      fatal ??= error.message;
-      sourceIntegrityFailed = true;
-      state.samples.at(-1).status = 'failed';
-      state.samples.at(-1).result = { ...state.samples.at(-1).result, success: false, source_integrity_error: error.message };
-      summarySamples.at(-1).status = 'failed';
-      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, success: false, source_integrity_error: error.message };
-    }
-    if (runBudgetExceeded || totalBudgetExceeded) {
-      removeOwnedDirectory(runDirectory);
-      state.samples.at(-1).result = markOwnedPayloadRemoved(state.samples.at(-1).result);
-      summarySamples.at(-1).result = { ...summarySamples.at(-1).result, owned_payload_removed: true };
-    }
-    state.summary = summarizeSuite(summarySamples, manifest);
-    writeState();
-    if (sourceIntegrityFailed || runBudgetExceeded || totalBudgetExceeded || timeBudgetExceeded || logBudgetExceeded || stdioError !== null) break;
   }
   state.status = fatal ? 'failed' : 'complete';
   state.summary = summarizeSuite(summarySamples, manifest);
-  writeState();
+  writeLedger();
   if (fatal) throw Error(fatal);
   return state;
 }
