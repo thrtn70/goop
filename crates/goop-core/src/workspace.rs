@@ -85,12 +85,14 @@ fn directory_identity(path: &Path) -> Result<DirectoryIdentity, WorkspaceKept> {
         FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        FILE_READ_ATTRIBUTES,
     };
 
     // Directories open only with backup semantics; the reparse flag opens a
-    // junction or link itself instead of its target.
+    // junction or link itself instead of its target. Attribute access is all
+    // both queries need, so a restrictive ACL on the contents cannot block it.
     let directory = std::fs::OpenOptions::new()
-        .read(true)
+        .access_mode(FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(unreadable)?;
@@ -217,6 +219,35 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+        assert!(target.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junctioned_workspace_is_left_with_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = created(dir.path());
+        let path = workspace.path().to_path_buf();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        // A junction needs no privilege, unlike a directory symlink.
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&path)
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(matches!(
+            workspace.remove_if_empty(),
+            Err(WorkspaceKept::NotADirectory)
+        ));
+
+        assert!(std::fs::symlink_metadata(&path).is_ok());
         assert!(target.is_dir());
     }
 
