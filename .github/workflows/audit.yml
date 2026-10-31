@@ -735,6 +735,7 @@ jobs:
         run: |
           CARGO_INCREMENTAL=0 cargo test -p goop-core --lib publication::tests
           CARGO_INCREMENTAL=0 cargo test -p goop-core --lib output::tests
+          CARGO_INCREMENTAL=0 cargo test -p goop-core --lib workspace::tests
           CARGO_INCREMENTAL=0 cargo test -p goop-queue
           CARGO_INCREMENTAL=0 cargo test -p goop-converter --test publication_receipts --test publication_restart -- --include-ignored --test-threads=1
       - name: Image settings persistence contracts
