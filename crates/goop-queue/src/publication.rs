@@ -2402,6 +2402,37 @@ mod tests {
         assert_eq!(fs::read(workspace.join("partial")).unwrap(), b"bytes");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn empty_workspace_not_matching_the_receipt_is_kept() {
+        for case in ["other_attempt", "staged_elsewhere"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _destination, _expected) = publish_through_staging(&store, dir.path(), None);
+            let adopted = store.adopted_workspaces.lock().remove(&job.id).unwrap();
+            let workspace = adopted.workspace.path().to_path_buf();
+            let (attempt_id, staged, reason) = match case {
+                "other_attempt" => (
+                    uuid::Uuid::now_v7(),
+                    workspace.join("out.jpg"),
+                    "another attempt",
+                ),
+                _ => (
+                    adopted.attempt_id,
+                    dir.path().join(".goop-output-other").join("out.jpg"),
+                    "not directly inside",
+                ),
+            };
+
+            let kept =
+                super::release_adopted_workspace(attempt_id, &staged, Some(adopted)).unwrap_err();
+
+            assert_eq!(kept.workspace, workspace, "{case}");
+            assert!(kept.reason.contains(reason), "{case}: {}", kept.reason);
+            assert!(workspace.is_dir(), "{case}: empty workspace was removed");
+        }
+    }
+
     #[test]
     fn missing_hand_over_reports_the_staged_parent() {
         let staged = std::path::Path::new("/outputs/.goop-output-1-0/out.jpg");
