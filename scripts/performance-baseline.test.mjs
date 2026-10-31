@@ -1150,10 +1150,11 @@ test('a paired sample refuses what its group leaves at a log path and keeps the 
   const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
   const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
   // The unlistable run directory also throws from the collector's own storage
-  // count. The ledger still records the sample as an evidence I/O failure, held
-  // pipes included, but the plan's comparison write walks the same tree and
-  // rejects with that error.
-  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),kind==='symbolic link'?/EACCES/:/paired execution failed/i);
+  // count. The ledger records the sample as an evidence I/O failure, held pipes
+  // included, and the plan's comparison write skips the walk, so the plan
+  // throws its own failure rather than that error.
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed/i);
+  assert.equal(JSON.parse(readFileSync(join(output,'comparison.json'),'utf8')).copy.success,false);
   assert.ok(armedPid(armed),'the holder never armed');
   assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
   assert.ok(lstatSync(join(runDirectory,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
