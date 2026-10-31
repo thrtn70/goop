@@ -198,6 +198,7 @@ it.each([
   // A save no writer here produces, and none of which a recovery could read.
   ["current-format data", "goop.workspace-drafts.v2", JSON.stringify({ version: 2, entries: oversizedFiles })],
   ["current-format data with more entries than a save holds", "goop.workspace-drafts.v2", JSON.stringify({ version: 2, entries: tooManyRotations })],
+  ["older-format data with more entries than a save holds", "goop.workspace-drafts.v2", JSON.stringify({ version: 1, entries: tooManyRotations })],
 ] as const)("never recovers over oversized %s", async (_label, slot, newer) => {
   const values = new Map<string, string>([[slot, "{"]]);
   const writes: string[] = [];

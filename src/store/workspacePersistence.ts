@@ -356,8 +356,11 @@ function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): Draf
   try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
   if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
   if (data.version > version) throw new DraftDecodeError("future");
-  if (data.version !== version || !object(data.entries)) throw new DraftDecodeError("malformed");
+  if (!object(data.entries)) throw new DraftDecodeError("malformed");
+  // Before the version match: recovery decodes at the save's own version, where
+  // this limit applies too.
   if (Object.keys(data.entries).length > 500) throw new DraftDecodeError("oversized");
+  if (data.version !== version) throw new DraftDecodeError("malformed");
   const entries: DraftEntries = {};
   for (const [key, entry] of Object.entries(data.entries)) {
     if (!object(entry) || !admissible(key, entry, version)) {
