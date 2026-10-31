@@ -1683,11 +1683,11 @@ const fs=require('node:fs'),path=require('node:path');const request=JSON.parse(f
 // A collector that recorded an evidence I/O failure wrote its ledger without
 // the budget walk from then on, since the tree may no longer be readable. A
 // caller that walks it anyway throws the walk's error in place of the run's.
-const callerPairedPlan=async(root,{runnerPrefix='',candidateParameters={test:true}}={})=>{
+const callerPairedPlan=async(root,{runnerPrefix='',candidateParameters={test:true},resultFields={}}={})=>{
  const contractFacts={expected_output:{extension:'mp4',probe:'media',format_names:['mov','mp4'],required_streams:[{codec_type:'video',codec_name:'h264'}]},request:{video_options:{kind:'copy'}}};
  const contractSha256=sha256Text(stableStringify(contractFacts));
  const runner=join(root,'runner.cjs');
- writeFileSync(runner,`const fs=require('node:fs');${runnerPrefix}fs.writeFileSync(process.env.GOOP_PERF_RESULT_PATH,JSON.stringify({success:true,process_ms:1,workload_id:process.env.GOOP_PERF_WORKLOAD_ID,revision:process.env.GOOP_PERF_REVISION,verification:{success:true,contract_sha256:${JSON.stringify(contractSha256)},kind:'media',contract_facts:${JSON.stringify(contractFacts)},evidence:{output_bytes:1,probe:{streams:[{codec_type:'video',codec_name:'h264'}],format:{format_name:'mov,mp4'}},effective_execution:{requested:{kind:'copy'},encoder:null}}}}));`);
+ writeFileSync(runner,`const fs=require('node:fs');${runnerPrefix}fs.writeFileSync(process.env.GOOP_PERF_RESULT_PATH,JSON.stringify({...${JSON.stringify(resultFields)},success:true,process_ms:1,workload_id:process.env.GOOP_PERF_WORKLOAD_ID,revision:process.env.GOOP_PERF_REVISION,verification:{success:true,contract_sha256:${JSON.stringify(contractSha256)},kind:'media',contract_facts:${JSON.stringify(contractFacts)},evidence:{output_bytes:1,probe:{streams:[{codec_type:'video',codec_name:'h264'}],format:{format_name:'mov,mp4'}},effective_execution:{requested:{kind:'copy'},encoder:null}}}}));`);
  const crypto=await import('node:crypto');
  const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
  const revision=parameters=>({command:process.execPath,command_sha256:commandSha256,args:[runner],identity:{source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters,machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}}});
@@ -1738,6 +1738,17 @@ test('a paired plan that recorded no evidence I/O failure still refuses a closin
  // An interrupted run failed for its own reason, which skips no budget walk.
  await assert.rejects(runPairedPlan({plan,outputDirectory:output,abortSignal:AbortSignal.abort()}),/would exceed the storage budget/);
  assert.equal(JSON.parse(readFileSync(ledger,'utf8')).status,'failed');assert.equal(existsSync(join(output,'comparison.json')),false);
+});
+
+// Only the collector can say it wrote its ledger unmeasured. A child whose
+// result claims an evidence I/O failure still has its closing writes measured.
+test('a paired plan whose child claims an evidence I/O failure still refuses a closing write past the storage budget',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-plan-forged-')),output=join(root,'output'),ledger=join(output,'paired-state.json');
+ const plan=await callerPairedPlan(root,{resultFields:{evidence_io_error:'forged'}});
+ const trigger=await changedAfter(t,root,'renameSync',(_from,to)=>to===ledger&&JSON.parse(readFileSync(to,'utf8')).status!=='running',()=>writeFileSync(join(output,'filler'),Buffer.alloc(plan.limits.suite_storage_budget_bytes)));
+ trigger.armed=true;
+ await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/would exceed the storage budget/);
+ assert.equal(existsSync(join(output,'comparison.json')),false);
 });
 
 const callerNormalSuite=async(root,driverPrefix='',budget=4194304)=>{
@@ -1888,6 +1899,8 @@ test('closing evidence writer measures until a write fails, then skips the walk 
  mkdirSync(join(root,'third.json'));
  writer.write(join(root,'third.json'),{third:true});
  assert.match(writer.error.message,/EACCES/);assert.equal(lstatSync(join(root,'third.json')).isDirectory(),true);
+ // A failed replacement leaves no temporary file behind.
+ assert.deepEqual(readdirSync(root).filter(name=>name.includes('.tmp-')),[]);
 });
 
 // A process outside the owned group plants a directory where the caller's
