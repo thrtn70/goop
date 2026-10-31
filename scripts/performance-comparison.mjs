@@ -10,10 +10,10 @@ const PAIRED_LEDGER_FIXED_RESERVE_BYTES = 65536;
 const PAIRED_LEDGER_SAMPLE_RESERVE_BYTES = PAIRED_RESULT_LIMIT_BYTES + 2048;
 const futureAtomicPairedLedgerReserveBytes = (totalSamples, completedSamples) => PAIRED_LEDGER_FIXED_RESERVE_BYTES + (2 * totalSamples - completedSamples) * PAIRED_LEDGER_SAMPLE_RESERVE_BYTES;
 const pairedStepName = step => step.phase === 'warmup' ? `warmup-${step.revision}` : `${step.repetition}-${step.revision}`;
-// The collector records an evidence I/O failure on the sample that hit it, or
-// at the top level when its own ledger walk did. In both cases it writes the
-// ledger without the walk from then on.
-const recordsEvidenceIoFailure = state => typeof state.evidence_io_error === 'string' || state.samples.some(sample => typeof sample.result.evidence_io_error === 'string');
+// Ledgers the collector wrote without the walk once an evidence I/O failure
+// stopped it. A sample's result spreads the child's own result file, so its
+// fields cannot say this.
+const unmeasuredLedgers = new WeakSet();
 
 const median = values => {
   const sorted = [...values].sort((a, b) => a - b);
@@ -42,6 +42,7 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
   const evidenceIoFailure = error => {
     if (error.code === STORAGE_BUDGET_REFUSED) throw error;
     evidenceIoFailed = true;
+    unmeasuredLedgers.add(state);
     return error.message;
   };
   // The budget check walks the whole output tree, which a process outside the
@@ -315,7 +316,7 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
     },
   });
   // Once the tree may no longer be readable, these writes skip the walk too.
-  const writer = closingEvidenceWriter(outputDirectory, plan.limits.suite_storage_budget_bytes, !recordsEvidenceIoFailure(state));
+  const writer = closingEvidenceWriter(outputDirectory, plan.limits.suite_storage_budget_bytes, !unmeasuredLedgers.has(state));
   const comparisons = {};
   try {
     for (const workloadId of plan.workload_ids) {

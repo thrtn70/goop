@@ -690,10 +690,11 @@ async function rustContractSmoke(options, abortSignal = null) {
   });
 }
 
-// Only after a failed integrity check, which integrity.json already records. A
-// ledger that can't be read back, because the suite failed before creating one
-// or a process outside the owned group made it unreadable, is left as it is
-// rather than letting the read replace that failure or the run's own.
+// Only after a failed integrity check, which the integrity record carries unless
+// its own write failed. A ledger that can't be read back, because the suite
+// failed before creating one or a process outside the owned group made it
+// unreadable, is left as it is rather than letting the read replace that
+// failure or the run's own.
 function readLedgerBack(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));

@@ -373,7 +373,8 @@ export function boundedLedgerField(value) {
  *
  * A failure is not thrown. The first one is kept for the caller to throw when
  * the run failed for no reason of its own, so a closing write never replaces
- * that reason. A refused write still throws.
+ * that reason. A refused write still throws, in place of any such reason: the
+ * budget is a hard ceiling, so nothing more is written past it.
  *
  * A collector that already wrote its ledger unmeasured starts this unmeasured.
  * Skipped walks leave these files outside the ceiling.
@@ -416,11 +417,17 @@ export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetByt
   // JSON byte count and violate the declared hard storage ceiling.
   writeFileSync(temporary, serialized, { flag: 'wx' });
   try {
-    renameSync(temporary, path);
+    try {
+      renameSync(temporary, path);
+    } catch (error) {
+      if (process.platform !== 'win32' || !existsSync(path)) throw error;
+      rmSync(path, { force: true });
+      renameSync(temporary, path);
+    }
   } catch (error) {
-    if (process.platform !== 'win32' || !existsSync(path)) throw error;
-    rmSync(path, { force: true });
-    renameSync(temporary, path);
+    // A retry creates the same temporary name, so none may be left behind.
+    rmSync(temporary, { force: true });
+    throw error;
   }
 }
 
