@@ -4,7 +4,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { treeRss, summarize, directoryBytes } from './performance-baseline.mjs';
-import { createEvidenceFile, drainChildOutput, reachableSymlinks, readChildFile, withTerminationSignals } from './performance-shared.mjs';
+import { createEvidenceFile, drainChildOutput, reachableSymlinks, readChildFile, replaceEvidenceFile, withTerminationSignals } from './performance-shared.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -177,6 +177,8 @@ async function main(abortSignal) {
   mkdirSync(output, { recursive: true });
   writeFileSync(join(output, 'identity.json'), JSON.stringify({ binary, binary_sha256: binaryHash, argv: [], config_sha256: hash(config), warmups: 1, repetitions: 5, scenarios: [0, 200, 1000], sampling_interval_ms: 100, node: process.version, platform: process.platform, arch: process.arch, limitation: 'Fresh process with warm filesystem cache. RSS sums app descendants; shared and XPC-hosted WebKit processes may be excluded or shared. Frame marker does not prove display presentation.' }, null, 2));
   const summary = {};
+  // Each run directory sits inside this one, so a child can reach the summary path.
+  const saveSummary = () => replaceEvidenceFile(join(output, 'summary.json'), JSON.stringify(summary, null, 2));
   for (const jobs of [0, 200, 1000]) {
     const samples = [];
     for (let i = -1; i < 5; i++) {
@@ -184,12 +186,13 @@ async function main(abortSignal) {
       if (i >= 0) samples.push(result);
       if (!result.success) {
         summary[jobs] = summarizeStartup(samples);
-        writeFileSync(join(output, 'summary.json'), JSON.stringify(summary, null, 2));
-        throw Error(`Startup failed for ${jobs} jobs, run ${i}; retained sample excludes it from medians`);
+        const failure = `Startup failed for ${jobs} jobs, run ${i}; retained sample excludes it from medians`;
+        try { saveSummary(); } catch (error) { throw Error(`${failure}; summary not saved: ${error.message}`); }
+        throw Error(failure);
       }
     }
     summary[jobs] = summarizeStartup(samples);
-    writeFileSync(join(output, 'summary.json'), JSON.stringify(summary, null, 2));
+    saveSummary();
   }
   if (hash(binary) !== binaryHash) throw Error('Executable changed during startup suite');
 }
