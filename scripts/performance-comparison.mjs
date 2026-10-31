@@ -1,7 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
+import { boundedLedgerField, createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, STORAGE_BUDGET_REFUSED, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
@@ -32,25 +32,60 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
   writeState();
   const started = performance.now();
   let retainedLogBytes = 0;
+  let evidenceIoFailed = false;
+  // A failure to measure or remove evidence stops the collection. A refused
+  // budgeted write is not one, and still throws as before.
+  const evidenceIoFailure = error => {
+    if (error.code === STORAGE_BUDGET_REFUSED) throw error;
+    evidenceIoFailed = true;
+    return error.message;
+  };
+  // The budget check walks the whole output tree, which a process outside the
+  // owned group can make unreadable at any time. Once that happens the ledger
+  // is written without the check. A result over the result limit is replaced
+  // before it is recorded, and the only field carried past that, a direct
+  // adapter's held-pipe report, is clipped before such a write.
+  const writeLedger = () => {
+    if (!evidenceIoFailed) {
+      try {
+        writeState();
+        return;
+      } catch (error) {
+        state.evidence_io_error = evidenceIoFailure(error);
+        state.success = false;
+        state.status = 'failed';
+      }
+    }
+    state.samples = state.samples.map(sample => sample.result?.stdio_error === undefined ? sample : { ...sample, result: { ...sample.result, stdio_error: boundedLedgerField(sample.result.stdio_error) } });
+    writeJsonAtomic(statePath, state);
+  };
   for (const [planIndex, step] of plan.entries()) {
-    if (totalLimits && directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes) {
+    let outputBytes = null;
+    if (totalLimits) {
+      try { outputBytes = directoryBytes(outputDirectory); }
+      catch (error) {
+        state.evidence_io_error = evidenceIoFailure(error);
+        break;
+      }
+    }
+    if (totalLimits && outputBytes > totalLimits.suite_storage_budget_bytes) {
       state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, storage_budget_exceeded: true, error: 'Paired total storage budget exceeded before launch' } });
-      writeState();
+      writeLedger();
       break;
     }
     const rawRemainingMs = totalLimits ? totalLimits.suite_timeout_ms - (performance.now() - started) : null;
     if (rawRemainingMs !== null && rawRemainingMs <= 0) {
       state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, time_budget_exceeded: true, error: 'Paired total time budget exceeded before launch' } });
-      writeState();
+      writeLedger();
       break;
     }
     const suiteRemainingMs = rawRemainingMs === null ? null : Math.max(1, Math.floor(rawRemainingMs));
-    const suiteRemainingStorageBytes = totalLimits ? totalLimits.suite_storage_budget_bytes - directoryBytes(outputDirectory) - futureAtomicPairedLedgerReserveBytes(plan.length, planIndex) : null;
+    const suiteRemainingStorageBytes = totalLimits ? totalLimits.suite_storage_budget_bytes - outputBytes - futureAtomicPairedLedgerReserveBytes(plan.length, planIndex) : null;
     const suiteRemainingLogBytes = totalLimits ? totalLimits.suite_log_limit_bytes - retainedLogBytes : null;
     if ((suiteRemainingStorageBytes !== null && suiteRemainingStorageBytes <= 0) || (suiteRemainingLogBytes !== null && suiteRemainingLogBytes <= 0)) {
       const storage = suiteRemainingStorageBytes !== null && suiteRemainingStorageBytes <= 0;
       state.samples.push({ ...step, status: 'failed', result: { success: false, not_run: true, ...(storage ? { storage_budget_exceeded: true } : { log_budget_exceeded: true }), error: `Paired total ${storage ? 'storage' : 'retained-log'} budget exhausted before launch` } });
-      writeState();
+      writeLedger();
       break;
     }
     let result;
@@ -68,32 +103,44 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
     const resultBytes = Buffer.byteLength(JSON.stringify(result));
     if (resultBytes > PAIRED_RESULT_LIMIT_BYTES) result = { success: false, result_too_large: true, result_bytes: resultBytes, error: 'Paired adapter result exceeded the retained evidence limit' };
     if (stdioError !== null) result = { ...result, success: false, stdio_error: stdioError };
-    const exceeded = totalLimits ? {
-      time: performance.now() - started > totalLimits.suite_timeout_ms,
-      storage: directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes,
-      log: retainedLogBytes > totalLimits.suite_log_limit_bytes,
-    } : { time: false, storage: false, log: false };
-    if (exceeded.time || exceeded.storage || exceeded.log) result = {
-      ...result,
-      success: false,
-      ...(exceeded.time ? { time_budget_exceeded: true } : {}),
-      ...(exceeded.storage ? { storage_budget_exceeded: true } : {}),
-      ...(exceeded.log ? { log_budget_exceeded: true } : {}),
-      error: `Paired total ${exceeded.time ? 'time' : exceeded.storage ? 'storage' : 'retained-log'} budget exceeded`,
-    };
-    if (exceeded.storage) {
-      removeOwnedDirectory(join(outputDirectory, 'runs', step.workload_id, pairedStepName(step)));
-      result = { ...result, owned_payload_removed: true };
+    let recorded = false;
+    try {
+      const exceeded = totalLimits ? {
+        time: performance.now() - started > totalLimits.suite_timeout_ms,
+        storage: directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes,
+        log: retainedLogBytes > totalLimits.suite_log_limit_bytes,
+      } : { time: false, storage: false, log: false };
+      if (exceeded.time || exceeded.storage || exceeded.log) result = {
+        ...result,
+        success: false,
+        ...(exceeded.time ? { time_budget_exceeded: true } : {}),
+        ...(exceeded.storage ? { storage_budget_exceeded: true } : {}),
+        ...(exceeded.log ? { log_budget_exceeded: true } : {}),
+        error: `Paired total ${exceeded.time ? 'time' : exceeded.storage ? 'storage' : 'retained-log'} budget exceeded`,
+      };
+      if (exceeded.storage) {
+        removeOwnedDirectory(join(outputDirectory, 'runs', step.workload_id, pairedStepName(step)));
+        result = { ...result, owned_payload_removed: true };
+      }
+      state.samples.push({ ...step, status: result.success === true ? (step.phase === 'warmup' ? 'excluded' : 'success') : 'failed', result });
+      recorded = true;
+      writeState();
+      if (result.aborted === true) break;
+      if (exceeded.time || exceeded.storage || exceeded.log) break;
+      if (stdioError !== null) break;
+    } catch (error) {
+      // Measuring or removing the run's evidence failed, or so did the walk of
+      // the ledger write recording it. The sample still goes in the ledger as
+      // failed, and nothing more launches.
+      const message = evidenceIoFailure(error);
+      const sample = recorded ? state.samples.pop() : { ...step, result };
+      state.samples.push({ ...sample, status: 'failed', result: { ...sample.result, success: false, error: sample.result.error ?? message, evidence_io_error: message } });
+      break;
     }
-    state.samples.push({ ...step, status: result.success === true ? (step.phase === 'warmup' ? 'excluded' : 'success') : 'failed', result });
-    writeState();
-    if (result.aborted === true) break;
-    if (exceeded.time || exceeded.storage || exceeded.log) break;
-    if (stdioError !== null) break;
   }
   state.success = state.samples.length === plan.length && state.samples.every(sample => sample.status === 'success' || sample.status === 'excluded');
   state.status = state.success ? 'complete' : 'failed';
-  writeState();
+  writeLedger();
   return state;
 }
 

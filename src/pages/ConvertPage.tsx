@@ -833,6 +833,7 @@ function ConvertPage() {
                 onAlphaValidityChange={(problem) => selected.id && handleAlphaValidityChange(selected.id, problem)}
                 path={selected.path}
                 draftIdentity={selected.id}
+                batchRevision={selected.batch?.revision}
                 options={selectedPlanned ?? selected}
                 state={selectedState}
                 onReinspect={() => selected.id && retry(selected.id)}

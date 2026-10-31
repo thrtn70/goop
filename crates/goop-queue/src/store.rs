@@ -11,6 +11,7 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 #[derive(Clone)]
 pub struct QueueStore {
     pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) adopted_workspaces: crate::publication::AdoptedWorkspaces,
 }
 
 impl QueueStore {
@@ -45,6 +46,7 @@ impl QueueStore {
             .map_err(|e| GoopError::Queue(e.to_string()))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            adopted_workspaces: Default::default(),
         })
     }
 
