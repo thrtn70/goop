@@ -1033,6 +1033,49 @@ for(const [label,leftover] of [['',''],[' and blocks its log',"fs.mkdirSync(requ
  });
 }
 
+// What a group leaves at an evidence path before the reap. The symlink sweep
+// never sees a hard link or a directory. It removes every symbolic link it can
+// reach, so a run directory it cannot list hides the link, and the link reaches
+// the write as one planted after the sweep would. The link comes first: the live
+// storage count fails closed on the unlistable directory and stops the group,
+// which must not land before the link exists.
+const evidencePlants=['symbolic link','hard link','directory'];
+const plantEvidence=(kind,directory,name,outside)=>{
+ const path=JSON.stringify(join(directory,name));
+ if(kind==='directory')return `fs.mkdirSync(${path});`;
+ if(kind==='hard link')return `fs.linkSync(${JSON.stringify(outside)},${path});`;
+ return `fs.symlinkSync(${JSON.stringify(outside)},${path});fs.chmodSync(${JSON.stringify(directory)},0o300);`;
+};
+const siblingLog=name=>name==='stdout.log'?'stderr.log':'stdout.log';
+// Root lists an unlistable directory, so its sweep would remove the link first.
+const evidencePlantSkip=kind=>kind==='symbolic link'&&process.getuid?.()===0;
+test('a paired sample refuses what its group leaves at a log path and keeps the held-pipe evidence',{skip:process.platform==='win32',concurrency:true,timeout:60000},async t=>{
+ const crypto=await import('node:crypto');
+ const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+ const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+ const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+ await Promise.all(['stdout.log','stderr.log'].flatMap(name=>evidencePlants.map(kind=>t.test(`${kind} at ${name}`,{skip:evidencePlantSkip(kind)},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-evidence-')),armed=join(root,'holder.pid'),runner=join(root,'runner.cjs'),output=join(root,'output'),outside=join(root,'outside'),runDirectory=join(output,'runs','copy','warmup-baseline');
+  // The holder outlives the plan, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(runDirectory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'outside');
+  writeFileSync(runner,escapedHolder(armed,plantEvidence(kind,runDirectory,name,outside)));
+  const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+  const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+  // The unlistable run directory also throws from the collector's own storage
+  // count, so that plan rejects before it records the sample, and the sample's
+  // held-pipe evidence is lost with it. Only the refused write is checked there.
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),kind==='symbolic link'?/EACCES/:/paired execution failed/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
+  assert.ok(lstatSync(join(runDirectory,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
+  if(kind==='symbolic link'){assert.ok(lstatSync(join(runDirectory,name)).isSymbolicLink(),'the link did not reach the log write');return;}
+  const [sample]=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')).samples;
+  assert.equal(sample.result.success,false);assert.match(sample.result.process.stdio_error??'',/output pipes/i);
+  assert.ok(sample.result.evidence_error?.includes(name),`${kind} at ${name}: ${sample.result.evidence_error}`);
+ }))));
+});
+
 test('workload metrics accept phase-separated Rust evidence and reject partial failure or contradictory process status', () => {
  const request = { mode: 'conversion_batch', concurrency: 2, items: [{ id: 'one' }, { id: 'two' }] };
  const evidence = { memory_evidence: 'external process tree required', path_safety_limitation: 'path namespace can change after validation' };
@@ -1365,6 +1408,24 @@ for(const [label,leftover,metrics] of [['','','{}'],[' and blocks its log',"fs.m
   assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['failed']);assert.match(state.samples[0].result.stdio_error??'',/output pipes/i);
  });
 }
+
+test('a workload sample refuses what its driver leaves at a log path and keeps the held-pipe evidence',{skip:process.platform==='win32',concurrency:true,timeout:60000},async t=>{
+ const crypto=await import('node:crypto');
+ await Promise.all(['stdout.log','stderr.log'].flatMap(name=>evidencePlants.map(kind=>t.test(`${kind} at ${name}`,{skip:evidencePlantSkip(kind)},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-workload-evidence-')),armed=join(root,'holder.pid'),driver=join(root,'driver'),output=join(root,'output'),outside=join(root,'outside'),inspect=join(root,'inspect.bin');
+  // The holder outlives the run, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(output,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'outside');writeFileSync(inspect,'inspect');
+  writeFileSync(driver,`#!${process.execPath}\n${escapedHolder(armed,plantEvidence(kind,output,name,outside))}`);chmodSync(driver,0o700);
+  const run={output_directory:output,bindings:{inspect_mixed:{path:inspect,sha256:crypto.createHash('sha256').update('inspect').digest('hex')}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}};
+  const result=await executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars:{}});
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
+  assert.ok(lstatSync(join(output,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
+  assert.equal(result.success,false);assert.match(result.stdio_error??'',/output pipes/i);
+  assert.ok(result.evidence_error?.includes(name),`${kind} at ${name}: ${result.evidence_error}`);
+ }))));
+});
 
 // Root reads an unreadable directory, so its scan would not fail.
 test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
