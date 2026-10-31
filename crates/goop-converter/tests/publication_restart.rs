@@ -63,6 +63,9 @@ impl PublicationObserver for StopAtBoundary {
         }
         Ok(())
     }
+    fn adopt_workspace(&self, workspace: goop_core::workspace::OwnedWorkspace) {
+        self.observer.adopt_workspace(workspace);
+    }
 }
 
 #[test]
@@ -207,6 +210,20 @@ fn exercise_restart(image: bool) {
         if phase != "intent" && image {
             assert_eq!(image::image_dimensions(&output).unwrap(), (24, 16));
         }
+        // Only a job committed done in the running process removes its
+        // workspace; restart recovery never does.
+        let workspaces = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".goop-output-")
+            })
+            .count();
+        assert_eq!(workspaces, usize::from(phase != "done"), "{phase}");
         // The owned temporary directory, including preserved evidence, is
         // removed only after the child has exited and both reopens passed.
     }

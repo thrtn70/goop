@@ -30,6 +30,7 @@ pub mod publication;
 pub mod signals;
 pub mod tracks;
 pub mod update;
+pub mod workspace;
 
 pub use convert::{
     validate_image_alpha_request_shape, validate_image_color_request_shape, AlphaCompositing,
