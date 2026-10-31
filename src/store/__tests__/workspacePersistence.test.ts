@@ -168,9 +168,10 @@ describe("durable editable drafts", () => {
     ["a newer version in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "future"],
     ["the current version too far from the start", DRAFT_STORAGE_KEY, `{${" ".repeat(64)}${JSON.stringify({ version: 2, entries: oversizedEntries }).slice(1)}`, "future"],
     ["no envelope", DRAFT_STORAGE_KEY, "x".repeat(600 * 1024), "future"],
-    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "malformed"],
-    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
-    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "oversized"],
+    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "oversized"],
+    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "oversized"],
+    ["more entries than a save holds", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [JSON.stringify(["image", "source", `/${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }])) }), "oversized"],
   ] as const)("protects saved drafts over the size limit that hold %s", (_label, storageKey, raw, reason) => {
     const outcome = loadDraftEntriesOutcome({
       getItem: candidate => candidate === storageKey ? raw : null,

@@ -190,11 +190,15 @@ it.each([
   expect(writes).toEqual([]);
 });
 
+const oversizedFiles = { [JSON.stringify(["image", "ImagePage.files"])]: { value: ["x".repeat(600 * 1024)] } };
+const tooManyRotations = Object.fromEntries(Array.from({ length: 501 }, (_, i) => [JSON.stringify(["image", "source", `/${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
 it.each([
-  ["with its version after the entries", "goop.workspace-drafts.v2", (entries: object) => JSON.stringify({ entries, version: 3 })],
-  ["in the older slot", "goop.workspace-drafts.v1", (entries: object) => JSON.stringify({ version: 2, entries })],
-] as const)("never recovers over oversized newer-format data %s", async (_label, slot, encode) => {
-  const newer = encode({ [JSON.stringify(["image", "ImagePage.files"])]: { value: ["x".repeat(600 * 1024)] } });
+  ["newer-format data with its version after the entries", "goop.workspace-drafts.v2", JSON.stringify({ entries: oversizedFiles, version: 3 })],
+  ["newer-format data in the older slot", "goop.workspace-drafts.v1", JSON.stringify({ version: 2, entries: oversizedFiles })],
+  // A save no writer here produces, and none of which a recovery could read.
+  ["current-format data", "goop.workspace-drafts.v2", JSON.stringify({ version: 2, entries: oversizedFiles })],
+  ["current-format data with more entries than a save holds", "goop.workspace-drafts.v2", JSON.stringify({ version: 2, entries: tooManyRotations })],
+] as const)("never recovers over oversized %s", async (_label, slot, newer) => {
   const values = new Map<string, string>([[slot, "{"]]);
   const writes: string[] = [];
   vi.stubGlobal("localStorage", {

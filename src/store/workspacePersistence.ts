@@ -286,7 +286,9 @@ export function encodeDraftEntries(entries: DraftEntries): string {
   return encodeDraftEntriesWithSize(entries).raw;
 }
 
-export type DraftProtectionReason = "malformed" | "future" | "read_error";
+// "oversized" saves exceed the limits every reader applies, so no part of one
+// can be read here, recovery included.
+export type DraftProtectionReason = "malformed" | "future" | "oversized" | "read_error";
 export type DraftLoadOutcome =
   | { kind: "ready"; entries: DraftEntries }
   | { kind: "migration_pending"; entries: DraftEntries; legacy_raw: string }
@@ -339,12 +341,13 @@ export function admitDraftEntries(entries: DraftEntries): { admitted: DraftEntri
 }
 
 // A save too large to parse is judged by the version leading its first few
-// characters, where every writer puts it; one without may be newer.
+// characters, where every writer puts it; one without may be newer. No writer
+// here produces one at a known version, and none of it could be recovered.
 const LEADING_VERSION_CHARS = 64;
 const LEADING_VERSION = /^\s*\{\s*"version"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*[,}]/;
 function oversizedReason(raw: string, version: 1 | 2): DraftDecodeError["reason"] {
   const match = LEADING_VERSION.exec(raw.slice(0, LEADING_VERSION_CHARS));
-  return match !== null && Number(match[1]) <= version ? "malformed" : "future";
+  return match !== null && Number(match[1]) <= version ? "oversized" : "future";
 }
 
 function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
@@ -353,7 +356,8 @@ function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): Draf
   try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
   if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
   if (data.version > version) throw new DraftDecodeError("future");
-  if (data.version !== version || !object(data.entries) || Object.keys(data.entries).length > 500) throw new DraftDecodeError("malformed");
+  if (data.version !== version || !object(data.entries)) throw new DraftDecodeError("malformed");
+  if (Object.keys(data.entries).length > 500) throw new DraftDecodeError("oversized");
   const entries: DraftEntries = {};
   for (const [key, entry] of Object.entries(data.entries)) {
     if (!object(entry) || !admissible(key, entry, version)) {
