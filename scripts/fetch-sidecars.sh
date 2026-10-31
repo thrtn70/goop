@@ -94,8 +94,8 @@ TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427
 # release until its CLI and dylib closure are rechecked. MACOS_TESSERACT_VERSION
 # pins the Homebrew tesseract that its gs was built against, which the source
 # build must match (scripts/build-tesseract-macos.sh holds the source pin).
-MACOS_GHOSTSCRIPT_VERSION="10.07.1"
-MACOS_MUPDF_VERSION="1.28.3"
+MACOS_GHOSTSCRIPT_VERSION="10.08.0"
+MACOS_MUPDF_VERSION="1.28.5"
 MACOS_TESSERACT_VERSION="5.5.3"
 
 case "$TARGET" in
