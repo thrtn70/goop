@@ -17,6 +17,7 @@ import { runStartup } from './startup-baseline.mjs';
 import {
   boundedLedgerField,
   captureIdentity,
+  createEvidenceFile,
   createOwnedDirectory,
   createRunLogs,
   directoryBytes,
@@ -116,7 +117,7 @@ function persistFullResult(result, absoluteEvidenceDirectory, evidenceDirectory,
 // the result limit.
 function ledgerResult(result, fullResult) {
   if (fullResult === null) return result;
-  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'evidence_io_error', 'sidecars', 'sidecar_identity_error'];
+  const fields = ['success', 'error', 'process_ms', 'aggregate_ms', 'wall_ms', 'encoder_detection_ms', 'launch_to_ready_ms', 'lifetime_ms', 'verification_ms', 'timed_out', 'budget_exceeded', 'time_budget_exceeded', 'log_budget_exceeded', 'stdio_error', 'evidence_error', 'evidence_io_error', 'sidecars', 'sidecar_identity_error'];
   return {
     ...Object.fromEntries(fields.filter(field => result[field] !== undefined).map(field => [field, boundedLedgerField(result[field])])),
     evidence_compacted: true,
@@ -522,7 +523,9 @@ export async function executeWorkloadAdapter(run, drivers) {
   }
   const requestPath = join(run.output_directory, 'request.json');
   const metricsPath = join(run.output_directory, 'metrics.json');
-  writeFileSync(requestPath, `${JSON.stringify(request, null, 2)}\n`);
+  // A process left over from an earlier run can reach this directory, so
+  // whatever is already at the request path is refused rather than followed.
+  createEvidenceFile(requestPath, `${JSON.stringify(request, null, 2)}\n`);
   const processResult = await runBoundedProcess({
     command: drivers.workloadDriver,
     args: [drivers.runtimeSidecarsDirectory, requestPath, metricsPath],
