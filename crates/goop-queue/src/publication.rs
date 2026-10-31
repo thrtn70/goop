@@ -1,9 +1,12 @@
 use crate::store::QueueStore;
 use goop_core::publication::{FileIdentity, PublicationObserver};
+use goop_core::workspace::OwnedWorkspace;
 use goop_core::{GoopError, JobId, JobKind, JobResult, JobState, ResultKind};
+use parking_lot::Mutex;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -102,6 +105,15 @@ struct QueuePublicationObserver {
     job_id: JobId,
     attempt_id: Uuid,
     payload: serde_json::Value,
+}
+
+/// Workspaces handed over after a durable receipt, held in memory until the
+/// job is committed Done. A restart forgets them, which keeps the folders.
+pub(crate) type AdoptedWorkspaces = Arc<Mutex<HashMap<JobId, AdoptedWorkspace>>>;
+
+pub(crate) struct AdoptedWorkspace {
+    attempt_id: Uuid,
+    workspace: OwnedWorkspace,
 }
 
 impl QueueStore {
@@ -515,6 +527,9 @@ impl QueueStore {
         proposed_result: Option<&JobResult>,
         now_ms: i64,
     ) -> Result<PublicationFinalization, GoopError> {
+        // Taken first so every path except a committed Done drops it, and the
+        // folder stays.
+        let adopted = self.adopted_workspaces.lock().remove(&id);
         let raw = self.load_journal(id)?;
         let Some(raw) = raw else {
             self.update_state(id, proposed_state, proposed_result, now_ms)?;
@@ -541,6 +556,7 @@ impl QueueStore {
             }
         };
 
+        let attempt_id = record.attempt_id;
         match record.phase {
             PublicationPhase::Preparing => {
                 let (state, result) = if *proposed_state == JobState::Done {
@@ -563,10 +579,10 @@ impl QueueStore {
                 "publication was attempted without a durable receipt".into(),
             ),
             PublicationPhase::Published {
+                staged_path,
                 destination,
                 result,
                 identity,
-                ..
             } => {
                 if *proposed_state == JobState::Done && proposed_result != Some(&result) {
                     return self.uncertain_finalization(
@@ -583,6 +599,15 @@ impl QueueStore {
                     );
                 }
                 self.commit_terminal_and_consume(id, &raw, &JobState::Done, Some(&result), now_ms)?;
+                if let Err(kept) = release_adopted_workspace(attempt_id, &staged_path, adopted) {
+                    tracing::warn!(
+                        ?id,
+                        workspace = %kept.workspace.display(),
+                        staged = %staged_path.display(),
+                        reason = %kept.reason,
+                        "private workspace left in place"
+                    );
+                }
                 Ok(PublicationFinalization {
                     state: JobState::Done,
                     result: Some(result),
@@ -875,6 +900,16 @@ impl PublicationObserver for QueuePublicationObserver {
         };
         self.replace_record(&raw, &record, "receipt")
     }
+
+    fn adopt_workspace(&self, workspace: OwnedWorkspace) {
+        self.store.adopted_workspaces.lock().insert(
+            self.job_id,
+            AdoptedWorkspace {
+                attempt_id: self.attempt_id,
+                workspace,
+            },
+        );
+    }
 }
 
 impl QueuePublicationObserver {
@@ -936,6 +971,39 @@ impl QueuePublicationObserver {
         }
         tx.commit().map_err(queue_error)
     }
+}
+
+struct KeptWorkspace {
+    workspace: PathBuf,
+    reason: String,
+}
+
+/// Runs only after Done is committed. Removes the workspace when every check
+/// passes; otherwise reports which folder was kept and why, for logging. It
+/// never changes the job's outcome.
+fn release_adopted_workspace(
+    attempt_id: Uuid,
+    staged_path: &Path,
+    adopted: Option<AdoptedWorkspace>,
+) -> Result<(), KeptWorkspace> {
+    let Some(adopted) = adopted else {
+        return Err(KeptWorkspace {
+            workspace: staged_path.parent().unwrap_or(staged_path).to_path_buf(),
+            reason: "no workspace was handed over for this attempt".into(),
+        });
+    };
+    let workspace = adopted.workspace.path().to_path_buf();
+    let reason = if adopted.attempt_id != attempt_id {
+        "it was handed over by another attempt".to_owned()
+    } else if staged_path.parent() != Some(workspace.as_path()) {
+        "the receipt's staged file is not directly inside it".to_owned()
+    } else {
+        match adopted.workspace.remove_if_empty() {
+            Ok(()) => return Ok(()),
+            Err(kept) => kept.to_string(),
+        }
+    };
+    Err(KeptWorkspace { workspace, reason })
 }
 
 fn load_review_state(
@@ -2130,6 +2198,253 @@ mod tests {
         assert_eq!(finalized.result, Some(expected));
         assert!(workspace.exists());
         assert!(!store.has_publication_journal(job.id).unwrap());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn private_workspaces(parent: &std::path::Path) -> Vec<std::path::PathBuf> {
+        fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".goop-output-"))
+            })
+            .collect()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn publish_through_staging(
+        store: &QueueStore,
+        root: &std::path::Path,
+        fault: Option<&str>,
+    ) -> (Job, std::path::PathBuf, JobResult) {
+        let destination = root.join("out.jpg");
+        let job = running_convert(store);
+        let expected = result(&destination);
+        let observer = store.begin_publication(job.id, &job.payload).unwrap();
+        if let Some(trigger) = fault {
+            store.conn.lock().execute_batch(trigger).unwrap();
+        }
+        let staged = goop_core::output::StagedOutput::new(&destination).unwrap();
+        fs::write(staged.path(), b"payload").unwrap();
+        let publication = staged.publish_observed(
+            &goop_core::output::OutputDestination::explicit(destination.clone()),
+            None,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            observer.as_ref(),
+            &expected,
+        );
+        assert_eq!(publication.is_ok(), fault.is_none());
+        (job, destination, expected)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn published_workspace_is_removed_only_after_done_is_committed() {
+        for proposed in [JobState::Done, JobState::Cancelled] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, destination, expected) = publish_through_staging(&store, dir.path(), None);
+            assert_eq!(private_workspaces(dir.path()).len(), 1);
+
+            let proposed_result = (proposed == JobState::Done).then(|| expected.clone());
+            let finalized = store
+                .finalize_worker(
+                    job.id,
+                    &job.payload,
+                    &proposed,
+                    proposed_result.as_ref(),
+                    123,
+                )
+                .unwrap();
+
+            assert_eq!(finalized.state, JobState::Done);
+            assert!(private_workspaces(dir.path()).is_empty(), "{proposed:?}");
+            assert_eq!(fs::read(&destination).unwrap(), b"payload");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn workspace_is_kept_when_done_cannot_be_committed() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let store = QueueStore::open(&db).unwrap();
+        let (job, destination, expected) = publish_through_staging(&store, dir.path(), None);
+        store.conn.lock().execute_batch("CREATE TRIGGER owned_fault BEFORE UPDATE ON jobs WHEN NEW.state = 'done' BEGIN SELECT RAISE(ABORT, 'owned terminal fault'); END;").unwrap();
+
+        assert!(store
+            .finalize_worker(job.id, &job.payload, &JobState::Done, Some(&expected), 123)
+            .is_err());
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+
+        store
+            .conn
+            .lock()
+            .execute_batch("DROP TRIGGER owned_fault;")
+            .unwrap();
+        drop(store);
+        let reopened = QueueStore::open(&db).unwrap();
+        reopened.reconcile_publications().unwrap();
+        assert_eq!(
+            reopened.get_by_id(job.id).unwrap().unwrap().state,
+            JobState::Done
+        );
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+        assert_eq!(fs::read(&destination).unwrap(), b"payload");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn workspace_is_kept_when_intent_has_no_receipt() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, destination, _expected) = publish_through_staging(
+            &store,
+            dir.path(),
+            Some("CREATE TRIGGER owned_fault BEFORE UPDATE ON publication_journal WHEN json_extract(NEW.record, '$.phase.kind') = 'published' BEGIN SELECT RAISE(ABORT, 'owned journal fault'); END;"),
+        );
+        let failure = JobState::Error {
+            message: "receipt write failed".into(),
+            detail: None,
+        };
+
+        let finalized = store
+            .finalize_worker(job.id, &job.payload, &failure, None, 123)
+            .unwrap();
+
+        assert!(matches!(finalized.state, JobState::Error { .. }));
+        assert!(destination.exists());
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn mismatched_worker_result_keeps_workspace() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _destination, expected) = publish_through_staging(&store, dir.path(), None);
+        let mut other = expected.clone();
+        other.duration_ms += 1;
+
+        let finalized = store
+            .finalize_worker(job.id, &job.payload, &JobState::Done, Some(&other), 123)
+            .unwrap();
+
+        assert!(matches!(finalized.state, JobState::Error { .. }));
+        assert_eq!(private_workspaces(dir.path()).len(), 1);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn changed_workspace_is_left_in_place_and_the_job_is_still_done() {
+        let mut cases = vec!["replaced", "non_empty"];
+        if cfg!(unix) {
+            cases.push("linked");
+        }
+        for case in cases {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, destination, expected) = publish_through_staging(&store, dir.path(), None);
+            let workspace = private_workspaces(dir.path()).pop().unwrap();
+            let other = dir.path().join("other");
+            match case {
+                "replaced" => {
+                    fs::create_dir(&other).unwrap();
+                    fs::remove_dir(&workspace).unwrap();
+                    fs::rename(&other, &workspace).unwrap();
+                }
+                "non_empty" => fs::write(workspace.join("partial"), b"bytes").unwrap(),
+                _ => {
+                    fs::create_dir(&other).unwrap();
+                    fs::remove_dir(&workspace).unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&other, &workspace).unwrap();
+                }
+            }
+
+            let finalized = store
+                .finalize_worker(job.id, &job.payload, &JobState::Done, Some(&expected), 123)
+                .unwrap();
+
+            assert_eq!(finalized.state, JobState::Done, "{case}");
+            assert!(fs::symlink_metadata(&workspace).is_ok(), "{case}");
+            assert_eq!(fs::read(&destination).unwrap(), b"payload");
+            match case {
+                "non_empty" => assert_eq!(fs::read(workspace.join("partial")).unwrap(), b"bytes"),
+                "linked" => assert!(other.is_dir()),
+                _ => assert!(workspace.is_dir()),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn kept_workspace_reports_its_own_path_and_the_reason() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _destination, _expected) = publish_through_staging(&store, dir.path(), None);
+        let adopted = store.adopted_workspaces.lock().remove(&job.id).unwrap();
+        let workspace = adopted.workspace.path().to_path_buf();
+        fs::write(workspace.join("partial"), b"bytes").unwrap();
+
+        let kept = super::release_adopted_workspace(
+            adopted.attempt_id,
+            &workspace.join("out.jpg"),
+            Some(adopted),
+        )
+        .unwrap_err();
+
+        assert_eq!(kept.workspace, workspace);
+        assert!(kept.reason.contains("not empty"), "{}", kept.reason);
+        assert_eq!(fs::read(workspace.join("partial")).unwrap(), b"bytes");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn empty_workspace_not_matching_the_receipt_is_kept() {
+        for case in ["other_attempt", "staged_elsewhere"] {
+            let dir = tempdir().unwrap();
+            let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+            let (job, _destination, _expected) = publish_through_staging(&store, dir.path(), None);
+            let adopted = store.adopted_workspaces.lock().remove(&job.id).unwrap();
+            let workspace = adopted.workspace.path().to_path_buf();
+            let (attempt_id, staged, reason) = match case {
+                "other_attempt" => (
+                    uuid::Uuid::now_v7(),
+                    workspace.join("out.jpg"),
+                    "another attempt",
+                ),
+                _ => (
+                    adopted.attempt_id,
+                    dir.path().join(".goop-output-other").join("out.jpg"),
+                    "not directly inside",
+                ),
+            };
+
+            let kept =
+                super::release_adopted_workspace(attempt_id, &staged, Some(adopted)).unwrap_err();
+
+            assert_eq!(kept.workspace, workspace, "{case}");
+            assert!(kept.reason.contains(reason), "{case}: {}", kept.reason);
+            assert!(workspace.is_dir(), "{case}: empty workspace was removed");
+        }
+    }
+
+    #[test]
+    fn missing_hand_over_reports_the_staged_parent() {
+        let staged = std::path::Path::new("/outputs/.goop-output-1-0/out.jpg");
+
+        let kept =
+            super::release_adopted_workspace(uuid::Uuid::now_v7(), staged, None).unwrap_err();
+
+        assert_eq!(
+            kept.workspace,
+            std::path::Path::new("/outputs/.goop-output-1-0")
+        );
+        assert!(kept.reason.contains("handed over"), "{}", kept.reason);
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -1,3 +1,4 @@
+use crate::workspace::OwnedWorkspace;
 use crate::{GoopError, JobResult};
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -17,6 +18,10 @@ pub trait PublicationObserver: Send + Sync {
     ) -> Result<(), GoopError>;
 
     fn published(&self, destination: &Path, result: &JobResult) -> Result<(), GoopError>;
+
+    /// Receives the private workspace once its receipt is durable. Dropping it
+    /// leaves the directory in place.
+    fn adopt_workspace(&self, _workspace: OwnedWorkspace) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
