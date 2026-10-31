@@ -17,7 +17,7 @@ cookies_from_browser: string | null | null,
  * skips onboarding; `Some(false)` from Settings → About to
  * re-show the welcome screen.
  */
-has_seen_onboarding: boolean | null, notifications_enabled: boolean | null, 
+has_seen_onboarding: boolean | null, notifications_enabled: boolean | null, media_player_enabled: boolean | null, 
 /**
  * Tri-state on the wire (see `double_option` helper):
  * - field absent → `None` (no change)

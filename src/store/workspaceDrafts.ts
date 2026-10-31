@@ -6,24 +6,30 @@ import { createContext, createElement, useCallback, useContext, useEffect, useMe
 import { create } from "zustand";
 import {
   cloneTrackOptions,
+  decodeDraftEntries,
+  DRAFT_BACKUP_KEY,
+  DRAFT_STORAGE_KEY,
+  LEGACY_DRAFT_STORAGE_KEY,
   loadBrowserDraftEntriesOutcome,
   readDraftEntriesOutcome,
   saveDraftEntries,
+  type DraftProtectionReason,
 } from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
 
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftProtection = { kind: "load" } | { kind: "migration"; legacyRaw: string } | null;
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean; protection: DraftProtection };
+type DraftProtection = { kind: "load"; reason: DraftProtectionReason } | { kind: "migration"; legacyRaw: string } | null;
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean; recoveryFailed: boolean; protection: DraftProtection };
 const initialDraftLoad = loadBrowserDraftEntriesOutcome();
 const useDraftStore = create<DraftState>(() => ({
   entries: initialDraftLoad.kind === "protected" ? {} : initialDraftLoad.entries,
   epochs: {}, scopeEpochs: {}, completionEpochs: {}, resetEpoch: 0, revisions: {},
   persistenceFailed: initialDraftLoad.kind !== "ready",
+  recoveryFailed: false,
   protection: initialDraftLoad.kind === "protected"
-    ? { kind: "load" }
+    ? { kind: "load", reason: initialDraftLoad.reason }
     : initialDraftLoad.kind === "migration_pending"
       ? { kind: "migration", legacyRaw: initialDraftLoad.legacy_raw }
       : null,
@@ -36,12 +42,23 @@ useDraftStore.subscribe((state, previous) => {
   if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
 });
 export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
+// A pending operation never submitted saved values, so hydrating them retires
+// cleanup in every tool they belong to, as a new operation choice does: its
+// parent callback may remove any source of that tool, not just its own scope.
+function hydrateSavedEntries(state: DraftState, saved: Record<string, DraftEntry>, entries = saved): Pick<DraftState, "entries" | "completionEpochs"> {
+  const completionEpochs = { ...state.completionEpochs };
+  for (const tool of new Set(Object.keys(saved).map(key => (JSON.parse(key) as string[])[0]))) {
+    const toolKey = JSON.stringify([tool]);
+    completionEpochs[toolKey] = (completionEpochs[toolKey] ?? 0) + 1;
+  }
+  return { entries, completionEpochs };
+}
 export function retryDraftPersistence() {
   try {
     const state = useDraftStore.getState();
     const read = readDraftEntriesOutcome(window.localStorage);
     if (read.kind === "protected") {
-      useDraftStore.setState({ persistenceFailed: true, protection: { kind: "load" } });
+      useDraftStore.setState({ persistenceFailed: true, protection: { kind: "load", reason: read.reason } });
       return;
     }
     if (state.protection?.kind === "load") {
@@ -55,7 +72,7 @@ export function retryDraftPersistence() {
       const entries = read.kind === "v2" ? read.entries : read.kind === "legacy" ? read.entries : {};
       // Hydrate while protection is still active so the subscription cannot
       // turn an error-derived state into an authoritative write.
-      useDraftStore.setState({ entries });
+      useDraftStore.setState(current => hydrateSavedEntries(current, entries));
       if (read.kind === "legacy" && !saveDraftEntries(window.localStorage, entries)) {
         useDraftStore.setState({ persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
         return;
@@ -65,7 +82,7 @@ export function retryDraftPersistence() {
     }
     if (state.protection?.kind === "migration") {
       if (read.kind === "v2") {
-        useDraftStore.setState({ entries: read.entries });
+        useDraftStore.setState(current => hydrateSavedEntries(current, read.entries));
         useDraftStore.setState({ persistenceFailed: false, protection: null });
         return;
       }
@@ -75,7 +92,7 @@ export function retryDraftPersistence() {
       }
       const legacyChanged = read.legacy_raw !== state.protection.legacyRaw;
       const entries = legacyChanged ? read.entries : state.entries;
-      if (legacyChanged) useDraftStore.setState({ entries });
+      if (legacyChanged) useDraftStore.setState(current => hydrateSavedEntries(current, entries));
       const ok = saveDraftEntries(window.localStorage, entries);
       useDraftStore.setState(ok
         ? { persistenceFailed: false, protection: null }
@@ -83,12 +100,71 @@ export function retryDraftPersistence() {
       return;
     }
     if (read.kind === "legacy") {
-      useDraftStore.setState({ entries: read.entries, persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, read.entries), persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } }));
       return;
     }
     const ok = saveDraftEntries(window.localStorage, state.entries);
     useDraftStore.setState({ persistenceFailed: !ok });
   } catch { useDraftStore.setState({ persistenceFailed: true }); }
+}
+/**
+ * Saved drafts a strict read refused as malformed. A newer Goop that changed
+ * the format version is never offered; one that only added drafts is, and its
+ * entries survive in the backup.
+ */
+export function useDraftRecoveryAvailable() {
+  return useDraftStore(state => state.protection?.kind === "load" && state.protection.reason === "malformed");
+}
+export function useDraftRecoveryFailed() { return useDraftStore(state => state.recoveryFailed); }
+
+// One copy per distinct unreadable save: a later recovery never replaces an
+// earlier backup. Few slots, since each can hold a full save in shared storage.
+const MAX_DRAFT_BACKUPS = 5;
+function backUpUnreadableDrafts(storage: Pick<Storage, "getItem" | "setItem">, raw: string) {
+  const keys = Array.from({ length: MAX_DRAFT_BACKUPS }, (_, index) => `${DRAFT_BACKUP_KEY}.${index}`);
+  const existing = keys.map(key => storage.getItem(key));
+  if (existing.includes(raw)) return;
+  const free = existing.indexOf(null);
+  if (free < 0) throw new Error("No room for another draft backup");
+  storage.setItem(keys[free], raw);
+}
+
+/**
+ * Backs up the saved drafts a strict read refused, then keeps every entry that
+ * can still be read. Saved values win where both exist, as a retry would;
+ * entries only this session has are kept. Nothing changes if the backup cannot
+ * be written. Returns whether the recovered drafts were saved.
+ */
+export function recoverSavedDrafts(): boolean {
+  if (useDraftStore.getState().protection?.kind !== "load") return false;
+  let raw: string;
+  try {
+    const storage = window.localStorage;
+    const read = readDraftEntriesOutcome(storage);
+    // The saved drafts may have changed since launch; recover only refused ones.
+    if (read.kind !== "protected" || read.reason !== "malformed") {
+      retryDraftPersistence();
+      return !useDraftStore.getState().persistenceFailed;
+    }
+    const saved = storage.getItem(DRAFT_STORAGE_KEY) ?? storage.getItem(LEGACY_DRAFT_STORAGE_KEY);
+    if (saved === null) throw new Error("No saved drafts to recover");
+    backUpUnreadableDrafts(storage, saved);
+    raw = saved;
+  } catch {
+    useDraftStore.setState({ recoveryFailed: true });
+    return false;
+  }
+  try {
+    const saved = decodeDraftEntries(raw);
+    // Hydrate while protection is still active, so only the save below writes.
+    useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, saved, { ...current.entries, ...saved }), recoveryFailed: false }));
+    const ok = saveDraftEntries(window.localStorage, useDraftStore.getState().entries);
+    useDraftStore.setState(ok ? { persistenceFailed: false, protection: null } : { persistenceFailed: true });
+    return ok;
+  } catch {
+    useDraftStore.setState({ persistenceFailed: true });
+    return false;
+  }
 }
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
 const matches = (key: string, prefix: readonly string[]) => {
@@ -276,6 +352,10 @@ export function useWorkspaceScope() { return useContext(ScopeContext); }
 
 /** Parent readiness also observes forms whose inspector is currently unmounted. */
 export function useWorkspaceDraftEntries() { return useDraftStore(state => state.entries); }
+/** Calls the listener with the drafts after every change, for checks outside React. */
+export function subscribeWorkspaceDraftEntries(listener: (entries: Record<string, DraftEntry>) => void) {
+  return useDraftStore.subscribe((state, previous) => { if (state.entries !== previous.entries) listener(state.entries); });
+}
 
 /** An intentional settings replacement retires only its raw editor slots. */
 export function clearWorkspaceDraftSlots(tool: WorkspaceTool, scope: readonly string[], slots: readonly string[]) {

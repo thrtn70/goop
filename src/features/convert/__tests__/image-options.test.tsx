@@ -1,10 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import ConvertPage from "@/pages/ConvertPage";
 import CompressPage from "@/pages/CompressPage";
 import type { ImageAlphaCapabilities, ImageSettingsCapabilities, Preset } from "@/types";
+import { DRAFT_STORAGE_KEY, encodeDraftEntries, loadDraftEntriesOutcome } from "@/store/workspacePersistence";
+import { useWorkspaceDraftEntries } from "@/store/workspaceDrafts";
 
 const mocks = vi.hoisted(() => ({ inspect: vi.fn(), enqueue: vi.fn(), open: vi.fn(), save: vi.fn(), preset: null as Preset | null, eligibility: vi.fn(), preview: vi.fn(), previewCancel: vi.fn(), presetSave: vi.fn() }));
 vi.mock("@/ipc/commands", () => ({ api: {
@@ -57,7 +59,10 @@ beforeEach(() => {
   mocks.open.mockResolvedValue(["/a.jpg"]); mocks.save.mockResolvedValue("/out.jpg"); mocks.enqueue.mockResolvedValue("job"); mocks.previewCancel.mockResolvedValue(null);
 });
 afterEach(cleanup);
-const page = () => <MemoryRouter><ConvertPage /></MemoryRouter>;
+let draftEntries: Record<string, { value: unknown }> = {};
+/** Reads the live draft store; jsdom's localStorage is shadowed by Node's here. */
+function DraftProbe() { draftEntries = useWorkspaceDraftEntries(); return null; }
+const page = () => <MemoryRouter><ConvertPage /><DraftProbe /></MemoryRouter>;
 async function add(paths = ["/a.jpg"]) {
   mocks.open.mockResolvedValue(paths);
   fireEvent.click(screen.getByRole("button", { name: "Add files" }));
@@ -87,7 +92,7 @@ it("edits explicit JPEG quality and fit bounds through the inspector and submits
 it("keeps empty width through selection and remount, blocking Convert, apply, save and samples", async () => {
   const view = render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
   await userEvent.setup().clear(screen.getByRole("textbox", { name: "Image width" }));
-  expect(disabled("Convert 2 files")).toBe(true); expect(disabled("Apply first to all")).toBe(true); expect(disabled("Save as preset")).toBe(true);
+  expect(disabled("Convert 2 files")).toBe(true); expect(disabled("Apply to all 2")).toBe(true); expect(disabled("Save as preset")).toBe(true);
   expect(disabled("Preview sample")).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
   expect(disabled("Convert 2 files")).toBe(true);
@@ -111,7 +116,7 @@ it("retains edited JPEG draft while an older Save dialog submits an independent 
 });
 it("copies independent settings and retries only the unacknowledged JPEG", async () => {
   render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
-  fireEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Image width" }), { target: { value: "512" } });
   mocks.enqueue.mockImplementation((r: { input_path: string }) => r.input_path === "/b.jpg" ? Promise.reject(new Error("disk full")) : Promise.resolve("a"));
   fireEvent.click(screen.getByRole("button", { name: "Convert 2 files" }));
@@ -122,13 +127,12 @@ it("copies independent settings and retries only the unacknowledged JPEG", async
   expect(mocks.enqueue.mock.calls.map(c => c[0].input_path)).toEqual(["/a.jpg", "/b.jpg", "/b.jpg"]);
   expect(mocks.enqueue.mock.calls[2][0].image_options).toEqual(fit);
 });
-it("rejects mixed-source batch and preset applications atomically with the incompatible source name", async () => {
+it("hides Apply for a single image and applies the Photo preset to the image only", async () => {
   mocks.preset = preset(); render(page()); await add(["/a.jpg", "/clip.mp4"]); await setFit();
-  await waitFor(() => expect(disabled("Apply first to all")).toBe(false));
-  fireEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
-  expect(screen.getByRole("alert").textContent).toContain("clip.mp4");
+  await seeded("/a.jpg", "/clip.mp4");
+  expect(screen.queryByRole("button", { name: /^Apply to/ })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
-  expect(screen.getByRole("alert").textContent).toContain("clip.mp4");
+  expect(outcome()).toBe("Applied Photo to 1 image. 1 video kept its settings.");
   fireEvent.click(screen.getByRole("button", { name: "Select clip.mp4" }));
   expect(screen.getByRole("button", { name: "MP4" }).className).toContain("bg-accent");
 });
@@ -180,13 +184,14 @@ it.each(["convert", "compress"] as const)("%s keeps safe metadata choices visibl
   expect(within(metadata).getByRole("button", { name: "Remove personal data" }).getAttribute("aria-disabled")).toBe("true");
 });
 
-it("Compress rejects mixed-source RemovePersonal preset and Apply first atomically", async () => {
+it("Compress rejects mixed-source RemovePersonal preset and Apply atomically", async () => {
   mocks.open.mockResolvedValue(["/a.jpg", "/b.png"]);
   mocks.inspect.mockImplementation((path: string) => Promise.resolve(inspect(false, path.endsWith("png") ? "png" : "jpeg")));
   mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 30 }, metadata_policy: "remove_personal" };
-  render(<MemoryRouter><CompressPage /></MemoryRouter>);
+  render(compressPage());
   fireEvent.click(screen.getByRole("button", { name: "Add files" }));
   await screen.findByRole("button", { name: "Select b.png" });
+  await compressSeeded("/a.jpg", "/b.png");
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
   expect(screen.getByRole("alert").textContent).toContain("b.png");
   fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
@@ -195,7 +200,7 @@ it("Compress rejects mixed-source RemovePersonal preset and Apply first atomical
 
   fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
   fireEvent.click(screen.getByRole("button", { name: "Remove personal data" }));
-  fireEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
   expect(screen.getByRole("alert").textContent).toContain("b.png");
   fireEvent.click(screen.getByRole("button", { name: "Select b.png" }));
   expect(screen.getByText("Output: PNG")).toBeTruthy();
@@ -245,7 +250,7 @@ it("refuses image preset application until every source inspection is ready", as
   mocks.inspect.mockImplementation((path: string) => path === "/b.jpg" ? new Promise(r => { resolve = r; }) : Promise.resolve(inspect()));
   render(page()); await add(["/a.jpg", "/b.jpg"]);
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
-  expect(screen.getByRole("alert").textContent).toContain("b.jpg: Inspecting");
+  expect(screen.getByRole("alert").textContent).toBe("Wait for every file to finish inspecting.");
   expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("75");
   await act(async () => resolve(inspect()));
 });
@@ -267,7 +272,7 @@ it("large fit boxes preserve original small output without treating the box area
 });
 it("JPEG presets copy independent nested settings to each compatible source", async () => {
   mocks.preset = preset(); render(page()); await add(["/a.jpg", "/b.jpg"]);
-  await waitFor(() => expect(disabled("Apply first to all")).toBe(false));
+  await waitFor(() => expect(disabled("Apply to all 2")).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Image width" }), { target: { value: "512" } });
   fireEvent.click(screen.getByRole("button", { name: "Convert 2 files" }));
@@ -470,7 +475,7 @@ it("refuses an unsupported alpha row atomically by source name", async () => {
   expect(screen.getByRole("button", {name:"White"}).getAttribute("aria-pressed")).toBe("false");
 });
 
-it("copies independent alpha backgrounds through Apply first to all", async () => {
+it("copies independent alpha backgrounds through Apply to all", async () => {
   mocks.preset = preset(null);
   mocks.preset.image_color_policy = "convert_to_srgb";
   mocks.preset.image_alpha_policy = {kind:"flatten",background:{red:255,green:255,blue:255}};
@@ -479,7 +484,7 @@ it("copies independent alpha backgrounds through Apply first to all", async () =
   const custom = screen.getByRole("textbox", {name:"Custom background"});
   fireEvent.change(custom, {target:{value:"#112233"}});
   fireEvent.keyDown(custom, {key:"Enter"});
-  fireEvent.click(screen.getByRole("button", {name:"Apply first to all"}));
+  fireEvent.click(screen.getByRole("button", {name:"Apply to all 2"}));
   fireEvent.click(screen.getByRole("button", {name:"Black"}));
   fireEvent.click(screen.getByRole("button", {name:"Convert 2 files"}));
   await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
@@ -498,7 +503,7 @@ it("blocks every effective action while custom background text differs from the 
   mocks.preview.mockImplementation(async request => ({...request,kind:"image",before_path:"/before.png",after_path:"/white.png",width:160,height:100,sample_bytes:100}));
   expect(disabled("Convert 2 files")).toBe(false);
   expect(disabled("Save as preset")).toBe(false);
-  expect(disabled("Apply first to all")).toBe(false);
+  expect(disabled("Apply to all 2")).toBe(false);
   fireEvent.click(await enabledPreview());
   await screen.findByAltText("Output sample");
   const displayedRequest = mocks.preview.mock.calls[0][0];
@@ -508,7 +513,7 @@ it("blocks every effective action while custom background text differs from the 
   expect((custom as HTMLInputElement).value).toBe("#12zz34");
   expect(disabled("Convert 2 files")).toBe(true);
   expect(disabled("Save as preset")).toBe(true);
-  expect(disabled("Apply first to all")).toBe(true);
+  expect(disabled("Apply to all 2")).toBe(true);
   expect(disabled("Preview sample")).toBe(true);
   expect(screen.queryByAltText("Output sample")).toBeNull();
   expect(mocks.previewCancel).toHaveBeenCalledWith(displayedRequest.request_id);
@@ -519,7 +524,7 @@ it("blocks every effective action while custom background text differs from the 
   fireEvent.keyDown(custom, {key:"Enter"});
   expect(disabled("Convert 2 files")).toBe(false);
   expect(disabled("Save as preset")).toBe(false);
-  expect(disabled("Apply first to all")).toBe(false);
+  expect(disabled("Apply to all 2")).toBe(false);
   expect(await enabledPreview()).toBeTruthy();
 });
 
@@ -617,4 +622,316 @@ it("describes legacy null StripAll without promising upright output geometry fro
   fireEvent.click(screen.getByRole("button", { name: "Convert 1 file" }));
   await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
   expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({ image_options: null, metadata_policy: "strip_all" });
+});
+
+type StoredRow = { path: string; revision: number; target: string; optionsReady?: boolean; batch?: { id: string; label: string; revision: number } };
+const stored = (tool: "convert" | "compress" = "convert") => draftEntries[JSON.stringify([tool, tool === "convert" ? "ConvertPage.files" : "CompressPage.files"])].value as StoredRow[];
+const row = (path: string) => stored().find(file => file.path === path)!;
+const seeded = (...paths: string[]) => waitFor(() => paths.forEach(path => expect(row(path).optionsReady).toBe(true)));
+const slots = () => new Set(Object.keys(draftEntries).map(key => (JSON.parse(key) as string[]).at(-1)!));
+/** Encodes the live drafts and reads them back through the strict v2 loader. */
+const strictReload = () => {
+  const values = new Map([[DRAFT_STORAGE_KEY, encodeDraftEntries(draftEntries as never)]]);
+  return loadDraftEntriesOutcome({ getItem: (key: string) => values.get(key) ?? null, setItem: () => {} } as unknown as Storage).kind;
+};
+/** Several controls already own a status region, so the outcome is found by its words. */
+const outcome = () => {
+  const node = screen.queryByText(/^Applied /);
+  if (node) expect(node.closest("[role=status]")).not.toBeNull();
+  return node?.textContent ?? null;
+};
+
+const tag = (name: string) => within(screen.getByRole("button", { name: `Select ${name}` }).closest("li")!);
+/** What a screen reader hears after a row's name: the button's aria-describedby text. */
+const description = (name: string) => (screen.getByRole("button", { name: `Select ${name}` }).getAttribute("aria-describedby") ?? "")
+  .split(" ").filter(Boolean).map(id => document.getElementById(id)?.textContent ?? "").join(" ");
+async function typeQuality(value: string) {
+  const user = userEvent.setup();
+  await user.clear(screen.getByRole("textbox", { name: "JPEG quality" }));
+  await user.type(screen.getByRole("textbox", { name: "JPEG quality" }), value);
+  await user.tab();
+}
+
+describe("mixed batches in Convert", () => {
+  it("tags rows, flags an edit and restores batch settings", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(tag("a.jpg").getByText("Batch")).toBeTruthy(); expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 90 · Fit 2048 × 2048")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    await typeQuality("70");
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy(); expect(tag("a.jpg").getByText("Batch")).toBeTruthy();
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 70 · Fit 2048 × 2048")).toBeTruthy();
+    expect(screen.getByText("Changed for this file.")).toBeTruthy();
+    const focus = HTMLElement.prototype.focus;
+    const focusedText: string[] = [];
+    const spy = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      focusedText.push(this.textContent ?? ""); focus.call(this, options);
+    });
+    try { fireEvent.click(screen.getByRole("button", { name: "Use batch settings" })); } finally { spy.mockRestore(); }
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    // Focus moves after the re-render, so it lands on the restored words.
+    expect(focusedText).toEqual(["Batch settings from a.jpg."]);
+    expect(document.activeElement?.textContent).toBe("Batch settings from a.jpg.");
+    expect((screen.getByRole("textbox", { name: "JPEG quality" }) as HTMLInputElement).value).toBe("90");
+  });
+  it("keeps a long name to one line in the inspector, with the full text in its title", async () => {
+    const name = `${"a-very-long-batch-label-".repeat(8)}end.jpg`;
+    render(page()); await add([`/${name}`, "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    const editing = screen.getByText(`Editing ${name}`);
+    const status = screen.getByText(`Batch settings from ${name}.`);
+    for (const line of [editing, status]) {
+      expect(line.getAttribute("title")).toBe(line.textContent);
+      expect(line.className).toContain("truncate");
+    }
+  });
+  it("describes each row's tag and settings to screen readers", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(description("b.jpg")).toContain("Batch");
+    expect(description("b.jpg")).toContain("→ JPEG · Quality 90 · Fit 2048 × 2048");
+  });
+  it("announces a repeated outcome again", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    const first = screen.getByText("Applied to all 2 files.");
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(screen.getByText("Applied to all 2 files.")).not.toBe(first);
+  });
+  it("clears the outcome once the list changes", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg", "/c.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 3" }));
+    expect(outcome()).toBe("Applied to all 3 files.");
+    fireEvent.click(screen.getByRole("button", { name: "Remove c.jpg" }));
+    expect(outcome()).toBeNull();
+  });
+  it("keeps tags across a route remount and drops reset when no unedited member is left", async () => {
+    const view = render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    view.unmount(); render(page());
+    expect(await screen.findByText("Batch settings from a.jpg.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    await typeQuality("70");
+    fireEvent.click(screen.getByRole("button", { name: "Remove a.jpg" }));
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Use batch settings" })).toBeNull();
+  });
+  it("leaves settings that do not apply to a row's new format out of its line", async () => {
+    render(page()); await add(["/a.jpg"]);
+    await typeQuality("70");
+    fireEvent.click(screen.getByRole("button", { name: "Remove personal data" }));
+    expect(tag("a.jpg").getByText("→ JPEG · Quality 70 · No personal data")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "PNG" }));
+    expect(tag("a.jpg").getByText(/Image settings are unavailable/)).toBeTruthy();
+    expect(tag("a.jpg").getByText("→ PNG")).toBeTruthy();
+    expect(description("a.jpg")).not.toContain("Quality");
+    expect(description("a.jpg")).not.toContain("No personal data");
+  });
+  it("summarises outputs by format", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(screen.getByText("3 media files · 2 → JPEG · 1 → MP4 · Outputs go beside each source unless you choose a folder.")).toBeTruthy();
+  });
+  it("applies a preset only to the files that can take its format", async () => {
+    mocks.preset = preset(); render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]);
+    await seeded("/a.jpg", "/b.jpg", "/clip.mp4");
+    const clipBefore = row("/clip.mp4");
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(outcome()).toBe("Applied Photo to 2 images. 1 video kept its settings.");
+    expect(row("/clip.mp4")).toEqual(clipBefore);
+    expect(row("/a.jpg").batch?.label).toBe("Photo");
+  });
+  it("refuses a preset no file can take", async () => {
+    mocks.preset = { ...preset(), target: "webp" } as Preset; render(page()); await add(["/a.jpg", "/clip.mp4"]);
+    await seeded("/a.jpg", "/clip.mp4");
+    const before = stored();
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(screen.getByRole("alert").textContent).toBe("None of these files can become WebP.");
+    expect(stored()).toEqual(before);
+  });
+  it("applies the selected file's settings, not the first file's", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]);
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.click(await screen.findByRole("button", { name: "JPEG" })); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Convert 2 files" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+    expect(mocks.enqueue.mock.calls.map(call => call[0].image_options)).toEqual([fit, fit]);
+    for (const [request] of mocks.enqueue.mock.calls) expect(request).not.toHaveProperty("batch");
+  });
+  it("applies to the selected kind only, leaves other rows untouched and writes no new draft slot", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg", "/clip.mp4"]); await setFit();
+    await seeded("/a.jpg", "/b.jpg", "/clip.mp4");
+    const clipBefore = row("/clip.mp4"); const before = slots();
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(outcome()).toBe("Applied to 2 images. 1 other file kept its settings.");
+    expect(row("/clip.mp4")).toEqual(clipBefore);
+    expect(row("/b.jpg").batch).toMatchObject({ label: "a.jpg", revision: row("/b.jpg").revision });
+    expect([...slots()].filter(slot => !before.has(slot))).toEqual([]);
+    expect(strictReload()).toBe("ready");
+  });
+  it("stays all-or-nothing within the scope", async () => {
+    render(page()); await add(["/a.jpg", "/b.png", "/clip.mp4"]); await setFit();
+    await seeded("/b.png", "/clip.mp4");
+    const pngBefore = row("/b.png");
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(screen.getByRole("alert").textContent).toContain("b.png");
+    expect(row("/b.png")).toEqual(pngBefore);
+    expect(outcome()).toBeNull();
+  });
+  it("stays enabled when another file has a problem and fixes it", async () => {
+    render(page()); await add(["/a.jpg", "/b.jpg"]); await setFit();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.click(await screen.findByRole("button", { name: "JPEG" })); await setFit();
+    await userEvent.setup().clear(screen.getByRole("textbox", { name: "Image width" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
+    expect(disabled("Apply to all 2")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    await waitFor(() => expect(disabled("Convert 2 files")).toBe(false));
+  });
+  it("waits for every inspection before Apply", async () => {
+    let release!: (value: ReturnType<typeof inspect>) => void;
+    mocks.inspect.mockImplementation((path: string) => path === "/slow.jpg" ? new Promise(resolve => { release = resolve; }) : Promise.resolve(inspect(false)));
+    render(page());
+    try {
+      await add(["/a.jpg", "/slow.jpg"]);
+      const pending = screen.getByRole("button", { name: "Apply to matching files" }) as HTMLButtonElement;
+      expect(pending.disabled).toBe(true); expect(pending.title).toBe("Wait for every file to finish inspecting.");
+      expect(pending.className).toContain("disabled:opacity-50");
+    } finally {
+      // Inspections run one at a time app-wide; a stuck one would starve later tests.
+      await act(async () => release?.(inspect(false)));
+    }
+    expect(await screen.findByRole("button", { name: "Apply to all 2" })).toBeTruthy();
+  });
+  it("leaves a file whose inspection failed out of the scope", async () => {
+    mocks.inspect.mockImplementation((path: string) => path === "/bad.jpg" ? Promise.reject(new Error("Unreadable")) : Promise.resolve(inspect(false)));
+    render(page()); await add(["/a.jpg", "/b.jpg", "/bad.jpg"]); await setFit();
+    fireEvent.click(await screen.findByRole("button", { name: "Apply to 2 images" }));
+    expect(outcome()).toBe("Applied to 2 images. 1 other file kept its settings.");
+  });
+});
+
+const compressPage = () => <MemoryRouter><CompressPage /><DraftProbe /></MemoryRouter>;
+type StoredCompressRow = { path: string; target: string; revision: number; optionsReady?: boolean; mode: { kind: string; value: number }; batch?: { label: string } };
+const crow = (path: string) => (stored("compress") as unknown as StoredCompressRow[]).find(file => file.path === path)!;
+const compressSeeded = (...paths: string[]) => waitFor(() => paths.forEach(path => expect(crow(path).optionsReady).toBe(true)));
+async function addCompress(paths: string[]) {
+  mocks.open.mockResolvedValue(paths);
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await screen.findByRole("slider", { name: "Compression quality" });
+  await compressSeeded(...paths);
+}
+
+describe("mixed batches in Compress", () => {
+  it("applies the selected file's compression and keeps every file's format", async () => {
+    render(compressPage()); await addCompress(["/a.png", "/b.jpg"]);
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.change(await screen.findByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Compress 2 files" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+    const byPath = Object.fromEntries(mocks.enqueue.mock.calls.map(([request]) => [request.input_path, request]));
+    expect(byPath["/a.png"]).toMatchObject({ target: "png", compress_mode: { kind: "quality", value: 60 } });
+    expect(byPath["/b.jpg"]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 } });
+    for (const [request] of mocks.enqueue.mock.calls) expect(request).not.toHaveProperty("batch");
+  });
+  it("shows the batch's target size again after restoring or reapplying over an emptied field", async () => {
+    mocks.inspect.mockImplementation(() => {
+      const inspected = inspect(false);
+      inspected.capabilities.compression = { quality: true, target_size: true, lossless: false, reason: null };
+      return Promise.resolve(inspected);
+    });
+    render(compressPage()); await addCompress(["/a.jpg", "/b.jpg"]);
+    const size = () => screen.getByRole("spinbutton", { name: "Target size value" }) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    fireEvent.change(size(), { target: { value: "5" } }); fireEvent.blur(size());
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    expect(size().value).toBe("5");
+    fireEvent.change(size(), { target: { value: "" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target size unit" }), { target: { value: "kb" } });
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(size().value).toBe("5");
+    expect((screen.getByRole("combobox", { name: "Target size unit" }) as HTMLSelectElement).value).toBe("mb");
+    expect(Number(crow("/b.jpg").mode.value)).toBe(5 * 1024 * 1024);
+
+    fireEvent.change(size(), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Select a.jpg" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    expect(size().value).toBe("5");
+  });
+  it("keeps a remembered target size when applying another compression mode", async () => {
+    mocks.inspect.mockImplementation(() => {
+      const inspected = inspect(false);
+      inspected.capabilities.compression = { quality: true, target_size: true, lossless: false, reason: null };
+      return Promise.resolve(inspected);
+    });
+    render(compressPage()); await addCompress(["/a.jpg", "/b.jpg"]);
+    const size = () => screen.getByRole("spinbutton", { name: "Target size value" }) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    fireEvent.change(size(), { target: { value: "500" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target size unit" }), { target: { value: "kb" } });
+    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Target size" }));
+    expect(size().value).toBe("500");
+    expect(Number(crow("/a.jpg").mode.value)).toBe(500 * 1024);
+  });
+  it("applies to images only in a mixed batch, and tags and restores like Convert", async () => {
+    render(compressPage()); await addCompress(["/a.png", "/b.jpg", "/clip.mp4"]);
+    const clipBefore = crow("/clip.mp4");
+    fireEvent.change(screen.getByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to 2 images" }));
+    expect(outcome()).toBe("Applied to 2 images. 1 other file kept its settings.");
+    expect(crow("/clip.mp4")).toEqual(clipBefore);
+    expect(tag("b.jpg").getByText("→ JPEG · Quality 60")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+    fireEvent.change(screen.getByRole("slider", { name: "Compression quality" }), { target: { value: "40" } });
+    expect(tag("b.jpg").getByText("Edited")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(tag("b.jpg").getByText("Batch")).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Batch settings from a.png.");
+    expect((screen.getByRole("slider", { name: "Compression quality" }) as HTMLInputElement).value).toBe("60");
+    expect(crow("/b.jpg").target).toBe("jpeg");
+  });
+  it("offers no Apply for subtitle files, which Compress cannot shrink", async () => {
+    const subtitle = inspect(false);
+    Object.assign(subtitle.probe, { source_kind: "subtitle", image_format: null, width: null, height: null });
+    subtitle.capabilities = { targets: [], compression: { quality: false, target_size: false, lossless: false, reason: "Subtitles cannot be compressed." } } as never;
+    mocks.inspect.mockResolvedValue(subtitle);
+    mocks.open.mockResolvedValue(["/a.srt", "/b.srt"]);
+    render(compressPage());
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    expect(await screen.findByRole("button", { name: "Select b.srt" })).toBeTruthy();
+    await waitFor(() => expect(screen.queryAllByText("Inspecting source…")).toEqual([]));
+    expect(screen.queryByRole("button", { name: /^Apply to/ })).toBeNull();
+  });
+  it("saves a preset from the selected file, not the first", async () => {
+    const { useAppStore } = await import("@/store/appStore");
+    const originalSave = useAppStore.getState().savePreset;
+    const savePreset = vi.fn().mockResolvedValue(null);
+    useAppStore.setState({ savePreset });
+    try {
+      render(compressPage()); await addCompress(["/a.png", "/b.jpg"]);
+      fireEvent.click(screen.getByRole("button", { name: "Select b.jpg" }));
+      fireEvent.change(await screen.findByRole("slider", { name: "Compression quality" }), { target: { value: "60" } });
+      fireEvent.click(screen.getByRole("button", { name: "Remove all" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save as preset" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Preset name" }), { target: { value: "Small JPEG" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(savePreset).toHaveBeenCalledOnce());
+      expect(savePreset.mock.calls[0][0]).toMatchObject({ target: "jpeg", compress_mode: { kind: "quality", value: 60 }, metadata_policy: "strip_all" });
+    } finally { useAppStore.setState({ savePreset: originalSave }); }
+  });
+  it("scopes a Compress preset to the files that can take its format", async () => {
+    mocks.preset = { ...preset(null), compress_mode: { kind: "quality", value: 50 } } as Preset;
+    render(compressPage()); await addCompress(["/a.png", "/clip.mp4"]);
+    fireEvent.click(screen.getByRole("button", { name: "Apply test preset" }));
+    expect(outcome()).toBe("Applied Photo to 1 image. 1 video kept its settings.");
+  });
 });

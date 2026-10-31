@@ -1,5 +1,5 @@
 import { Outlet, useNavigate } from "react-router-dom";
-import { useDraftPersistenceFailed, retryDraftPersistence } from "@/store/workspaceDrafts";
+import { useDraftPersistenceFailed, retryDraftPersistence, useDraftRecoveryAvailable, useDraftRecoveryFailed, recoverSavedDrafts } from "@/store/workspaceDrafts";
 import LeftNav from "./LeftNav";
 import TopBar from "./TopBar";
 import CommandPalette from "./CommandPalette";
@@ -13,6 +13,10 @@ import { useHotkeys } from "@/hooks/useHotkeys";
 export default function Layout() {
   const nav = useNavigate();
   const draftPersistenceFailed = useDraftPersistenceFailed();
+  const draftRecoveryAvailable = useDraftRecoveryAvailable();
+  const draftRecoveryFailed = useDraftRecoveryFailed();
+  // The alert and its focused button go away on success; keep focus in the page.
+  const recoverDrafts = () => { if (recoverSavedDrafts()) document.getElementById("main")?.focus(); };
   useTheme();
   useQueueHotkey();
   useHotkeys();
@@ -23,7 +27,7 @@ export default function Layout() {
       <TopBar
         onSubmit={(url) => nav(`/extract?url=${encodeURIComponent(url)}`)}
       />
-      {draftPersistenceFailed && <div role="alert" className="px-4 py-2 text-sm text-warning">Unfinished edits could not be saved for restart. <button onClick={retryDraftPersistence} className="underline">Try again</button></div>}
+      {draftPersistenceFailed && <div role="alert" className="px-4 py-2 text-sm text-warning">Unfinished edits could not be saved for restart. <button onClick={retryDraftPersistence} className="underline">Try again</button>{draftRecoveryAvailable && <> Some saved edits can&apos;t be read. <button onClick={recoverDrafts} className="underline">Back up and recover what can be read</button>{draftRecoveryFailed && " Nothing was recovered."}</>}</div>}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <LeftNav />
         <div className="workspace-column">

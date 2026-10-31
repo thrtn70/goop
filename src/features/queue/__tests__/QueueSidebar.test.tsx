@@ -19,7 +19,7 @@ const job = { id: "queued-one", kind: "convert", state: "queued", payload: {}, r
 
 beforeEach(() => {
   useAppStore.setState({ jobs: [job], unseenCompletions: 1, progressById: {}, patchSettings: patch,
-    ui: { queueCollapsed: true, queueSelectedIds: new Set(), doneToday: 0 } });
+    ui: { queueCollapsed: true, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 0 } });
   patch.mockClear();
   navigate.mockClear();
 });
@@ -73,7 +73,7 @@ describe("bottom queue", () => {
         state: "done",
         result: { output_path: "/tmp/movie.mp4", result_kind: "file", file_count: 1, bytes: 1n, duration_ms: 1n },
       } as Job],
-      ui: { queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 1 },
+      ui: { queueCollapsed: false, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 1 },
     });
     render(<QueueSidebar />);
     fireEvent.click(screen.getByRole("button", { name: "Job done-one" }));
@@ -141,7 +141,7 @@ describe("bottom queue", () => {
     expect(Number(grip.getAttribute("aria-valuenow"))).toBe(initial - 50);
   });
   it("retains two-step selected cancellation and Escape dismissal", () => {
-    useAppStore.setState({ui: {queueCollapsed: false, queueSelectedIds: new Set([job.id]), doneToday: 0}});
+    useAppStore.setState({ui: {queueCollapsed: false, playerCollapsed: false, queueSelectedIds: new Set([job.id]), doneToday: 0}});
     render(<QueueSidebar />);
     fireEvent.click(screen.getByRole("button", {name: "Cancel selected"}));
     expect(screen.getByText("Cancel 1 job?")).toBeTruthy();
@@ -149,7 +149,7 @@ describe("bottom queue", () => {
     fireEvent.keyDown(window, {key: "Escape"});
     expect(screen.queryByRole("button", {name: "Yes, cancel"})).toBeNull();
     fireEvent.click(screen.getByRole("button", {name: "Cancel selected"}));
-    act(() => useAppStore.setState({ui: {queueCollapsed: false, queueSelectedIds: new Set(), doneToday: 0}}));
+    act(() => useAppStore.setState({ui: {queueCollapsed: false, playerCollapsed: false, queueSelectedIds: new Set(), doneToday: 0}}));
     expect(screen.queryByRole("button", {name: "Yes, cancel"})).toBeNull();
     expect(api.queue.cancelMany).not.toHaveBeenCalled();
   });

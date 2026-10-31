@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  admitDraftEntries,
   decodeDraftEntries,
   DRAFT_STORAGE_KEY,
   encodeDraftEntries,
@@ -159,6 +160,25 @@ describe("durable editable drafts", () => {
     expect(reads).toEqual([DRAFT_STORAGE_KEY]);
   });
 
+  const oversizedEntries = { [key("ImagePage.files")]: { value: ["x".repeat(600 * 1024)] } };
+  it.each([
+    ["a newer version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, entries: oversizedEntries }), "future"],
+    ["a newer version first, over the limit only in bytes", DRAFT_STORAGE_KEY, JSON.stringify({ version: 3, entries: { [key("ImagePage.files")]: { value: ["€".repeat(200 * 1024)] } } }), "future"],
+    ["a newer version after the entries", DRAFT_STORAGE_KEY, JSON.stringify({ entries: oversizedEntries, version: 3 }), "future"],
+    ["a newer version in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "future"],
+    ["the current version too far from the start", DRAFT_STORAGE_KEY, `{${" ".repeat(64)}${JSON.stringify({ version: 2, entries: oversizedEntries }).slice(1)}`, "future"],
+    ["no envelope", DRAFT_STORAGE_KEY, "x".repeat(600 * 1024), "future"],
+    ["the current version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, entries: oversizedEntries }), "malformed"],
+    ["an older version first", DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+    ["the older version first in the older slot", LEGACY_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, entries: oversizedEntries }), "malformed"],
+  ] as const)("protects saved drafts over the size limit that hold %s", (_label, storageKey, raw, reason) => {
+    const outcome = loadDraftEntriesOutcome({
+      getItem: candidate => candidate === storageKey ? raw : null,
+      setItem: () => { throw new Error("must not write"); },
+    });
+    expect(outcome).toEqual({ kind: "protected", reason });
+  });
+
   it("protects v2 when a known slot is invalid instead of silently erasing it", () => {
     const invalid = JSON.stringify({ version: 2, entries: {
       [key("ImageRotateFlow.degrees")]: { value: "cw90" },
@@ -169,6 +189,28 @@ describe("durable editable drafts", () => {
     } });
     expect(loadDraftEntriesOutcome({ getItem: () => invalid, setItem: () => undefined }))
       .toEqual({ kind: "protected", reason: "malformed" });
+  });
+
+  it("restores a remembered Compress quality and protects one that is not a number", () => {
+    const slot = JSON.stringify(["compress", "source", "/a.jpg", "CompressControls.lastQuality"]);
+    const load = (value: unknown) => {
+      const raw = JSON.stringify({ version: 2, entries: { [slot]: { value } } });
+      return loadDraftEntriesOutcome({ getItem: () => raw, setItem: () => undefined });
+    };
+    expect(load(63)).toEqual({ kind: "ready", entries: { [slot]: { value: 63 } } });
+    expect(load("63")).toEqual({ kind: "protected", reason: "malformed" });
+    expect(load(null)).toEqual({ kind: "protected", reason: "malformed" });
+  });
+
+  it("restores PDF page drafts with the rotations page cards write and protects any other", () => {
+    const slot = JSON.stringify(["compress", "pdf", "/doc.pdf", "PdfRotateFlow.pages"]);
+    const load = (rotation: unknown) => {
+      const raw = JSON.stringify({ version: 2, entries: { [slot]: { value: [{ originalPage: 1, deleted: false, rotation }] } } });
+      return loadDraftEntriesOutcome({ getItem: () => raw, setItem: () => { throw new Error("strict v2 load must not write"); } });
+    };
+    for (const rotation of [null, "cw90", "cw180", "cw270"]) expect(load(rotation).kind).toBe("ready");
+    // The old numeric degrees, an unknown turn, and a missing field (JSON drops undefined).
+    for (const rotation of [0, 90, "cw45", undefined]) expect(load(rotation)).toEqual({ kind: "protected", reason: "malformed" });
   });
 
   it("does not inspect v1 when the v2 read itself fails", () => {
@@ -183,6 +225,53 @@ describe("durable editable drafts", () => {
     });
     expect(outcome).toEqual({ kind: "protected", reason: "read_error" });
     expect(reads).toEqual([DRAFT_STORAGE_KEY]);
+  });
+});
+
+// Every entry is admissible on its own; together they pass the 500-entry limit.
+const overEntryLimit = Object.fromEntries(Array.from({ length: 501 }, (_, i) =>
+  [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
+
+describe("write-side admission", () => {
+  const valid = key("ImageRotateFlow.degrees");
+  const refused = {
+    unknownSlot: key("Runtime.promise"),
+    tooManyKeyParts: JSON.stringify(["compress", "pdf", ...Array.from({ length: 18 }, (_, i) => `/doc-${i}.pdf`), "PdfFlow.op"]),
+    longKeyPart: JSON.stringify(["extract", "source", "x".repeat(4097), "UrlHero.lastUrl"]),
+    longList: key("ImagePage.files"),
+    longText: JSON.stringify(["recognize", "RecognizePage.input"]),
+    unsafeNumber: key("ImageResizeFlow.width"),
+  };
+  const entries = {
+    [valid]: { value: "cw90" },
+    [refused.unknownSlot]: { value: {} },
+    [refused.tooManyKeyParts]: { value: "merge" },
+    [refused.longKeyPart]: { value: "https://example.com/video" },
+    [refused.longList]: { value: Array.from({ length: 1001 }, (_, i) => `/photo-${i}.png`) },
+    [refused.longText]: { value: "x".repeat(65537) },
+    [refused.unsafeNumber]: { value: 0x20_0000_0000_0000n },
+  };
+
+  it("names every entry a strict load would refuse and admits the rest", () => {
+    const { admitted, skipped } = admitDraftEntries(entries);
+    expect(admitted).toEqual({ [valid]: { value: "cw90" } });
+    expect(skipped).toEqual(Object.values(refused));
+  });
+
+  it("saves only admissible entries, so the saved store always loads strictly", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    expect(persistDraftEntries(storage, entries, NOOP_RESPONSIVENESS_RECORDER).ok).toBe(true);
+    expect(loadDraftEntriesOutcome(storage)).toEqual({ kind: "ready", entries: { [valid]: { value: "cw90" } } });
+  });
+
+  it("drops a previously saved value once its entry becomes inadmissible", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    const files = key("ImagePage.files");
+    expect(saveDraftEntries(storage, { [files]: { value: ["/a.png"] } })).toBe(true);
+    expect(saveDraftEntries(storage, { [files]: { value: Array.from({ length: 1001 }, (_, i) => `/p-${i}.png`) } })).toBe(true);
+    expect(loadDraftEntriesOutcome(storage)).toEqual({ kind: "ready", entries: {} });
   });
 });
 
@@ -217,12 +306,12 @@ describe("instrumented draft persistence", () => {
     let writes = 0;
     const result = persistDraftEntries(
       { getItem: () => null, setItem: () => { writes += 1; } },
-      { [key("test.value")]: { value: 0x20_0000_0000_0000n } },
+      overEntryLimit,
       recorder,
     );
     expect(result).toEqual({ ok: false, phase: "encode" });
     expect(writes).toBe(0);
-    expect(JSON.stringify(result)).not.toContain("Draft number");
+    expect(JSON.stringify(result)).not.toContain("storage limit");
     expect(calls).toEqual([
       ["startSetup", "workspace_drafts"],
       ["startSpan", "draft_encode"],
@@ -345,6 +434,31 @@ describe("JPEG draft persistence", () => {
   ])("drops malformed alpha policy drafts: %j", (imageAlphaPolicy) => {
     const entries = { [fileKey]: { value: [{ ...file, imageAlphaPolicy }] } };
     expect(decodeDraftEntries(encodeDraftEntries(entries))).toEqual({});
+  });
+  it("keeps a well-formed batch stamp through a strict v2 restart", () => {
+    const stamped = { ...file, batch: { id: "s1", label: "Web Image", revision: 2 } };
+    const values = new Map<string, string>();
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+    expect(saveDraftEntries(storage as Storage, { [fileKey]: { value: [stamped] } })).toBe(true);
+    const outcome = loadDraftEntriesOutcome(storage as Storage);
+    expect(outcome.kind).toBe("ready");
+    expect((outcome as { entries: Record<string, { value: Array<{ batch?: unknown }> }> }).entries[fileKey].value[0].batch).toEqual(stamped.batch);
+  });
+  it("drops only a malformed batch stamp and keeps the file and the store", () => {
+    for (const batch of [{ id: "", label: "x", revision: 1 }, { id: "s", label: "l".repeat(257), revision: 1 }, { id: "s", label: "x", revision: -1 }, "stamp"]) {
+      const values = new Map<string, string>();
+      const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { values.set(k, v); } };
+      values.set(DRAFT_STORAGE_KEY, encodeDraftEntries({ [fileKey]: { value: [{ ...file, batch }] } }));
+      const outcome = loadDraftEntriesOutcome(storage as Storage);
+      expect(outcome.kind).toBe("ready");
+      const restored = (outcome as { entries: Record<string, { value: Array<Record<string, unknown>> }> }).entries[fileKey].value[0];
+      expect("batch" in restored).toBe(false);
+      expect(restored.imageOptions).toEqual(file.imageOptions);
+    }
+  });
+  it("adds no batch key to an entry that never had one", () => {
+    const restored = decodeDraftEntries(encodeDraftEntries({ [fileKey]: { value: [file] } }))[fileKey].value as Array<Record<string, unknown>>;
+    expect("batch" in restored[0]).toBe(false);
   });
 });
 

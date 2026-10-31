@@ -9,7 +9,8 @@ import type { PreviewRequest, PreviewResult, ProbeResult, Settings, Preset } fro
 
 // --- Mocks ---
 
-const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease, responsiveness } = vi.hoisted(() => ({
+const { mockProbe, mockFromFile, mockOpen, mockSave, mockVideoPlan, mockAudioPlan, mockPreviewBegin, mockPreviewEligibility, mockPreviewGenerate, mockPreviewCancel, mockPreviewRelease, responsiveness, sourcePlayer } = vi.hoisted(() => ({
+  sourcePlayer: { throws: false },
   mockVideoPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},video_codec:"h264",video_stream_index:0,audio_stream_index:1,audio_codec:"aac",audio_copied:true,width:1920,height:1080,notices:["Color tags are unspecified"]}),
   mockAudioPlan: vi.fn().mockResolvedValue({requested:{kind:"copy"},encoder:null,codec:"aac",audio_stream_index:1,copied:true,sample_rate_hz:48000,channels:2,channel_layout:"stereo",sample_format:null,bit_depth:null,reported_bitrate_kbps:192,notices:[]}),
   mockProbe: vi.fn(),
@@ -91,6 +92,7 @@ vi.mock("@/ipc/commands", () => ({
                       ]
                     : []),
                 ];
+        const noHardware = path.startsWith("/tmp/no-hardware");
         return {
           probe: p,
           capabilities: {
@@ -146,7 +148,7 @@ vi.mock("@/ipc/commands", () => ({
                 codecs:[{codec:"h264",encoder:"libx264",available:true},{codec:"hevc",encoder:"libx265",available:true}],
                 crf_min:1,crf_max:51,default_crf:23,bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                 speeds:["fast","medium","slow"],default_speed:"medium",processor:"software",preview_available:false,preview_unavailable_reason:"Explicit video samples are unavailable."
-                ,hardware:{available:path !== "/tmp/no-hardware.mp4" && !(path === "/tmp/target-loss.mp4" && target === "mov"),reason:path === "/tmp/no-hardware.mp4" || (path === "/tmp/target-loss.mp4" && target === "mov") ? "Hardware session unavailable" : null,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
+                ,hardware:{available:!noHardware && !(path === "/tmp/target-loss.mp4" && target === "mov"),reason:noHardware || (path === "/tmp/target-loss.mp4" && target === "mov") ? "Hardware session unavailable" : null,codec:"h264",bitrate_min_kbps:100,bitrate_max_kbps:200000,default_bitrate_kbps:5000,
                   resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}},
                   frame_rate:{available:true,default:{kind:"preserve"},constant_choices:[{frame_rate:{kind:"constant",numerator:24000,denominator:1001},label:"23.976 fps"}]}}
                 ,resize:{available:true,min_dimension:2,max_dimension:32768,no_enlargement:true,default:{kind:"original"}}
@@ -226,6 +228,18 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `asset://${path}`,
+}));
+
+vi.mock("@tauri-apps/api/path", () => ({
+  homeDir: () => Promise.resolve("/tmp"),
+}));
+
+// The real player is covered on its own; here it only has to show up, or fall over on demand.
+vi.mock("@/features/player/SourcePlayer", () => ({
+  default: ({ path }: { path: string }) => {
+    if (sourcePlayer.throws) throw new Error("player exploded");
+    return <div data-testid="source-player">{path}</div>;
+  },
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -385,6 +399,9 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+/** The row list item for a staged source, for its Batch or Edited tag. */
+const row = (name: string) => within(screen.getByRole("button",{name:`Select ${name}`}).closest("li")!);
 
 // --- Tests ---
 
@@ -674,8 +691,8 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "M4A" }));
     await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "copy");
     await userEvent.click(screen.getByRole("radio", { name: /main/i }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Apply first to all" })).toHaveProperty("disabled", false));
-    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to all 2" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
 
     await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
     expect(screen.getByLabelText("Audio processing")).toHaveProperty("value", "copy");
@@ -790,6 +807,41 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Select first.mkv" }));
     expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
     expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", true);
+  });
+
+  it("keeps the row's own audio track when restoring batch settings that leave tracks to each file", async () => {
+    clearWorkspaceDrafts("convert");
+    mockOpen.mockResolvedValue(["/tmp/first.mkv", "/tmp/second.mkv"]);
+    mockProbe.mockResolvedValue(multiTrackProbe);
+    useAppStore.setState({ presets: [] });
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => expect(screen.getByText("first.mkv")).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "M4A" }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio processing"), "encode");
+    await userEvent.click(screen.getByRole("radio", { name: /main/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to all 2" })).toHaveProperty("disabled", false));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
+    expect(row("second.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("checked", true);
+
+    await userEvent.selectOptions(screen.getByLabelText("Audio channels"), "mono");
+    expect(row("first.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(row("first.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("Audio channels")).toHaveProperty("value", "preserve");
+    expect(screen.getByRole("radio", { name: /main/i })).toHaveProperty("checked", true);
+
+    // The other row restores from the apply source, which holds first.mkv's own track.
+    await userEvent.click(screen.getByRole("button", { name: "Select second.mkv" }));
+    await userEvent.click(screen.getByRole("radio", { name: /commentary/i }));
+    await userEvent.selectOptions(screen.getByLabelText("Audio channels"), "mono");
+    expect(row("second.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use batch settings" }));
+    expect(row("second.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("Audio channels")).toHaveProperty("value", "preserve");
+    expect(screen.getByRole("radio", { name: /commentary/i })).toHaveProperty("checked", true);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Convert 2 files" })).toHaveProperty("disabled", false));
   });
 
   it("shows error state with retry on probe failure", async () => {
@@ -1012,7 +1064,7 @@ describe("ConvertPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Select a.mp4" }));
     await userEvent.click(screen.getByRole("button", { name: "GIF" }));
     await userEvent.click(
-      screen.getByRole("button", { name: /apply first to all/i }),
+      screen.getByRole("button", { name: "Apply to all 2" }),
     );
     await userEvent.click(
       screen.getByRole("button", { name: /convert 2 files/i }),
@@ -1042,6 +1094,17 @@ describe("ConvertPage", () => {
       "bg-accent",
     );
     expect(screen.getByRole("button", { name: "SRT" })).toBeDefined();
+  });
+
+  it("offers Apply across a batch of subtitle files", async () => {
+    mockOpen.mockResolvedValue(["/tmp/a.srt", "/tmp/b.srt"]);
+    mockProbe.mockResolvedValue(srtProbe);
+    renderPage();
+
+    await userEvent.click(screen.getByText(/pick from your computer/i));
+    await waitFor(() => expect(screen.getByText("b.srt")).toBeDefined());
+
+    expect(await screen.findByRole("button", { name: "Apply to all 2" })).toBeDefined();
   });
 
   it("removes file row when remove is clicked", async () => {
@@ -1654,6 +1717,75 @@ describe("explicit video inspector", () => {
     expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button",{name:"Convert 1 file"})).toHaveProperty("disabled",true);
   });
+  it("restores an unavailable Hardware required batch setting onto an edited row", async () => {
+    mockOpen.mockResolvedValue(["/tmp/no-hardware.mp4","/tmp/no-hardware-2.mp4"]);
+    useAppStore.setState({presets:[{
+      id:"hardware",name:"Required H.264",target:"mp4",
+      video_options:{kind:"hardware_encode",codec:"h264",hardware_policy:{kind:"required"},rate_control:{kind:"average_bitrate",kbps:6000}} as never,
+      quality_preset:null,resolution_cap:null,compress_mode:null,is_builtin:false,created_at:0n,
+    }]});
+    await stage();
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Required H.264"}));
+    await userEvent.click(screen.getByRole("button",{name:"Select no-hardware-2.mp4"}));
+    await userEvent.selectOptions(screen.getByLabelText("Processor"),"software");
+    expect(row("no-hardware-2.mp4").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("no-hardware-2.mp4").getByText("Batch")).toBeTruthy();
+    expect(screen.queryByText(/Settings were not applied/)).toBeNull();
+    expect(screen.getByLabelText("Processor")).toHaveProperty("value","hardware_required");
+    expect(screen.getByLabelText("Hardware bitrate (kbps)")).toHaveProperty("value","6000");
+    expect(screen.getAllByText(/Hardware session unavailable/).length).toBeGreaterThan(0);
+  });
+  it("keeps the row's own chosen video streams when restoring batch settings", async () => {
+    mockOpen.mockResolvedValue(["/tmp/multi-video.mkv","/tmp/multi-video-2.mkv"]);
+    mockProbe.mockResolvedValue(multiVideoProbe);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await userEvent.click(screen.getByRole("radio",{name:"Choose audio streams"}));
+    await userEvent.click(screen.getByRole("checkbox",{name:/Commentary/}));
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
+    expect(row("multi-video-2.mkv").getByText("Batch")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"30"}});
+    expect(row("multi-video.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Commentary/})).toHaveProperty("checked",false);
+
+    // Keep all subtitles is copied to every row, so restore takes it from the batch.
+    await userEvent.click(screen.getByRole("radio",{name:"None subtitle streams"}));
+    expect(row("multi-video.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByRole("radio",{name:"Keep all subtitle streams"})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",true);
+
+    // The other row chooses its own stream, then restores from the apply source.
+    await userEvent.click(screen.getByRole("button",{name:"Select multi-video-2.mkv"}));
+    await userEvent.click(screen.getByRole("checkbox",{name:/Commentary/}));
+    fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"30"}});
+    expect(row("multi-video-2.mkv").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("multi-video-2.mkv").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+    expect(screen.getByRole("checkbox",{name:/Commentary/})).toHaveProperty("checked",true);
+    expect(screen.getByRole("checkbox",{name:/Main/})).toHaveProperty("checked",false);
+  });
+  it("marks a batch row Edited when its rate text changes, so restore copies only applied values", async () => {
+    mockOpen.mockResolvedValue(["/tmp/first.mp4","/tmp/second.mp4"]);
+    await stage();
+    await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
+    await waitFor(() => expect(screen.getByRole("button",{name:"Apply to all 2"})).toHaveProperty("disabled",false));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
+    await userEvent.clear(screen.getByLabelText("CRF"));
+    expect(row("first.mp4").getByText("Edited")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Use batch settings"}));
+    expect(row("first.mp4").getByText("Batch")).toBeTruthy();
+    expect(screen.getByLabelText("CRF")).toHaveProperty("value","23");
+  });
   it("retains committed Hardware required intent when the selected target loses capability", async () => {
     mockOpen.mockResolvedValue(["/tmp/target-loss.mp4"]);
     await stage();
@@ -1678,7 +1810,7 @@ describe("explicit video inspector", () => {
   it("validates every batch source before applying and clones compatible rows", async () => {
     mockOpen.mockResolvedValue(["/tmp/test-video.mp4","/tmp/unsupported.mp4"]);
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     expect(screen.getByText(/Settings were not applied/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button",{name:"Select unsupported.mp4"}));
     expect(screen.getByLabelText("Processing")).toHaveProperty("value","automatic");
@@ -1688,7 +1820,7 @@ describe("explicit video inspector", () => {
     mockProbe.mockResolvedValue(multiVideoProbe);
     await stage();
     await userEvent.selectOptions(screen.getByLabelText("Processing"), "copy");
-    await userEvent.click(screen.getByRole("button", { name: "Apply first to all" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply to all 2" }));
     expect(screen.getByText(/Settings were not applied.*Not every audio stream can be copied/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Select unsupported-tracks.mkv" }));
     expect(screen.getByLabelText("Processing")).toHaveProperty("value", "automatic");
@@ -1760,7 +1892,7 @@ describe("explicit video inspector", () => {
     await userEvent.selectOptions(screen.getByLabelText("Dimensions"),"fit_within");
     fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"1280"}});
     await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"24/1");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     fireEvent.change(screen.getByLabelText("CRF"),{target:{value:"19"}});
     fireEvent.change(screen.getByLabelText("Maximum width"),{target:{value:"640"}});
     await userEvent.selectOptions(screen.getByLabelText("Frame rate"),"60/1");
@@ -1850,7 +1982,7 @@ describe("explicit video inspector", () => {
       .mockImplementationOnce(()=>new Promise((_r,fail)=>{reject=fail;}));
     mockOpen.mockResolvedValue(["/tmp/a.mp4","/tmp/b.mp4"]);
     await stage(); await userEvent.selectOptions(screen.getByLabelText("Processing"),"encode");
-    await userEvent.click(screen.getByRole("button",{name:"Apply first to all"}));
+    await userEvent.click(screen.getByRole("button",{name:"Apply to all 2"}));
     await waitFor(()=>expect(mockVideoPlan).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("button",{name:"Convert 2 files"})).toHaveProperty("disabled",true);
     const area=screen.getByRole("region",{name:"Video processing plans"});
@@ -1901,5 +2033,89 @@ describe("explicit video inspector", () => {
     resolve("/tmp/out.mp4"); await waitFor(()=>expect(mockFromFile).toHaveBeenCalled());
     expect(mockFromFile.mock.calls[0][0]).toMatchObject({quality_preset:null,video_options:{kind:"encode",codec:"h264",rate_control:{kind:"constant_quality",crf:23},speed:"medium",processor:"software"}});
     expect(screen.getByLabelText("CRF")).toHaveProperty("value","31");
+  });
+});
+
+describe("media player slot", () => {
+  const convertButton = () => screen.getByRole("button", { name: /^Convert \d+ files?$/ }) as HTMLButtonElement;
+  const slot = () => document.querySelector(".workspace-inspector-media");
+  const setPlayerSetting = (media_player_enabled: boolean | null) =>
+    useAppStore.setState({ settings: media_player_enabled === null ? null : ({ media_player_enabled } as Settings) });
+  async function stage() {
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await screen.findByLabelText("Processing");
+    await waitFor(() => expect(convertButton().disabled).toBe(false));
+  }
+  beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    clearWorkspaceDrafts("convert");
+    sourcePlayer.throws = false;
+    useAppStore.setState({ presets: [], settings: null });
+    mockOpen.mockResolvedValue(["/tmp/test-video.mp4"]);
+    mockProbe.mockResolvedValue(mp4Probe);
+    mockSave.mockResolvedValue("/tmp/out.mp4");
+    mockFromFile.mockResolvedValue("job");
+  });
+  afterEach(() => {
+    cleanup();
+    sourcePlayer.throws = false;
+    useAppStore.setState({ settings: null });
+  });
+
+  it("adds no media element at all while the player is off", async () => {
+    setPlayerSetting(false);
+    await stage();
+    expect(slot()).toBeNull();
+    expect(screen.queryByTestId("source-player")).toBeNull();
+  });
+
+  it("adds none before settings have loaded", async () => {
+    setPlayerSetting(null);
+    await stage();
+    expect(slot()).toBeNull();
+  });
+
+  it("pins the player above the scrolling settings when it is on", async () => {
+    setPlayerSetting(true);
+    await stage();
+    const media = slot();
+    const scroll = document.querySelector(".workspace-inspector-scroll");
+    expect(media).not.toBeNull();
+    expect((await screen.findByTestId("source-player")).textContent).toBe("/tmp/test-video.mp4");
+    expect(media!.contains(screen.getByTestId("source-player"))).toBe(true);
+    expect(media!.compareDocumentPosition(scroll!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(scroll!.contains(media)).toBe(false);
+  });
+
+  it("keeps the settings and the Convert button working when the player throws", async () => {
+    setPlayerSetting(false);
+    await stage();
+    const withPlayerOff = convertButton().disabled;
+    cleanup();
+    clearWorkspaceDrafts("convert");
+
+    // React and the boundary both report the caught error, and jsdom prints it as "Uncaught"; the output is expected here.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const claimExpectedError = (event: ErrorEvent) => {
+      if (event.error?.message === "player exploded") event.preventDefault();
+    };
+    window.addEventListener("error", claimExpectedError);
+    try {
+      sourcePlayer.throws = true;
+      setPlayerSetting(true);
+      await stage();
+      expect(await screen.findByText("Preview unavailable.")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Output settings" })).toBeTruthy();
+      expect(convertButton().disabled).toBe(withPlayerOff);
+
+      await userEvent.click(convertButton());
+      await waitFor(() => expect(mockFromFile).toHaveBeenCalledTimes(1));
+      expect(mockFromFile.mock.calls[0][0]).toMatchObject({ input_path: "/tmp/test-video.mp4" });
+    } finally {
+      window.removeEventListener("error", claimExpectedError);
+      consoleError.mockRestore();
+    }
   });
 });

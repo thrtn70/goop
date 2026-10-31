@@ -1,7 +1,7 @@
-import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOwnedDirectory, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
+import { createOwnedDirectory, createRunLogs, directoryBytes, removeOwnedDirectory, runBoundedProcess, sha256File, sha256Text, stableStringify, validateCapturedIdentity, withTerminationSignals, writeJsonAtomic } from './performance-shared.mjs';
 import { validateEffectiveExecution, validateMediaProbe } from './performance-manifest.mjs';
 
 const modulePath = fileURLToPath(import.meta.url);
@@ -61,8 +61,13 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
       result = { success: false, error: error.message };
     }
     retainedLogBytes += result?.log_bytes_retained ?? result?.process?.log_bytes_retained ?? 0;
+    // Read before an oversized result is compacted away. A process outside the
+    // owned group held the sample's output pipes after the reap and may still be
+    // running, so this sample is contaminated and no later one can be isolated.
+    const stdioError = result.stdio_error ?? result.process?.stdio_error ?? null;
     const resultBytes = Buffer.byteLength(JSON.stringify(result));
     if (resultBytes > PAIRED_RESULT_LIMIT_BYTES) result = { success: false, result_too_large: true, result_bytes: resultBytes, error: 'Paired adapter result exceeded the retained evidence limit' };
+    if (stdioError !== null) result = { ...result, success: false, stdio_error: stdioError };
     const exceeded = totalLimits ? {
       time: performance.now() - started > totalLimits.suite_timeout_ms,
       storage: directoryBytes(outputDirectory) > totalLimits.suite_storage_budget_bytes,
@@ -84,6 +89,7 @@ export async function collectPairedSamples({ workloadIds, repetitions, outputDir
     writeState();
     if (result.aborted === true) break;
     if (exceeded.time || exceeded.storage || exceeded.log) break;
+    if (stdioError !== null) break;
   }
   state.success = state.samples.length === plan.length && state.samples.every(sample => sample.status === 'success' || sample.status === 'excluded');
   state.status = state.success ? 'complete' : 'failed';
@@ -240,10 +246,13 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
         storageBudgetBytes: Math.min(plan.limits.storage_budget_bytes, step.suite_remaining_storage_bytes),
         abortSignal,
       });
-      writeFileSync(join(runDirectory, 'stdout.log'), processResult.stdout);
-      writeFileSync(join(runDirectory, 'stderr.log'), processResult.stderr);
       const sanitizedProcess = { ...processResult, stdout: undefined, stderr: undefined };
       try {
+        // The child shared this directory, so whatever it left at a log path is
+        // refused rather than followed or truncated. The refusal fails the
+        // sample, which still carries the runner's evidence, held pipes included.
+        const evidenceError = createRunLogs(runDirectory, processResult);
+        if (evidenceError !== null) return { success: false, aborted: processResult.aborted, process: sanitizedProcess, evidence_error: evidenceError, error: `Paired workload logs could not be retained: ${evidenceError}` };
         if (sha256File(revision.command) !== revision.command_sha256) return { success: false, process: sanitizedProcess, error: 'Paired command changed during execution' };
         if (!processResult.success || statSync(resultPath).size > PAIRED_RESULT_LIMIT_BYTES) return { success: false, aborted: processResult.aborted, process: sanitizedProcess, error: 'Paired workload process failed or produced oversized evidence' };
         const result = JSON.parse(readFileSync(resultPath, 'utf8'));
@@ -258,6 +267,11 @@ export async function runPairedPlan({ plan: planInput, outputDirectory, abortSig
   try {
     for (const workloadId of plan.workload_ids) {
       const allSamples = state.samples.filter(sample => sample.workload_id === workloadId);
+      // A suite that stopped early never reached this workload.
+      if (allSamples.length === 0) {
+        comparisons[workloadId] = { success: false, not_run: true, error: 'No paired sample ran; no timing comparison produced' };
+        continue;
+      }
       if (allSamples.some(sample => sample.status !== 'success' && sample.status !== 'excluded')) {
         comparisons[workloadId] = { success: false, error: 'At least one paired sample failed; no timing comparison produced' };
         continue;

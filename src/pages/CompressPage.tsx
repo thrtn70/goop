@@ -1,4 +1,5 @@
 import SettingsPreview from "@/features/preview/SettingsPreview";
+import InspectorPlayer, { useMediaPlayerEnabled } from "@/features/player/InspectorPlayer";
 import WorkspaceFrame from "@/components/workspace/WorkspaceFrame";
 import WorkspaceInspector from "@/components/workspace/WorkspaceInspector";
 import WorkspaceList from "@/components/workspace/WorkspaceList";
@@ -14,8 +15,14 @@ import { claimWorkspaceFilePicker } from "@/store/workspaceDrafts";
 import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
+import { clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useState } from "react";
 import { readHandoff } from "@/features/workspace/handoff";
+import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
+import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
+import { applyButtonLabel, applyOutcome, applyTooltip, compressSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
+import BatchInspectorStatus from "@/features/workspace/BatchInspectorStatus";
+import { OutcomeStatus, useOutcomeStatus } from "@/features/workspace/OutcomeStatus";
 import { useLocation, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import DropZone from "@/features/convert/DropZone";
@@ -25,12 +32,13 @@ import {
   defaultMode,
 } from "@/features/compress/CompressFileRow";
 import type { CompressRowOptions } from "@/features/compress/CompressFileRow";
+import { compressDraftSlots } from "@/features/compress/CompressControls";
 import CompressActionBar from "@/features/compress/CompressActionBar";
 import type { CompressFileEntry } from "@/features/compress/CompressActionBar";
 import PresetChips from "@/features/presets/PresetChips";
 import PdfFlow from "@/features/pdf/PdfFlow";
 import { useAppStore } from "@/store/appStore";
-import type { Preset, TargetFormat } from "@/types";
+import type { CompressMode, MetadataPolicy, Preset, TargetFormat } from "@/types";
 import { metadataPolicyProblem } from "@/features/metadata/MetadataPolicyControl";
 
 function dirname(p: string): string {
@@ -102,6 +110,7 @@ function CompressPage() {
   }, [files, setFiles]);
   const selected = files.find((f) => f.id === selectedId) ?? files[0];
   const selectedState = byId[selected?.id ?? ""] ?? PROBING;
+  const mediaPlayerEnabled = useMediaPlayerEnabled();
   useEffect(() => {
     if (selected?.id !== selectedId) setSelectedId(selected?.id ?? null);
   }, [selected?.id, selectedId, setSelectedId]);
@@ -230,59 +239,64 @@ function CompressPage() {
   );
 
   const [applicationError, setApplicationError] = useState<string | null>(null);
-  const applyCompressionSettings = useCallback(
-    (mode: CompressFileEntry["mode"], target: TargetFormat, metadataPolicy: NonNullable<CompressFileEntry["metadataPolicy"]>) => {
-      const next = files.map((file) => ({
-        ...file,
-        revision: (file.revision ?? 0) + 1,
-        mode,
-        target,
-        metadataPolicy,
-        optionsReady: true,
-      }));
-      const incompatible = next.flatMap((file) => {
-        const state = byId[file.id ?? ""] ?? PROBING;
-        const compression = compressionProblem(file.mode, state, file.target);
-        const metadata = state.phase === "ready" && state.probe.source_kind === "image"
-          ? metadataPolicyProblem(
-              file.metadataPolicy ?? "preserve",
-              state.capabilities.targets.find((candidate) => candidate.target === file.target)?.image_metadata,
-              "rgb_reencode",
-            )
-          : null;
-        const problem = compression ?? metadata;
-        return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
-      });
-      if (incompatible.length) {
-        setApplicationError(`Settings were not applied. ${incompatible.join(" ")}`);
-        return;
-      }
-      setApplicationError(null);
-      setFiles(next);
-    },
-    [byId, files, setFiles],
-  );
-  const applyPreset = useCallback(
-    (preset: Preset) => {
-      if (preset.image_options) { setApplicationError("Image settings cannot be applied in Compress. Use Convert for JPEG quality and dimensions."); return; }
-      if (!preset.compress_mode) return;
-      applyCompressionSettings(
-        preset.compress_mode,
-        preset.target,
-        preset.metadata_policy ?? "preserve",
-      );
-    },
-    [applyCompressionSettings],
-  );
-
-  const applyFirstToAll = useCallback(() => {
-    if (files.length < 2) return;
-    applyCompressionSettings(
-      files[0].mode,
-      files[0].target,
-      files[0].metadataPolicy ?? "preserve",
+  const [applicationStatus, setApplicationStatus] = useOutcomeStatus(files.map(file => file.id ?? file.path).join("\n"));
+  const refuse = (message: string) => { setApplicationError(message); setApplicationStatus(null); };
+  // Validate every row in scope before changing any; rows outside it are
+  // returned untouched. Without an explicit target each row keeps its own
+  // format: compression settings never change what a file is.
+  const applyCompressionToScope = (
+    settings: { mode: CompressMode; metadataPolicy: MetadataPolicy; target?: TargetFormat },
+    scope: { ids: ReadonlySet<string>; stamp: { id: string; label: string } },
+  ): boolean => {
+    const inScope = (file: CompressFileEntry) => file.id !== undefined && scope.ids.has(file.id);
+    const next = files.map((file) => !inScope(file) ? file : {
+      ...file,
+      revision: (file.revision ?? 0) + 1,
+      mode: settings.mode,
+      target: settings.target ?? file.target,
+      metadataPolicy: settings.metadataPolicy,
+      optionsReady: true,
+    });
+    const incompatible = next.filter(inScope).flatMap((file) => {
+      const state = byId[file.id ?? ""] ?? PROBING;
+      const compression = compressionProblem(file.mode, state, file.target);
+      const metadata = state.phase === "ready" && state.probe.source_kind === "image"
+        ? metadataPolicyProblem(
+            file.metadataPolicy ?? "preserve",
+            state.capabilities.targets.find((candidate) => candidate.target === file.target)?.image_metadata,
+            "rgb_reencode",
+          )
+        : null;
+      const problem = compression ?? metadata;
+      return problem ? [`${sourceName(file.path)}: ${problem}`] : [];
+    });
+    if (incompatible.length) {
+      refuse(`Settings were not applied. ${incompatible.join(" ")}`);
+      return false;
+    }
+    setApplicationError(null);
+    // An unfinished Target size edit would outlive a mode it already matches.
+    // Under another mode the text is only the tab's memory, so it stays.
+    if (settings.mode.kind === "target_size_bytes") {
+      files.filter(inScope).forEach(file => clearWorkspaceDraftSlots("compress", ["source", file.path], compressDraftSlots));
+    }
+    setFiles(stampEntries(next, scope.ids, scope.stamp));
+    return true;
+  };
+  // A preset applies to the files whose capabilities admit its format.
+  const applyPreset = (preset: Preset) => {
+    if (preset.image_options) { refuse("Image settings cannot be applied in Compress. Use Convert for JPEG quality and dimensions."); return; }
+    if (!preset.compress_mode) return;
+    const scope = targetScope(files, byId, preset.target);
+    if (scope.pending) { refuse(WAIT_FOR_INSPECTION); return; }
+    if (scope.ids.length === 0) { refuse(noPresetTarget(preset.target)); return; }
+    const label = preset.name || "a preset";
+    const applied = applyCompressionToScope(
+      { mode: preset.compress_mode, metadataPolicy: preset.metadata_policy ?? "preserve", target: preset.target },
+      { ids: new Set(scope.ids), stamp: { id: newBatchStampId(), label } },
     );
-  }, [applyCompressionSettings, files]);
+    if (applied) setApplicationStatus(presetOutcome(label, kindCounts(scope.ids, byId), scope.kept));
+  };
 
   const handleBrowse = useCallback(async () => {
     const picked = await open({
@@ -322,6 +336,43 @@ function CompressPage() {
     return null;
   });
   const blocked = problems.some(Boolean) || files.some((f) => !f.optionsReady);
+  const selectedIndex = selected ? files.indexOf(selected) : -1;
+  const kind = batchKind(byId[selected?.id ?? ""]);
+  // Compress has no settings for subtitle files, so there is nothing to apply.
+  const selectedKind = kind === "subtitle" ? null : kind;
+  const applyScope = selectedKind ? kindScope(files, byId, selectedKind) : null;
+  // Only the source row's own problems block Apply; applying may fix the others.
+  const selectedProblem = selectedIndex < 0 ? null : problems[selectedIndex] ?? null;
+  const applySelectedToKind = () => {
+    if (!selected?.id || !selectedKind || !applyScope || applyScope.pending || selectedProblem) return;
+    const applied = applyCompressionToScope(
+      { mode: selected.mode, metadataPolicy: selected.metadataPolicy ?? "preserve" },
+      { ids: new Set(applyScope.ids), stamp: { id: newBatchStampId(), label: sourceName(selected.path) } },
+    );
+    if (applied) setApplicationStatus(applyOutcome(applyScope.ids.length, selectedKind, applyScope.kept));
+  };
+  const applyLabel = selected && selectedKind && applyScope
+    ? applyButtonLabel(selectedKind, applyScope.ids.length, files.length, applyScope.pending)
+    : null;
+  const applyScopeAction: ApplyScopeAction | null = applyLabel && selected && selectedKind && applyScope ? {
+    label: applyLabel,
+    title: applyTooltip(sourceName(selected.path), selectedKind, applyScope.ids.length === files.length),
+    disabledReason: applyScope.pending ? WAIT_FOR_INSPECTION : selectedProblem ? FIX_SELECTED_FIRST : null,
+    onApply: applySelectedToKind,
+  } : null;
+  const selectedBatchState = selected ? batchState(selected) : null;
+  const resetSource = selected && selectedBatchState === "edited" ? batchResetSource(selected, files) : null;
+  // Copies an unedited batch member's compression back onto this row alone.
+  const restoreBatchSettings = () => {
+    if (!selected?.id || !selected.batch || !resetSource) return false;
+    const restored = applyCompressionToScope(
+      { mode: resetSource.mode, metadataPolicy: resetSource.metadataPolicy ?? "preserve" },
+      { ids: new Set([selected.id]), stamp: { id: selected.batch.id, label: selected.batch.label } },
+    );
+    if (restored) setApplicationStatus(null);
+    return restored;
+  };
+  const settled = (file: CompressFileEntry) => file.optionsReady === true && byId[file.id ?? ""]?.phase === "ready";
   return (
     <WorkspaceFrame
       title="Compress"
@@ -345,21 +396,29 @@ function CompressPage() {
       }
       inspector={
         <WorkspaceInspector
+          media={mediaPlayerEnabled ? <InspectorPlayer path={selected?.path ?? null} state={selectedState} /> : undefined}
           title="Compression"
           description={
-            selected
-              ? "Editing " + sourceName(selected.path)
-              : "Select a source to get started."
+            selected ? (
+              <BatchInspectorStatus
+                name={sourceName(selected.path)}
+                state={selectedBatchState}
+                label={selected.batch?.label ?? ""}
+                onRestore={resetSource ? restoreBatchSettings : null}
+              />
+            ) : "Select a source to get started."
           }
-          actions={
+          actions={<>
             <CompressActionBar
               files={files}
+              presetSource={selected}
               disabled={blocked}
               onEnqueued={() => {}}
               onSettled={onSettled}
-              onApplyToAll={applyFirstToAll}
+              applyScope={applyScopeAction}
             />
-          }
+            <OutcomeStatus outcome={applicationStatus} />
+          </>}
         >
           {selected &&
           selectedState.phase === "ready" &&
@@ -426,6 +485,8 @@ function CompressPage() {
               state={byId[f.id ?? ""] ?? PROBING}
               problem={problems[i]}
               edited={f.submittedEdit}
+              summary={settled(f) ? compressSettingsLine(f) : null}
+              batchState={batchState(f)}
               onSelect={() => setSelectedId(f.id ?? null)}
               onRemove={() => handleRemove(f.path)}
               onRetry={() => f.id && retry(f.id)}

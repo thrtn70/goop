@@ -2,22 +2,26 @@ import { validateVideoOptions, videoDraftSlots } from "@/features/convert/videoO
 import { validateAudioOptions } from "@/features/convert/audioOptions";
 import { validateImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { parsePresetBundle, PRESET_BUNDLE_VERSION } from "@/features/presets/io";
+import { validBatchStamp } from "@/features/workspace/batchStamp";
 import {
   getResponsivenessRecorder,
   type CausalOwner,
   type ResponsivenessRecorder,
 } from "@/performance/responsiveness";
-import type { TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
+import type { RotationDegrees, TrackConvertOptions, TrackDispositionFacts, TrackIdentity, TrackInventory, TrackPresetPolicy, TrackSourceBinding, TrackStreamPolicy, TrackTextFact } from "@/types";
 import { consumeNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 import { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
-export { DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
+export { DRAFT_BACKUP_KEY, DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from "./draftStorageKeys";
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
 const MAX_BYTES = 512 * 1024;
 const TOOLS = new Set(["extract", "convert", "compress", "image", "metadata", "recognize"]);
-const SLOTS = new Set<string>([...videoDraftSlots,"ImageOptionsPanel.qualityDraft", "ImageOptionsPanel.widthDraft", "ImageOptionsPanel.heightDraft", "ImageOptionsPanel.appliedQuality", "ImageOptionsPanel.appliedWidth", "ImageOptionsPanel.appliedHeight", "AudioBatchEditor.album", "AudioBatchEditor.albumArtist", "AudioBatchEditor.artist", "AudioBatchEditor.backup", "AudioBatchEditor.comment", "AudioBatchEditor.composer", "AudioBatchEditor.cover", "AudioBatchEditor.disc", "AudioBatchEditor.genre", "AudioBatchEditor.titles", "AudioBatchEditor.tracks", "AudioBatchEditor.year", "AudioTagForm.album", "AudioTagForm.albumArtist", "AudioTagForm.artist", "AudioTagForm.backup", "AudioTagForm.comment", "AudioTagForm.composer", "AudioTagForm.cover", "AudioTagForm.disc", "AudioTagForm.genre", "AudioTagForm.title", "AudioTagForm.track", "AudioTagForm.year", "CompressActionBar.overrideDir", "CompressControls.appliedMode", "CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressPage.files", "CompressPage.pdfs", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "ConvertPage.files", "ConvertPage.pdfs", "ConvertPage.selectedId", "CropEditor.aspect", "CropEditor.crop", "CropEditor.zoom", "GifOptionsPanel.appliedEnd", "GifOptionsPanel.appliedStart", "GifOptionsPanel.endDraft", "GifOptionsPanel.startDraft", "ImageAppIconFlow.selected", "ImageCropFlow.rect", "ImageOcrFlow.images", "ImageOcrFlow.lang", "ImageOcrFlow.outputKind", "ImagePage.files", "ImagePage.op", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.mode", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageRotateFlow.degrees", "ImageWatermarkFlow.opacity", "ImageWatermarkFlow.position", "ImageWatermarkFlow.text", "ImagesToPdfFlow.images", "MetadataPage.files", "PdfDeleteFlow.pages", "PdfExtractFlow.ranges", "PdfFlow.op", "PdfFlow.quality", "PdfFlow.ranges", "PdfInsertBlankFlow.draft", "PdfInsertBlankFlow.positions", "PdfMetadataForm.author", "PdfMetadataForm.keywords", "PdfMetadataForm.subject", "PdfMetadataForm.title", "PdfOcrFlow.lang", "PdfReorderFlow.pages", "PdfRotateFlow.pages", "PdfSplitEditor.input", "PdfToImagesFlow.dpi", "PdfToImagesFlow.format", "ProbeCard.audioOnly", "ProbeCard.selected", "RecognizePage.input", "RecognizePage.lang", "RecognizePage.outputKind", "TopBar.url", "UrlHero.lastUrl"]);
+// The clockwise turns a PDF page card stores; null, no change, is checked
+// beside it. Keyed by the union so an added or removed turn fails to compile.
+const PAGE_ROTATIONS: ReadonlySet<string> = new Set(Object.keys({ cw90: true, cw180: true, cw270: true } satisfies Record<RotationDegrees, true>));
+const SLOTS = new Set<string>([...videoDraftSlots,"ImageOptionsPanel.qualityDraft", "ImageOptionsPanel.widthDraft", "ImageOptionsPanel.heightDraft", "ImageOptionsPanel.appliedQuality", "ImageOptionsPanel.appliedWidth", "ImageOptionsPanel.appliedHeight", "AudioBatchEditor.album", "AudioBatchEditor.albumArtist", "AudioBatchEditor.artist", "AudioBatchEditor.backup", "AudioBatchEditor.comment", "AudioBatchEditor.composer", "AudioBatchEditor.cover", "AudioBatchEditor.disc", "AudioBatchEditor.genre", "AudioBatchEditor.titles", "AudioBatchEditor.tracks", "AudioBatchEditor.year", "AudioTagForm.album", "AudioTagForm.albumArtist", "AudioTagForm.artist", "AudioTagForm.backup", "AudioTagForm.comment", "AudioTagForm.composer", "AudioTagForm.cover", "AudioTagForm.disc", "AudioTagForm.genre", "AudioTagForm.title", "AudioTagForm.track", "AudioTagForm.year", "CompressActionBar.overrideDir", "CompressControls.appliedMode", "CompressControls.lastQuality", "CompressControls.sizeInput", "CompressControls.sizeUnit", "CompressPage.files", "CompressPage.pdfs", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "ConvertPage.files", "ConvertPage.pdfs", "ConvertPage.selectedId", "CropEditor.aspect", "CropEditor.crop", "CropEditor.zoom", "GifOptionsPanel.appliedEnd", "GifOptionsPanel.appliedStart", "GifOptionsPanel.endDraft", "GifOptionsPanel.startDraft", "ImageAppIconFlow.selected", "ImageCropFlow.rect", "ImageOcrFlow.images", "ImageOcrFlow.lang", "ImageOcrFlow.outputKind", "ImagePage.files", "ImagePage.op", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.mode", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageRotateFlow.degrees", "ImageWatermarkFlow.opacity", "ImageWatermarkFlow.position", "ImageWatermarkFlow.text", "ImagesToPdfFlow.images", "MetadataPage.files", "PdfDeleteFlow.pages", "PdfExtractFlow.ranges", "PdfFlow.op", "PdfFlow.quality", "PdfFlow.ranges", "PdfInsertBlankFlow.draft", "PdfInsertBlankFlow.positions", "PdfMetadataForm.author", "PdfMetadataForm.keywords", "PdfMetadataForm.subject", "PdfMetadataForm.title", "PdfOcrFlow.lang", "PdfReorderFlow.pages", "PdfRotateFlow.pages", "PdfSplitEditor.input", "PdfToImagesFlow.dpi", "PdfToImagesFlow.format", "ProbeCard.audioOnly", "ProbeCard.selected", "RecognizePage.input", "RecognizePage.lang", "RecognizePage.outputKind", "TopBar.url", "UrlHero.lastUrl"]);
 SLOTS.add("AudioOptionsPanel.savedCustom");
 SLOTS.add("AudioOptionsPanel.bitrateDraft");
 SLOTS.add("AudioOptionsPanel.appliedBitrate");
@@ -222,7 +226,7 @@ function validSlot(slot: string, value: unknown, allowHardware: boolean): boolea
   if (slot === "CompressPage.files") return validFiles(value, true, allowHardware);
   if (["ImagePage.files", "MetadataPage.files", "ConvertPage.pdfs", "CompressPage.pdfs", "ImagesToPdfFlow.images", "ImageOcrFlow.images"].includes(slot)) return strings(value);
   if (slot === "ImageAppIconFlow.selected") return object(value) && strings(value.set) && value.set.every(platform => ["macos", "windows", "web"].includes(platform));
-  if (slot.endsWith(".pages")) return Array.isArray(value) && value.every(page => object(page) && Number.isSafeInteger(page.originalPage) && typeof page.deleted === "boolean" && typeof page.rotation === "number" && [0,90,180,270].includes(page.rotation));
+  if (slot.endsWith(".pages")) return Array.isArray(value) && value.every(page => object(page) && Number.isSafeInteger(page.originalPage) && typeof page.deleted === "boolean" && (page.rotation === null || (typeof page.rotation === "string" && PAGE_ROTATIONS.has(page.rotation))));
   if (slot.endsWith(".ranges")) return Array.isArray(value) && value.every(range => object(range) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && Number(range.start) >= 1 && Number(range.end) >= Number(range.start));
   if (slot === "PdfInsertBlankFlow.positions") return Array.isArray(value) && value.every(position => Number.isSafeInteger(position) && position >= 0);
   if (slot.endsWith(".cover")) return object(value) && ["keep", "remove", "replace"].includes(String(value.kind)) && (value.kind !== "replace" || typeof value.source_path === "string");
@@ -232,7 +236,7 @@ function validSlot(slot: string, value: unknown, allowHardware: boolean): boolea
     return object(value) && (slot === "CropEditor.crop" ? ["x", "y"] : ["x", "y", "width", "height"]).every(field => typeof value[field] === "number" && Number.isFinite(value[field]));
   }
   if (["ProbeCard.audioOnly", "AudioBatchEditor.backup", "AudioTagForm.backup"].includes(slot)) return typeof value === "boolean";
-  if (["CropEditor.zoom", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageWatermarkFlow.opacity", "PdfToImagesFlow.dpi"].includes(slot)) return typeof value === "number" && Number.isFinite(value);
+  if (["CompressControls.lastQuality", "CropEditor.zoom", "ImageRecompressFlow.quality", "ImageResizeFlow.height", "ImageResizeFlow.scale", "ImageResizeFlow.width", "ImageWatermarkFlow.opacity", "PdfToImagesFlow.dpi"].includes(slot)) return typeof value === "number" && Number.isFinite(value);
   if (["ConvertPage.selectedId", "CompressPage.selectedId", "ConvertActionBar.overrideDir", "CompressActionBar.overrideDir", "ProbeCard.selected", "RecognizePage.input", "UrlHero.lastUrl"].includes(slot)) return value === null || typeof value === "string";
   return typeof value === "string";
 }
@@ -242,8 +246,11 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
   return value.map((file) => {
     if (!object(file)) return file;
     const imageTarget = ["png", "jpeg", "webp", "bmp", "tiff", "avif", "jpeg_xl"].includes(String(file.target));
+    // A batch stamp only labels the row, so a malformed one is dropped
+    // rather than protecting the whole draft store over it.
+    const { batch, ...unstamped } = file;
     const normalized = {
-      ...file,
+      ...("batch" in file && !validBatchStamp(batch) ? unstamped : file),
       ...(imageTarget && file.metadataPolicy == null ? { metadataPolicy: "preserve" } : {}),
       ...(imageTarget && file.imageColorPolicy == null ? { imageColorPolicy: "preserve" } : {}),
     };
@@ -257,16 +264,19 @@ function normalizeSlotValue(slot: string, value: unknown): unknown {
   });
 }
 
+// How runtime values are stored: bigints as safe numbers, sets as {set}.
+function storedValue(_key: string, value: unknown): unknown {
+  if (typeof value === "bigint") {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number)) throw new Error("Draft number is too large");
+    return number;
+  }
+  if (value instanceof Set) return {set:[...value]};
+  return value;
+}
+
 function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
-  const raw = JSON.stringify({version:2, entries}, (_key, value: unknown) => {
-    if (typeof value === "bigint") {
-      const number = Number(value);
-      if (!Number.isSafeInteger(number)) throw new Error("Draft number is too large");
-      return number;
-    }
-    if (value instanceof Set) return {set:[...value]};
-    return value;
-  });
+  const raw = JSON.stringify({version:2, entries}, storedValue);
   const encodedBytes = new TextEncoder().encode(raw).length;
   if (raw.length > MAX_BYTES || encodedBytes > MAX_BYTES || Object.keys(entries).length > 500) throw new Error("Draft storage limit reached");
   return { raw, encodedBytes };
@@ -276,7 +286,7 @@ export function encodeDraftEntries(entries: DraftEntries): string {
   return encodeDraftEntriesWithSize(entries).raw;
 }
 
-type DraftProtectionReason = "malformed" | "future" | "read_error";
+export type DraftProtectionReason = "malformed" | "future" | "read_error";
 export type DraftLoadOutcome =
   | { kind: "ready"; entries: DraftEntries }
   | { kind: "migration_pending"; entries: DraftEntries; legacy_raw: string }
@@ -291,8 +301,54 @@ class DraftDecodeError extends Error {
   constructor(readonly reason: Exclude<DraftProtectionReason, "read_error">) { super(reason); }
 }
 
+/** Whether a strict read keeps one stored entry. The writer applies the same test. */
+function admissible(key: string, entry: Record<string, unknown>, version: 1 | 2): boolean {
+  let parts: unknown;
+  try { parts = JSON.parse(key); } catch { return false; }
+  if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) return false;
+  const slot = parts[parts.length - 1];
+  const allowed = version === 1 && slot.startsWith("VideoOptionsPanel.")
+    ? LEGACY_VIDEO_SLOTS.has(slot)
+    : SLOTS.has(slot);
+  return allowed && bounded(entry.value) && validSlot(slot, entry.value, version === 2);
+}
+
+// Entries are replaced, never mutated, so a verdict holds while its object lives.
+const admissions = new WeakMap<object, { key: string; admitted: boolean }>();
+
+/**
+ * Splits entries into those a strict read would keep and the keys of those it
+ * would refuse. Saving only the first part means one oversized or unknown
+ * draft is not restored after a restart, instead of every draft being refused.
+ */
+export function admitDraftEntries(entries: DraftEntries): { admitted: DraftEntries; skipped: string[] } {
+  const admitted: DraftEntries = {};
+  const skipped: string[] = [];
+  for (const [key, entry] of Object.entries(entries)) {
+    let verdict = admissions.get(entry);
+    if (verdict?.key !== key) {
+      let stored: unknown;
+      try { stored = JSON.parse(JSON.stringify(entry, storedValue)); } catch { stored = null; }
+      verdict = { key, admitted: object(stored) && admissible(key, stored, 2) };
+      admissions.set(entry, verdict);
+    }
+    if (verdict.admitted) admitted[key] = entry;
+    else skipped.push(key);
+  }
+  return { admitted, skipped };
+}
+
+// A save too large to parse is judged by the version leading its first few
+// characters, where every writer puts it; one without may be newer.
+const LEADING_VERSION_CHARS = 64;
+const LEADING_VERSION = /^\s*\{\s*"version"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*[,}]/;
+function oversizedReason(raw: string, version: 1 | 2): DraftDecodeError["reason"] {
+  const match = LEADING_VERSION.exec(raw.slice(0, LEADING_VERSION_CHARS));
+  return match !== null && Number(match[1]) <= version ? "malformed" : "future";
+}
+
 function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
-  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError("malformed");
+  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError(oversizedReason(raw, version));
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
   if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
@@ -300,23 +356,12 @@ function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): Draf
   if (data.version !== version || !object(data.entries) || Object.keys(data.entries).length > 500) throw new DraftDecodeError("malformed");
   const entries: DraftEntries = {};
   for (const [key, entry] of Object.entries(data.entries)) {
-    let parts: unknown;
-    try { parts = JSON.parse(key); } catch {
+    if (!object(entry) || !admissible(key, entry, version)) {
       if (strict) throw new DraftDecodeError("malformed");
       continue;
     }
-    if (!strings(parts) || parts.length < 2 || parts.length > 20 || !TOOLS.has(parts[0])) {
-      if (strict) throw new DraftDecodeError("malformed");
-      continue;
-    }
+    const parts = JSON.parse(key) as string[];
     const slot = parts[parts.length - 1];
-    const allowed = version === 1 && slot.startsWith("VideoOptionsPanel.")
-      ? LEGACY_VIDEO_SLOTS.has(slot)
-      : SLOTS.has(slot);
-    if (!allowed || !object(entry) || !bounded(entry.value) || !validSlot(slot, entry.value, version === 2)) {
-      if (strict) throw new DraftDecodeError("malformed");
-      continue;
-    }
     const value = slot === "ImageAppIconFlow.selected"
       ? new Set((entry.value as {set:string[]}).set)
       : normalizeSlotValue(slot, entry.value);
@@ -410,7 +455,7 @@ export function persistDraftEntries(
   });
   let encoded: { raw: string; encodedBytes: number };
   try {
-    encoded = encodeDraftEntriesWithSize(entries);
+    encoded = encodeDraftEntriesWithSize(admitDraftEntries(entries).admitted);
   } catch {
     closeFailedPersistence(recorder, owner, encodeSpan);
     return { ok: false, phase: "encode" };

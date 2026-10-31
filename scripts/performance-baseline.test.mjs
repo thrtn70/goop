@@ -928,6 +928,27 @@ test('paired plan is runnable and writes bound comparisons', async () => {
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+// A run directory the symlink scan cannot list hides every link in it, so the
+// paired log writes must refuse a link rather than follow it out. The suite's
+// own checks may then fail on the same directory, so only the outside file and
+// the surviving link are checked.
+test('a paired run whose directory the symlink scan cannot list never follows a link left at a log path',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-paired-scan-link-')),outside=join(root,'outside.txt'),runner=join(root,'runner.cjs'),runs=join(root,'run-directories');
+ t.after(()=>{try{for(const path of readFileSync(runs,'utf8').split('\n').filter(Boolean))chmodSync(path,0o700);}catch{/* Never ran. */}rmSync(root,{recursive:true,force:true});});
+ writeFileSync(outside,'outside');
+ writeFileSync(runner,`const fs=require('node:fs'),path=require('node:path'),dir=process.env.GOOP_PERF_OUTPUT_DIR;fs.appendFileSync(${JSON.stringify(runs)},dir+'\\n');for(const name of ['stdout.log','stderr.log'])fs.symlinkSync(${JSON.stringify(outside)},path.join(dir,name));fs.chmodSync(dir,0o300);`);
+ const crypto=await import('node:crypto');
+ const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+ const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+ const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:'test',power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+ const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+ const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+ await runPairedPlan({plan,outputDirectory:join(root,'output')}).catch(()=>{/* The suite's own checks fail on the same directory. */});
+ const [first]=readFileSync(runs,'utf8').split('\n');chmodSync(first,0o700);
+ assert.equal(readFileSync(outside,'utf8'),'outside');
+ assert.equal(lstatSync(join(first,'stdout.log')).isSymbolicLink(),true);
+});
+
 test('paired verification binds media codecs, inspection source order, and startup jobs', () => {
  const step={workload_id:'work',revision:'baseline'};
  const makeContract=(evidenceKind,expectedFacts)=>({evidence_kind:evidenceKind,expected_facts:expectedFacts,contract_sha256:sha256Text(stableStringify(expectedFacts))});
@@ -968,6 +989,91 @@ test('paired collector compacts oversized direct adapter results before ledger w
   const state=await collectPairedSamples({workloadIds:['copy'],repetitions:1,outputDirectory:output,totalLimits:{suite_timeout_ms:10000,suite_log_limit_bytes:1048576,suite_storage_budget_bytes:1048576},execute:async()=>({success:true,process_ms:1,padding:'x'.repeat(100000)})});
   assert.equal(state.status,'failed');assert.equal(state.samples.every(sample=>sample.result.result_too_large===true),true);assert.equal(state.samples.every(sample=>sample.result.padding===undefined),true);assert.ok(directoryBytes(output)<=1048576);
  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('paired collection stops once a sample reports its output pipes held after the reap', async () => {
+ // runPairedPlan nests the bounded runner's result under `process`, a direct
+ // adapter can report it at the top, and an oversized result is compacted away.
+ const held='The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group';
+ for(const [shape,heldResult] of [['nested',{success:true,process_ms:1,process:{stdio_error:held}}],['top-level',{success:true,process_ms:1,stdio_error:held}],['oversized',{success:true,process_ms:1,padding:'x'.repeat(100000),process:{stdio_error:held}}]]){
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-held-')),output=join(root,'output');
+  try {
+   const visited=[];
+   const state=await collectPairedSamples({workloadIds:['copy','encode'],repetitions:1,outputDirectory:output,execute:async step=>{visited.push(`${step.workload_id}:${step.phase}:${step.revision}`);return visited.length===2?heldResult:{success:true,process_ms:1,process:{stdio_error:null}};}});
+   assert.deepEqual(visited,['copy:warmup:baseline','copy:warmup:candidate'],shape);
+   assert.equal(state.status,'failed',shape);assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed'],shape);assert.equal(state.samples[1].result.stdio_error,held,shape);
+   assert.deepEqual(JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')),state,shape);
+  } finally {rmSync(root,{recursive:true,force:true});}
+ }
+});
+
+// A directory where the adapter writes the run's stdout log makes that write
+// fail after the runner has already reported the held pipes.
+for(const [label,leftover] of [['',''],[' and blocks its log',"fs.mkdirSync(require('node:path').join(process.env.GOOP_PERF_OUTPUT_DIR,'stdout.log'));"]]){
+ test(`a paired plan launches nothing after a sample whose output pipes a process outside the owned group still holds${label}`,{skip:process.platform==='win32',timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-held-plan-')),armed=join(root,'holder.pid'),launches=join(root,'launches'),runner=join(root,'runner.cjs'),output=join(root,'output');
+  // The holder outlives the suite, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}rmSync(root,{recursive:true,force:true});});
+  // Only the first launch leaves a holder, so a suite that kept going would launch every later sample.
+  writeFileSync(runner,`require('node:fs').appendFileSync(${JSON.stringify(launches)},'launch\\n');if(!require('node:fs').existsSync(${JSON.stringify(armed)})){${escapedHolder(armed,leftover)}}`);
+  const crypto=await import('node:crypto');
+  const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+  const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+  const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+  const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+  const plan={schema_version:1,repetitions:1,workload_ids:['copy','encode'],workload_contracts:{copy:contract,encode:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),/paired execution failed/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(launches,'utf8'),'launch\n');
+  const state=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8'));
+  assert.equal(state.status,'failed');assert.equal(state.samples.length,1);assert.match(state.samples[0].result.process.stdio_error??'',/output pipes/i);assert.equal(state.comparison_error,undefined);
+  // The workload the stop never reached says so instead of failing a comparison it never had.
+  const comparisons=JSON.parse(readFileSync(join(output,'comparison.json'),'utf8'));
+  assert.equal(comparisons.copy.success,false);assert.equal(comparisons.encode.success,false);assert.equal(comparisons.encode.not_run,true);
+ });
+}
+
+// What a group leaves at an evidence path before the reap. The symlink sweep
+// never sees a hard link or a directory. It removes every symbolic link it can
+// reach, so a run directory it cannot list hides the link, and the link reaches
+// the write as one planted after the sweep would. The link comes first: the live
+// storage count fails closed on the unlistable directory and stops the group,
+// which must not land before the link exists.
+const evidencePlants=['symbolic link','hard link','directory'];
+const plantEvidence=(kind,directory,name,outside)=>{
+ const path=JSON.stringify(join(directory,name));
+ if(kind==='directory')return `fs.mkdirSync(${path});`;
+ if(kind==='hard link')return `fs.linkSync(${JSON.stringify(outside)},${path});`;
+ return `fs.symlinkSync(${JSON.stringify(outside)},${path});fs.chmodSync(${JSON.stringify(directory)},0o300);`;
+};
+const siblingLog=name=>name==='stdout.log'?'stderr.log':'stdout.log';
+// Root lists an unlistable directory, so its sweep would remove the link first.
+const evidencePlantSkip=kind=>kind==='symbolic link'&&process.getuid?.()===0;
+test('a paired sample refuses what its group leaves at a log path and keeps the held-pipe evidence',{skip:process.platform==='win32',concurrency:true,timeout:60000},async t=>{
+ const crypto=await import('node:crypto');
+ const commandSha256=crypto.createHash('sha256').update(readFileSync(process.execPath)).digest('hex');
+ const contractFacts={jobs:0,marker_schema_version:1},contract={contract_sha256:sha256Text(stableStringify(contractFacts)),evidence_kind:'startup',expected_facts:contractFacts};
+ const identity={source:{head:'a'.repeat(40),tree:'b'.repeat(40),dirty_digest:'c'.repeat(64),dirty:false},manifest_sha256:'a'.repeat(64),bindings_sha256:'b'.repeat(64),executables:{engine:{path:process.execPath,sha256:commandSha256}},toolchain:{node:process.version,rustc:'test',cargo:'test'},sidecars:{ffprobe:{path:'/ffprobe',sha256:'d'.repeat(64),bytes:1,version:'test'}},parameters:{test:true},machine:{platform:process.platform,arch:process.arch,os:'test',hardware_model:process.platform==='darwin'?'test':null,power_source:'test',low_power_mode:'test',thermal:'test',disk_available_bytes:'test'}};
+ await Promise.all(['stdout.log','stderr.log'].flatMap(name=>evidencePlants.map(kind=>t.test(`${kind} at ${name}`,{skip:evidencePlantSkip(kind)},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-paired-evidence-')),armed=join(root,'holder.pid'),runner=join(root,'runner.cjs'),output=join(root,'output'),outside=join(root,'outside'),runDirectory=join(output,'runs','copy','warmup-baseline');
+  // The holder outlives the plan, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(runDirectory,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'outside');
+  writeFileSync(runner,escapedHolder(armed,plantEvidence(kind,runDirectory,name,outside)));
+  const revision={command:process.execPath,command_sha256:commandSha256,args:[runner],identity};
+  const plan={schema_version:1,repetitions:1,workload_ids:['copy'],workload_contracts:{copy:contract},limits:{timeout_ms:20000,suite_timeout_ms:40000,log_limit_bytes:65536,suite_log_limit_bytes:1048576,storage_budget_bytes:1048576,suite_storage_budget_bytes:4194304},revisions:{baseline:revision,candidate:revision}};
+  // The unlistable run directory also throws from the collector's own storage
+  // count, so that plan rejects before it records the sample, and the sample's
+  // held-pipe evidence is lost with it. Only the refused write is checked there.
+  await assert.rejects(runPairedPlan({plan,outputDirectory:output}),kind==='symbolic link'?/EACCES/:/paired execution failed/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
+  assert.ok(lstatSync(join(runDirectory,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
+  if(kind==='symbolic link'){assert.ok(lstatSync(join(runDirectory,name)).isSymbolicLink(),'the link did not reach the log write');return;}
+  const [sample]=JSON.parse(readFileSync(join(output,'paired-state.json'),'utf8')).samples;
+  assert.equal(sample.result.success,false);assert.match(sample.result.process.stdio_error??'',/output pipes/i);
+  assert.ok(sample.result.evidence_error?.includes(name),`${kind} at ${name}: ${sample.result.evidence_error}`);
+ }))));
 });
 
 test('workload metrics accept phase-separated Rust evidence and reject partial failure or contradictory process status', () => {
@@ -1249,6 +1355,114 @@ test('suite stops immediately after the total retained-log budget is exceeded', 
   const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));assert.equal(runs,1);assert.equal(state.samples[0].result.log_budget_exceeded,true);
  } finally {rmSync(root,{recursive:true,force:true});}
 });
+
+test('suite stops once a sample reports its output pipes held after the reap', async () => {
+ // The workload adapter nests the bounded runner's result under `process`, the
+ // single-conversion and startup harnesses report it at the top, and an
+ // oversized result or a budget override rebuilds what the ledger keeps. The
+ // budget cases stop on their own; they pin that the ledger keeps the held pipes
+ // and that the suite names them as the cause.
+ const held='The output pipes were still held one kill grace after the reap, most likely by a process outside the owned group';
+ for(const [shape,heldResult,rebuiltBy] of [
+  ['nested',{success:true,process_ms:1,process:{stdio_error:held}},null],
+  ['top-level',{success:true,process_ms:1,stdio_error:held},null],
+  ['oversized',{success:true,process_ms:1,padding:'x'.repeat(300000),process:{stdio_error:held}},'evidence_compacted'],
+  ['past the evidence budget',{success:true,process_ms:1,padding:'x'.repeat(2*1024*1024),process:{stdio_error:held}},'budget_exceeded'],
+  ['past the log budget',{success:true,process_ms:1,process:{stdio_error:held,log_bytes_retained:2*1048576}},'log_budget_exceeded'],
+ ]){
+  const root=mkdtempSync(join(tmpdir(),'goop-suite-held-'));
+  try {
+   const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+   const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+   const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=manifest.workloads.slice(0,2);
+   const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+   const visited=[],output=join(root,'output');
+   await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async run=>{visited.push(run.id);return visited.length===2?heldResult:{success:true,process_ms:1,process:{stdio_error:null}};}}),/output pipes/i,shape);
+   assert.deepEqual(visited,['raw-single/warmup-0','raw-single/0'],shape);
+   const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+   assert.equal(state.status,'failed',shape);assert.deepEqual(state.samples.map(sample=>sample.status),['excluded','failed'],shape);
+   assert.equal(state.samples[1].result.success,false,shape);assert.equal(state.samples[1].result.stdio_error,held,shape);
+   if(rebuiltBy)assert.equal(state.samples[1].result[rebuiltBy],true,shape);
+  } finally {rmSync(root,{recursive:true,force:true});}
+ }
+});
+
+// A directory where the adapter writes the run's stdout log makes that write
+// fail, and null metrics are no object; both come after the runner has already
+// reported the held pipes.
+for(const [label,leftover,metrics] of [['','','{}'],[' and blocks its log',"fs.mkdirSync(require('node:path').join(require('node:path').dirname(process.argv[3]),'stdout.log'));",'{}'],[' and reports null metrics','','null']]){
+ test(`a suite launches nothing after a sample whose output pipes a process outside the owned group still holds${label}`,{skip:process.platform==='win32',timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-suite-held-run-')),armed=join(root,'holder.pid'),launches=join(root,'launches'),driver=join(root,'driver'),sidecars=join(root,'sidecars'),output=join(root,'output');
+  // The holder outlives the suite, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}rmSync(root,{recursive:true,force:true});});
+  // Only the first launch leaves a holder, so a suite that kept going would launch every later sample.
+  writeFileSync(driver,`#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(launches)},'launch\\n');require('node:fs').writeFileSync(process.argv[4],${JSON.stringify(metrics)});if(!require('node:fs').existsSync(${JSON.stringify(armed)})){${escapedHolder(armed,leftover)}}`);chmodSync(driver,0o700);mkdirSync(sidecars);
+  const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+  const crypto=await import('node:crypto');const sha=path=>crypto.createHash('sha256').update(readFileSync(path)).digest('hex');
+  const manifest=validManifest();manifest.defaults.timeout_ms=20000;manifest.defaults.repetitions=2;manifest.workloads=[manifest.workloads[1]];
+  const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha(raw),bytes:3},inspect_mixed:{path:inspect,sha256:sha(inspect),bytes:7}}});
+  await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:run=>executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:sidecars,runtimeSidecars:{}})}),/output pipes/i);
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(launches,'utf8'),'launch\n');
+  const state=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8'));
+  assert.equal(state.status,'failed');assert.deepEqual(state.samples.map(sample=>sample.status),['failed']);assert.match(state.samples[0].result.stdio_error??'',/output pipes/i);
+ });
+}
+
+test('a workload sample refuses what its driver leaves at a log path and keeps the held-pipe evidence',{skip:process.platform==='win32',concurrency:true,timeout:60000},async t=>{
+ const crypto=await import('node:crypto');
+ await Promise.all(['stdout.log','stderr.log'].flatMap(name=>evidencePlants.map(kind=>t.test(`${kind} at ${name}`,{skip:evidencePlantSkip(kind)},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-workload-evidence-')),armed=join(root,'holder.pid'),driver=join(root,'driver'),output=join(root,'output'),outside=join(root,'outside'),inspect=join(root,'inspect.bin');
+  // The holder outlives the run, so only this ends it, on a timeout too.
+  t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(output,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'outside');writeFileSync(inspect,'inspect');
+  writeFileSync(driver,`#!${process.execPath}\n${escapedHolder(armed,plantEvidence(kind,output,name,outside))}`);chmodSync(driver,0o700);
+  const run={output_directory:output,bindings:{inspect_mixed:{path:inspect,sha256:crypto.createHash('sha256').update('inspect').digest('hex')}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}};
+  const result=await executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars:{}});
+  assert.ok(armedPid(armed),'the holder never armed');
+  assert.equal(readFileSync(outside,'utf8'),'outside',`${kind} at ${name} was written through`);
+  assert.ok(lstatSync(join(output,siblingLog(name))).isFile(),`${kind} at ${name} cost the other log`);
+  assert.equal(result.success,false);assert.match(result.stdio_error??'',/output pipes/i);
+  assert.ok(result.evidence_error?.includes(name),`${kind} at ${name}: ${result.evidence_error}`);
+ }))));
+});
+
+// Root reads an unreadable directory, so its scan would not fail.
+test('bounded process returns its held-pipe evidence when the run leaves an entry its symlink scan cannot read',{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-process-held-scan-')),armed=join(root,'holder.pid'),output=join(root,'output'),runner=join(root,'runner.cjs'),blocked=join(output,'blocked');
+ // The holder outlives the run, so only this ends it, on a timeout too.
+ t.after(()=>{const pid=armedPid(armed);if(pid)try{process.kill(pid,'SIGKILL');}catch{/* Already gone. */}try{chmodSync(blocked,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+ mkdirSync(output);
+ // An unreadable directory stands in for an entry the live holder removes
+ // between the scan's listing and its stat.
+ writeFileSync(runner,escapedHolder(armed,`fs.mkdirSync(${JSON.stringify(blocked)},{mode:0});`));
+ const result=await runBoundedProcess({command:process.execPath,args:[runner],outputDirectory:output,timeoutMs:20000,killGraceMs:200,logLimitBytes:4096,storageBudgetBytes:1048576});
+ assert.ok(armedPid(armed),'the holder never armed');
+ assert.match(result.stdio_error??'',/output pipes/i);assert.match(result.output_error??'',/could not be checked for symbolic links/);assert.equal(result.success,false);
+});
+
+// A scan that fails part-way must still remove the links it reached, and one
+// that cannot list the run directory at all leaves the log writes and the
+// metrics read to refuse a link rather than follow it out of the run directory.
+// Links come first: once the tree is unreadable, the live storage check can stop the group.
+for(const [label,links,lock,check] of [
+ ['fails part-way',['stdout.log','stderr.log','metrics.json'],"fs.mkdirSync(path.join(dir,'aaa-blocked'),{mode:0});",(result,output)=>{assert.equal(lstatSync(join(output,'stdout.log')).isFile(),true);assert.equal(lstatSync(join(output,'stderr.log')).isFile(),true);assert.equal(existsSync(join(output,'metrics.json')),false);}],
+ ['cannot list the run directory, logs linked',['stdout.log','stderr.log'],'fs.chmodSync(dir,0o300);',result=>assert.match(result.evidence_error??'',/stdout\.log/)],
+ ['cannot list the run directory, metrics linked',['metrics.json'],'fs.chmodSync(dir,0o300);',result=>assert.match(result.error??'',/Invalid workload metrics/)],
+]){
+ // Root reads an unreadable directory, so its scan would not fail.
+ test(`a workload sample whose symlink scan ${label} never follows a link its driver left`,{skip:process.platform==='win32'||process.getuid?.()===0,timeout:60000},async t=>{
+  const root=mkdtempSync(join(tmpdir(),'goop-workload-scan-link-')),output=join(root,'output'),outside=join(root,'outside.json'),driver=join(root,'driver'),sidecars=join(root,'sidecars');
+  t.after(()=>{for(const path of [output,join(output,'aaa-blocked')])try{chmodSync(path,0o700);}catch{/* Never made. */}rmSync(root,{recursive:true,force:true});});
+  writeFileSync(outside,'{"leaked":true}');mkdirSync(sidecars);
+  writeFileSync(driver,`#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path'),dir=path.dirname(process.argv[3]);for(const name of ${JSON.stringify(links)})fs.symlinkSync(${JSON.stringify(outside)},path.join(dir,name));${lock}`);chmodSync(driver,0o700);
+  const result=await executeWorkloadAdapter({output_directory:output,bindings:{inspect_mixed:{path:outside,sha256:'0'.repeat(64)}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}},{workloadDriver:driver,runtimeSidecarsDirectory:sidecars,runtimeSidecars:{}});
+  chmodSync(output,0o700);
+  assert.equal(readFileSync(outside,'utf8'),'{"leaked":true}');assert.equal(result.leaked,undefined);
+  assert.match(result.output_error??result.process?.output_error??'',/could not be checked for symbolic links/);assert.equal(result.success,false);
+  check(result,output);
+ });
+}
 
 test('normal suite refuses an existing output without writing into it', async () => {
  const root = mkdtempSync(join(tmpdir(), 'goop-normal-existing-'));
