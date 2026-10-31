@@ -214,7 +214,7 @@ case "$TARGET" in
     # no macOS binary. The build script writes directly to OUT_DIR.
     "$(git rev-parse --show-toplevel)/scripts/build-gallery-dl-macos.sh" "$TARGET"
     # Homebrew, for the macOS sidecars with no suitable upstream arm64 build.
-    # macos-14 ships with arm64 Homebrew at /opt/homebrew. Apple Silicon
+    # GitHub's macOS runners ship arm64 Homebrew at /opt/homebrew. Apple Silicon
     # only — Intel Mac was dropped in v0.2.0.
     GS_BREW=/opt/homebrew/bin/brew
     # Preserve the runner's reviewed bottled set. Current Homebrew metadata can
