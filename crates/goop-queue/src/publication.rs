@@ -599,8 +599,14 @@ impl QueueStore {
                     );
                 }
                 self.commit_terminal_and_consume(id, &raw, &JobState::Done, Some(&result), now_ms)?;
-                if let Some(adopted) = adopted {
-                    remove_adopted_workspace(id, attempt_id, &staged_path, adopted);
+                if let Err(kept) = release_adopted_workspace(attempt_id, &staged_path, adopted) {
+                    tracing::warn!(
+                        ?id,
+                        workspace = %kept.workspace.display(),
+                        staged = %staged_path.display(),
+                        reason = %kept.reason,
+                        "private workspace left in place"
+                    );
                 }
                 Ok(PublicationFinalization {
                     state: JobState::Done,
@@ -967,24 +973,37 @@ impl QueuePublicationObserver {
     }
 }
 
-/// Runs only after Done is committed. Failures are logged and never change
-/// the job's outcome.
-fn remove_adopted_workspace(
-    id: JobId,
+struct KeptWorkspace {
+    workspace: PathBuf,
+    reason: String,
+}
+
+/// Runs only after Done is committed. Removes the workspace when every check
+/// passes; otherwise reports which folder was kept and why, for logging. It
+/// never changes the job's outcome.
+fn release_adopted_workspace(
     attempt_id: Uuid,
     staged_path: &Path,
-    adopted: AdoptedWorkspace,
-) {
-    if adopted.attempt_id != attempt_id || staged_path.parent() != Some(adopted.workspace.path()) {
-        tracing::warn!(
-            ?id,
-            "private workspace does not match the published attempt; left in place"
-        );
-        return;
-    }
-    if let Err(error) = adopted.workspace.remove_if_empty() {
-        tracing::warn!(?id, %error, "private workspace left in place");
-    }
+    adopted: Option<AdoptedWorkspace>,
+) -> Result<(), KeptWorkspace> {
+    let Some(adopted) = adopted else {
+        return Err(KeptWorkspace {
+            workspace: staged_path.parent().unwrap_or(staged_path).to_path_buf(),
+            reason: "no workspace was handed over for this attempt".into(),
+        });
+    };
+    let workspace = adopted.workspace.path().to_path_buf();
+    let reason = if adopted.attempt_id != attempt_id {
+        "it was handed over by another attempt".to_owned()
+    } else if staged_path.parent() != Some(workspace.as_path()) {
+        "the receipt's staged file is not directly inside it".to_owned()
+    } else {
+        match adopted.workspace.remove_if_empty() {
+            Ok(()) => return Ok(()),
+            Err(kept) => kept.to_string(),
+        }
+    };
+    Err(KeptWorkspace { workspace, reason })
 }
 
 fn load_review_state(
@@ -2359,6 +2378,42 @@ mod tests {
                 _ => assert!(workspace.is_dir()),
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn kept_workspace_reports_its_own_path_and_the_reason() {
+        let dir = tempdir().unwrap();
+        let store = QueueStore::open(&dir.path().join("queue.db")).unwrap();
+        let (job, _destination, _expected) = publish_through_staging(&store, dir.path(), None);
+        let adopted = store.adopted_workspaces.lock().remove(&job.id).unwrap();
+        let workspace = adopted.workspace.path().to_path_buf();
+        fs::write(workspace.join("partial"), b"bytes").unwrap();
+
+        let kept = super::release_adopted_workspace(
+            adopted.attempt_id,
+            &workspace.join("out.jpg"),
+            Some(adopted),
+        )
+        .unwrap_err();
+
+        assert_eq!(kept.workspace, workspace);
+        assert!(kept.reason.contains("not empty"), "{}", kept.reason);
+        assert_eq!(fs::read(workspace.join("partial")).unwrap(), b"bytes");
+    }
+
+    #[test]
+    fn missing_hand_over_reports_the_staged_parent() {
+        let staged = std::path::Path::new("/outputs/.goop-output-1-0/out.jpg");
+
+        let kept =
+            super::release_adopted_workspace(uuid::Uuid::now_v7(), staged, None).unwrap_err();
+
+        assert_eq!(
+            kept.workspace,
+            std::path::Path::new("/outputs/.goop-output-1-0")
+        );
+        assert!(kept.reason.contains("handed over"), "{}", kept.reason);
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

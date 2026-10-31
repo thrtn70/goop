@@ -66,7 +66,7 @@ impl StagedOutput {
                 Ok(()) => {
                     return Ok(Self {
                         path: directory.join(filename),
-                        owned: OwnedWorkspace::capture(directory.clone()),
+                        owned: Some(OwnedWorkspace::capture(directory.clone())),
                         directory,
                         preserve_directory: false,
                     })
