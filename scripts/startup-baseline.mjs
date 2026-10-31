@@ -186,8 +186,9 @@ async function main(abortSignal) {
       if (i >= 0) samples.push(result);
       if (!result.success) {
         summary[jobs] = summarizeStartup(samples);
-        saveSummary();
-        throw Error(`Startup failed for ${jobs} jobs, run ${i}; retained sample excludes it from medians`);
+        const failure = `Startup failed for ${jobs} jobs, run ${i}; retained sample excludes it from medians`;
+        try { saveSummary(); } catch (error) { throw Error(`${failure}; summary not saved: ${error.message}`); }
+        throw Error(failure);
       }
     }
     summary[jobs] = summarizeStartup(samples);
