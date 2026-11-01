@@ -588,25 +588,24 @@ test('captured identity fails closed on unavailable toolchain or sidecar facts',
  assert.throws(()=>validateCapturedIdentity({...identity,sidecars:{ffprobe:{...identity.sidecars.ffprobe,version:'unavailable'}}}),/sidecar version/i);
 });
 
-test('bounded process cleanup reaps a TERM-resistant descendant before returning', { skip: process.platform === 'win32' }, async () => {
+// The timeout falls due only once the descendant ignores TERM, so only the
+// group SIGKILL after the grace can stop it. The runner itself dies of TERM.
+test('bounded process cleanup reaps a TERM-resistant descendant before returning', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
  const root = mkdtempSync(join(tmpdir(), 'goop-process-tree-'));
  const output = join(root, 'output'); mkdirSync(output);
- const pidPath = join(root, 'descendant.pid');
- const runner = join(root, 'runner.cjs');
- const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},10)`;
+ const armed = join(root, 'armed'), runner = join(root, 'runner.cjs');
+ const guard = killArmedAfter(t, root, armed);
+ const clock = clockAfter(armed);
+ const descendant = `${ignoreTermThenArm(armed)}setInterval(()=>{},10)`;
  writeFileSync(runner, `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},10);`);
- let descendantPid = null;
- try {
-  const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1000, killGraceMs: 50, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024 });
-  descendantPid = Number(readFileSync(pidPath, 'utf8'));
-  assert.equal(result.timed_out, true);
-  let state = '';
-  try { state = execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(descendantPid)], { encoding: 'utf8' }).trim(); } catch { /* Gone. */ }
-  assert.ok(state === '' || /[ZE]/.test(state), `descendant remained runnable with state ${state}`);
- } finally {
-  if (descendantPid) { try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already reaped. */ } }
-  rmSync(root, { recursive: true, force: true });
- }
+ const result = await runBoundedProcess({ command: process.execPath, args: [runner], outputDirectory: output, timeoutMs: 1000, killGraceMs: 50, logLimitBytes: 1024, storageBudgetBytes: 1024 * 1024, nowMs: clock.nowMs, sleepMs: clock.sleepMs });
+ assert.equal(clock.missed, false);
+ assert.equal(result.timed_out, true);
+ assert.deepEqual(clock.sleeps, [1000, 50]);
+ const pid = Number(readFileSync(armed, 'utf8'));
+ assert.ok(Number.isSafeInteger(pid) && pid > 1, `invalid descendant pid ${pid}`);
+ assert.equal(await runnableAfterKill(pid), null, 'descendant outlived the run');
+ guard.passed = true;
 });
 
 import { existsSync, readFileSync, mkdirSync, statSync } from 'node:fs';
@@ -1593,6 +1592,39 @@ test('a workload sample refuses what its driver leaves at a log path and keeps t
   assert.equal(result.success,false);assert.match(result.stdio_error??'',/output pipes/i);
   assert.ok(result.evidence_error?.includes(name),`${kind} at ${name}: ${result.evidence_error}`);
  }))));
+});
+
+// The adapter writes its request into the run directory before launch. A
+// process left over from an earlier run can reach that directory, so whatever
+// already sits at the request path is refused, and the driver never launches.
+test('a workload sample refuses what is already at its request path before launch',{skip:process.platform==='win32'},async t=>{
+ const crypto=await import('node:crypto');
+ for(const kind of evidencePlants){
+  await t.test(kind,async t=>{
+   const root=mkdtempSync(join(tmpdir(),'goop-workload-request-')),output=join(root,'output'),outside=join(root,'outside'),launched=join(root,'launched'),driver=join(root,'driver'),inspect=join(root,'inspect.bin');
+   t.after(()=>rmSync(root,{recursive:true,force:true}));
+   writeFileSync(outside,'outside');writeFileSync(inspect,'inspect');
+   writeFileSync(driver,`#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(launched)},'1');`);chmodSync(driver,0o700);
+   mkdirSync(output);
+   const request=join(output,'request.json');
+   if(kind==='directory')mkdirSync(request);else if(kind==='hard link')linkSync(outside,request);else symlinkSync(outside,request);
+   const run={output_directory:output,bindings:{inspect_mixed:{path:inspect,sha256:crypto.createHash('sha256').update('inspect').digest('hex')}},limits:{timeout_ms:20000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'inspection_burst',fixture_roles:['inspect_mixed'],source_count:1}};
+   await assert.rejects(executeWorkloadAdapter(run,{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars:{}}),/EEXIST/);
+   assert.equal(readFileSync(outside,'utf8'),'outside');assert.equal(existsSync(launched),false);
+  });
+ }
+});
+
+test('a compacted ledger result keeps its evidence error',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'goop-suite-ledger-evidence-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const raw=join(root,'raw.bin'),inspect=join(root,'inspect.bin');writeFileSync(raw,'raw');writeFileSync(inspect,'inspect');
+ const manifest=validManifest();manifest.defaults.repetitions=1;manifest.workloads=[manifest.workloads[0]];
+ const bindings=validateBindings(manifest,{schema_version:1,fixtures:{raw_48mp:{path:raw,sha256:sha256Text('raw'),bytes:3},inspect_mixed:{path:inspect,sha256:sha256Text('inspect'),bytes:7}}}),output=join(root,'output');
+ // The padding pushes the result past the ledger limit, so the entry is compacted.
+ await assert.rejects(runPerformanceSuite({manifest,bindings,prevalidatedBindings:true,outputDirectory:output,execute:async()=>({success:false,evidence_error:'EEXIST: stdout.log',padding:'x'.repeat(300000)})}),/workload failed/i);
+ const result=JSON.parse(readFileSync(join(output,'suite-state.json'),'utf8')).samples[0].result;
+ assert.equal(result.evidence_compacted,true);assert.equal(result.evidence_error,'EEXIST: stdout.log');
 });
 
 // Root reads an unreadable directory, so its scan would not fail.
