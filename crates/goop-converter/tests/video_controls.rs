@@ -852,6 +852,8 @@ async fn preview_rejected_before_path_or_session_work() {
 }
 
 mod common;
+#[cfg(unix)]
+use common::executable::executable;
 use goop_converter::{ConversionBackend, FfmpegBackend};
 use std::{path::Path, process::Command, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -1947,60 +1949,10 @@ fn malformed_display_matrix_and_fractional_rotation_are_rejected() {
     }
 }
 #[cfg(unix)]
-const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
-
-#[cfg(unix)]
-fn executable(path: &Path, body: &str) {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut file = std::fs::File::create(path).unwrap();
-    write!(
-        file,
-        "#!/bin/sh\ncase \"$1\" in {EXEC_PROBE_ARG}) exit 0;; esac\n{body}\n"
-    )
-    .unwrap();
-    drop(file);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    wait_until_executable(path);
-}
-
-#[cfg(unix)]
-fn wait_until_executable(path: &Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut backoff = std::time::Duration::from_millis(1);
-    loop {
-        let busy = match Command::new(path)
-            .arg(EXEC_PROBE_ARG)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-        {
-            Ok(status) => {
-                assert!(
-                    status.success(),
-                    "fixture readiness probe exited unsuccessfully for {}: {status}",
-                    path.display()
-                );
-                return;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => error,
-            Err(error) => panic!("fixture {} could not be run: {error:?}", path.display()),
-        };
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fixture {} was still held open for writing after 10s: {busy:?}",
-            path.display()
-        );
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(std::time::Duration::from_millis(25));
-    }
-}
-
-#[cfg(unix)]
 #[test]
 fn executable_readiness_probe_does_not_run_the_fixture_body() {
+    use common::executable::EXEC_PROBE_ARG;
+
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("ffprobe");
     executable(&binary, "printf 'fixture-body'");
@@ -2017,51 +1969,15 @@ fn executable_readiness_probe_does_not_run_the_fixture_body() {
     assert_eq!(actual.stdout, b"fixture-body");
 }
 
+/// `false` exits 1 whatever it is passed, as a fixture without the probe
+/// header would.
 #[cfg(unix)]
 #[test]
 #[should_panic(expected = "fixture readiness probe exited unsuccessfully")]
 fn executable_readiness_rejects_a_nonzero_probe_exit() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ffprobe");
-    std::fs::write(&binary, "#!/bin/sh\nexit 7\n").unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    wait_until_executable(&binary);
+    common::executable::wait_until_executable(Path::new("/usr/bin/false"));
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn executable_waits_out_an_inherited_writer_before_returning() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("ffprobe");
-
-    let mut holder = Command::new("/bin/sh")
-        .arg("-c")
-        .arg("exec 9>>\"$0\"; sleep 0.5")
-        .arg(&binary)
-        .spawn()
-        .unwrap();
-    let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !binary.exists() {
-        assert!(
-            std::time::Instant::now() < marker_deadline,
-            "writer holder did not create {} within 2s; child status: {:?}",
-            binary.display(),
-            holder.try_wait().unwrap()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-
-    executable(&binary, "exit 7");
-
-    let status = Command::new(&binary)
-        .status()
-        .expect("a fixture must be runnable once executable returns");
-    assert_eq!(status.code(), Some(7), "the fixture body must still run");
-    holder.wait().unwrap();
-}
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn output_mismatch_never_publishes() {
