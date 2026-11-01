@@ -1,10 +1,10 @@
 #![cfg(unix)]
 mod common;
-use common::{request, SilentSink};
+use common::{executable::executable, request, SilentSink};
 use goop_converter::{ConversionBackend, FfmpegBackend};
 use goop_core::{CompressMode, GoopError, JobId, TargetFormat};
 use goop_sidecar::BinaryResolver;
-use std::{os::unix::fs::PermissionsExt, sync::Arc};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 fn fixture(
@@ -19,7 +19,7 @@ fn fixture(
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     for (name, body) in [("ffmpeg", script), ("ffprobe", "printf '%s' '{\"format\":{\"duration\":\"1\",\"size\":\"100\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":16,\"height\":16}]}'")] {
-        let p = bin.join(name); std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap(); std::fs::set_permissions(p,std::fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&bin.join(name), body);
     }
     let input = dir.path().join("in.mp4");
     std::fs::write(&input, b"source").unwrap();

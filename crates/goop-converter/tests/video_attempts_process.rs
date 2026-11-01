@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{request, SilentSink};
+use common::{executable::executable, request, SilentSink};
 use goop_converter::{ConversionBackend, DetectedEncoders, FfmpegBackend};
 use goop_core::publication::PublicationObserver;
 use goop_core::{
@@ -22,15 +22,10 @@ struct Fixture {
     output: PathBuf,
     attempts: PathBuf,
     ffmpeg: PathBuf,
+    /// The ffprobe stand-in's body, for a test that rewrites it.
+    ffprobe_body: String,
     /// Where the `sleep` mode's ffmpeg arms.
     pid_file: PathBuf,
-}
-
-fn executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn fixture_with_probe(mode: &str, probe_json: &str) -> Fixture {
@@ -63,7 +58,8 @@ printf 'encoded media' > "$output"
     );
     let ffmpeg = bin.join("ffmpeg");
     executable(&ffmpeg, &script);
-    executable(&bin.join("ffprobe"), &format!("printf '%s' '{probe_json}'"));
+    let ffprobe_body = format!("printf '%s' '{probe_json}'");
+    executable(&bin.join("ffprobe"), &ffprobe_body);
     let input = directory.path().join("in.mp4");
     std::fs::write(&input, b"source").unwrap();
     let output = directory.path().join("out.mp4");
@@ -73,6 +69,7 @@ printf 'encoded media' > "$output"
         output,
         attempts,
         ffmpeg,
+        ffprobe_body,
         pid_file,
         _directory: directory,
     }
@@ -291,9 +288,7 @@ async fn spawn_io_failure_does_not_retry() {
 async fn cancellation_does_not_retry() {
     let fixture = fixture("sleep");
     let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
-    let ffprobe_script = std::fs::read_to_string(&ffprobe).unwrap();
-    let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
-    executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
+    executable(&ffprobe, &format!("sleep 1\n{}", fixture.ffprobe_body));
     let cancel = CancellationToken::new();
     let backend = hardware_backend(&fixture);
     let req = encode_request(&fixture);
@@ -579,9 +574,7 @@ async fn hardware_required_spawn_failure_never_retries_software() {
 async fn hardware_required_cancellation_never_retries_software() {
     let fixture = fixture("sleep");
     let ffprobe = fixture.ffmpeg.with_file_name("ffprobe");
-    let ffprobe_script = std::fs::read_to_string(&ffprobe).unwrap();
-    let ffprobe_body = ffprobe_script.strip_prefix("#!/bin/sh\n").unwrap();
-    executable(&ffprobe, &format!("sleep 1\n{ffprobe_body}"));
+    executable(&ffprobe, &format!("sleep 1\n{}", fixture.ffprobe_body));
     let cancel = CancellationToken::new();
     let backend = hardware_required_backend(&fixture, true);
     let req = hardware_required_request(&fixture);

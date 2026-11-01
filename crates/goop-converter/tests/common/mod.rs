@@ -14,6 +14,8 @@
 #![allow(dead_code)]
 
 #[cfg(unix)]
+pub mod executable;
+#[cfg(unix)]
 pub mod held_clock;
 
 use std::path::{Path, PathBuf};
