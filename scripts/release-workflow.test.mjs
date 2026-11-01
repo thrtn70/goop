@@ -33,6 +33,11 @@ const workflows = readdirSync(workflowDirectory)
   .map((name) => ({ name, body: readFileSync(new URL(name, workflowDirectory), "utf8") }));
 const checkoutNode24Ref = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const setupNode24Ref = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
+// The macOS runner image. Steps that only make sense on macOS test the
+// runner's platform rather than this label, so an image bump touches the
+// matrices alone.
+const macosRunner = "macos-15";
+const macosStepGuard = /^ {8}if: runner\.os == 'macOS'$/m;
 
 function job(name) {
   const start = lines.findIndex((line) => line === `  ${name}:`);
@@ -123,7 +128,7 @@ test("Linux audit compiles and tests PERF-01 drivers without executing unavailab
 
 test("hosted PERF-01 contract stages exact runtime sidecar names on macOS and Windows", () => {
   const smoke = auditJob("sidecar-smoke");
-  assert.match(smoke,/os: \[macos-14, windows-latest\]/);
+  assert.match(smoke,/os: \[macos-15, windows-latest\]/);
   const step=namedStep(smoke,"PERF-01 exact runtime-sidecar contract");
   assert.doesNotMatch(step,/^\s*if:/m);
   assert.match(step, /cargo build -p goop-converter --example performance_baseline --example performance_workload --all-features/);
@@ -228,9 +233,21 @@ test("every workflow pins each action to a full commit SHA", () => {
   assert.ok(pinned > 0, "no actions found to validate");
 });
 
+test("macOS steps test the runner's platform, so an image bump touches only the matrices", () => {
+  const runnerLabels = /\bmacos-(?:\d|latest)[\w.-]*/g;
+  for (const { name, body } of workflows) {
+    assert.doesNotMatch(body, /matrix\.os == 'macos-/, `${name} guards a step on a macOS runner label`);
+    const labels = body.match(runnerLabels) ?? [];
+    assert.deepEqual(labels.filter((label) => label !== macosRunner), [], `${name} names another macOS runner`);
+  }
+  // One label per matrix: release's build, audit's sidecar-smoke and heif-deps.
+  assert.equal(workflow.match(runnerLabels)?.length, 1);
+  assert.equal(auditWorkflow.match(runnerLabels)?.length, 2);
+});
+
 test("the macOS arm64 build stages one immutable workflow artifact before publication", () => {
   const build = job("build");
-  assert.match(build, /os: macos-14/);
+  assert.match(build, /os: macos-15,/);
   assert.match(build, /target: aarch64-apple-darwin/);
   assert.match(build, /bundle: "app,dmg"/);
   assert.doesNotMatch(build, /windows-latest|x86_64-pc-windows-msvc|nsis|msi/);
@@ -316,7 +333,7 @@ test("audit proves the frozen gallery-dl runtime against the recipe pins on macO
   assert.match(python, /python-version: "3\.14\.6"/);
 
   const step = namedStep(smoke, "gallery-dl runtime matches the recipe (macOS)");
-  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, macosStepGuard);
   assert.match(step, /^ {10}GALLERY_DL_PYTHON: \$\{\{ steps\.python\.outputs\.python-version \}\}$/m);
   assert.equal(step.match(galleryRuntimeCheck)?.[1], "./src-tauri/bin/gallery-dl-$TARGET");
   assert.ok(
@@ -361,7 +378,7 @@ function assertFailsTheJob(step) {
 
 test("audit proves the fetched yt-dlp clears the certifi and urllib3 floors on macOS and Windows", () => {
   const smoke = auditJob("sidecar-smoke");
-  assert.match(smoke, /^ {8}os: \[macos-14, windows-latest\]$/m);
+  assert.match(smoke, /^ {8}os: \[macos-15, windows-latest\]$/m);
   const step = namedStep(smoke, ytDlpRuntimeStep);
   assert.doesNotMatch(step, /^ {8}if:/m, "every sidecar-smoke runner must run the check");
   assert.match(step, /^ {8}shell: bash$/m);
@@ -507,7 +524,7 @@ test("validate accepts a matching tag push or agreeing manifests, and nothing el
 
 test("audit executes the pinned static Little CMS transform on both release targets", () => {
   const smoke = auditJob("sidecar-smoke");
-  assert.match(smoke, /os: \[macos-14, windows-latest\]/);
+  assert.match(smoke, /os: \[macos-15, windows-latest\]/);
   const step = smoke.match(/ {6}- name: Portable color static link\n([\s\S]*?)\n {6}- name: Image conversion correctness/);
   assert.ok(step, "missing bounded portable color static-link step");
   assert.doesNotMatch(step[0], /^\s*if:/m);
@@ -630,9 +647,9 @@ test("audit saves the HEIC cache only from a job that compiles nothing", () => {
   // Its setup-node must not save an npm cache of its own (see release).
   assert.match(writer, /^ {8}with: \{ node-version: "22", package-manager-cache: false \}$/m);
   // One leg for each runner a consumer restores on.
-  assert.match(writer, /^ {8}os: \[ubuntu-24\.04, macos-14\]$/m);
+  assert.match(writer, /^ {8}os: \[ubuntu-24\.04, macos-15\]$/m);
   assert.match(auditJob("rust"), /^ {4}runs-on: ubuntu-24\.04$/m);
-  assert.match(auditJob("sidecar-smoke"), /^ {8}os: \[macos-14, windows-latest\]$/m);
+  assert.match(auditJob("sidecar-smoke"), /^ {8}os: \[macos-15, windows-latest\]$/m);
 
   const uses = [];
   for (const name of jobNames(auditWorkflow)) {
@@ -770,7 +787,7 @@ test("macOS jobs export the floor before any Rust cache or native build, and key
     const list = steps(body).map(stepCode);
     const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
     assert.notEqual(floorAt, -1, `${name} has no macos-floor step`);
-    assert.match(list[floorAt], /^ {8}if: matrix\.os == 'macos-14'$/m, `${name}: the floor step runs on macOS`);
+    assert.match(list[floorAt], macosStepGuard, `${name}: the floor step runs on macOS`);
     for (const step of list.slice(0, floorAt)) {
       assert.match(step, setup, `${name}: this step runs before the floor is exported:\n${step}`);
     }
@@ -858,7 +875,7 @@ test("both quality gates run the HEIC stack tests, and audit runs them on macOS 
   assert.match(auditJob("web"), /- run: node --test scripts\/heif-deps\.test\.mjs/);
   // The web job is Linux, where the tests that build real archives skip.
   const step = namedStep(auditJob("sidecar-smoke"), "HEIC stack tests (macOS)");
-  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, macosStepGuard);
   assert.match(step, /^ {8}run: node --test scripts\/heif-deps\.test\.mjs$/m);
 });
 
@@ -883,12 +900,12 @@ test("every tesseract cache carries the floor and the build script, and is resto
     assert.notEqual(cacheAt, -1, `${name} has no tesseract cache`);
     const cache = list[cacheAt];
     assert.ok(cache.split("\n").includes(`          key: ${tesseractCacheKey}`), `${name} cache key:\n${cache}`);
-    assert.match(cache, /^ {8}if: matrix\.os == 'macos-14'$/m);
+    assert.match(cache, macosStepGuard);
     const floorAt = list.findIndex((step) => /^ {8}id: macos-floor$/m.test(step));
     assert.ok(floorAt !== -1 && floorAt < cacheAt, `${name} must read the floor before restoring the cache`);
     const imageAt = list.findIndex((step) => /^ {8}id: runner-image$/m.test(step));
     assert.ok(imageAt !== -1 && imageAt < cacheAt, `${name} must read the runner image before restoring the cache`);
-    assert.match(list[imageAt], /^ {8}if: matrix\.os == 'macos-14'$/m);
+    assert.match(list[imageAt], macosStepGuard);
     assert.match(stepScript(list[imageAt]), /^echo "version=\$\{ImageVersion:-unknown\}" >> "\$GITHUB_OUTPUT"$/m);
     const fetchAt = list.findIndex((step) => step.includes(`      - name: ${fetchName}\n`));
     assert.ok(fetchAt !== -1 && cacheAt < fetchAt, `${name} must restore the build before fetch-sidecars.sh runs`);
@@ -903,7 +920,7 @@ test("both quality gates run the tesseract build tests, and audit runs them on m
   assert.match(auditJob("web"), /- run: node --test scripts\/tesseract-build\.test\.mjs/);
   // The web job is Linux, where the tests that build real Mach-O files skip.
   const step = namedStep(auditJob("sidecar-smoke"), "Tesseract build tests (macOS)");
-  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, macosStepGuard);
   assert.match(step, /^ {8}run: node --test scripts\/tesseract-build\.test\.mjs$/m);
 });
 
@@ -1156,10 +1173,12 @@ test("inline publisher validates bytes and release state before mutating a draft
 test("the macOS bundle declares the floor its bundled tools need", () => {
   // Tailwind 4's output relies on cascade layers, color-mix() and @property,
   // all present from Safari 16.4, which macOS 13.3's system WebKit matches.
-  // The bundled PDF tools set the higher floor: gs, mutool and their
-  // libraries are built for macOS 14.0. Homebrew's tesseract is built for
-  // 14.8.5, so fetch-sidecars.sh bundles one built here for the floor
-  // instead (see tesseract-build.test.mjs).
+  // The bundled PDF tools set the higher floor: on the macos-14 runner, gs,
+  // mutool and their libraries came from Homebrew bottles built for macOS
+  // 14.0. Homebrew's tesseract is built for 14.8.5, so fetch-sidecars.sh
+  // bundles one built here for the floor instead (see
+  // tesseract-build.test.mjs). The macos-15 runner installs bottles built
+  // for 15.0, which the release's floor step reports as above this floor.
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
   assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
 });
@@ -1169,7 +1188,7 @@ const floorStep = "Verify the macOS deployment floor";
 test("the signed bundle must carry the declared macOS floor before assets are staged", () => {
   const build = job("build");
   const step = namedStep(build, floorStep);
-  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, macosStepGuard);
   assert.match(step, /^ {8}shell: bash$/m);
   assert.match(step, /^ {10}TARGET: \$\{\{ matrix\.target \}\}$/m);
   const script = runBlock(step);
@@ -1388,7 +1407,7 @@ test("only a slice that runs on Apple Silicon can raise the floor warning", need
 
 test("audit runs the floor check's tests on macOS, where they are not skipped", () => {
   const step = namedStep(auditJob("sidecar-smoke"), "Release workflow tests (macOS)");
-  assert.match(step, /^ {8}if: matrix\.os == 'macos-14'$/m);
+  assert.match(step, macosStepGuard);
   assert.match(step, /node --test scripts\/release-workflow\.test\.mjs/);
 });
 
