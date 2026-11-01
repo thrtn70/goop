@@ -234,7 +234,10 @@ test(
   "a HEIC stack holding objects built for another macOS is rebuilt, not reused",
   { skip: process.platform !== "darwin" && "needs clang, ar and otool" },
   async (t) => {
-    const newer = `${Number(declaredFloor.split(".")[0]) + 1}.0`;
+    // The first macOS after the floor. 15 was followed by 26, and clang
+    // rewrites a target of 16 through 25 to 26.0 with only a warning.
+    const major = Number(declaredFloor.split(".")[0]);
+    const newer = `${major === 15 ? 26 : major + 1}.0`;
     const compile = (root, name, minos) => {
       const source = join(root, `${name}.c`);
       writeFileSync(source, `int goop_${name.replace(/-/g, "_")}(void) { return 0; }\n`);

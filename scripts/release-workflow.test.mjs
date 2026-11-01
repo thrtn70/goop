@@ -1173,14 +1173,15 @@ test("inline publisher validates bytes and release state before mutating a draft
 test("the macOS bundle declares the floor its bundled tools need", () => {
   // Tailwind 4's output relies on cascade layers, color-mix() and @property,
   // all present from Safari 16.4, which macOS 13.3's system WebKit matches.
-  // The bundled PDF tools set the higher floor: on the macos-14 runner, gs,
-  // mutool and their libraries came from Homebrew bottles built for macOS
-  // 14.0. Homebrew's tesseract is built for 14.8.5, so fetch-sidecars.sh
-  // bundles one built here for the floor instead (see
-  // tesseract-build.test.mjs). The macos-15 runner installs bottles built
-  // for 15.0, which the release's floor step reports as above this floor.
+  // The bundled PDF tools set the higher floor: on the macos-15 runner, gs,
+  // mutool and their libraries come from Homebrew bottles built for macOS
+  // 15.0. Homebrew's tesseract is built for the macOS of the machine that
+  // built it, so fetch-sidecars.sh bundles one built here for the floor
+  // instead (see tesseract-build.test.mjs). Moving the runner to a newer
+  // image moves these bottles too; the release's floor step reports any
+  // bundled binary built above this floor.
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(config.bundle.macOS.minimumSystemVersion, "14.0");
+  assert.equal(config.bundle.macOS.minimumSystemVersion, "15.0");
 });
 
 const floorStep = "Verify the macOS deployment floor";
@@ -1283,7 +1284,7 @@ ${body}
 }
 
 // Shaped like the shipped bundle: a static upstream build, a universal
-// PyInstaller binary and Homebrew bottles built on the macOS 14 runner.
+// PyInstaller binary and Homebrew bottles built above the floor.
 const bundledBinaries = {
   ffmpeg: [["arm64", "12.0"]],
   "yt-dlp": [["x86_64", "10.13", "min"], ["arm64", "11.0"]],

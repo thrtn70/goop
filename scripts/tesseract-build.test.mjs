@@ -195,7 +195,10 @@ test("a tesseract build for the floor against the installed libraries is reused"
 });
 
 test("a tesseract build that is not the one this checkout would make is rebuilt", needsMacTools, async (t) => {
-  const newer = `${Number(declaredFloor.split(".")[0]) + 1}.0`;
+  // The first macOS after the floor. 15 was followed by 26, and clang
+  // rewrites a target of 16 through 25 to 26.0 with only a warning.
+  const major = Number(declaredFloor.split(".")[0]);
+  const newer = `${major === 15 ? 26 : major + 1}.0`;
   const older = "13.0";
   const stale = (name, prefixOptions, pattern, repoOptions) =>
     t.test(name, () => {
