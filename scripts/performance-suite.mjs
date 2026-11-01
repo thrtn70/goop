@@ -17,6 +17,7 @@ import { runStartup } from './startup-baseline.mjs';
 import {
   boundedLedgerField,
   captureIdentity,
+  closingEvidenceWriter,
   createOwnedDirectory,
   createRunLogs,
   directoryBytes,
@@ -378,7 +379,8 @@ export async function runPerformanceSuite({
   state.status = fatal ? 'failed' : 'complete';
   state.summary = summarizeSuite(summarySamples, manifest);
   writeLedger();
-  if (fatal) throw Error(fatal);
+  // A caller writing after the ledger skips the walk too once the ledger did.
+  if (fatal) throw Object.assign(Error(fatal), evidenceIoFailed ? { evidenceIoFailed } : {});
   return state;
 }
 
@@ -688,6 +690,19 @@ async function rustContractSmoke(options, abortSignal = null) {
   });
 }
 
+// Only after a failed integrity check, which the integrity record carries unless
+// its own write failed. A ledger that can't be read back, because the suite
+// failed before creating one or a process outside the owned group made it
+// unreadable, is left as it is rather than letting the read replace that
+// failure or the run's own.
+function readLedgerBack(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 export async function normalSuite(options, abortSignal = null) {
   const required = ['manifest', 'bindings', 'output', 'single-driver', 'workload-driver', 'runtime-sidecars', 'startup-binary', 'startup-config', 'build-command'];
   const allowed = new Set([...required, 'hardware-enabled']);
@@ -758,16 +773,17 @@ export async function normalSuite(options, abortSignal = null) {
   } catch (error) {
     integrityError = error.message;
   }
-  writeJsonAtomic(join(outputDirectory, 'integrity.json'), { success: integrityError === null, error: integrityError, pre: identity, post }, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
+  // Once the tree may no longer be readable, these writes skip the walk too.
+  const writer = closingEvidenceWriter(outputDirectory, manifest.defaults.suite_storage_budget_bytes, runError?.evidenceIoFailed !== true);
+  writer.write(join(outputDirectory, 'integrity.json'), { success: integrityError === null, error: integrityError, pre: identity, post });
   if (integrityError) {
     const statePath = join(outputDirectory, 'suite-state.json');
-    const state = JSON.parse(readFileSync(statePath, 'utf8'));
-    state.status = 'failed';
-    state.integrity_error = integrityError;
-    writeJsonAtomic(statePath, state, { budgetDirectory: outputDirectory, budgetBytes: manifest.defaults.suite_storage_budget_bytes });
+    const state = readLedgerBack(statePath);
+    if (state !== null) writer.write(statePath, { ...state, status: 'failed', integrity_error: integrityError });
   }
   if (runError) throw runError;
   if (integrityError) throw Error(integrityError);
+  if (writer.error) throw writer.error;
   return result;
 }
 
