@@ -40,7 +40,7 @@
 #                         its own. The PROTOCOL_ERROR above is exactly
 #                         such a failure, so this flag is the one that
 #                         addresses the observed break. Needs curl >= 7.71
-#                         (2020); the ubuntu-24.04, macos-14 and
+#                         (2020); the ubuntu-24.04, macos-15 and
 #                         windows-latest images all ship 8.x.
 #   --connect-timeout 30  bound the handshake so a black-holed mirror
 #                         drops into the retry loop instead of hanging.

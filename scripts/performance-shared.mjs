@@ -365,6 +365,45 @@ export function boundedLedgerField(value) {
   return text.length <= LEDGER_FIELD_LIMIT_CHARS ? value : `${text.slice(0, LEDGER_FIELD_LIMIT_CHARS)} [truncated]`;
 }
 
+/**
+ * Write a caller's closing evidence after a collector's ledger, the way the
+ * collector writes its ledger. Writes are measured against the budget until
+ * one fails for any reason other than a refusal, which is how a tree that can
+ * no longer be walked shows. After that they skip the walk.
+ *
+ * A failure is not thrown. The first one is kept for the caller to throw when
+ * the run failed for no reason of its own, so a closing write never replaces
+ * that reason. A refused write still throws, in place of any such reason: the
+ * budget is a hard ceiling, so nothing more is written past it.
+ *
+ * A collector that already wrote its ledger unmeasured starts this unmeasured.
+ * Skipped walks leave these files outside the ceiling.
+ */
+export function closingEvidenceWriter(budgetDirectory, budgetBytes, measurable) {
+  let measured = measurable;
+  const writer = {
+    error: null,
+    write(path, value) {
+      if (measured) {
+        try {
+          writeJsonAtomic(path, value, { budgetDirectory, budgetBytes });
+          return;
+        } catch (error) {
+          if (error.code === STORAGE_BUDGET_REFUSED) throw error;
+          measured = false;
+          writer.error ??= error;
+        }
+      }
+      try {
+        writeJsonAtomic(path, value);
+      } catch (error) {
+        writer.error ??= error;
+      }
+    },
+  };
+  return writer;
+}
+
 export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetBytes = null } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
@@ -378,11 +417,17 @@ export function writeJsonAtomic(path, value, { budgetDirectory = null, budgetByt
   // JSON byte count and violate the declared hard storage ceiling.
   writeFileSync(temporary, serialized, { flag: 'wx' });
   try {
-    renameSync(temporary, path);
+    try {
+      renameSync(temporary, path);
+    } catch (error) {
+      if (process.platform !== 'win32' || !existsSync(path)) throw error;
+      rmSync(path, { force: true });
+      renameSync(temporary, path);
+    }
   } catch (error) {
-    if (process.platform !== 'win32' || !existsSync(path)) throw error;
-    rmSync(path, { force: true });
-    renameSync(temporary, path);
+    // A retry creates the same temporary name, so none may be left behind.
+    rmSync(temporary, { force: true });
+    throw error;
   }
 }
 

@@ -130,6 +130,7 @@ export function ConvertSettingsPanel({
   onAlphaValidityChange,
   onReinspect,
   draftIdentity,
+  batchRevision,
 }: {
   path: string;
   options: FileRowOptions;
@@ -139,6 +140,7 @@ export function ConvertSettingsPanel({
   onAlphaValidityChange?: (problem: string | null) => void;
   onReinspect?: () => void;
   draftIdentity?: string;
+  batchRevision?: number;
 }) {
   const p = state.probe;
   const { target, gifOptions, imageColorPolicy = "preserve", metadataPolicy, subtitle } = opts;
@@ -443,7 +445,10 @@ export function ConvertSettingsPanel({
         )}
       {showMetadataPolicy && (
         ((alphaCapabilities?.source_has_alpha === true && target === "jpeg") || opts.imageAlphaPolicy) && (
+          // A batch write replaces the saved background even when the color
+          // is unchanged, so a fresh editor drops the custom text it superseded.
           <ImageAlphaPolicyControl
+            key={batchRevision}
             value={opts.imageAlphaPolicy}
             capabilities={alphaCapabilities}
             target={target}

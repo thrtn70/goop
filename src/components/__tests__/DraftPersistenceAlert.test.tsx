@@ -224,6 +224,7 @@ describe("recovering saved edits a strict load refused", () => {
 
   it.each([
     ["edits saved by a newer Goop", { [V2]: JSON.stringify({ version: 3, entries: {} }) }, {}],
+    ["edits too large for this Goop to read", { [V2]: JSON.stringify({ version: 2, entries: { [files]: { value: ["x".repeat(600 * 1024)] } } }) }, {}],
     ["storage that cannot be read", { [V2]: refusedRaw }, { unreadable: true }],
   ])("offers no recovery for %s", async (_label, saved, options) => {
     await boot(saved, options);
