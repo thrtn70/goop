@@ -68,7 +68,7 @@ pub struct ThumbnailService {
     data_dir: PathBuf,
     /// Path to the bundled Ghostscript resource tree (Resource/, lib/,
     /// iccprofiles/). Set at startup from Tauri's `resource_dir()`. The
-    /// gs invocations export this as `GS_LIB`. `None` means we assume gs
+    /// gs invocations search it through `goop_pdf::gs_env`. `None` means we assume gs
     /// has its own resource-path baked in (dev builds where gs is on PATH).
     gs_resource_dir: Option<PathBuf>,
     locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
@@ -314,9 +314,9 @@ async fn generate_pdf(
         .map_err(|e| ThumbError::SidecarMissing(e.to_string()))?;
     let mut cmd = tokio::process::Command::new(&bin.path);
     if let Some(dir) = gs_resource_dir {
-        // Gs searches these dirs for Resource/, lib/, iccprofiles/.
-        cmd.env("GS_LIB", dir);
-        cmd.arg(gs_generic_resource_dir_arg(dir));
+        goop_pdf::gs_env::apply_gs_resources(&mut cmd, dir).map_err(|e| {
+            ThumbError::Ghostscript(format!("Ghostscript can't search {}: {e}", dir.display()))
+        })?;
     }
     let status = cmd
         .arg("-sDEVICE=pngalpha")
@@ -344,21 +344,6 @@ fn gs_output_arg(output: &Path) -> String {
     format!("-sOutputFile={escaped}")
 }
 
-/// Point Ghostscript at the bundled `<gs-resources>/Resource/` tree for its
-/// CMaps/fonts/ICC profiles. Without it, gs renders (it finds `gs_init.ps`
-/// via `GS_LIB`) but warns that GenericResourceDir is invalid and can miss
-/// resources for exotic PDFs. The value must end in a separator — gs appends
-/// category subdirs (`Init/`, `Font/`, `CMap/`, …). We use `/` (not
-/// `MAIN_SEPARATOR`): gs accepts it on every platform, and a trailing `\` on
-/// Windows would be swallowed by `CreateProcess` arg-quoting on a path with
-/// spaces (the `\"` escapes the closing quote).
-fn gs_generic_resource_dir_arg(gs_resource_dir: &Path) -> String {
-    format!(
-        "-sGenericResourceDir={}/",
-        gs_resource_dir.join("Resource").display()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,17 +366,6 @@ mod tests {
             gs_output_arg(path),
             "-sOutputFile=/tmp/goop 100%%/thumb.png"
         );
-    }
-
-    #[test]
-    fn generic_resource_dir_arg_targets_resource_subdir_with_trailing_separator() {
-        let arg = gs_generic_resource_dir_arg(Path::new("/opt/app/gs-resources"));
-        assert!(arg.starts_with("-sGenericResourceDir="));
-        assert!(arg.contains("gs-resources"));
-        assert!(arg.contains("Resource"));
-        // gs needs a trailing separator so it can append category dirs; we
-        // always emit '/' (portable + safe under Windows arg-quoting).
-        assert!(arg.ends_with('/'));
     }
 
     #[test]
@@ -484,6 +458,58 @@ mod tests {
         assert!(
             matches!(err, ThumbError::SidecarMissing(_) | ThumbError::Ffmpeg(_)),
             "expected SidecarMissing or Ffmpeg, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pdf_thumbnail_gives_ghostscript_the_bundled_search_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let gs = dir.path().join("gs");
+        std::fs::write(
+            &gs,
+            "#!/bin/sh\n[ \"$1\" = --goop-exec-probe ] && exit 0\nfor arg do case $arg in -sOutputFile=*) out=${arg#-sOutputFile=};; esac; done; printf '%s' \"$GS_LIB\" > \"$out\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Linux refuses to run a file another process holds open for
+        // writing, and a sibling test's fork can inherit this script's write
+        // handle until its own exec. Probe it, retrying only that refusal.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(&gs)
+                .arg("--goop-exec-probe")
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "readiness probe exited {status}");
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("fake gs never became runnable: {e}"),
+            }
+        }
+        let resolver = BinaryResolver::new(dir.path().to_path_buf());
+        let resources = dir.path().join("gs-resources");
+        let output = dir.path().join("thumb.png");
+        generate_pdf(
+            &resolver,
+            Some(resources.as_path()),
+            &dir.path().join("in.pdf"),
+            &output,
+        )
+        .await
+        .unwrap();
+        let r = resources.display();
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("{r}/Resource/Init:{r}/lib:{r}/Resource/Font:{r}/iccprofiles")
         );
     }
 }
