@@ -469,10 +469,32 @@ mod tests {
         let gs = dir.path().join("gs");
         std::fs::write(
             &gs,
-            "#!/bin/sh\nfor arg do case $arg in -sOutputFile=*) out=${arg#-sOutputFile=};; esac; done; printf '%s' \"$GS_LIB\" > \"$out\"\n",
+            "#!/bin/sh\n[ \"$1\" = --goop-exec-probe ] && exit 0\nfor arg do case $arg in -sOutputFile=*) out=${arg#-sOutputFile=};; esac; done; printf '%s' \"$GS_LIB\" > \"$out\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&gs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Linux refuses to run a file another process holds open for
+        // writing, and a sibling test's fork can inherit this script's write
+        // handle until its own exec. Probe it, retrying only that refusal.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(&gs)
+                .arg("--goop-exec-probe")
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "readiness probe exited {status}");
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("fake gs never became runnable: {e}"),
+            }
+        }
         let resolver = BinaryResolver::new(dir.path().to_path_buf());
         let resources = dir.path().join("gs-resources");
         let output = dir.path().join("thumb.png");

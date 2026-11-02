@@ -229,13 +229,47 @@ mod tests {
 mod reliability_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    const EXEC_PROBE_ARG: &str = "--goop-exec-probe";
+
+    /// Linux refuses to run a file another process holds open for writing,
+    /// and a sibling test's fork can inherit this script's write handle until
+    /// its own exec. Probe the script, retrying only that refusal, so the
+    /// test's own spawn never sees "Text file busy".
     fn fixture(body: &str) -> (tempfile::TempDir, BinaryResolver) {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("gs");
-        std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\n[ \"$1\" = {EXEC_PROBE_ARG} ] && exit 0\n{body}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&binary);
         let resolver = BinaryResolver::new(dir.path().to_path_buf());
         (dir, resolver)
+    }
+
+    fn wait_until_executable(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(path)
+                .arg(EXEC_PROBE_ARG)
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "readiness probe exited {status}");
+                    return;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("{} never became runnable: {e}", path.display()),
+            }
+        }
     }
     #[tokio::test]
     async fn ghostscript_failure_keeps_original() {
