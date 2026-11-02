@@ -268,7 +268,7 @@ pub fn run() {
 
             // Ghostscript ships its Resource/lib/iccprofiles tree via
             // `bundle.resources` in tauri.conf.json. Resolve the runtime
-            // path so the gs invocations can export GS_LIB. `None` in dev
+            // path so the gs invocations can search it. `None` in dev
             // builds falls back to gs's compile-time defaults.
             let gs_resource_dir: Option<PathBuf> = app
                 .path()

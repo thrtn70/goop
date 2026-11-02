@@ -1,0 +1,13 @@
+(version 1)
+(allow default)
+; Hide every Ghostscript install outside the app bundle. The bundled gs falls
+; back to the Homebrew prefix compiled into it, which exists on CI runners and
+; dev Macs but not on users' Macs. With it hidden, a check of the bundled gs
+; fails the way a user's launch would.
+(deny file-read*
+  (subpath "/opt/homebrew/Cellar/ghostscript")
+  (subpath "/opt/homebrew/opt/ghostscript")
+  (subpath "/opt/homebrew/share/ghostscript")
+  (subpath "/usr/local/Cellar/ghostscript")
+  (subpath "/usr/local/opt/ghostscript")
+  (subpath "/usr/local/share/ghostscript"))

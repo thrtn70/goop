@@ -407,19 +407,21 @@ jobs:
           node scripts/check-yt-dlp-runtime.mjs --binary "$APP/Contents/MacOS/yt-dlp"
           # `gs --version` exercises the dylib graph but NOT the bundled
           # Resource/lib tree (gs_init.ps, fonts, iccprofiles) that the real
-          # PDF compress/thumbnail features reach via GS_LIB (set to the
-          # gs-resources dir in src-tauri/src/lib.rs). A broken/missing
+          # PDF compress/thumbnail features reach via the search path that
+          # crates/goop-pdf/src/gs_env.rs builds. A broken/missing
           # gs-resources bundle — invisible to --version — would only fault in
           # a user's hands ("Can't find initialization file gs_init.ps").
           # Assert the tree is actually in the bundle, then do one real render
-          # with that exact GS_LIB.
+          # with that exact GS_LIB and GenericResourceDir. The runner's own
+          # Homebrew ghostscript sits at the prefix compiled into the bundled
+          # gs, and gs falls back to it, so hide it the way a user's Mac lacks it.
           GSRES="$APP/Contents/Resources/gs-resources"
           for need in "Resource/Init/gs_init.ps" "Resource/Font"; do
             [ -e "$GSRES/$need" ] || { echo "::error::bundled gs-resources is missing $need"; exit 1; }
           done
           printf '%%!PS\n/Helvetica findfont 24 scalefont setfont 72 700 moveto (gs render smoke) show showpage\n' > "$RUNNER_TEMP/gs-smoke.ps"
-          echo "== gs pngalpha render (GS_LIB=gs-resources) =="
-          GS_LIB="$GSRES" "$APP/Contents/MacOS/gs" -q -dNOPAUSE -dBATCH -sDEVICE=pngalpha -r72 -o "$RUNNER_TEMP/gs-smoke.png" "$RUNNER_TEMP/gs-smoke.ps"
+          echo "== gs pngalpha render (bundled search path, system ghostscript hidden) =="
+          GS_LIB="$GSRES/Resource/Init:$GSRES/lib:$GSRES/Resource/Font:$GSRES/iccprofiles" sandbox-exec -f scripts/no-system-ghostscript.sb "$APP/Contents/MacOS/gs" -q -sGenericResourceDir="$GSRES/Resource/" -dNOPAUSE -dBATCH -sDEVICE=pngalpha -r72 -o "$RUNNER_TEMP/gs-smoke.png" "$RUNNER_TEMP/gs-smoke.ps"
           [ -s "$RUNNER_TEMP/gs-smoke.png" ] || { echo "::error::gs produced no PNG — the bundled gs-resources / GS_LIB path is broken"; exit 1; }
           echo "gs rendered $(wc -c < "$RUNNER_TEMP/gs-smoke.png" | tr -d ' ') bytes from the bundled resource tree"
 

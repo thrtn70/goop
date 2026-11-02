@@ -19,10 +19,10 @@ fn pdf_settings_flag(q: PdfQuality) -> &'static str {
 /// The `resolver` must be able to locate the bundled `gs` binary (same
 /// pattern used for ffmpeg/yt-dlp).
 ///
-/// `gs_resource_dir` points at the bundled Resource/lib/iccprofiles tree
-/// and is exported as the `GS_LIB` env var so gs can find its init
-/// scripts. `None` is acceptable for dev environments where gs is on
-/// PATH with its compile-time resource dir intact.
+/// `gs_resource_dir` points at the bundled Resource/lib/iccprofiles tree;
+/// `gs_env::apply_gs_resources` turns it into gs's search path. `None` is
+/// acceptable for dev environments where gs is on PATH with its compile-time
+/// resource dir intact.
 ///
 /// `pids` and `job_id` together enable v0.2.0 pause/resume: when both are
 /// `Some`, the spawned gs PID is registered for the duration of the call
@@ -54,6 +54,13 @@ pub async fn compress(
         return Err(PdfError::Cancelled);
     }
 
+    let mut cmd = Command::new(&bin.path);
+    if let Some(dir) = gs_resource_dir {
+        crate::gs_env::apply_gs_resources(&mut cmd, dir).map_err(|e| {
+            PdfError::Ghostscript(format!("Ghostscript can't search {}: {e}", dir.display()))
+        })?;
+    }
+
     let destination = goop_core::output::OutputDestination::explicit(output.to_path_buf());
     let staged = goop_core::output::StagedOutput::new(output)?;
     let output = staged.path();
@@ -61,11 +68,6 @@ pub async fn compress(
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut cmd = Command::new(&bin.path);
-    if let Some(dir) = gs_resource_dir {
-        cmd.env("GS_LIB", dir);
-        cmd.arg(gs_generic_resource_dir_arg(dir));
-    }
     cmd.arg("-sDEVICE=pdfwrite")
         .arg("-dCompatibilityLevel=1.4")
         .arg(format!("-dPDFSETTINGS={}", pdf_settings_flag(quality)))
@@ -135,23 +137,6 @@ fn gs_output_arg(output: &Path) -> String {
     format!("-sOutputFile={escaped}")
 }
 
-/// Ghostscript's `GenericResourceDir` is where it looks for CMaps, fonts,
-/// and ICC profiles. With only `GS_LIB` set, gs still finds `gs_init.ps`
-/// and renders, but it warns that GenericResourceDir is invalid and can
-/// miss resources for exotic PDFs (CJK CMaps, non-embedded fonts, specific
-/// color spaces). Point it at the bundled `<gs-resources>/Resource/` tree.
-/// gs appends category subdirs (`Init/`, `Font/`, `CMap/`, …), so the value
-/// must end in a separator. We use `/` (not `MAIN_SEPARATOR`): gs accepts
-/// forward slashes on every platform, and a trailing `\` on Windows would be
-/// swallowed by `CreateProcess` arg-quoting when the path contains spaces
-/// (the `\"` escapes the closing quote and mangles the argument).
-fn gs_generic_resource_dir_arg(gs_resource_dir: &Path) -> String {
-    format!(
-        "-sGenericResourceDir={}/",
-        gs_resource_dir.join("Resource").display()
-    )
-}
-
 fn append_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
     tail.extend_from_slice(bytes);
     if tail.len() > 8192 {
@@ -174,17 +159,6 @@ mod tests {
     fn output_arg_escapes_percent_for_ghostscript() {
         let path = Path::new("/tmp/goop 100%/out.pdf");
         assert_eq!(gs_output_arg(path), "-sOutputFile=/tmp/goop 100%%/out.pdf");
-    }
-
-    #[test]
-    fn generic_resource_dir_arg_targets_resource_subdir_with_trailing_separator() {
-        let arg = gs_generic_resource_dir_arg(Path::new("/opt/app/gs-resources"));
-        assert!(arg.starts_with("-sGenericResourceDir="));
-        assert!(arg.contains("gs-resources"));
-        assert!(arg.contains("Resource"));
-        // gs needs a trailing separator so it can append category dirs; we
-        // always emit '/' (portable + safe under Windows arg-quoting).
-        assert!(arg.ends_with('/'));
     }
 
     /// Ghostscript-gated: only runs when a gs binary is on PATH. CI without
@@ -232,7 +206,7 @@ mod tests {
         crate::test_fixture::require_bundled(&resolver, "gs");
         // The resource dir is passed rather than left `None`. Only the packaged
         // app supplies it in production, so `-sGenericResourceDir` — the whole
-        // reason `gs_generic_resource_dir_arg` exists — was built by a unit
+        // reason `gs_env::apply_gs_resources` exists — was built by a unit
         // test and never once handed to a real gs.
         let gs_resources = crate::test_fixture::bundled_gs_resource_dir();
         compress(
@@ -301,6 +275,57 @@ mod reliability_tests {
         )
         .await;
         assert!(matches!(result, Ok(Err(_))));
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn ghostscript_gets_the_bundled_search_path_in_gs_lib() {
+        let (dir, resolver) = fixture(
+            "for arg do case $arg in -sOutputFile=*) out=${arg#-sOutputFile=};; esac; done; printf '%s' \"$GS_LIB\" > \"$out\"",
+        );
+        let resources = dir.path().join("gs-resources");
+        let output = dir.path().join("out.pdf");
+        compress(
+            &resolver,
+            Some(resources.as_path()),
+            &dir.path().join("input.pdf"),
+            &output,
+            PdfQuality::Screen,
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let r = resources.display();
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("{r}/Resource/Init:{r}/lib:{r}/Resource/Font:{r}/iccprofiles")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resource_dir_gs_cannot_search_fails_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gs"), b"not executable").unwrap();
+        let resolver = BinaryResolver::new(dir.path().to_path_buf());
+        let resources = dir.path().join("a:b").join("gs-resources");
+        let output = dir.path().join("out.pdf");
+        let result = compress(
+            &resolver,
+            Some(resources.as_path()),
+            &dir.path().join("input.pdf"),
+            &output,
+            PdfQuality::Screen,
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PdfError::Ghostscript(ref m)) if m.contains("gs-resources")),
+            "{result:?}"
+        );
         assert!(!output.exists());
     }
 }

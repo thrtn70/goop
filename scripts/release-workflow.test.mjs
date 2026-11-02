@@ -280,7 +280,34 @@ test("the macOS release keeps version, licensing, entitlement, and in-bundle smo
   assert.match(build, /Verify signed sidecars run \(macOS\)/);
   assert.match(build, /for bin in gallery-dl yt-dlp tesseract gs ffmpeg ffprobe mutool/);
   assert.match(build, /Contents\/Resources\/gs-resources/);
-  assert.match(build, /GS_LIB="\$GSRES"/);
+});
+
+test("Ghostscript checks run with every Ghostscript outside the bundle hidden", () => {
+  const profile = readFileSync(new URL("./no-system-ghostscript.sb", import.meta.url), "utf8");
+  assert.match(profile, /^\(version 1\)$/m);
+  assert.match(profile, /^\(allow default\)$/m);
+  for (const dir of [
+    "/opt/homebrew/Cellar/ghostscript",
+    "/opt/homebrew/opt/ghostscript",
+    "/opt/homebrew/share/ghostscript",
+    "/usr/local/Cellar/ghostscript",
+    "/usr/local/opt/ghostscript",
+    "/usr/local/share/ghostscript",
+  ]) {
+    assert.ok(profile.includes(`(subpath "${dir}")`), `profile must hide ${dir}`);
+  }
+  assert.match(profile, /\(deny file-read\*/);
+
+  const build = job("build");
+  assert.doesNotMatch(build, /GS_LIB="\$GSRES"/, "a bare GS_LIB passes only when the compiled-in prefix exists");
+  assert.match(
+    build,
+    /GS_LIB="\$GSRES\/Resource\/Init:\$GSRES\/lib:\$GSRES\/Resource\/Font:\$GSRES\/iccprofiles" sandbox-exec -f scripts\/no-system-ghostscript\.sb "\$APP\/Contents\/MacOS\/gs" -q -sGenericResourceDir="\$GSRES\/Resource\/"/,
+  );
+
+  const pdf = namedStep(auditJob("sidecar-smoke"), "PDF pipeline (real mutool / gs / tesseract)");
+  assert.match(pdf, /if \[ "\$RUNNER_OS" = macOS \]; then\n\s+sandbox-exec -f scripts\/no-system-ghostscript\.sb cargo test -p goop-pdf --lib -- --ignored\n/);
+  assert.match(pdf, /else\n\s+cargo test -p goop-pdf --lib -- --ignored\n/);
 });
 
 test("the macOS gallery-dl recipe excludes vulnerable urllib3 releases", () => {

@@ -891,9 +891,18 @@ jobs:
       # Both runners matter for the same reason the ffmpeg steps above give:
       # gs and tesseract load co-located libraries by different mechanisms per
       # platform, and the OCR pipeline shells out to two of them in sequence.
+      #
+      # The bundled gs also falls back to the Homebrew prefix compiled into
+      # it, which the macOS runner has and users' Macs don't, so a broken
+      # GS_LIB passed here while failing for users. Hide it on macOS.
       - name: PDF pipeline (real mutool / gs / tesseract)
         shell: bash
-        run: cargo test -p goop-pdf --lib -- --ignored
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            sandbox-exec -f scripts/no-system-ghostscript.sb cargo test -p goop-pdf --lib -- --ignored
+          else
+            cargo test -p goop-pdf --lib -- --ignored
+          fi
 
   # The only job that saves the static HEIC stack's cache, and it compiles
   # nothing else. The rust and sidecar-smoke jobs run build scripts from
