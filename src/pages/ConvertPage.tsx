@@ -46,6 +46,7 @@ import type { FileRowOptions } from "@/features/convert/FileRow";
 import ConvertActionBar from "@/features/convert/ConvertActionBar";
 import type { FileEntry } from "@/features/convert/ConvertActionBar";
 import { cloneImageOptions, imageDraftProblem, imageDraftSlots, type ImageDraftText } from "@/features/convert/imageOptions";
+import { gifDraftSlots } from "@/features/convert/GifOptionsPanel";
 import { cloneImageAlphaPolicy } from "@/features/convert/imageAlphaPolicy";
 import { useWorkspaceDraftEntries, clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
 import { smartDefault } from "@/features/convert/TargetPicker";
@@ -609,7 +610,11 @@ function ConvertPage() {
     }
     setApplicationError(null);
     const replaceableVideoDrafts = videoDraftSlots.filter(slot => slot !== "VideoOptionsPanel.savedSoftware");
-    files.filter(inScope).forEach(file => clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]));
+    files.filter(inScope).forEach(file => {
+      clearWorkspaceDraftSlots("convert", ["source", file.path, file.id ?? ""], [...imageDraftSlots, ...replaceableVideoDrafts, ...audioDraftSlots, "AudioOptionsPanel.savedCustom"]);
+      // GIF trim text sits beside the per-file panels, keyed by path alone.
+      clearWorkspaceDraftSlots("convert", ["source", file.path], gifDraftSlots);
+    });
     setFiles(stampEntries(next, scope.ids, scope.stamp));
     return true;
   };
