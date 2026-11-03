@@ -168,10 +168,11 @@ function parseReport(stderr) {
   }
   const [, version] = requireField(found, "Version", /^(\S+)(?: - .+)?$/, "Version …");
   const [, python, platform] = requireField(found, "Python", /^(\S+) - (\S+)$/, "Python … - <platform>");
-  const [, requests, urllib3] = requireField(
+  // gallery-dl 1.32.19 and later append the certifi requests uses.
+  const [, requests, urllib3, requestsCertifi] = requireField(
     found,
     "requests",
-    /^(\S+) - urllib3 (\S+)$/,
+    /^(\S+) - urllib3 (\S+)(?: - certifi (\S+))?$/,
     "requests … - urllib3 …",
   );
   const [, certifi, caBundle] = requireField(
@@ -180,7 +181,7 @@ function parseReport(stderr) {
     /^(\S+) - requests CA bundle (certifi|other)$/,
     "certifi … - requests CA bundle …",
   );
-  return { version, python, platform, requests, urllib3, certifi, caBundle };
+  return { version, python, platform, requests, urllib3, requestsCertifi, certifi, caBundle };
 }
 
 // certifi's __version__ zero-pads the month and day ("2026.07.22") while a pip
@@ -204,6 +205,9 @@ function compare(report, pins, python) {
   ];
   for (const [name, actual] of pairs) {
     if (!versionsMatch(actual, pins[name])) problems.push(`${name} ${actual} does not match the recipe's ${pins[name]}`);
+  }
+  if (report.requestsCertifi !== undefined && !versionsMatch(report.requestsCertifi, report.certifi)) {
+    problems.push(`gallery-dl reports requests with certifi ${report.requestsCertifi}, but the probe found ${report.certifi}`);
   }
   if (report.caBundle !== "certifi") {
     problems.push("requests trusts a CA bundle other than the bundled certifi's");

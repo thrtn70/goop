@@ -10,11 +10,11 @@ import { scrubbedEnv } from "./sidecar-child-env.mjs";
 const checker = fileURLToPath(new URL("./check-yt-dlp-runtime.mjs", import.meta.url));
 const fetchScript = fileURLToPath(new URL("./fetch-sidecars.sh", import.meta.url));
 
-// What yt-dlp 2026.10.21's macOS binary printed for `--ignore-config -v`,
+// What yt-dlp 2026.10.26's macOS binary printed for `--ignore-config -v`,
 // trimmed to the lines the checker reads plus their neighbours.
 const AT_FLOORS = {
-  version: "stable@2026.10.21",
-  certifi: "2026.10.19",
+  version: "stable@2026.10.26",
+  certifi: "2026.10.23",
   urllib3: "2.8.0",
 };
 
@@ -82,7 +82,7 @@ function fakeBinary(dir, { stderrLines = [...report(), ...NO_URL], exitCode = 2,
   return { path, record };
 }
 
-function pins(dir, text = 'YT_DLP_VERSION="2026.10.21"\nYT_DLP_MACOS_SHA256="00"\n') {
+function pins(dir, text = 'YT_DLP_VERSION="2026.10.26"\nYT_DLP_MACOS_SHA256="00"\n') {
   const path = join(dir, "fetch-sidecars.sh");
   writeFileSync(path, text);
   return path;
@@ -112,8 +112,8 @@ test("accepts the pinned yt-dlp when certifi and urllib3 sit exactly at the floo
   withDir((dir) => {
     const result = run(dir, fakeBinary(dir));
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /yt-dlp stable@2026\.10\.21/);
-    assert.match(result.stdout, /certifi 2026\.10\.19/);
+    assert.match(result.stdout, /yt-dlp stable@2026\.10\.26/);
+    assert.match(result.stdout, /certifi 2026\.10\.23/);
     assert.match(result.stdout, /urllib3 2\.8\.0/);
     assert.match(result.stdout, /Python 3\.14\.7/);
   });
@@ -141,7 +141,7 @@ test("reads the Windows binary's output", () => {
   withDir((dir) => {
     const result = run(dir, fakeBinary(dir, { stderrLines: windowsReport() }));
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Python 3\.10\.11, certifi 2026\.10\.19, urllib3 2\.8\.0$/m);
+    assert.match(result.stdout, /Python 3\.10\.11, certifi 2026\.10\.23, urllib3 2\.8\.0$/m);
   });
 });
 
@@ -181,7 +181,7 @@ test("treats missing version parts as zero", async (t) => {
   for (const [name, overrides, status] of [
     ["a two-part version at the floor", { urllib3: "2.8" }, 0],
     ["a four-part version above the floor", { urllib3: "2.8.0.1" }, 0],
-    ["a four-part version below the floor", { certifi: "2026.10.18.9" }, 1],
+    ["a four-part version below the floor", { certifi: "2026.10.22.9" }, 1],
   ]) {
     await t.test(name, () => {
       withDir((dir) => {
@@ -197,14 +197,23 @@ test("refuses the certifi and urllib3 that yt-dlp 2026.08.19 shipped", () => {
     const bin = fakeBinary(dir, { stderrLines: [...report({ certifi: "2026.07.22", urllib3: "2.7.0" }), ...NO_URL] });
     const result = run(dir, bin);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /::error::certifi 2026\.07\.22 is below the 2026\.10\.19 floor/);
+    assert.match(result.stderr, /::error::certifi 2026\.07\.22 is below the 2026\.10\.23 floor/);
     assert.match(result.stderr, /::error::urllib3 2\.7\.0 is below the 2\.8\.0 floor/);
+  });
+});
+
+test("refuses the certifi that yt-dlp 2026.10.21 shipped, which still trusts emSign C1 and C3", () => {
+  withDir((dir) => {
+    const bin = fakeBinary(dir, { stderrLines: [...report({ certifi: "2026.10.19" }), ...NO_URL] });
+    const result = run(dir, bin);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /::error::certifi 2026\.10\.19 is below the 2026\.10\.23 floor/);
   });
 });
 
 test("refuses each library one step below its floor", async (t) => {
   for (const [name, overrides, message] of [
-    ["certifi", { certifi: "2026.10.18" }, /::error::certifi 2026\.10\.18 is below/],
+    ["certifi", { certifi: "2026.10.22" }, /::error::certifi 2026\.10\.22 is below/],
     ["urllib3", { urllib3: "2.7.9" }, /::error::urllib3 2\.7\.9 is below/],
   ]) {
     await t.test(name, () => {
@@ -239,7 +248,7 @@ test("refuses a binary that is not the pinned yt-dlp release", () => {
     const bin = fakeBinary(dir, { stderrLines: [...report({ version: "stable@2026.08.19" }), ...NO_URL] });
     const result = run(dir, bin);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /::error::yt-dlp 2026\.08\.19 is not the pinned 2026\.10\.21/);
+    assert.match(result.stderr, /::error::yt-dlp 2026\.08\.19 is not the pinned 2026\.10\.26/);
   });
 });
 
@@ -251,7 +260,7 @@ test("fails closed when a debug line is missing or repeated", async (t) => {
     ["repeated libraries line", [...report(), `[debug] Optional libraries: ${libraries({ certifi: "2026.07.22", urllib3: "2.7.0" })}`, ...NO_URL], /::error::.*more than once/],
     [
       "a library listed twice",
-      report().map((line) => line.replace("certifi-2026.10.19", "certifi-2026.07.22, certifi-2026.10.19")).concat(NO_URL),
+      report().map((line) => line.replace("certifi-2026.10.23", "certifi-2026.07.22, certifi-2026.10.23")).concat(NO_URL),
       /::error::.*certifi more than once/,
     ],
     [
