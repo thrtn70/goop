@@ -336,10 +336,10 @@ test("the macOS gallery-dl recipe excludes certifi bundles that trust the compro
   assert.match(lines[pinIndex + 1], /^ {4}--hash=sha256:[0-9a-f]{64}$/);
 
   // 2026.10.19 is the first patched release for GHSA-6q48-6c7w-9gw2: it drops
-  // "emSign ECC Root CA - G3", whose intermediate CA keys were compromised,
-  // and keeps the unaffected emSign roots that 2026.10.18 had also removed.
+  // "emSign ECC Root CA - G3", whose intermediate CA keys were compromised.
+  // 2026.10.23 also drops "emSign Root CA - C1" and "emSign ECC Root CA - C3".
   const [year, month, day] = pin.slice(1).map(Number);
-  assert.ok(year * 10_000 + month * 100 + day >= 20261019, "certifi must be at least 2026.10.19");
+  assert.ok(year * 10_000 + month * 100 + day >= 20261023, "certifi must be at least 2026.10.23");
 });
 
 // A source pin is not proof the frozen binary contains it. These checks run

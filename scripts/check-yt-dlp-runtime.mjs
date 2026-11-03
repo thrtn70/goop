@@ -31,10 +31,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const YT_DLP_ARGS = ["--ignore-config", "--no-plugin-dirs", "-v"];
 // Lowest versions a shipped yt-dlp may import.
 //   certifi 2026.10.19 drops "emSign ECC Root CA - G3", whose intermediate CA
-//   keys were compromised (GHSA-6q48-6c7w-9gw2).
+//   keys were compromised (GHSA-6q48-6c7w-9gw2); 2026.10.23 also drops
+//   "emSign Root CA - C1" and "emSign ECC Root CA - C3".
 //   urllib3 2.8.0 fixes GHSA-8988-9cw3-xx77, GHSA-vxq7-64xx-v4gw and
 //   GHSA-gh4c-6fx4-qh6g, the floor the gallery-dl recipe already holds.
-const FLOORS = { certifi: "2026.10.19", urllib3: "2.8.0" };
+const FLOORS = { certifi: "2026.10.23", urllib3: "2.8.0" };
 const DEBUG_LINE = /^\[debug\] (yt-dlp version|Python|Optional libraries):? (.+)$/;
 const NO_URL_ERROR = /: error: You must provide at least one URL\.$/m;
 const NO_URL_STATUS = 2;

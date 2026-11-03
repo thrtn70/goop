@@ -37,7 +37,7 @@ function report(overrides = {}) {
     `[goop-probe][debug] certifi ${r.certifi} - requests CA bundle ${r.caBundle}`,
     `[gallery-dl][debug] Version ${r.version} - Executable (None)`,
     `[gallery-dl][debug] Python ${r.python} - ${r.platform}`,
-    `[gallery-dl][debug] requests ${r.requests} - urllib3 ${r.urllib3}`,
+    `[gallery-dl][debug] requests ${r.requests} - urllib3 ${r.urllib3}${r.requestsCertifi === undefined ? "" : ` - certifi ${r.requestsCertifi}`}`,
     "[gallery-dl][debug] Configuration Files []",
   ];
 }
@@ -404,6 +404,24 @@ test("reports usage errors and a missing binary distinctly", async (t) => {
       assert.equal(result.status, 1);
       assert.match(result.stderr, /::error::.*absent/);
     });
+  });
+});
+
+// gallery-dl 1.32.19 appends the certifi requests uses to its requests line.
+test("accepts the requests line that names certifi, when it agrees with the probe", () => {
+  withDir((dir) => {
+    const bin = fakeBinary(dir, { stderrLines: report({ requestsCertifi: MATCHING.certifi }) });
+    const result = check(["--binary", bin.path, "--python", "3.14.6", "--requirements", requirements(dir)]);
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+test("refuses a requests line whose certifi disagrees with the probe", () => {
+  withDir((dir) => {
+    const bin = fakeBinary(dir, { stderrLines: report({ requestsCertifi: "2026.07.22" }) });
+    const result = check(["--binary", bin.path, "--python", "3.14.6", "--requirements", requirements(dir)]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /::error::gallery-dl reports requests with certifi 2026\.07\.22, but the probe found 2026\.10\.19/);
   });
 });
 

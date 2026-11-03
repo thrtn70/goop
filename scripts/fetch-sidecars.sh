@@ -39,10 +39,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/fetch-with-retry.sh"
 # The bundled yt-dlp binaries carry their own certifi and urllib3, which
 # change only with this pin. scripts/check-yt-dlp-runtime.mjs asks the fetched
 # binary which ones it imports and holds them to Goop's floors.
-YT_DLP_VERSION="2026.10.21"
-YT_DLP_WINDOWS_SHA256="33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
-YT_DLP_MACOS_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
-YT_DLP_PORTABLE_SHA256="b7af77f686e95f7845ce8d09d21957718febb8b48b30555adb9dd2292ad7bf14"
+YT_DLP_VERSION="2026.10.26"
+YT_DLP_WINDOWS_SHA256="f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d"
+YT_DLP_MACOS_SHA256="0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa"
+YT_DLP_PORTABLE_SHA256="e51e69e89489f199530f13d32a4342da3ddb2cf34842f364603a066db05afbf3"
 
 # Pinned gallery-dl release on Codeberg. gallery-dl publishes no macOS
 # binary and its own `--update` targets GitHub (which no longer hosts the
@@ -50,10 +50,10 @@ YT_DLP_PORTABLE_SHA256="b7af77f686e95f7845ce8d09d21957718febb8b48b30555adb9dd229
 # self-update; it ships with Goop and is refreshed by bumping this pin. Keep
 # in sync with build-gallery-dl-macos.sh (which PyInstaller-builds the same
 # version for macOS).
-GALLERY_DL_VERSION="v1.32.11"
+GALLERY_DL_VERSION="v1.32.19"
 GALLERY_DL_BASE="https://codeberg.org/mikf/gallery-dl/releases/download/${GALLERY_DL_VERSION}"
-GALLERY_DL_WINDOWS_SHA256="f51c739d961004961e303fb9b6146ffdbac9e022163a091319c75c02760b4523"
-GALLERY_DL_LINUX_SHA256="6b96a9d2a30923703995237384b56e1c496ffa951014feebd8f0569b869198ca"
+GALLERY_DL_WINDOWS_SHA256="4dda3f14efbc8a8e616af1fc7e1e88d795995326b47692453e620117254dec18"
+GALLERY_DL_LINUX_SHA256="9662483cafa72f51ce4b2153aebd620256a9ab536218674b8794f7b3ece11c29"
 
 # Pinned MuPDF release. Artifex publishes Windows binaries on
 # ArtifexSoftware/mupdf-downloads only for select tags (some .x patch

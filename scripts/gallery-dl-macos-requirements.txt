@@ -3,12 +3,12 @@
 # `--require-hashes` in build-gallery-dl-macos.sh makes this file fail closed.
 altgraph==0.17.5 \
     --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
-certifi==2026.10.19 \
-    --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
+certifi==2026.10.23 \
+    --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
 charset-normalizer==3.5.1 \
     --hash=sha256:c428c6c31eb5f4277d7f8eccaf767fbd548ddd5ce3c8b4f4cbbfab3d96b5904c
-gallery-dl==1.32.11 \
-    --hash=sha256:67fcb941083defebcf0d075e6c0c0aab84a5d8ef23e927f34bf9b9860754958b
+gallery-dl==1.32.19 \
+    --hash=sha256:f6b1eb5e9a7409a988b754335d99dbb1873e130d133ed5d164d32e5e645d1c50
 idna==3.19 \
     --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
 macholib==1.16.4 \
