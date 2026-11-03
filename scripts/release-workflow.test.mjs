@@ -979,6 +979,13 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
   assert.match(step[0], /if \(\$process\.ExitCode -ne 0\)/);
   assert.match(step[0], /PeakWorkingSet64/);
   assert.match(step[0], /if \(\$peak -le 0\)/);
+  // A missed peak names what the sampler saw, so the next flake can be told
+  // apart from a real failure: successful reads, run time and the last error.
+  const missedPeak = step[0].match(/throw "HEIC preview memory probe \$\(\$case\.Key\) did not report peak working set([^"]*)"/);
+  assert.ok(missedPeak, "missed-peak failure must keep its message");
+  for (const fact of [/\$iteration/, /\$samples/, /\$runtimeMs/, /\$lastReadError/]) assert.match(missedPeak[1], fact);
+  assert.match(step[0], /\$samples\+\+/);
+  assert.match(step[0], /\$lastReadError = \$_\.Exception\.Message/);
   assert.match(step[0], /if \(\$iteration -gt 0\)/);
   assert.match(step[0], /\$median = \[long\]\$ordered\[2\]/);
   assert.match(step[0], /HEIC_PREVIEW_MEMORY/);

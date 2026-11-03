@@ -545,12 +545,18 @@ jobs:
               $arguments = @("--quiet", "--exact", $case.Value, "--ignored")
               $process = Start-Process -FilePath $binary -ArgumentList $arguments -NoNewWindow -PassThru
               $peak = [long]0
+              # Counted so a missed peak says whether the sampler ever read the
+              # process before it exited, or every read failed.
+              $samples = 0
+              $lastReadError = "none"
               while (-not $process.HasExited) {
                 try {
                   $process.Refresh()
                   $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+                  $samples++
                 } catch {
                   # The process may exit between the status check and refresh.
+                  $lastReadError = $_.Exception.Message
                 }
                 Start-Sleep -Milliseconds 5
               }
@@ -558,14 +564,18 @@ jobs:
               try {
                 $process.Refresh()
                 $peak = [Math]::Max($peak, [long]$process.PeakWorkingSet64)
+                $samples++
               } catch {
                 # Retain the last sampled peak after process exit.
+                $lastReadError = $_.Exception.Message
               }
               if ($process.ExitCode -ne 0) {
                 throw "HEIC preview memory probe $($case.Key) failed with exit code $($process.ExitCode)"
               }
               if ($peak -le 0) {
-                throw "HEIC preview memory probe $($case.Key) did not report peak working set"
+                $runtimeMs = "unknown"
+                try { $runtimeMs = [long]($process.ExitTime - $process.StartTime).TotalMilliseconds } catch { }
+                throw "HEIC preview memory probe $($case.Key) did not report peak working set (iteration $iteration, $samples successful reads, ran $runtimeMs ms, last read error: $lastReadError)"
               }
               if ($iteration -gt 0) {
                 $measurements.Add($peak)
