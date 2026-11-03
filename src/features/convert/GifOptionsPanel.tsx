@@ -3,6 +3,10 @@ import { useEffect } from "react";
 import clsx from "clsx";
 import type { GifOptions, GifSizePreset } from "@/types";
 
+/** Raw trim text and the trims it mirrors; cleared, they reseed from the row's GIF options. */
+export const gifDraftSlots = ["GifOptionsPanel.startDraft", "GifOptionsPanel.endDraft", "GifOptionsPanel.appliedStart", "GifOptionsPanel.appliedEnd"] as const;
+const [START_DRAFT, END_DRAFT, APPLIED_START, APPLIED_END] = gifDraftSlots;
+
 const SIZE_OPTIONS: { value: GifSizePreset; label: string; px: number }[] = [
   { value: "small", label: "Small", px: 320 },
   { value: "medium", label: "Medium", px: 480 },
@@ -41,12 +45,12 @@ export default function GifOptionsPanel({
 }: GifOptionsPanelProps) {
   const startValue = gifOptions.trim_start_ms == null ? "" : msToMmSs(Number(gifOptions.trim_start_ms));
   const endValue = gifOptions.trim_end_ms == null ? "" : msToMmSs(Number(gifOptions.trim_end_ms));
-  const [startDraft, setStartDraft] = useWorkspaceDraftState("GifOptionsPanel.startDraft", startValue);
-  const [endDraft, setEndDraft] = useWorkspaceDraftState("GifOptionsPanel.endDraft", endValue);
+  const [startDraft, setStartDraft] = useWorkspaceDraftState(START_DRAFT, startValue);
+  const [endDraft, setEndDraft] = useWorkspaceDraftState(END_DRAFT, endValue);
   // Preserve partial typing across unrelated row updates, while batch-applied
   // trim changes replace the corresponding visible draft.
-  const [appliedStart, setAppliedStart] = useWorkspaceDraftState("GifOptionsPanel.appliedStart", startValue);
-  const [appliedEnd, setAppliedEnd] = useWorkspaceDraftState("GifOptionsPanel.appliedEnd", endValue);
+  const [appliedStart, setAppliedStart] = useWorkspaceDraftState(APPLIED_START, startValue);
+  const [appliedEnd, setAppliedEnd] = useWorkspaceDraftState(APPLIED_END, endValue);
   useEffect(() => {
     if (appliedStart !== startValue) { setStartDraft(startValue); setAppliedStart(startValue); }
   }, [appliedStart, startValue, setStartDraft, setAppliedStart]);
