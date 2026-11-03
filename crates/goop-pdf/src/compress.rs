@@ -292,10 +292,14 @@ mod reliability_tests {
     }
     #[tokio::test]
     async fn ghostscript_large_stderr_does_not_deadlock() {
+        // 512 KiB on stderr overfills the pipe, so a reader that waits for exit
+        // before draining deadlocks. The watchdog only has to outlast a slow
+        // spawn on a loaded runner: a deadlock never finishes at all.
         let (dir, resolver) = fixture("dd if=/dev/zero bs=65536 count=8 >&2 2>/dev/null; exit 1");
         let output = dir.path().join("out.pdf");
+        let started = std::time::Instant::now();
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            DEADLOCK_WATCHDOG,
             compress(
                 &resolver,
                 None,
@@ -308,9 +312,26 @@ mod reliability_tests {
             ),
         )
         .await;
-        assert!(matches!(result, Ok(Err(_))));
+        let elapsed = started.elapsed();
+        // gs keeps the last 8 KiB of stderr, and this one wrote 512 KiB.
+        let outcome = match &result {
+            Ok(Err(PdfError::Ghostscript(tail))) if tail.len() == 8192 => None,
+            Ok(Err(PdfError::Ghostscript(tail))) => Some(format!(
+                "Ghostscript error with a {}-byte stderr tail",
+                tail.len()
+            )),
+            Ok(other) => Some(format!("{other:?}")),
+            Err(_) => Some(format!("no result within {DEADLOCK_WATCHDOG:?}")),
+        };
+        assert!(
+            outcome.is_none(),
+            "after {elapsed:?}: {}",
+            outcome.unwrap_or_default()
+        );
         assert!(!output.exists());
     }
+
+    const DEADLOCK_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
 
     #[tokio::test]
     async fn ghostscript_gets_the_bundled_search_path_in_gs_lib() {
