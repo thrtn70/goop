@@ -5,6 +5,7 @@ import {
   useDraftForgetAvailable,
   useDraftForgetFailure,
   useDraftPersistence,
+  useDraftProtected,
   useDraftRecoveryAvailable,
   useDraftRecoveryFailed,
   useDraftSavedEditsTooLarge,
@@ -32,22 +33,27 @@ export default function DraftPersistenceAlert() {
   const forgetFailure = useDraftForgetFailure();
   const recoveryAvailable = useDraftRecoveryAvailable();
   const recoveryFailed = useDraftRecoveryFailed();
-  // The alert and its focused button go away on success; keep focus in the page.
-  const keepFocus = (saved: boolean) => { if (saved) document.getElementById("main")?.focus(); };
+  const autosaveOff = useDraftProtected();
+  // The focused button can go away once its action runs; keep focus in the page.
+  const keepFocus = (removed: boolean) => { if (removed) document.getElementById("main")?.focus(); };
   if (persistence.kind === "ok") return null;
+  const retry = <button onClick={retryDraftPersistence} className="underline">Try again</button>;
+  const recovery = recoveryAvailable && <> Some saved edits can&apos;t be read. <button onClick={() => keepFocus(recoverSavedDrafts())} className="underline">Back up and recover what can be read</button>{recoveryFailed && " Nothing was recovered."}</>;
   if (persistence.kind === "full" || savedEditsTooLarge) {
     const reason = persistence.kind === "full"
       ? overLimit(persistence, forgetAvailable)
       : "Unfinished edits from earlier sessions are too large to restore.";
+    // With autosave off, edits that later fit are saved only by Try again or recovery.
+    const saveAgain = autosaveOff && persistence.kind === "full" && <> {retry}{recovery}</>;
     return (
       <div role="alert" className="px-4 py-2 text-sm text-warning">
-        {reason} Your edits still work until you quit.{forgetAvailable && <> <button onClick={() => keepFocus(forgetEarlierDrafts())} className="underline">Forget edits from earlier sessions</button>{forgetFailure && FORGET_FAILURES[forgetFailure]}</>}
+        {reason} Your edits still work until you quit.{saveAgain}{forgetAvailable && <> <button onClick={() => keepFocus(forgetEarlierDrafts())} className="underline">Forget edits from earlier sessions</button>{forgetFailure && FORGET_FAILURES[forgetFailure]}</>}
       </div>
     );
   }
   return (
     <div role="alert" className="px-4 py-2 text-sm text-warning">
-      Unfinished edits could not be saved for restart. <button onClick={retryDraftPersistence} className="underline">Try again</button>{recoveryAvailable && <> Some saved edits can&apos;t be read. <button onClick={() => keepFocus(recoverSavedDrafts())} className="underline">Back up and recover what can be read</button>{recoveryFailed && " Nothing was recovered."}</>}
+      Unfinished edits could not be saved for restart. {retry}{recovery}
     </div>
   );
 }

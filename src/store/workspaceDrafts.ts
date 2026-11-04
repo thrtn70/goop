@@ -14,6 +14,7 @@ import {
   readDraftEntriesOutcome,
   saveDraftEntriesOutcome,
   type DraftProtectionReason,
+  type DraftReadOutcome,
   type DraftSaveOutcome,
 } from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
@@ -192,26 +193,56 @@ export function useDraftSavedEditsTooLarge() { return useDraftStore(savedEditsTo
 /** A save too large at launch, or a save over the limit holding entries from earlier sessions that Forget would drop. */
 export function useDraftForgetAvailable() { return useDraftStore(canForgetEarlierDrafts); }
 export function useDraftForgetFailure() { return useDraftStore(state => state.forgetFailure); }
+/** Autosave is off; only Try again, recovery or Forget can save. */
+export function useDraftProtected() { return useDraftStore(state => state.protection !== null); }
 
 // Saves Forget may back up and replace. A newer Goop's save, or one that
-// cannot be read at all, is left alone; Try again handles those.
+// cannot be read at all, is left alone and the action refuses.
 const FORGETTABLE_PROTECTION = new Set<DraftProtectionReason>(["oversized", "malformed"]);
 
 /**
+ * What still guards the saved copy until the kept entries replace it. An
+ * unfinished migration keeps its exact legacy copy, so Try again saves the
+ * kept entries rather than restoring that copy over them.
+ */
+function authorityUntilSaved(read: DraftReadOutcome): DraftProtection {
+  if (read.kind === "legacy") return { kind: "migration", legacyRaw: read.legacy_raw };
+  if (read.kind === "protected") return { kind: "load", reason: read.reason };
+  return null;
+}
+
+function keepSessionEntries(current: DraftProtection, authority: DraftProtection) {
+  // Saving stays off while memory is replaced, so only the save below writes;
+  // with nothing to hold it off, the autosave subscription makes that one save.
+  const holding = authority ?? current;
+  useDraftStore.setState(state => ({
+    entries: Object.fromEntries(Object.entries(state.entries).filter(([key]) => state.session.has(key))),
+    protection: holding,
+    forgetFailure: null,
+  }));
+  if (holding === null) return;
+  let persistence: DraftSaveOutcome = WRITE_FAILED;
+  try { persistence = saveDrafts(useDraftStore.getState().entries); } catch { /* Storage may be disabled. */ }
+  useDraftStore.setState(persistence.kind === "ok" ? { persistence, protection: null } : { persistence, protection: authority });
+}
+
+/**
  * Backs up the saved drafts, then keeps only the entries this session seeded
- * or wrote and saves those. Nothing changes if the backup cannot be written.
- * A save readable again since launch is restored by Try again instead. Returns
- * whether the kept drafts were saved.
+ * or wrote and saves those. The saved copy never replaces memory. Nothing
+ * changes if the backup cannot be written, or if the save is a newer Goop's or
+ * cannot be read. Returns whether earlier entries were dropped, whether or not
+ * the kept ones then fit.
  */
 export function forgetEarlierDrafts(): boolean {
   const state = useDraftStore.getState();
   if (!canForgetEarlierDrafts(state)) return false;
+  let authority: DraftProtection;
   try {
     const storage = window.localStorage;
     const read = readDraftEntriesOutcome(storage);
-    if (read.kind === "protected" ? !FORGETTABLE_PROTECTION.has(read.reason) : state.protection?.kind === "load") {
-      retryDraftPersistence();
-      return useDraftStore.getState().persistence.kind === "ok";
+    if (read.kind === "protected" && !FORGETTABLE_PROTECTION.has(read.reason)) {
+      useDraftStore.setState({ persistence: WRITE_FAILED, protection: { kind: "load", reason: read.reason }, forgetFailure: "failed" });
+      return false;
     }
     const saved = storage.getItem(DRAFT_STORAGE_KEY) ?? storage.getItem(LEGACY_DRAFT_STORAGE_KEY);
     if (saved === null) throw new Error("No saved drafts to back up");
@@ -219,17 +250,13 @@ export function forgetEarlierDrafts(): boolean {
       useDraftStore.setState({ forgetFailure: "no_backup_room" });
       return false;
     }
+    authority = authorityUntilSaved(read);
   } catch {
     useDraftStore.setState({ forgetFailure: "failed" });
     return false;
   }
-  // Clearing protection here lets the autosave subscription write the kept drafts.
-  useDraftStore.setState(current => ({
-    entries: Object.fromEntries(Object.entries(current.entries).filter(([key]) => current.session.has(key))),
-    protection: null,
-    forgetFailure: null,
-  }));
-  return useDraftStore.getState().persistence.kind === "ok";
+  keepSessionEntries(state.protection, authority);
+  return true;
 }
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
 const matches = (key: string, prefix: readonly string[]) => {
