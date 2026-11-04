@@ -1359,6 +1359,11 @@ fn validate_cleanup_success_receipt(
     {
         return Err("invalid data store cleanup receipt".to_owned());
     }
+    if activation_requires_run_data_store(activation)
+        && object.get("removed") != Some(&Value::Bool(true))
+    {
+        return Err("data store cleanup receipt did not remove the run data store".to_owned());
+    }
     value_u64(object.get("pid"), "cleanup PID")?;
     let clock = object_at(object, "native_clock")?;
     if clock.len() != 3 {
@@ -2581,6 +2586,77 @@ mod tests {
         let receipt = cleanup_receipt(&reports);
         assert_eq!(receipt["removed"], false);
         assert_eq!(receipt["error_code"], Value::Null);
+    }
+
+    fn write_legacy_missing_store_receipt(reports: &Path) {
+        fs::write(
+            reports.join(format!("data-store-cleanup-{SESSION_ID}.json")),
+            serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "component_kind": "data_store_cleanup",
+                "session_id": SESSION_ID,
+                "webview_data_store_id": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                "removed": false,
+                "error_code": null,
+                "pid": 42,
+                "native_clock": { "domain": "native_monotonic", "unit": "us", "elapsed_us": 7 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn responsiveness_cleanup_refuses_a_legacy_missing_store_receipt_for_draft_runs() {
+        for change in [draft_lane as fn(&mut Value), seeded_bootstrap] {
+            let dir = tempfile::tempdir().unwrap();
+            let (manifest, reports) = draft_run_paths(dir.path(), change);
+            write_legacy_missing_store_receipt(&reports);
+            let unowned = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+                true,
+            );
+            assert!(unowned.cleanup_requested());
+            assert!(!unowned.cleanup_mode());
+            assert!(unowned.reconcile_cleanup_success(true).is_err());
+
+            ResponsivenessState::from_paths(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+            );
+            let owned = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest),
+                Some(reports.clone()),
+                Instant::now(),
+                true,
+            );
+            assert!(owned.cleanup_mode());
+            assert!(!owned.cleanup_request().unwrap().already_complete);
+            assert!(owned.reconcile_cleanup_success(true).is_err());
+            assert!(owned.reconcile_cleanup_success(false).is_err());
+            assert!(reports
+                .join(format!("data-store-owned-{SESSION_ID}.json"))
+                .exists());
+            let receipt = cleanup_receipt(&reports);
+            assert_eq!(receipt["removed"], false);
+            assert_eq!(receipt["pid"], 42);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, reports) = draft_run_paths(dir.path(), |_| {});
+        write_legacy_missing_store_receipt(&reports);
+        let replay = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest),
+            Some(reports),
+            Instant::now(),
+            true,
+        );
+        assert!(replay.cleanup_mode());
+        assert!(replay.cleanup_request().unwrap().already_complete);
+        replay.reconcile_cleanup_success(false).unwrap();
     }
 
     #[test]
