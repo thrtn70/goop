@@ -355,4 +355,37 @@ describe("a full unfinished-edits store", () => {
     expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: ["/b.png"] } } });
     expect(values.get(V1)).toBe(legacy);
   });
+
+  it("keeps focus in the page when Forget is refused and its button goes away", async () => {
+    const { values } = await boot({ [V2]: saved(500) });
+    const forget = await screen.findByRole("button", { name: FORGET });
+    forget.focus();
+    values.set(V2, JSON.stringify({ version: 3, entries: {} }));
+
+    fireEvent.click(forget);
+
+    expect(screen.queryByRole("button", { name: FORGET })).toBeNull();
+    expect(document.activeElement?.id).toBe("main");
+  });
+
+  it("says why a failed Forget could not finish when there's no room to back up a changed save", async () => {
+    const slots = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`${BACKUP}.${i}`, `earlier backup ${i}`]));
+    const { values } = await boot({ [V2]: saved(500), ...slots });
+    const forget = await screen.findByRole("button", { name: FORGET });
+    let refuseV2 = true;
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { if (refuseV2 && key === V2) throw new Error("quota"); values.set(key, value); },
+    });
+    fireEvent.click(forget);
+    expect(values.get(`${BACKUP}.4`)).toBe(saved(500));
+    refuseV2 = false;
+    const changed = saved(2);
+    values.set(V2, changed);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(screen.getByRole("alert").textContent).toContain("there's no room to back up the saved edits");
+    expect(values.get(V2)).toBe(changed);
+  });
 });

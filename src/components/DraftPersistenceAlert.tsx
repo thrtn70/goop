@@ -1,4 +1,6 @@
 import {
+  draftForgetAvailable,
+  draftRecoveryAvailable,
   forgetEarlierDrafts,
   recoverSavedDrafts,
   retryDraftPersistence,
@@ -8,6 +10,7 @@ import {
   useDraftProtected,
   useDraftRecoveryAvailable,
   useDraftRecoveryFailed,
+  useDraftReplacementPending,
   useDraftSavedEditsTooLarge,
   type DraftForgetFailure,
 } from "@/store/workspaceDrafts";
@@ -34,11 +37,15 @@ export default function DraftPersistenceAlert() {
   const recoveryAvailable = useDraftRecoveryAvailable();
   const recoveryFailed = useDraftRecoveryFailed();
   const autosaveOff = useDraftProtected();
-  // The focused button can go away once its action runs; keep focus in the page.
-  const keepFocus = (removed: boolean) => { if (removed) document.getElementById("main")?.focus(); };
+  const replacementPending = useDraftReplacementPending();
+  // The clicked button goes away when its action leaves it unavailable, refused
+  // or not; keep focus in the page.
+  const keepFocus = (stillShown: boolean) => { if (!stillShown) document.getElementById("main")?.focus(); };
+  const forget = () => { forgetEarlierDrafts(); keepFocus(draftForgetAvailable()); };
+  const recover = () => { recoverSavedDrafts(); keepFocus(draftRecoveryAvailable()); };
   if (persistence.kind === "ok") return null;
   const retry = <button onClick={retryDraftPersistence} className="underline">Try again</button>;
-  const recovery = recoveryAvailable && <> Some saved edits can&apos;t be read. <button onClick={() => keepFocus(recoverSavedDrafts())} className="underline">Back up and recover what can be read</button>{recoveryFailed && " Nothing was recovered."}</>;
+  const recovery = recoveryAvailable && <> Some saved edits can&apos;t be read. <button onClick={recover} className="underline">Back up and recover what can be read</button>{recoveryFailed && " Nothing was recovered."}</>;
   if (persistence.kind === "full" || savedEditsTooLarge) {
     const reason = persistence.kind === "full"
       ? overLimit(persistence, forgetAvailable)
@@ -47,13 +54,13 @@ export default function DraftPersistenceAlert() {
     const saveAgain = autosaveOff && persistence.kind === "full" && <> {retry}{recovery}</>;
     return (
       <div role="alert" className="px-4 py-2 text-sm text-warning">
-        {reason} Your edits still work until you quit.{saveAgain}{forgetAvailable && <> <button onClick={() => keepFocus(forgetEarlierDrafts())} className="underline">Forget edits from earlier sessions</button>{forgetFailure && FORGET_FAILURES[forgetFailure]}</>}
+        {reason} Your edits still work until you quit.{saveAgain}{forgetAvailable && <> <button onClick={forget} className="underline">Forget edits from earlier sessions</button>{forgetFailure && FORGET_FAILURES[forgetFailure]}</>}
       </div>
     );
   }
   return (
     <div role="alert" className="px-4 py-2 text-sm text-warning">
-      Unfinished edits could not be saved for restart. {retry}{recovery}
+      Unfinished edits could not be saved for restart. {retry}{recovery}{replacementPending && forgetFailure === "no_backup_room" && " Your edits are kept, but they can't replace the saved edits: there's no room to back up the saved edits first."}
     </div>
   );
 }
