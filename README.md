@@ -120,7 +120,7 @@ For Twitter/X, Instagram reels, members-only YouTube, Patreon-via-Kemono, age-ga
 ### Prerequisites
 
 - **Rust:** the stable toolchain selected by `rust-toolchain.toml` (`rustup toolchain install stable`)
-- **Node** 22.12+ (`nvm install 22`)
+- **Node** 22.13+ (`nvm install 22`)
 - **npm** 10+ (ships with Node 22)
 - **macOS arm64:** Xcode Command Line Tools, Homebrew at `/opt/homebrew`, CMake 3.23+, pkgconf, and Python 3.14.6. The exact Python version matches the reviewed, hash-locked gallery-dl build inputs (`brew install cmake pkgconf`).
 - **Windows x64:** Git Bash, 7-Zip at `C:\Program Files\7-Zip`, vcpkg at `C:\vcpkg`, WebView2, and Visual Studio Build Tools 2022 with the "Desktop development with C++" workload.

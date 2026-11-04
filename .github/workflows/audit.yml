@@ -175,6 +175,7 @@ jobs:
       # can be bypassed; this is the only lint enforcement that always runs.
       - run: npm run lint
       - run: node --test scripts/lint-ignores.test.mjs
+      - run: node --test scripts/node-engines.test.mjs
       - run: npm run test
       - run: node --test scripts/release-workflow.test.mjs
       - run: node --test scripts/heif-deps.test.mjs
