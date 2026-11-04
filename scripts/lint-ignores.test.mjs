@@ -26,11 +26,13 @@ test("lint skips every directory that .gitignore excludes", async () => {
 });
 
 test("lint still covers every tracked source file outside generated output", async () => {
-  const tracked = execFileSync("git", ["ls-files", "--", "*.js", "*.mjs", "*.cjs", "*.ts", "*.tsx"], {
+  // -z: without it git quotes and escapes names with non-ASCII or control
+  // characters, and the quoted form is not a path eslint can check.
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", "*.js", "*.mjs", "*.cjs", "*.ts", "*.tsx"], {
     cwd: root,
     encoding: "utf8",
   })
-    .split("\n")
+    .split("\0")
     .filter(Boolean);
   assert.ok(tracked.length > 100, "expected the repository's tracked sources");
   const skipped = [];
