@@ -12,8 +12,9 @@ import {
   LEGACY_DRAFT_STORAGE_KEY,
   loadBrowserDraftEntriesOutcome,
   readDraftEntriesOutcome,
-  saveDraftEntries,
+  saveDraftEntriesOutcome,
   type DraftProtectionReason,
+  type DraftSaveOutcome,
 } from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
 
@@ -21,27 +22,37 @@ export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "meta
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
 type DraftProtection = { kind: "load"; reason: DraftProtectionReason } | { kind: "migration"; legacyRaw: string } | null;
-type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistenceFailed: boolean; recoveryFailed: boolean; protection: DraftProtection };
+export type DraftForgetFailure = "no_backup_room" | "failed";
+// session: keys this launch seeded or wrote; every field on screen is one of them.
+type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistence: DraftSaveOutcome; session: ReadonlySet<string>; recoveryFailed: boolean; forgetFailure: DraftForgetFailure | null; protection: DraftProtection };
+const SAVED: DraftSaveOutcome = { kind: "ok" };
+const WRITE_FAILED: DraftSaveOutcome = { kind: "write_failed" };
 const initialDraftLoad = loadBrowserDraftEntriesOutcome();
 const useDraftStore = create<DraftState>(() => ({
   entries: initialDraftLoad.kind === "protected" ? {} : initialDraftLoad.entries,
   epochs: {}, scopeEpochs: {}, completionEpochs: {}, resetEpoch: 0, revisions: {},
-  persistenceFailed: initialDraftLoad.kind !== "ready",
+  persistence: initialDraftLoad.kind === "ready" ? SAVED : WRITE_FAILED,
+  session: new Set(),
   recoveryFailed: false,
+  forgetFailure: null,
   protection: initialDraftLoad.kind === "protected"
     ? { kind: "load", reason: initialDraftLoad.reason }
     : initialDraftLoad.kind === "migration_pending"
       ? { kind: "migration", legacyRaw: initialDraftLoad.legacy_raw }
       : null,
 }));
+const saveDrafts = (entries: Record<string, DraftEntry>) => saveDraftEntriesOutcome(window.localStorage, entries);
+const sameOutcome = (a: DraftSaveOutcome, b: DraftSaveOutcome) =>
+  a.kind === b.kind && (a.kind !== "full" || (b.kind === "full" && a.entries === b.entries && a.bytes === b.bytes));
 useDraftStore.subscribe((state, previous) => {
   if (state.entries === previous.entries || typeof window === "undefined") return;
   if (state.protection !== null) return;
-  let ok = false;
-  try { ok = saveDraftEntries(window.localStorage, state.entries); } catch { /* Storage may be disabled. */ }
-  if (state.persistenceFailed === ok) useDraftStore.setState({ persistenceFailed: !ok });
+  let persistence: DraftSaveOutcome = WRITE_FAILED;
+  try { persistence = saveDrafts(state.entries); } catch { /* Storage may be disabled. */ }
+  if (!sameOutcome(state.persistence, persistence)) useDraftStore.setState({ persistence });
 });
-export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistenceFailed); }
+export function useDraftPersistenceFailed() { return useDraftStore(state => state.persistence.kind !== "ok"); }
+export function useDraftPersistence() { return useDraftStore(state => state.persistence); }
 // A pending operation never submitted saved values, so hydrating them retires
 // cleanup in every tool they belong to, as a new operation choice does: its
 // parent callback may remove any source of that tool, not just its own scope.
@@ -58,54 +69,56 @@ export function retryDraftPersistence() {
     const state = useDraftStore.getState();
     const read = readDraftEntriesOutcome(window.localStorage);
     if (read.kind === "protected") {
-      useDraftStore.setState({ persistenceFailed: true, protection: { kind: "load", reason: read.reason } });
+      useDraftStore.setState({ persistence: WRITE_FAILED, protection: { kind: "load", reason: read.reason } });
       return;
     }
     if (state.protection?.kind === "load") {
       if (read.kind === "empty") {
-        const ok = saveDraftEntries(window.localStorage, state.entries);
-        useDraftStore.setState(ok
-          ? { persistenceFailed: false, protection: null }
-          : { persistenceFailed: true });
+        const persistence = saveDrafts(state.entries);
+        useDraftStore.setState(persistence.kind === "ok"
+          ? { persistence, protection: null }
+          : { persistence });
         return;
       }
       const entries = read.kind === "v2" ? read.entries : read.kind === "legacy" ? read.entries : {};
       // Hydrate while protection is still active so the subscription cannot
       // turn an error-derived state into an authoritative write.
       useDraftStore.setState(current => hydrateSavedEntries(current, entries));
-      if (read.kind === "legacy" && !saveDraftEntries(window.localStorage, entries)) {
-        useDraftStore.setState({ persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
-        return;
+      if (read.kind === "legacy") {
+        const migrated = saveDrafts(entries);
+        if (migrated.kind !== "ok") {
+          useDraftStore.setState({ persistence: migrated, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+          return;
+        }
       }
-      useDraftStore.setState({ persistenceFailed: false, protection: null });
+      useDraftStore.setState({ persistence: SAVED, protection: null });
       return;
     }
     if (state.protection?.kind === "migration") {
       if (read.kind === "v2") {
         useDraftStore.setState(current => hydrateSavedEntries(current, read.entries));
-        useDraftStore.setState({ persistenceFailed: false, protection: null });
+        useDraftStore.setState({ persistence: SAVED, protection: null });
         return;
       }
       if (read.kind === "empty") {
-        useDraftStore.setState({ persistenceFailed: true });
+        useDraftStore.setState({ persistence: WRITE_FAILED });
         return;
       }
       const legacyChanged = read.legacy_raw !== state.protection.legacyRaw;
       const entries = legacyChanged ? read.entries : state.entries;
       if (legacyChanged) useDraftStore.setState(current => hydrateSavedEntries(current, entries));
-      const ok = saveDraftEntries(window.localStorage, entries);
-      useDraftStore.setState(ok
-        ? { persistenceFailed: false, protection: null }
-        : { persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
+      const persistence = saveDrafts(entries);
+      useDraftStore.setState(persistence.kind === "ok"
+        ? { persistence, protection: null }
+        : { persistence, protection: { kind: "migration", legacyRaw: read.legacy_raw } });
       return;
     }
     if (read.kind === "legacy") {
-      useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, read.entries), persistenceFailed: true, protection: { kind: "migration", legacyRaw: read.legacy_raw } }));
+      useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, read.entries), persistence: WRITE_FAILED, protection: { kind: "migration", legacyRaw: read.legacy_raw } }));
       return;
     }
-    const ok = saveDraftEntries(window.localStorage, state.entries);
-    useDraftStore.setState({ persistenceFailed: !ok });
-  } catch { useDraftStore.setState({ persistenceFailed: true }); }
+    useDraftStore.setState({ persistence: saveDrafts(state.entries) });
+  } catch { useDraftStore.setState({ persistence: WRITE_FAILED }); }
 }
 /**
  * Saved drafts a strict read refused as malformed. A newer Goop that changed
@@ -118,16 +131,18 @@ export function useDraftRecoveryAvailable() {
 }
 export function useDraftRecoveryFailed() { return useDraftStore(state => state.recoveryFailed); }
 
-// One copy per distinct unreadable save: a later recovery never replaces an
+// One copy per distinct save: a later recovery or forget never replaces an
 // earlier backup. Few slots, since each can hold a full save in shared storage.
+// Returns false, writing nothing, when every slot holds another save.
 const MAX_DRAFT_BACKUPS = 5;
-function backUpUnreadableDrafts(storage: Pick<Storage, "getItem" | "setItem">, raw: string) {
+function backUpSavedDrafts(storage: Pick<Storage, "getItem" | "setItem">, raw: string): boolean {
   const keys = Array.from({ length: MAX_DRAFT_BACKUPS }, (_, index) => `${DRAFT_BACKUP_KEY}.${index}`);
   const existing = keys.map(key => storage.getItem(key));
-  if (existing.includes(raw)) return;
+  if (existing.includes(raw)) return true;
   const free = existing.indexOf(null);
-  if (free < 0) throw new Error("No room for another draft backup");
+  if (free < 0) return false;
   storage.setItem(keys[free], raw);
+  return true;
 }
 
 /**
@@ -145,11 +160,11 @@ export function recoverSavedDrafts(): boolean {
     // The saved drafts may have changed since launch; recover only refused ones.
     if (read.kind !== "protected" || read.reason !== "malformed") {
       retryDraftPersistence();
-      return !useDraftStore.getState().persistenceFailed;
+      return useDraftStore.getState().persistence.kind === "ok";
     }
     const saved = storage.getItem(DRAFT_STORAGE_KEY) ?? storage.getItem(LEGACY_DRAFT_STORAGE_KEY);
     if (saved === null) throw new Error("No saved drafts to recover");
-    backUpUnreadableDrafts(storage, saved);
+    if (!backUpSavedDrafts(storage, saved)) throw new Error("No room for another draft backup");
     raw = saved;
   } catch {
     useDraftStore.setState({ recoveryFailed: true });
@@ -159,13 +174,62 @@ export function recoverSavedDrafts(): boolean {
     const saved = decodeDraftEntries(raw);
     // Hydrate while protection is still active, so only the save below writes.
     useDraftStore.setState(current => ({ ...hydrateSavedEntries(current, saved, { ...current.entries, ...saved }), recoveryFailed: false }));
-    const ok = saveDraftEntries(window.localStorage, useDraftStore.getState().entries);
-    useDraftStore.setState(ok ? { persistenceFailed: false, protection: null } : { persistenceFailed: true });
-    return ok;
+    const persistence = saveDrafts(useDraftStore.getState().entries);
+    useDraftStore.setState(persistence.kind === "ok" ? { persistence, protection: null } : { persistence });
+    return persistence.kind === "ok";
   } catch {
-    useDraftStore.setState({ persistenceFailed: true });
+    useDraftStore.setState({ persistence: WRITE_FAILED });
     return false;
   }
+}
+
+const hasEarlierEntries = (state: DraftState) => Object.keys(state.entries).some(key => !state.session.has(key));
+const savedEditsTooLarge = (state: DraftState) => state.protection?.kind === "load" && state.protection.reason === "oversized";
+const canForgetEarlierDrafts = (state: DraftState) =>
+  savedEditsTooLarge(state) || (state.persistence.kind === "full" && hasEarlierEntries(state));
+/** A save over the limit at launch, which no reader here can restore. */
+export function useDraftSavedEditsTooLarge() { return useDraftStore(savedEditsTooLarge); }
+/** A save too large at launch, or a save over the limit holding entries from earlier sessions that Forget would drop. */
+export function useDraftForgetAvailable() { return useDraftStore(canForgetEarlierDrafts); }
+export function useDraftForgetFailure() { return useDraftStore(state => state.forgetFailure); }
+
+// Saves Forget may back up and replace. A newer Goop's save, or one that
+// cannot be read at all, is left alone; Try again handles those.
+const FORGETTABLE_PROTECTION = new Set<DraftProtectionReason>(["oversized", "malformed"]);
+
+/**
+ * Backs up the saved drafts, then keeps only the entries this session seeded
+ * or wrote and saves those. Nothing changes if the backup cannot be written.
+ * A save readable again since launch is restored by Try again instead. Returns
+ * whether the kept drafts were saved.
+ */
+export function forgetEarlierDrafts(): boolean {
+  const state = useDraftStore.getState();
+  if (!canForgetEarlierDrafts(state)) return false;
+  try {
+    const storage = window.localStorage;
+    const read = readDraftEntriesOutcome(storage);
+    if (read.kind === "protected" ? !FORGETTABLE_PROTECTION.has(read.reason) : state.protection?.kind === "load") {
+      retryDraftPersistence();
+      return useDraftStore.getState().persistence.kind === "ok";
+    }
+    const saved = storage.getItem(DRAFT_STORAGE_KEY) ?? storage.getItem(LEGACY_DRAFT_STORAGE_KEY);
+    if (saved === null) throw new Error("No saved drafts to back up");
+    if (!backUpSavedDrafts(storage, saved)) {
+      useDraftStore.setState({ forgetFailure: "no_backup_room" });
+      return false;
+    }
+  } catch {
+    useDraftStore.setState({ forgetFailure: "failed" });
+    return false;
+  }
+  // Clearing protection here lets the autosave subscription write the kept drafts.
+  useDraftStore.setState(current => ({
+    entries: Object.fromEntries(Object.entries(current.entries).filter(([key]) => current.session.has(key))),
+    protection: null,
+    forgetFailure: null,
+  }));
+  return useDraftStore.getState().persistence.kind === "ok";
 }
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
 const matches = (key: string, prefix: readonly string[]) => {
@@ -239,6 +303,10 @@ function ownMediaDraft<T>(slot: string, value: T): T {
   return value;
 }
 
+// Copied only when a key is new, so a keystroke in a known field costs nothing here.
+const withSessionKey = (session: ReadonlySet<string>, key: string): ReadonlySet<string> =>
+  session.has(key) ? session : new Set([...session, key]);
+
 export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)): [T, Dispatch<SetStateAction<T>>] {
   const { tool, path, sources } = useContext(ScopeContext);
   const key = JSON.stringify([tool, ...path, slot]);
@@ -250,7 +318,11 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const seed = useMemo(() => ownMediaDraft(slot, typeof initial === "function" ? (initial as () => T)() : initial), [key, epoch]);
   useEffect(() => {
-    useDraftStore.setState(s => s.entries[key] ? s : { entries: { ...s.entries, [key]: { value: seed } } });
+    useDraftStore.setState(s => {
+      const session = withSessionKey(s.session, key);
+      if (s.entries[key]) return session === s.session ? s : { session };
+      return { entries: { ...s.entries, [key]: { value: seed } }, session };
+    });
   }, [key, seed]);
   const setValue = useCallback<Dispatch<SetStateAction<T>>>((next) => {
     useDraftStore.setState(s => {
@@ -271,7 +343,7 @@ export function useWorkspaceDraftState<T>(slot: string, initial: T | (() => T)):
         const sourceKey = JSON.stringify(["source-edit", tool, source]);
         revisions[sourceKey] = (revisions[sourceKey] ?? 0) + 1;
       }
-      return { entries: { ...s.entries, [key]: { value } }, revisions };
+      return { entries: { ...s.entries, [key]: { value } }, revisions, session: withSessionKey(s.session, key) };
     });
   }, [epoch, epochKey, key, seed, slot, sources, tool]);
   return [entry ? entry.value as T : seed, setValue];
@@ -304,7 +376,7 @@ export function resetWorkspaceDrafts() {
   notifyRetirement({});
   consumedPickerToken = 0;
   useDraftStore.setState(state => ({ entries: {}, epochs: {}, scopeEpochs: {}, completionEpochs: {}, revisions: {}, resetEpoch: state.resetEpoch + 1,
-    ...(state.protection === null ? {} : { persistenceFailed: true, protection: state.protection }) }));
+    ...(state.protection === null ? {} : { persistence: WRITE_FAILED, protection: state.protection }) }));
 }
 
 /** Explicit source removal retires its forms, including source-set batch scopes. */
