@@ -44,6 +44,7 @@ async function boot(saved: Record<string, string>, control: StorageControl = { r
     failed: drafts.useDraftPersistenceFailed(),
     forgetAvailable: drafts.useDraftForgetAvailable(),
     forgetFailure: drafts.useDraftForgetFailure(),
+    recoveryAvailable: drafts.useDraftRecoveryAvailable(),
     entries: drafts.useWorkspaceDraftEntries(),
   }));
   const forget = () => {
@@ -219,9 +220,9 @@ describe("a full unfinished-edits store", () => {
     expect(values.get(V1)).toBe(legacyRaw);
   });
 
-  it("keeps a save too large at launch protected until the kept edits are saved", async () => {
+  it("keeps a save too large at launch from coming back until the kept edits are saved", async () => {
     const control: StorageControl = { refuseWrite: () => false, failReads: false };
-    const { field, status, values, forget, reload } = await boot({ [V2]: savedRaw(501) }, control);
+    const { field, status, values, drafts, forget, reload } = await boot({ [V2]: savedRaw(501) }, control);
     const edit = field([], "ImageRotateFlow.degrees", "cw180");
     act(() => edit.result.current[1]("ccw90"));
 
@@ -229,13 +230,12 @@ describe("a full unfinished-edits store", () => {
     expect(forget()).toBe(true);
     expect(values.get(`${BACKUP}.0`)).toBe(savedRaw(501));
     expect(status.result.current.persistence).toEqual({ kind: "write_failed" });
-    expect(status.result.current.forgetAvailable).toBe(true);
+    act(() => drafts.retryDraftPersistence());
+    expect(values.get(V2)).toBe(savedRaw(501));
+    expect(edit.result.current[0]).toBe("ccw90");
 
     control.refuseWrite = () => false;
     act(() => edit.result.current[1]("cw270"));
-    expect(values.get(V2)).toBe(savedRaw(501));
-
-    expect(forget()).toBe(true);
     expect(status.result.current.persistence).toEqual({ kind: "ok" });
     expect(reload()).toEqual({ kind: "ready", entries: { [editKey]: { value: "cw270" } } });
   });
@@ -280,5 +280,115 @@ describe("a full unfinished-edits store", () => {
     expect(edit.result.current[0]).toBe("cw90");
     expect(status.result.current.forgetFailure).toBe("failed");
     expect(status.result.current.forgetAvailable).toBe(false);
+  });
+  // A save holding one valid saved entry that collides with a live edit, plus a
+  // slot this version does not know: a strict read refuses it as malformed,
+  // while tolerant recovery would bring the old value back.
+  const collidingMalformed = JSON.stringify({ version: 2, entries: { [savedKey(0)]: { value: "cw90" }, [JSON.stringify(["image", "Unknown.slot"])]: { value: 1 } } });
+
+  async function failedForgetOverMalformed() {
+    const control: StorageControl = { refuseWrite: () => false, failReads: false };
+    const booted = await boot({ [V2]: savedRaw(500) }, control);
+    const kept = booted.field(["source", "/photo-0.png"], "ImageRotateFlow.degrees", "cw180");
+    const added = booted.field([], "ImageRotateFlow.degrees", "cw180");
+    act(() => kept.result.current[1]("cw270"));
+    expect(booted.status.result.current.persistence.kind).toBe("full");
+    booted.values.set(V2, collidingMalformed);
+    control.refuseWrite = storageKey => storageKey === V2;
+
+    expect(booted.forget()).toBe(true);
+    expect(booted.values.get(`${BACKUP}.0`)).toBe(collidingMalformed);
+    expect(booted.status.result.current.persistence).toEqual({ kind: "write_failed" });
+    control.refuseWrite = () => false;
+    return { ...booted, control, kept, added };
+  }
+  const keptAfterForget = { [savedKey(0)]: { value: "cw270" }, [editKey]: { value: "cw180" } };
+
+  it("finishes a Forget whose save failed over a malformed copy with Try again, never restoring that copy", async () => {
+    const { status, values, drafts, kept, added, reload } = await failedForgetOverMalformed();
+    expect(status.result.current.recoveryAvailable).toBe(false);
+    let recovered = true;
+    act(() => { recovered = drafts.recoverSavedDrafts(); });
+    expect(recovered).toBe(false);
+    expect(kept.result.current[0]).toBe("cw270");
+
+    act(() => drafts.retryDraftPersistence());
+
+    expect(kept.result.current[0]).toBe("cw270");
+    expect(added.result.current[0]).toBe("cw180");
+    expect(status.result.current.entries).toEqual(keptAfterForget);
+    expect(status.result.current.persistence).toEqual({ kind: "ok" });
+    expect(reload()).toEqual({ kind: "ready", entries: keptAfterForget });
+    expect(values.get(`${BACKUP}.0`)).toBe(collidingMalformed);
+  });
+
+  it("backs up a copy that changed after a failed Forget, then saves the kept edits instead of hydrating it", async () => {
+    const { status, values, drafts, kept, reload } = await failedForgetOverMalformed();
+    const changed = JSON.stringify({ version: 2, entries: { [savedKey(0)]: { value: "cw90" }, [savedKey(9)]: { value: "cw90" } } });
+    values.set(V2, changed);
+
+    act(() => drafts.retryDraftPersistence());
+
+    expect(kept.result.current[0]).toBe("cw270");
+    expect(status.result.current.entries).toEqual(keptAfterForget);
+    expect(values.get(`${BACKUP}.0`)).toBe(collidingMalformed);
+    expect(values.get(`${BACKUP}.1`)).toBe(changed);
+    expect(status.result.current.persistence).toEqual({ kind: "ok" });
+    expect(reload()).toEqual({ kind: "ready", entries: keptAfterForget });
+  });
+
+  it.each([
+    ["a newer save", false],
+    ["storage that cannot be read", true],
+  ])("refuses to finish a failed Forget over %s, keeping the edits and writing nothing", async (_label, failReads) => {
+    const { status, values, writes, drafts, control, kept } = await failedForgetOverMalformed();
+    const newer = JSON.stringify({ version: 3, entries: {} });
+    values.set(V2, newer);
+    control.failReads = failReads;
+    writes.length = 0;
+
+    act(() => drafts.retryDraftPersistence());
+
+    expect(writes).toEqual([]);
+    expect(kept.result.current[0]).toBe("cw270");
+    expect(status.result.current.entries).toEqual(keptAfterForget);
+    expect(status.result.current.persistence).toEqual({ kind: "write_failed" });
+    expect(status.result.current.recoveryAvailable).toBe(false);
+    control.failReads = false;
+    expect(values.get(V2)).toBe(newer);
+  });
+
+  it("keeps a failed Forget's edits when the copy it replaced becomes readable before Try again", async () => {
+    const { status, values, drafts, kept, reload } = await failedForgetOverMalformed();
+    values.set(V2, savedRaw(500));
+
+    act(() => drafts.retryDraftPersistence());
+
+    expect(kept.result.current[0]).toBe("cw270");
+    expect(status.result.current.entries).toEqual(keptAfterForget);
+    expect(values.get(`${BACKUP}.1`)).toBe(savedRaw(500));
+    expect(reload()).toEqual({ kind: "ready", entries: keptAfterForget });
+  });
+
+  it("saves by itself once this session's own edits fit again after Forget", async () => {
+    const { field, status, values, forget, reload } = await boot({ [V2]: savedRaw(3) });
+    const files = field([], "ImagePage.files", largeFiles);
+    expect(forget()).toBe(true);
+    expect(status.result.current.persistence.kind).toBe("full");
+    expect(values.get(V2)).toBe(savedRaw(3));
+
+    act(() => files.result.current[1](["/small.png"]));
+
+    expect(status.result.current.persistence).toEqual({ kind: "ok" });
+    expect(reload()).toEqual({ kind: "ready", entries: { [largeFilesKey]: { value: ["/small.png"] } } });
+  });
+
+  it("saves a failed Forget's edits by itself on the next edit once storage works", async () => {
+    const { status, kept, reload } = await failedForgetOverMalformed();
+
+    act(() => kept.result.current[1]("ccw90"));
+
+    expect(status.result.current.persistence).toEqual({ kind: "ok" });
+    expect(reload()).toEqual({ kind: "ready", entries: { ...keptAfterForget, [savedKey(0)]: { value: "ccw90" } } });
   });
 });

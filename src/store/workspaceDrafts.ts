@@ -14,7 +14,6 @@ import {
   readDraftEntriesOutcome,
   saveDraftEntriesOutcome,
   type DraftProtectionReason,
-  type DraftReadOutcome,
   type DraftSaveOutcome,
 } from "./workspacePersistence";
 import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/features/convert/videoTrackOptions";
@@ -22,7 +21,14 @@ import { cloneVideoTrackPolicyDraft, type VideoTrackPolicyDraft } from "@/featur
 export type WorkspaceTool = "extract" | "convert" | "compress" | "image" | "metadata" | "recognize";
 type DraftScope = { tool: WorkspaceTool; path: readonly string[]; sources: readonly string[] };
 type DraftEntry = { value: unknown };
-type DraftProtection = { kind: "load"; reason: DraftProtectionReason } | { kind: "migration"; legacyRaw: string } | null;
+// replacement: Forget backed up savedRaw and kept only this session's entries,
+// but saving them failed. Until they are saved they replace savedRaw; the saved
+// copy never comes back over them.
+type DraftProtection =
+  | { kind: "load"; reason: DraftProtectionReason }
+  | { kind: "migration"; legacyRaw: string }
+  | { kind: "replacement"; savedRaw: string }
+  | null;
 export type DraftForgetFailure = "no_backup_room" | "failed";
 // session: keys this launch seeded or wrote; every field on screen is one of them.
 type DraftState = { entries: Record<string, DraftEntry>; epochs: Record<string, number>; scopeEpochs: Record<string, number>; completionEpochs: Record<string, number>; resetEpoch: number; revisions: Record<string, number>; persistence: DraftSaveOutcome; session: ReadonlySet<string>; recoveryFailed: boolean; forgetFailure: DraftForgetFailure | null; protection: DraftProtection };
@@ -45,8 +51,14 @@ const useDraftStore = create<DraftState>(() => ({
 const saveDrafts = (entries: Record<string, DraftEntry>) => saveDraftEntriesOutcome(window.localStorage, entries);
 const sameOutcome = (a: DraftSaveOutcome, b: DraftSaveOutcome) =>
   a.kind === b.kind && (a.kind !== "full" || (b.kind === "full" && a.entries === b.entries && a.bytes === b.bytes));
+// Set while Forget replaces memory, so only its own explicit save writes.
+let replacingMemory = false;
 useDraftStore.subscribe((state, previous) => {
-  if (state.entries === previous.entries || typeof window === "undefined") return;
+  if (state.entries === previous.entries || typeof window === "undefined" || replacingMemory) return;
+  if (state.protection?.kind === "replacement") {
+    try { finishReplacement(state.protection.savedRaw); } catch { useDraftStore.setState({ persistence: WRITE_FAILED }); }
+    return;
+  }
   if (state.protection !== null) return;
   let persistence: DraftSaveOutcome = WRITE_FAILED;
   try { persistence = saveDrafts(state.entries); } catch { /* Storage may be disabled. */ }
@@ -68,6 +80,10 @@ function hydrateSavedEntries(state: DraftState, saved: Record<string, DraftEntry
 export function retryDraftPersistence() {
   try {
     const state = useDraftStore.getState();
+    if (state.protection?.kind === "replacement") {
+      finishReplacement(state.protection.savedRaw);
+      return;
+    }
     const read = readDraftEntriesOutcome(window.localStorage);
     if (read.kind === "protected") {
       useDraftStore.setState({ persistence: WRITE_FAILED, protection: { kind: "load", reason: read.reason } });
@@ -193,37 +209,53 @@ export function useDraftSavedEditsTooLarge() { return useDraftStore(savedEditsTo
 /** A save too large at launch, or a save over the limit holding entries from earlier sessions that Forget would drop. */
 export function useDraftForgetAvailable() { return useDraftStore(canForgetEarlierDrafts); }
 export function useDraftForgetFailure() { return useDraftStore(state => state.forgetFailure); }
-/** Autosave is off; only Try again, recovery or Forget can save. */
-export function useDraftProtected() { return useDraftStore(state => state.protection !== null); }
+/** Autosave is off; only Try again, recovery or Forget can save. A pending Forget replacement still autosaves. */
+export function useDraftProtected() { return useDraftStore(state => state.protection !== null && state.protection.kind !== "replacement"); }
 
 // Saves Forget may back up and replace. A newer Goop's save, or one that
 // cannot be read at all, is left alone and the action refuses.
 const FORGETTABLE_PROTECTION = new Set<DraftProtectionReason>(["oversized", "malformed"]);
 
-/**
- * What still guards the saved copy until the kept entries replace it. An
- * unfinished migration keeps its exact legacy copy, so Try again saves the
- * kept entries rather than restoring that copy over them.
- */
-function authorityUntilSaved(read: DraftReadOutcome): DraftProtection {
-  if (read.kind === "legacy") return { kind: "migration", legacyRaw: read.legacy_raw };
-  if (read.kind === "protected") return { kind: "load", reason: read.reason };
-  return null;
-}
-
-function keepSessionEntries(current: DraftProtection, authority: DraftProtection) {
-  // Saving stays off while memory is replaced, so only the save below writes;
-  // with nothing to hold it off, the autosave subscription makes that one save.
-  const holding = authority ?? current;
-  useDraftStore.setState(state => ({
-    entries: Object.fromEntries(Object.entries(state.entries).filter(([key]) => state.session.has(key))),
-    protection: holding,
-    forgetFailure: null,
-  }));
-  if (holding === null) return;
+// Saves the kept entries over savedRaw. Protection stays on until that save
+// succeeds, so neither autosave nor Try again can restore the saved copy.
+function saveReplacement(savedRaw: string) {
   let persistence: DraftSaveOutcome = WRITE_FAILED;
   try { persistence = saveDrafts(useDraftStore.getState().entries); } catch { /* Storage may be disabled. */ }
-  useDraftStore.setState(persistence.kind === "ok" ? { persistence, protection: null } : { persistence, protection: authority });
+  useDraftStore.setState(persistence.kind === "ok"
+    ? { persistence, protection: null }
+    : { persistence, protection: { kind: "replacement", savedRaw } });
+}
+
+/**
+ * Try again after Forget's save failed. A newer Goop's save or unreadable
+ * storage is still refused. A save that changed meanwhile is backed up like
+ * the one Forget replaced; then the kept entries are saved without reading it.
+ */
+function finishReplacement(savedRaw: string) {
+  const storage = window.localStorage;
+  const read = readDraftEntriesOutcome(storage);
+  if (read.kind === "protected" && !FORGETTABLE_PROTECTION.has(read.reason)) {
+    useDraftStore.setState({ persistence: WRITE_FAILED });
+    return;
+  }
+  const current = storage.getItem(DRAFT_STORAGE_KEY) ?? storage.getItem(LEGACY_DRAFT_STORAGE_KEY);
+  if (current !== null && current !== savedRaw && !backUpSavedDrafts(storage, current)) {
+    useDraftStore.setState({ persistence: WRITE_FAILED, forgetFailure: "no_backup_room" });
+    return;
+  }
+  saveReplacement(current ?? savedRaw);
+}
+
+function keepSessionEntries(savedRaw: string) {
+  replacingMemory = true;
+  try {
+    useDraftStore.setState(state => ({
+      entries: Object.fromEntries(Object.entries(state.entries).filter(([key]) => state.session.has(key))),
+      protection: { kind: "replacement", savedRaw },
+      forgetFailure: null,
+    }));
+  } finally { replacingMemory = false; }
+  saveReplacement(savedRaw);
 }
 
 /**
@@ -236,7 +268,7 @@ function keepSessionEntries(current: DraftProtection, authority: DraftProtection
 export function forgetEarlierDrafts(): boolean {
   const state = useDraftStore.getState();
   if (!canForgetEarlierDrafts(state)) return false;
-  let authority: DraftProtection;
+  let savedRaw: string;
   try {
     const storage = window.localStorage;
     const read = readDraftEntriesOutcome(storage);
@@ -250,12 +282,12 @@ export function forgetEarlierDrafts(): boolean {
       useDraftStore.setState({ forgetFailure: "no_backup_room" });
       return false;
     }
-    authority = authorityUntilSaved(read);
+    savedRaw = saved;
   } catch {
     useDraftStore.setState({ forgetFailure: "failed" });
     return false;
   }
-  keepSessionEntries(state.protection, authority);
+  keepSessionEntries(savedRaw);
   return true;
 }
 const ScopeContext = createContext<DraftScope>({ tool: "convert", path: [], sources: [] });
