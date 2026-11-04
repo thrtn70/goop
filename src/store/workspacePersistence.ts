@@ -16,7 +16,8 @@ export { DRAFT_BACKUP_KEY, DRAFT_STORAGE_KEY, LEGACY_DRAFT_STORAGE_KEY } from ".
 
 export type DraftEntries = Record<string, { value: unknown }>;
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem">;
-const MAX_BYTES = 512 * 1024;
+export const DRAFT_ENTRY_LIMIT = 500;
+export const DRAFT_BYTE_LIMIT = 512 * 1024;
 const TOOLS = new Set(["extract", "convert", "compress", "image", "metadata", "recognize"]);
 // The clockwise turns a PDF page card stores; null, no change, is checked
 // beside it. Keyed by the union so an added or removed turn fails to compile.
@@ -275,10 +276,16 @@ function storedValue(_key: string, value: unknown): unknown {
   return value;
 }
 
+export type DraftLimitCounts = { entries: number; bytes: number };
+class DraftLimitError extends Error {
+  constructor(readonly counts: DraftLimitCounts) { super("Draft storage limit reached"); }
+}
+
 function encodeDraftEntriesWithSize(entries: DraftEntries): { raw: string; encodedBytes: number } {
   const raw = JSON.stringify({version:2, entries}, storedValue);
   const encodedBytes = new TextEncoder().encode(raw).length;
-  if (raw.length > MAX_BYTES || encodedBytes > MAX_BYTES || Object.keys(entries).length > 500) throw new Error("Draft storage limit reached");
+  const count = Object.keys(entries).length;
+  if (raw.length > DRAFT_BYTE_LIMIT || encodedBytes > DRAFT_BYTE_LIMIT || count > DRAFT_ENTRY_LIMIT) throw new DraftLimitError({ entries: count, bytes: encodedBytes });
   return { raw, encodedBytes };
 }
 
@@ -351,7 +358,7 @@ function oversizedReason(raw: string, version: 1 | 2): DraftDecodeError["reason"
 }
 
 function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): DraftEntries {
-  if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).length > MAX_BYTES) throw new DraftDecodeError(oversizedReason(raw, version));
+  if (raw.length > DRAFT_BYTE_LIMIT || new TextEncoder().encode(raw).length > DRAFT_BYTE_LIMIT) throw new DraftDecodeError(oversizedReason(raw, version));
   let data: unknown;
   try { data = JSON.parse(raw); } catch { throw new DraftDecodeError("malformed"); }
   if (!object(data) || typeof data.version !== "number") throw new DraftDecodeError("malformed");
@@ -359,7 +366,7 @@ function decodeDraftEnvelope(raw: string, version: 1 | 2, strict: boolean): Draf
   if (!object(data.entries)) throw new DraftDecodeError("malformed");
   // Before the version match: recovery decodes at the save's own version, where
   // this limit applies too.
-  if (Object.keys(data.entries).length > 500) throw new DraftDecodeError("oversized");
+  if (Object.keys(data.entries).length > DRAFT_ENTRY_LIMIT) throw new DraftDecodeError("oversized");
   if (data.version !== version) throw new DraftDecodeError("malformed");
   const entries: DraftEntries = {};
   for (const [key, entry] of Object.entries(data.entries)) {
@@ -431,7 +438,8 @@ export function loadDraftEntries(storage: Storage): DraftEntries {
 
 export type DraftPersistenceResult =
   | { ok: true; encoded_bytes: number }
-  | { ok: false; phase: "encode" | "write" };
+  | { ok: false; phase: "encode"; limit?: DraftLimitCounts }
+  | { ok: false; phase: "write" };
 
 function closeFailedPersistence(
   recorder: ResponsivenessRecorder,
@@ -463,9 +471,11 @@ export function persistDraftEntries(
   let encoded: { raw: string; encodedBytes: number };
   try {
     encoded = encodeDraftEntriesWithSize(admitDraftEntries(entries).admitted);
-  } catch {
+  } catch (error) {
     closeFailedPersistence(recorder, owner, encodeSpan);
-    return { ok: false, phase: "encode" };
+    return error instanceof DraftLimitError
+      ? { ok: false, phase: "encode", limit: error.counts }
+      : { ok: false, phase: "encode" };
   }
   if (encodeSpan !== null) recorder.endSpan(encodeSpan);
 
@@ -488,4 +498,12 @@ export function persistDraftEntries(
 
 export function saveDraftEntries(storage: Storage, entries: DraftEntries): boolean {
   return persistDraftEntries(storage, entries, getResponsivenessRecorder()).ok;
+}
+
+/** Why the last save did or did not reach storage: a retry can help a refused write, never a save over the limit. */
+export type DraftSaveOutcome = { kind: "ok" } | { kind: "write_failed" } | ({ kind: "full" } & DraftLimitCounts);
+export function saveDraftEntriesOutcome(storage: Storage, entries: DraftEntries): DraftSaveOutcome {
+  const result = persistDraftEntries(storage, entries, getResponsivenessRecorder());
+  if (result.ok) return { kind: "ok" };
+  return result.phase === "encode" && result.limit ? { kind: "full", ...result.limit } : { kind: "write_failed" };
 }
