@@ -120,6 +120,7 @@ fn configure_responsiveness_windows(
             .find(|window| window.label == "main")
             .cloned()
             .ok_or_else(|| "responsiveness main window is missing".to_owned())?;
+        cleanup_window.create = true;
         cleanup_window.visible = false;
         cleanup_window.data_store_identifier = None;
         cleanup_window.url = tauri::WebviewUrl::External(
@@ -144,7 +145,27 @@ fn configure_responsiveness_windows(
         return Err("responsiveness data store identifier conflicts with app config".to_owned());
     }
     main.data_store_identifier = Some(identifier);
+    main.create = false;
     Ok(())
+}
+
+type DeferredMainWindow = (tauri::utils::config::WindowConfig, [u8; 16]);
+
+fn deferred_main_window(
+    windows: &[tauri::utils::config::WindowConfig],
+    identifier: Option<[u8; 16]>,
+) -> Result<Option<DeferredMainWindow>, String> {
+    let Some(identifier) = identifier else {
+        return Ok(None);
+    };
+    let main = windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| "responsiveness main window is missing".to_owned())?;
+    if main.create || main.data_store_identifier != Some(identifier) {
+        return Err("responsiveness main window was not deferred to its data store".to_owned());
+    }
+    Ok(Some((main.clone(), identifier)))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -243,12 +264,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            if app
-                .state::<performance::ResponsivenessState>()
-                .cleanup_request()
-                .is_some()
-            {
+            let responsiveness = app.state::<performance::ResponsivenessState>();
+            if responsiveness.cleanup_request().is_some() {
                 return Ok(());
+            }
+            if let Some((main, identifier)) = deferred_main_window(
+                &app.config().app.windows,
+                responsiveness.data_store_identifier(),
+            )? {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &main)?
+                    .data_store_identifier(identifier)
+                    .build()?;
             }
             // Tauri's externalBin bundler ships sidecars in the same directory as
             // the app's main executable (Contents/MacOS on macOS; next to the .exe
@@ -968,6 +994,9 @@ mod explicit_engine_path_tests {
     fn responsiveness_window_configuration_is_inert_isolated_and_cleanup_only() {
         let main = tauri::utils::config::WindowConfig {
             label: "main".to_owned(),
+            title: "Goop".to_owned(),
+            width: 1200.0,
+            min_width: Some(900.0),
             ..Default::default()
         };
         let mut windows = vec![main];
@@ -975,14 +1004,27 @@ mod explicit_engine_path_tests {
 
         configure_responsiveness_windows(&mut windows, None, false).unwrap();
         assert_eq!(windows, original);
+        assert_eq!(deferred_main_window(&windows, None), Ok(None));
 
         let identifier = [7; 16];
+        assert!(deferred_main_window(&windows, Some(identifier)).is_err());
         configure_responsiveness_windows(&mut windows, Some(identifier), false).unwrap();
-        assert_eq!(windows[0].data_store_identifier, Some(identifier));
+        let deferred = tauri::utils::config::WindowConfig {
+            create: false,
+            data_store_identifier: Some(identifier),
+            ..original[0].clone()
+        };
+        assert_eq!(windows, vec![deferred.clone()]);
+        assert_eq!(
+            deferred_main_window(&windows, Some(identifier)),
+            Ok(Some((deferred, identifier)))
+        );
+        assert!(deferred_main_window(&windows, Some([8; 16])).is_err());
         assert!(configure_responsiveness_windows(&mut windows, Some([8; 16]), false).is_err());
 
         configure_responsiveness_windows(&mut windows, None, true).unwrap();
         assert_eq!(windows.len(), 1);
+        assert!(windows[0].create);
         assert!(!windows[0].visible);
         assert_eq!(windows[0].data_store_identifier, None);
         assert!(matches!(

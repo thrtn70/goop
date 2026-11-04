@@ -816,6 +816,12 @@ export function validateFrontendComponents(components, lane) {
 
 const LIMITATIONS = new Set(['event_timing_unsupported', 'long_tasks_unsupported', 'webkit_process_unattributed', 'related_process_partial', 'accessibility_interrupted', 'focus_lost', 'sampling_missed', 'instrumentation_overhead_exceeded', 'exploratory_soak_only']);
 
+const RUN_DATA_STORE_MISSING = 'The run data store was missing at cleanup, so the run was not isolated from the app\'s own WebKit storage';
+
+function requiresRunDataStore(manifests) {
+  return manifests.some(manifest => manifest.descriptor.lane === 'draft' || manifest.bootstrap.draftStorage !== null);
+}
+
 function validateCleanupReceipt(receipt, expected = null) {
   exactKeys(receipt, ['schema_version', 'component_kind', 'session_id', 'webview_data_store_id', 'removed', 'error_code', 'pid', 'native_clock'], 'data-store cleanup receipt');
   if (receipt.schema_version !== 2 || receipt.component_kind !== 'data_store_cleanup' || !UUID.test(receipt.session_id) || typeof receipt.removed !== 'boolean' || receipt.error_code !== null || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1) throw Error('Invalid data-store cleanup receipt');
@@ -1808,6 +1814,7 @@ export async function runDataStoreCleanup({ plan, manifest, componentDirectory, 
   });
   const receiptPath = join(componentDirectory, `data-store-cleanup-${manifest.descriptor.sessionId}.json`);
   const receipt = readRegularJson(receiptPath, 4096, 'Data-store cleanup receipt');
+  if (plainObject(receipt) && receipt.error_code === 'data_store_missing') throw Error(RUN_DATA_STORE_MISSING);
   validateCleanupReceipt(receipt, { sessionId: manifest.descriptor.sessionId, webviewDataStoreId: manifest.webviewDataStoreId });
   return { receipt, helper_success: result.success };
 }
@@ -1943,6 +1950,7 @@ export async function runNativeResponsivenessPlan(planValue, { platform = proces
   const cleanupReceipt = cleanupRaw?.receipt ?? cleanupRaw;
   const cleanupHelperSuccess = cleanupRaw?.receipt ? cleanupRaw.helper_success === true : true;
   validateCleanupReceipt(cleanupReceipt, { sessionId: firstManifest.descriptor.sessionId, webviewDataStoreId: firstManifest.webviewDataStoreId });
+  if (requiresRunDataStore(plan.pages.map(page => page.manifest)) && cleanupReceipt.removed !== true) throw Error(RUN_DATA_STORE_MISSING);
   if (controlMode) {
     const pageResult = pageResults[0];
     const recoveryResult = pageResults[1];
