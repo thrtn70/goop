@@ -1571,6 +1571,15 @@ test('native draft control publishes only complete external AX evidence without 
     assert.equal(recoveryEvidence.ax_value_matches, true);
     assert.equal(readdirSync(join(reports, 'components')).some(name => name.startsWith('frontend-')), false);
 
+    const missingStoreReports = join(root, 'missing-store-reports'); mkdirSync(missingStoreReports);
+    const missingStoreProfile = join(root, 'missing-store-profile'); mkdirSync(missingStoreProfile);
+    await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: missingStoreReports, app_data_directory: missingStoreProfile }, {
+      platform: 'darwin',
+      runPage: async ({ manifest: activeManifest }) => ({ page_component: null, driver_observations: activeManifest.descriptor.componentRole === 'recovery' ? [] : observations, external_ax_duration_us: activeManifest.descriptor.componentRole === 'recovery' ? null : 210, process_series: null, recovery_evidence: activeManifest.descriptor.componentRole === 'recovery' ? { ax_value: typed.join('') } : null, cleanup: { complete: true } }),
+      runCleanup: async () => ({ ...cleanupReceipt, removed: false }),
+    }), /run data store was missing at cleanup/);
+    assert.equal(existsSync(join(missingStoreReports, 'control.json')), false);
+
     const incompleteReports = join(root, 'incomplete-reports'); mkdirSync(incompleteReports);
     const incompleteProfile = join(root, 'incomplete-profile'); mkdirSync(incompleteProfile);
     await assert.rejects(() => runNativeResponsivenessPlan({ ...plan, report_directory: incompleteReports, app_data_directory: incompleteProfile }, {
@@ -1704,9 +1713,18 @@ test('native draft plan runs pre-quit then recovery before exclusive publication
     assert.equal(readdirSync(join(reports, 'components')).filter(name => name === 'driver.json').length, 1);
     const failedReports = join(root, 'failed-reports'); mkdirSync(failedReports);
     const failedProfile = join(root, 'failed-profile'); mkdirSync(failedProfile);
-    const cleanupFailed = await runNativeResponsivenessPlan({ ...basePlan, report_directory: failedReports, app_data_directory: failedProfile }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => ({ receipt: { ...cleanupReceipt(manifest), removed: false }, helper_success: false }) });
+    const cleanupFailed = await runNativeResponsivenessPlan({ ...basePlan, report_directory: failedReports, app_data_directory: failedProfile }, { platform: 'darwin', runPage, runCleanup: async ({ manifest }) => ({ receipt: cleanupReceipt(manifest), helper_success: false }) });
     assert.deepEqual(cleanupFailed.sample.outcome, { kind: 'failed', code: 'cleanup_failed' });
     assert.equal(existsSync(join(failedReports, 'sample.json')), true);
+    for (const [name, runCleanup] of [
+      ['missing-store', async ({ manifest }) => ({ ...cleanupReceipt(manifest), removed: false })],
+      ['missing-store-helper', async ({ manifest }) => ({ receipt: { ...cleanupReceipt(manifest), removed: false }, helper_success: false })],
+    ]) {
+      const missingReports = join(root, `${name}-reports`); mkdirSync(missingReports);
+      const missingProfile = join(root, `${name}-profile`); mkdirSync(missingProfile);
+      await assert.rejects(() => runNativeResponsivenessPlan({ ...basePlan, report_directory: missingReports, app_data_directory: missingProfile }, { platform: 'darwin', runPage, runCleanup }), /run data store was missing at cleanup/);
+      assert.equal(existsSync(join(missingReports, 'sample.json')), false);
+    }
     const recorderReports = join(root, 'recorder-failed-reports'); mkdirSync(recorderReports);
     const recorderProfile = join(root, 'recorder-failed-profile'); mkdirSync(recorderProfile);
     const recorderFailed = await runNativeResponsivenessPlan({ ...basePlan, report_directory: recorderReports, app_data_directory: recorderProfile }, { platform: 'darwin', runPage: async context => {
@@ -1798,6 +1816,12 @@ test('cleanup reads a valid receipt even when the helper exits nonzero', async (
     });
     assert.deepEqual(result, { receipt, helper_success: false });
     assert.deepEqual(invocation.args, ['-ApplePersistenceIgnoreState', 'YES']);
+    rmSync(join(report, `data-store-cleanup-${uuid('1')}.json`));
+    await assert.rejects(() => runDataStoreCleanup({
+      plan: { binary, app_data_directory: profile, pages: [{ manifest_path: manifestPath }], limits: { log_limit_bytes: 1024, storage_budget_bytes: 1024 * 1024 } },
+      manifest, componentDirectory: report,
+      runProcess: async () => { writeFileSync(join(report, `data-store-cleanup-${uuid('1')}.json`), JSON.stringify({ ...receipt, error_code: 'data_store_missing' })); return { success: false }; },
+    }), /run data store was missing at cleanup/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
