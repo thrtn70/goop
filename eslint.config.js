@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { includeIgnoreFile } from "@eslint/compat";
 import js from "@eslint/js";
 import globals from "globals";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -10,6 +12,9 @@ import tseslint from "typescript-eslint";
 // runtime. eslint's job here is the class of bug tsc cannot see: unused vars,
 // bad hook dependencies, `case` blocks that leak declarations.
 export default tseslint.config(
+  // A path git ignores can never be committed, so linting it only reports on
+  // local material that differs from one checkout to the next.
+  includeIgnoreFile(fileURLToPath(new URL(".gitignore", import.meta.url))),
   {
     ignores: [
       "dist/**",

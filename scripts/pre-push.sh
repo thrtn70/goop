@@ -43,6 +43,7 @@ run_step "tsc typecheck"     npm run --silent typecheck
 # Covers src/ AND site/ — the landing page is otherwise deployed by
 # pages.yml without a single check running against it.
 run_step "eslint"            npm run --silent lint
+run_step "lint scope"        node --test scripts/lint-ignores.test.mjs
 run_step "vitest"            npm run --silent test
 run_step "npm audit gate"    node --test scripts/npm-audit-gate.test.mjs
 run_step "startup fonts"     node --test scripts/startup-fonts.test.mjs

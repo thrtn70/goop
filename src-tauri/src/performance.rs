@@ -31,6 +31,10 @@ const MAX_FIELD_BYTES: usize = 64;
 const MAX_DRAFT_STORAGE_BYTES: usize = 512 * 1024;
 const MAX_COMPLETION_TIMEOUT_MS: u64 = 120_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+#[cfg(target_vendor = "apple")]
+const RUN_DATA_STORE_LISTING_ATTEMPTS: u32 = 40;
+#[cfg(target_vendor = "apple")]
+const RUN_DATA_STORE_LISTING_INTERVAL_MS: u64 = 50;
 
 pub struct PerformanceState {
     report_path: Option<PathBuf>,
@@ -341,6 +345,24 @@ impl ResponsivenessState {
         })
     }
 
+    pub fn requires_run_data_store(&self) -> bool {
+        self.activation
+            .as_ref()
+            .is_some_and(activation_requires_run_data_store)
+    }
+
+    pub fn run_data_store_to_confirm(&self) -> Option<[u8; 16]> {
+        self.data_store_identifier()
+            .filter(|_| self.requires_run_data_store())
+    }
+
+    pub fn require_run_data_store_listed(&self, listed: Option<bool>) -> Result<(), String> {
+        if self.run_data_store_to_confirm().is_none() || listed == Some(true) {
+            return Ok(());
+        }
+        Err("responsiveness run data store is not in use".to_owned())
+    }
+
     pub fn reconcile_cleanup_success(&self, removed: bool) -> Result<(), String> {
         self.reconcile_cleanup_success_with_hook(removed, || Ok(()))
     }
@@ -361,27 +383,33 @@ impl ResponsivenessState {
             .as_ref()
             .ok_or_else(|| "responsiveness cleanup is not enabled".to_owned())?;
         validate_report_directory(report_dir)?;
-        let report = serde_json::json!({
-            "schema_version": RESPONSIVENESS_SCHEMA_VERSION,
-            "component_kind": "data_store_cleanup",
-            "session_id": request.session_id,
-            "webview_data_store_id": request.data_store_identifier,
-            "removed": removed,
-            "error_code": null,
-            "pid": std::process::id(),
-            "native_clock": {
-                "domain": "native_monotonic",
-                "unit": "us",
-                "elapsed_us": self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-            }
-        });
         let activation = self
             .activation
             .as_ref()
             .ok_or_else(|| "responsiveness cleanup is not enabled".to_owned())?;
-        let receipt_path = data_store_cleanup_receipt_path(activation, report_dir);
         if !validate_cleanup_success_receipt(activation, report_dir)? {
-            write_create_new_json(&receipt_path, &report)?;
+            let store_missing = !removed && activation_requires_run_data_store(activation);
+            let report = serde_json::json!({
+                "schema_version": RESPONSIVENESS_SCHEMA_VERSION,
+                "component_kind": "data_store_cleanup",
+                "session_id": request.session_id,
+                "webview_data_store_id": request.data_store_identifier,
+                "removed": removed,
+                "error_code": store_missing.then_some("data_store_missing"),
+                "pid": std::process::id(),
+                "native_clock": {
+                    "domain": "native_monotonic",
+                    "unit": "us",
+                    "elapsed_us": self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+                }
+            });
+            write_create_new_json(
+                &data_store_cleanup_receipt_path(activation, report_dir),
+                &report,
+            )?;
+            if store_missing {
+                return Err("responsiveness run data store was missing at cleanup".to_owned());
+            }
         }
         after_receipt()?;
         remove_data_store_ownership_after_receipt(activation, report_dir)?;
@@ -612,22 +640,63 @@ pub fn responsiveness_status(state: tauri::State<'_, ResponsivenessState>) -> Re
     state.status()
 }
 
+async fn confirm_run_data_store(
+    app: &tauri::AppHandle,
+    state: &ResponsivenessState,
+) -> Result<(), String> {
+    let listed = match state.run_data_store_to_confirm() {
+        Some(identifier) => run_data_store_listed(app, identifier).await,
+        None => None,
+    };
+    state.require_run_data_store_listed(listed)
+}
+
+#[cfg(target_vendor = "apple")]
+async fn run_data_store_listed(app: &tauri::AppHandle, identifier: [u8; 16]) -> Option<bool> {
+    for attempt in 0..RUN_DATA_STORE_LISTING_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                RUN_DATA_STORE_LISTING_INTERVAL_MS,
+            ))
+            .await;
+        }
+        if app
+            .fetch_data_store_identifiers()
+            .await
+            .ok()?
+            .contains(&identifier)
+        {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+async fn run_data_store_listed(_app: &tauri::AppHandle, _identifier: [u8; 16]) -> Option<bool> {
+    None
+}
+
 #[tauri::command]
-pub fn responsiveness_ready(
+pub async fn responsiveness_ready(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ResponsivenessState>,
     page_instance_id: String,
     token: String,
     action_id: Option<u64>,
 ) -> Result<NativeResponsivenessMarker, String> {
+    confirm_run_data_store(&app, &state).await?;
     state.ready(page_instance_id, token, action_id)
 }
 
 #[tauri::command]
-pub fn responsiveness_control_ready(
+pub async fn responsiveness_control_ready(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ResponsivenessState>,
     page_instance_id: String,
     token: String,
 ) -> Result<NativeResponsivenessMarker, String> {
+    confirm_run_data_store(&app, &state).await?;
     state.control_ready(page_instance_id, token)
 }
 
@@ -1166,6 +1235,10 @@ fn validate_report_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn activation_requires_run_data_store(activation: &ResponsivenessActivation) -> bool {
+    activation.descriptor.lane == "draft" || activation.bootstrap.draft_storage.is_some()
+}
+
 fn data_store_ownership_path(activation: &ResponsivenessActivation, report_dir: &Path) -> PathBuf {
     report_dir.join(format!(
         "data-store-owned-{}.json",
@@ -1285,6 +1358,11 @@ fn validate_cleanup_success_receipt(
         || object.get("error_code") != Some(&Value::Null)
     {
         return Err("invalid data store cleanup receipt".to_owned());
+    }
+    if activation_requires_run_data_store(activation)
+        && object.get("removed") != Some(&Value::Bool(true))
+    {
+        return Err("data store cleanup receipt did not remove the run data store".to_owned());
     }
     value_u64(object.get("pid"), "cleanup PID")?;
     let clock = object_at(object, "native_clock")?;
@@ -2379,6 +2457,236 @@ mod tests {
         );
         assert!(mismatched.cleanup_requested());
         assert!(!mismatched.cleanup_mode());
+    }
+
+    fn draft_run_paths(dir: &Path, change: fn(&mut Value)) -> (PathBuf, PathBuf) {
+        let root = fs::canonicalize(dir).unwrap();
+        let manifest = root.join("manifest.json");
+        let reports = root.join("reports");
+        fs::create_dir(&reports).unwrap();
+        write_manifest(&manifest);
+        let mut value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        change(&mut value);
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        (manifest, reports)
+    }
+
+    fn draft_lane(value: &mut Value) {
+        value["descriptor"]["lane"] = json!("draft");
+    }
+
+    fn seeded_bootstrap(value: &mut Value) {
+        let raw = "{\"version\":1,\"entries\":{}}";
+        value["bootstrap"]["draftStorage"] =
+            json!({ "raw": raw, "sha256": format!("{:x}", Sha256::digest(raw.as_bytes())) });
+    }
+
+    fn cleanup_receipt(reports: &Path) -> Value {
+        serde_json::from_slice(
+            &fs::read(reports.join(format!("data-store-cleanup-{SESSION_ID}.json"))).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn responsiveness_cleanup_fails_closed_when_a_draft_run_store_is_missing() {
+        for change in [draft_lane as fn(&mut Value), seeded_bootstrap] {
+            let dir = tempfile::tempdir().unwrap();
+            let (manifest, reports) = draft_run_paths(dir.path(), change);
+            let active = ResponsivenessState::from_paths(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+            );
+            assert!(active.status().enabled);
+            assert!(active.requires_run_data_store());
+
+            let cleanup = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+                true,
+            );
+            assert!(cleanup.requires_run_data_store());
+            let error = cleanup.reconcile_cleanup_success(false).unwrap_err();
+            assert!(error.contains("data store was missing"), "{error}");
+            let receipt = cleanup_receipt(&reports);
+            assert_eq!(receipt["removed"], false);
+            assert_eq!(receipt["error_code"], "data_store_missing");
+            assert!(reports
+                .join(format!("data-store-owned-{SESSION_ID}.json"))
+                .exists());
+
+            let retry = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest),
+                Some(reports),
+                Instant::now(),
+                true,
+            );
+            assert!(retry.cleanup_mode());
+            assert!(!retry.cleanup_request().unwrap().already_complete);
+            assert!(retry.reconcile_cleanup_success(false).is_err());
+            assert!(retry.reconcile_cleanup_success(true).is_err());
+        }
+    }
+
+    #[test]
+    fn responsiveness_cleanup_of_a_draft_run_succeeds_when_its_store_was_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, reports) = draft_run_paths(dir.path(), draft_lane);
+        ResponsivenessState::from_paths(
+            Some(manifest.clone()),
+            Some(reports.clone()),
+            Instant::now(),
+        );
+        let cleanup = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest.clone()),
+            Some(reports.clone()),
+            Instant::now(),
+            true,
+        );
+        assert!(cleanup
+            .reconcile_cleanup_success_with_hook(true, || {
+                Err("injected ownership finalization failure".to_owned())
+            })
+            .is_err());
+        let resumed = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest),
+            Some(reports.clone()),
+            Instant::now(),
+            true,
+        );
+        assert!(resumed.cleanup_request().unwrap().already_complete);
+        resumed.reconcile_cleanup_success(false).unwrap();
+        let receipt = cleanup_receipt(&reports);
+        assert_eq!(receipt["removed"], true);
+        assert_eq!(receipt["error_code"], Value::Null);
+        assert!(!reports
+            .join(format!("data-store-owned-{SESSION_ID}.json"))
+            .exists());
+    }
+
+    #[test]
+    fn responsiveness_cleanup_still_accepts_a_missing_store_without_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, reports) = draft_run_paths(dir.path(), |_| {});
+        let active = ResponsivenessState::from_paths(
+            Some(manifest.clone()),
+            Some(reports.clone()),
+            Instant::now(),
+        );
+        assert!(!active.requires_run_data_store());
+        let cleanup = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest),
+            Some(reports.clone()),
+            Instant::now(),
+            true,
+        );
+        cleanup.reconcile_cleanup_success(false).unwrap();
+        let receipt = cleanup_receipt(&reports);
+        assert_eq!(receipt["removed"], false);
+        assert_eq!(receipt["error_code"], Value::Null);
+    }
+
+    fn write_legacy_missing_store_receipt(reports: &Path) {
+        fs::write(
+            reports.join(format!("data-store-cleanup-{SESSION_ID}.json")),
+            serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "component_kind": "data_store_cleanup",
+                "session_id": SESSION_ID,
+                "webview_data_store_id": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                "removed": false,
+                "error_code": null,
+                "pid": 42,
+                "native_clock": { "domain": "native_monotonic", "unit": "us", "elapsed_us": 7 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn responsiveness_cleanup_refuses_a_legacy_missing_store_receipt_for_draft_runs() {
+        for change in [draft_lane as fn(&mut Value), seeded_bootstrap] {
+            let dir = tempfile::tempdir().unwrap();
+            let (manifest, reports) = draft_run_paths(dir.path(), change);
+            write_legacy_missing_store_receipt(&reports);
+            let unowned = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+                true,
+            );
+            assert!(unowned.cleanup_requested());
+            assert!(!unowned.cleanup_mode());
+            assert!(unowned.reconcile_cleanup_success(true).is_err());
+
+            ResponsivenessState::from_paths(
+                Some(manifest.clone()),
+                Some(reports.clone()),
+                Instant::now(),
+            );
+            let owned = ResponsivenessState::from_paths_with_cleanup(
+                Some(manifest),
+                Some(reports.clone()),
+                Instant::now(),
+                true,
+            );
+            assert!(owned.cleanup_mode());
+            assert!(!owned.cleanup_request().unwrap().already_complete);
+            assert!(owned.reconcile_cleanup_success(true).is_err());
+            assert!(owned.reconcile_cleanup_success(false).is_err());
+            assert!(reports
+                .join(format!("data-store-owned-{SESSION_ID}.json"))
+                .exists());
+            let receipt = cleanup_receipt(&reports);
+            assert_eq!(receipt["removed"], false);
+            assert_eq!(receipt["pid"], 42);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, reports) = draft_run_paths(dir.path(), |_| {});
+        write_legacy_missing_store_receipt(&reports);
+        let replay = ResponsivenessState::from_paths_with_cleanup(
+            Some(manifest),
+            Some(reports),
+            Instant::now(),
+            true,
+        );
+        assert!(replay.cleanup_mode());
+        assert!(replay.cleanup_request().unwrap().already_complete);
+        replay.reconcile_cleanup_success(false).unwrap();
+    }
+
+    #[test]
+    fn responsiveness_readiness_requires_a_listed_run_store_only_for_draft_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let inspection = enabled_state(dir.path());
+        assert_eq!(inspection.run_data_store_to_confirm(), None);
+        for listed in [None, Some(false), Some(true)] {
+            inspection.require_run_data_store_listed(listed).unwrap();
+        }
+
+        for change in [draft_lane as fn(&mut Value), seeded_bootstrap] {
+            let dir = tempfile::tempdir().unwrap();
+            let (manifest, reports) = draft_run_paths(dir.path(), change);
+            let draft =
+                ResponsivenessState::from_paths(Some(manifest), Some(reports), Instant::now());
+            assert_eq!(
+                draft.run_data_store_to_confirm(),
+                Some([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+            );
+            draft.require_run_data_store_listed(Some(true)).unwrap();
+            for listed in [None, Some(false)] {
+                let error = draft.require_run_data_store_listed(listed).unwrap_err();
+                assert!(error.contains("data store is not in use"), "{error}");
+            }
+        }
+
+        let disabled = ResponsivenessState::from_paths(None, None, Instant::now());
+        assert_eq!(disabled.run_data_store_to_confirm(), None);
+        disabled.require_run_data_store_listed(None).unwrap();
     }
 
     #[test]
