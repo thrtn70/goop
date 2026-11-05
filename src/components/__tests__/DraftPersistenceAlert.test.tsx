@@ -387,5 +387,14 @@ describe("a full unfinished-edits store", () => {
 
     expect(screen.getByRole("alert").textContent).toContain("there's no room to back up the saved edits");
     expect(values.get(V2)).toBe(changed);
+
+    // The copy goes back to the one Forget already backed up, so the backup
+    // room no longer matters; a write that fails now must not blame it.
+    values.set(V2, saved(500));
+    refuseV2 = true;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(screen.getByRole("alert").textContent).not.toContain("no room");
+    expect(values.get(V2)).toBe(saved(500));
   });
 });

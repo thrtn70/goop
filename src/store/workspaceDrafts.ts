@@ -250,6 +250,9 @@ function finishReplacement(savedRaw: string) {
     useDraftStore.setState({ persistence: WRITE_FAILED, forgetFailure: "no_backup_room" });
     return;
   }
+  // Every copy that needs one is backed up now, so an earlier capacity refusal
+  // no longer explains anything.
+  if (useDraftStore.getState().forgetFailure !== null) useDraftStore.setState({ forgetFailure: null });
   saveReplacement(current ?? savedRaw);
 }
 
