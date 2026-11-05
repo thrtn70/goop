@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   admitDraftEntries,
   decodeDraftEntries,
+  DRAFT_BYTE_LIMIT,
+  DRAFT_ENTRY_LIMIT,
   DRAFT_STORAGE_KEY,
   encodeDraftEntries,
   LEGACY_DRAFT_STORAGE_KEY,
@@ -9,11 +11,13 @@ import {
   loadDraftEntriesOutcome,
   persistDraftEntries,
   saveDraftEntries,
+  saveDraftEntriesOutcome,
 } from "../workspacePersistence";
 import type { CausalOwner, ResponsivenessRecorder, SpanKind } from "@/performance/responsiveness";
 import { NOOP_RESPONSIVENESS_RECORDER } from "@/performance/responsiveness";
 import { armNextDraftWriteFailure } from "@/performance/responsivenessBootstrap";
 const key = (slot: string) => JSON.stringify(["image", slot]);
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
 // Every entry is admissible on its own; together they pass the 500-entry limit.
 const overEntryLimit = Object.fromEntries(Array.from({ length: 501 }, (_, i) =>
   [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }]));
@@ -303,7 +307,7 @@ describe("instrumented draft persistence", () => {
     ]);
   });
 
-  it("reports encode failure without writing or retaining exception text", () => {
+  it("reports encode failure with the counts over the limit, without writing or retaining exception text", () => {
     const { calls, recorder, owner } = recordingRecorder();
     let writes = 0;
     const result = persistDraftEntries(
@@ -311,7 +315,7 @@ describe("instrumented draft persistence", () => {
       overEntryLimit,
       recorder,
     );
-    expect(result).toEqual({ ok: false, phase: "encode" });
+    expect(result).toEqual({ ok: false, phase: "encode", limit: { entries: 501, bytes: utf8Bytes(JSON.stringify({ version: 2, entries: overEntryLimit })) } });
     expect(writes).toBe(0);
     expect(JSON.stringify(result)).not.toContain("storage limit");
     expect(calls).toEqual([
@@ -341,6 +345,25 @@ describe("instrumented draft persistence", () => {
       ["cancelSpan", 2],
       ["cancelSetup", owner],
     ]);
+  });
+
+  it("reports a save over the byte limit with its size", () => {
+    const large = { [key("ImagePage.files")]: { value: Array.from({ length: 150 }, () => "x".repeat(4000)) } };
+    expect(persistDraftEntries({ getItem: () => null, setItem: () => { throw new Error("must not write"); } }, large, NOOP_RESPONSIVENESS_RECORDER))
+      .toEqual({ ok: false, phase: "encode", limit: { entries: 1, bytes: utf8Bytes(JSON.stringify({ version: 2, entries: large })) } });
+  });
+
+  it("names why a save failed: storage refused it, or it is over the limit", () => {
+    const values = new Map<string, string>();
+    let refuse = false;
+    const storage = { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => { if (refuse) throw new Error("quota"); values.set(k, v); } };
+    expect(saveDraftEntriesOutcome(storage, {})).toEqual({ kind: "ok" });
+    refuse = true;
+    expect(saveDraftEntriesOutcome(storage, {})).toEqual({ kind: "write_failed" });
+    expect(saveDraftEntriesOutcome(storage, overEntryLimit))
+      .toEqual({ kind: "full", entries: 501, bytes: utf8Bytes(JSON.stringify({ version: 2, entries: overEntryLimit })) });
+    expect(DRAFT_ENTRY_LIMIT).toBe(500);
+    expect(DRAFT_BYTE_LIMIT).toBe(512 * 1024);
   });
 });
 

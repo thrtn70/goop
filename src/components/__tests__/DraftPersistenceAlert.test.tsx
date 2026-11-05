@@ -18,6 +18,8 @@ vi.mock("@/hooks/useTheme", () => ({ useTheme: () => undefined }));
 vi.mock("@/hooks/useQueueHotkey", () => ({ useQueueHotkey: () => undefined }));
 vi.mock("@/hooks/useHotkeys", () => ({ useHotkeys: () => undefined }));
 
+const FORGET = "Forget edits from earlier sessions";
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -91,6 +93,7 @@ describe.each(["noop", "enabled", "faulted"] as const)("draft persistence alert 
     expect(draft.result.current[0]).toEqual(["/private/source.png"]);
     expect(values.has(DRAFT_STORAGE_KEY)).toBe(false);
 
+    expect(screen.queryByRole("button", { name: "Forget edits from earlier sessions" })).toBeNull();
     failWrites = false;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
@@ -224,11 +227,132 @@ describe("recovering saved edits a strict load refused", () => {
 
   it.each([
     ["edits saved by a newer Goop", { [V2]: JSON.stringify({ version: 3, entries: {} }) }, {}],
-    ["edits too large for this Goop to read", { [V2]: JSON.stringify({ version: 2, entries: { [files]: { value: ["x".repeat(600 * 1024)] } } }) }, {}],
     ["storage that cannot be read", { [V2]: refusedRaw }, { unreadable: true }],
   ])("offers no recovery for %s", async (_label, saved, options) => {
     await boot(saved, options);
     expect((await screen.findByRole("alert")).textContent).toContain("Unfinished edits could not be saved for restart");
     expect(screen.queryByRole("button", { name: RECOVER })).toBeNull();
+    expect(screen.queryByRole("button", { name: FORGET })).toBeNull();
+  });
+
+  it("offers no recovery but offers Forget for edits too large for this Goop to read", async () => {
+    const tooLarge = JSON.stringify({ version: 2, entries: { [files]: { value: ["x".repeat(600 * 1024)] } } });
+    const { values, strictLoad } = await boot({ [V2]: tooLarge });
+    expect((await screen.findByRole("alert")).textContent)
+      .toBe("Unfinished edits from earlier sessions are too large to restore. Your edits still work until you quit. Forget edits from earlier sessions");
+    expect(screen.queryByRole("button", { name: RECOVER })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: FORGET }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(values.get(`${BACKUP}.0`)).toBe(tooLarge);
+    expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: [] }, [rotation]: { value: "cw90" } } });
+    expect(document.activeElement?.id).toBe("main");
+  });
+});
+
+describe("a full unfinished-edits store", () => {
+  const V2 = "goop.workspace-drafts.v2";
+  const V1 = "goop.workspace-drafts.v1";
+  const BACKUP = "goop.workspace-drafts.v2.unreadable";
+  const RECOVER = "Back up and recover what can be read";
+  const files = JSON.stringify(["image", "ImagePage.files"]);
+  const largeFiles = Array.from({ length: 150 }, (_, i) => `/${i}-${"x".repeat(4000)}.png`);
+  const SESSION_TOO_LARGE = "Unfinished edits from this session are too large to keep after a restart (588 KB of 512 KB). Your edits still work until you quit.";
+  const saved = (count: number) => JSON.stringify({ version: 2, entries: Object.fromEntries(Array.from({ length: count }, (_, i) =>
+    [JSON.stringify(["image", "source", `/photo-${i}.png`, "ImageRotateFlow.degrees"]), { value: "cw90" }])) });
+
+  async function boot(stored: Record<string, string>, field: { slot: string; initial: unknown } = { slot: "ImageRotateFlow.degrees", initial: "cw180" }, failWrites = { current: false }) {
+    vi.resetModules();
+    const values = new Map<string, string>(Object.entries(stored));
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (failWrites.current) throw new Error("quota");
+        values.set(key, value);
+      },
+    });
+    recorderState.current = recorder("noop");
+    const drafts = await import("@/store/workspaceDrafts");
+    const persistence = await import("@/store/workspacePersistence");
+    const { default: Layout } = await import("../Layout");
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(drafts.WorkspaceDraftProvider, { tool: "image" }, children);
+    render(<MemoryRouter><Layout /></MemoryRouter>);
+    const draft = renderHook(() => drafts.useWorkspaceDraftState(field.slot, field.initial), { wrapper });
+    const strictLoad = () => persistence.loadDraftEntriesOutcome({ getItem: key => values.get(key) ?? null, setItem: () => { throw new Error("must not write"); } });
+    return { values, draft, strictLoad };
+  }
+
+  it("shows the counts and offers Forget instead of Try again", async () => {
+    const { values } = await boot({ [V2]: saved(500) });
+
+    expect((await screen.findByRole("alert")).textContent)
+      .toBe("Too many unfinished edits to keep after a restart (501 of 500). Your edits still work until you quit. Forget edits from earlier sessions");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: FORGET }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(values.get(`${BACKUP}.0`)).toBe(saved(500));
+    expect(document.activeElement?.id).toBe("main");
+  });
+
+  it("says why nothing was forgotten when no backup slot is free", async () => {
+    const slots = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`${BACKUP}.${i}`, `earlier backup ${i}`]));
+    const { values } = await boot({ [V2]: saved(500), ...slots });
+
+    fireEvent.click(await screen.findByRole("button", { name: FORGET }));
+
+    expect(screen.getByRole("alert").textContent).toContain("Nothing was forgotten: there's no room to back up the saved edits first.");
+    expect(values.get(V2)).toBe(saved(500));
+  });
+
+  it("says this session's own edits are too large, offers nothing more, and keeps focus in the page", async () => {
+    await boot({ [V2]: saved(3) }, { slot: "ImagePage.files", initial: largeFiles });
+    const forget = await screen.findByRole("button", { name: FORGET });
+    forget.focus();
+    expect(document.activeElement).toBe(forget);
+
+    fireEvent.click(forget);
+
+    expect(screen.getByRole("alert").textContent).toBe(SESSION_TOO_LARGE);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(document.activeElement?.id).toBe("main");
+  });
+
+  it("keeps Recover and Try again when recovered edits are over the limit, and saves once they fit", async () => {
+    const { values, draft, strictLoad } = await boot({ [V2]: "{" }, { slot: "ImagePage.files", initial: largeFiles });
+    fireEvent.click(await screen.findByRole("button", { name: RECOVER }));
+
+    expect(screen.getByRole("alert").textContent).toContain(SESSION_TOO_LARGE);
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(values.get(`${BACKUP}.0`)).toBe("{");
+    expect(values.get(V2)).toBe("{");
+
+    act(() => draft.result.current[1](["/small.png"]));
+    fireEvent.click(screen.getByRole("button", { name: RECOVER }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: ["/small.png"] } } });
+  });
+
+  it("keeps Try again when an unfinished migration is over the limit, and saves once it fits", async () => {
+    const legacy = JSON.stringify({ version: 1, entries: { [files]: { value: ["/a.png"] } } });
+    const failWrites = { current: true };
+    const { values, draft, strictLoad } = await boot({ [V1]: legacy }, { slot: "ImagePage.files", initial: [] }, failWrites);
+    expect(draft.result.current[0]).toEqual(["/a.png"]);
+    act(() => draft.result.current[1](largeFiles));
+    failWrites.current = false;
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+
+    expect(screen.getByRole("alert").textContent).toContain(SESSION_TOO_LARGE);
+    expect(values.has(V2)).toBe(false);
+
+    act(() => draft.result.current[1](["/b.png"]));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+
+    expect(strictLoad()).toEqual({ kind: "ready", entries: { [files]: { value: ["/b.png"] } } });
+    expect(values.get(V1)).toBe(legacy);
   });
 });

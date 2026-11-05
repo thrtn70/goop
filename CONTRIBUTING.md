@@ -24,7 +24,7 @@ Frontend (`src/`) is React 18 + Tailwind + Zustand 4 + React Router 7 + Vite 8. 
 ## Build Prerequisites
 
 - **Rust:** the stable toolchain selected by `rust-toolchain.toml`, including rustfmt and Clippy.
-- **Node.js:** 22.12+ with `npm`. Tauri 2's CLI and the Vite dev server need it.
+- **Node.js:** 22.13+ with `npm`. Tauri 2's CLI and the Vite dev server need it.
 - **Git:** recent.
 - **macOS arm64:** Xcode Command Line Tools, Homebrew at `/opt/homebrew`, CMake 3.23+, pkgconf, and Python 3.14.6 (the version used to lock the gallery-dl build inputs; `brew install cmake pkgconf`).
 - **Windows x64:** Git Bash, 7-Zip at `C:\Program Files\7-Zip`, vcpkg at `C:\vcpkg`, WebView2, and MSVC Build Tools 2022 with the "Desktop development with C++" workload.
