@@ -37,8 +37,8 @@
 # Homebrew; fetch-sidecars.sh installs any that are missing.
 set -euo pipefail
 
-TESSERACT_VERSION="5.5.3"
-TESSERACT_SHA256="9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884"
+TESSERACT_VERSION="5.5.4"
+TESSERACT_SHA256="a8dbf8b8c8ee427ff6ad1d99116502feaf59440af1adb893caf60a6576826cf4"
 TESSERACT_URL="https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESSERACT_VERSION}.tar.gz"
 
 usage() {

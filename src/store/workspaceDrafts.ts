@@ -147,6 +147,9 @@ export function useDraftRecoveryAvailable() {
   return useDraftStore(state => state.protection?.kind === "load" && state.protection.reason === "malformed");
 }
 export function useDraftRecoveryFailed() { return useDraftStore(state => state.recoveryFailed); }
+const recoveryAvailable = (state: DraftState) => state.protection?.kind === "load" && state.protection.reason === "malformed";
+/** Whether recovery is still offered right now, outside React. */
+export function draftRecoveryAvailable() { return recoveryAvailable(useDraftStore.getState()); }
 
 // One copy per distinct save: a later recovery or forget never replaces an
 // earlier backup. Few slots, since each can hold a full save in shared storage.
@@ -209,6 +212,10 @@ export function useDraftSavedEditsTooLarge() { return useDraftStore(savedEditsTo
 /** A save too large at launch, or a save over the limit holding entries from earlier sessions that Forget would drop. */
 export function useDraftForgetAvailable() { return useDraftStore(canForgetEarlierDrafts); }
 export function useDraftForgetFailure() { return useDraftStore(state => state.forgetFailure); }
+/** Whether Forget is still offered right now, outside React. */
+export function draftForgetAvailable() { return canForgetEarlierDrafts(useDraftStore.getState()); }
+/** Forget kept this session's edits, but they have not replaced the saved copy yet. */
+export function useDraftReplacementPending() { return useDraftStore(state => state.protection?.kind === "replacement"); }
 /** Autosave is off; only Try again, recovery or Forget can save. A pending Forget replacement still autosaves. */
 export function useDraftProtected() { return useDraftStore(state => state.protection !== null && state.protection.kind !== "replacement"); }
 
@@ -222,7 +229,7 @@ function saveReplacement(savedRaw: string) {
   let persistence: DraftSaveOutcome = WRITE_FAILED;
   try { persistence = saveDrafts(useDraftStore.getState().entries); } catch { /* Storage may be disabled. */ }
   useDraftStore.setState(persistence.kind === "ok"
-    ? { persistence, protection: null }
+    ? { persistence, protection: null, forgetFailure: null }
     : { persistence, protection: { kind: "replacement", savedRaw } });
 }
 
@@ -243,6 +250,9 @@ function finishReplacement(savedRaw: string) {
     useDraftStore.setState({ persistence: WRITE_FAILED, forgetFailure: "no_backup_room" });
     return;
   }
+  // Every copy that needs one is backed up now, so an earlier capacity refusal
+  // no longer explains anything.
+  if (useDraftStore.getState().forgetFailure !== null) useDraftStore.setState({ forgetFailure: null });
   saveReplacement(current ?? savedRaw);
 }
 

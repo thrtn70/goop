@@ -1318,13 +1318,15 @@ ${body}
 }
 
 // Shaped like the shipped bundle: a static upstream build, a universal
-// PyInstaller binary and Homebrew bottles built above the floor.
+// PyInstaller binary and Homebrew bottles built at the floor.
 const bundledBinaries = {
   ffmpeg: [["arm64", "12.0"]],
   "yt-dlp": [["x86_64", "10.13", "min"], ["arm64", "11.0"]],
-  gs: [["arm64", "14.0"]],
-  "libtiff.6.dylib": [["arm64", "14.0"]],
+  gs: [["arm64", "13.3"]],
+  "libtiff.6.dylib": [["arm64", "13.3"]],
 };
+
+const aboveFloor = { ...bundledBinaries, gs: [["arm64", "14.0"]], "libtiff.6.dylib": [["arm64", "14.0"]] };
 
 function runFloorCheck({
   floor = "13.3",
@@ -1370,19 +1372,29 @@ test("the floor check passes a bundle at the declared floor and reports every ot
   assert.doesNotMatch(run.log, /::error::/);
   assert.match(run.log, /^ffmpeg +12\.0$/m);
   assert.match(run.log, /^yt-dlp +x86_64 10\.13, arm64 11\.0$/m);
-  assert.match(run.log, /^gs +14\.0 +above the 13\.3 floor$/m);
-  assert.match(run.log, /^libtiff\.6\.dylib +14\.0 +above the 13\.3 floor$/m);
+  assert.match(run.log, /^gs +13\.3$/m);
+  assert.match(run.log, /^libtiff\.6\.dylib +13\.3$/m);
   assert.doesNotMatch(run.log, /^goop /m, "the main executable is checked, not listed with the sidecars");
-  const warnings = run.log.split("\n").filter((line) => line.startsWith("::warning::"));
-  assert.equal(warnings.length, 1, run.log);
-  assert.match(warnings[0], /declared 13\.3/);
-  assert.match(warnings[0], /gs \(14\.0\), libtiff\.6\.dylib \(14\.0\)$/);
+  assert.doesNotMatch(run.log, /::warning::|above the/);
 });
 
-test("the floor check says nothing above the floor when no bundled binary needs more", needsMacTools, () => {
-  const run = runFloorCheck({ bundled: { ffmpeg: bundledBinaries.ffmpeg, "yt-dlp": bundledBinaries["yt-dlp"] } });
-  assert.equal(run.status, 0, run.log);
-  assert.doesNotMatch(run.log, /::warning::|above the/);
+test("the floor check fails a bundled binary built for a newer macOS than the floor", needsMacTools, () => {
+  const run = runFloorCheck({ bundled: aboveFloor });
+  assert.equal(run.status, 1, run.log);
+  assert.match(run.log, /^gs +14\.0 +above the 13\.3 floor$/m);
+  assert.match(run.log, /^libtiff\.6\.dylib +14\.0 +above the 13\.3 floor$/m);
+  assert.match(run.log, /^ffmpeg +12\.0$/m, "binaries after a failing one are still reported");
+  const errors = run.log.split("\n").filter((line) => line.startsWith("::error::"));
+  assert.deepEqual(
+    errors.slice(0, 2),
+    [
+      "::error::gs is built for macOS 14.0, above the declared 13.3 floor",
+      "::error::libtiff.6.dylib is built for macOS 14.0, above the declared 13.3 floor",
+    ],
+    run.log,
+  );
+  assert.match(errors.at(-1), /does not carry the declared macOS 13\.3 floor/);
+  assert.doesNotMatch(run.log, /::warning::/);
 });
 
 test("the floor check fails a bundle that does not carry the declared floor", needsMacTools, async (t) => {
@@ -1421,23 +1433,21 @@ test("the floor check fails a bundle that does not carry the declared floor", ne
   });
   await t.test("the sidecar report survives a failing check", () => {
     for (const options of [{ plist: { LSMinimumSystemVersion: "10.13" } }, { main: [["arm64", "11.0"]] }]) {
-      const run = fails(options, /^gs +14\.0 +above the 13\.3 floor$/m);
-      assert.match(run.log, /^::warning::.*gs \(14\.0\)/m);
+      const run = fails(options, /^gs +13\.3$/m);
+      assert.match(run.log, /^yt-dlp +x86_64 10\.13, arm64 11\.0$/m);
     }
   });
 });
 
-test("only a slice that runs on Apple Silicon can raise the floor warning", needsMacTools, () => {
-  const run = runFloorCheck({
-    bundled: {
-      universal: [["arm64", "11.0"], ["x86_64", "14.0"]],
-      "intel-only": [["x86_64", "14.0"], ["x86_64h", "14.0"]],
-    },
-  });
-  assert.equal(run.status, 0, run.log);
-  assert.match(run.log, /^universal +arm64 11\.0, x86_64 14\.0$/m);
-  assert.match(run.log, /^intel-only +x86_64 14\.0, x86_64h 14\.0 +above the 13\.3 floor$/m);
-  assert.match(run.log, /^::warning::.*: intel-only \(14\.0\)$/m);
+test("only a slice that runs on Apple Silicon can fail a bundled binary", needsMacTools, () => {
+  const passes = runFloorCheck({ bundled: { universal: [["arm64", "11.0"], ["x86_64", "14.0"]] } });
+  assert.equal(passes.status, 0, passes.log);
+  assert.match(passes.log, /^universal +arm64 11\.0, x86_64 14\.0$/m);
+
+  const fails = runFloorCheck({ bundled: { "intel-only": [["x86_64", "14.0"], ["x86_64h", "14.0"]] } });
+  assert.equal(fails.status, 1, fails.log);
+  assert.match(fails.log, /^intel-only +x86_64 14\.0, x86_64h 14\.0 +above the 13\.3 floor$/m);
+  assert.match(fails.log, /^::error::intel-only is built for macOS 14\.0, above the declared 13\.3 floor$/m);
 });
 
 test("audit runs the floor check's tests on macOS, where they are not skipped", () => {
