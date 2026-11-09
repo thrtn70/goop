@@ -95,7 +95,7 @@ TESSDATA_ENG_SHA256="7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427
 # pins the Homebrew tesseract that its gs was built against, which the source
 # build must match (scripts/build-tesseract-macos.sh holds the source pin).
 MACOS_GHOSTSCRIPT_VERSION="10.08.0"
-MACOS_MUPDF_VERSION="1.28.5"
+MACOS_MUPDF_VERSION="1.28.6"
 MACOS_TESSERACT_VERSION="5.5.4"
 
 case "$TARGET" in
