@@ -230,16 +230,19 @@ jobs:
       # macos-floor step exports (without it they take the SDK default).
       # Nothing here re-checks those objects; only the linker would warn.
       #
-      # Everything else in Contents/MacOS is reported, not enforced. Most
+      # Everything else in Contents/MacOS is reported, and fails the step
+      # when its minos is above the declared floor: it was built for a newer
+      # macOS, so Goop's real floor would be higher than it says. Most
       # sidecars and their dylibs are upstream, Homebrew and PyInstaller
       # builds whose floor nothing in this repo sets; Homebrew bottles target
-      # the macOS that built them. tesseract and libtesseract.5.dylib are the
-      # exception: fetch-sidecars.sh builds them for the floor and fails if
-      # either bundled copy is not. One whose minos is above the declared floor
-      # was built for a newer macOS, so Goop's real floor may be higher than
-      # it says. Only slices Apple Silicon runs count; an x86_64 slice counts
-      # when it is the only one. For the PyInstaller sidecars the minos is
-      # the bootloader's; the Python they unpack at run time is not covered.
+      # the macOS that built them, so a bottle built above the floor stops
+      # the release here. tesseract and libtesseract.5.dylib are built for
+      # the floor by fetch-sidecars.sh, which also fails if either bundled
+      # copy is not. A file with no build version, such as a script, is
+      # reported, never fatal. Only slices Apple Silicon runs count; an
+      # x86_64 slice counts when it is the only one. For the PyInstaller
+      # sidecars the minos is the bootloader's; the Python they unpack at
+      # run time is not covered.
       #
       # This runs before the sidecar smoke test so a failing sidecar cannot
       # take the report down with it.
@@ -304,7 +307,7 @@ jobs:
             fi
           done <<< "$slices"
 
-          echo "== other binaries in Contents/MacOS (reported, not enforced) =="
+          echo "== other binaries in Contents/MacOS =="
           over=()
           while IFS= read -r file <&3; do
             name=$(basename "$file")
@@ -322,14 +325,14 @@ jobs:
             mark=""
             if above "$top" "$want"; then
               mark="  above the $want floor"
-              over+=("$name ($top)")
+              over+=("$name is built for macOS $top")
             fi
             printf '%-24s %s%s\n' "$name" "$(printf '%s\n' "$slices" | show)" "$mark"
           done 3< <(find "$APP/Contents/MacOS" -maxdepth 1 -type f ! -name "$exe" | sort)
-          if [ "${#over[@]}" -gt 0 ]; then
-            list=$(printf '%s, ' "${over[@]}")
-            echo "::warning::bundled binaries were built for a newer macOS than the declared $want, so the real floor may be higher: ${list%, }"
-          fi
+          for entry in "${over[@]}"; do
+            echo "::error::$entry, above the declared $want floor"
+            bad=1
+          done
 
           [ "$bad" -eq 0 ] || { echo "::error::the signed bundle does not carry the declared macOS $want floor"; exit 1; }
           echo "Info.plist and $exe both carry the declared macOS $want floor"
