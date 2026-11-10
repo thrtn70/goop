@@ -1035,9 +1035,9 @@ test("static website offers only a macOS installer at or above the minimum safe 
   assert.doesNotMatch(siteHtml, /data-download-paused|temporarily paused/i);
   assert.match(siteHtml, /data-cta="mac"/);
   assert.doesNotMatch(siteHtml, /data-win-url|\.msi\b|\.exe\b|Download for Windows/);
-  // v0.3.7 is the first build whose bundled downloaders carry certifi
-  // 2026.10.19; the site must never promote an older one as current.
-  assert.match(siteScript, /MIN_MAC_VERSION\s*=\s*\[\s*0\s*,\s*3\s*,\s*7\s*\]/);
+  // v0.3.8 is the first build whose bundled downloaders carry certifi
+  // 2026.10.23; the site must never promote an older one as current.
+  assert.match(siteScript, /MIN_MAC_VERSION\s*=\s*\[\s*0\s*,\s*3\s*,\s*8\s*\]/);
   assert.doesNotMatch(siteScript, /\.msi\b|\.exe\b|data-win-url/);
   assert.match(siteScript, /makeLink\(notesURL, 'Release page'\)/);
 });

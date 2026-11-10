@@ -42,6 +42,7 @@ function release(tag: string, extra: Partial<Release> = {}): Release {
 
 const v036 = release("v0.3.6");
 const v037 = release("v0.3.7");
+const v038 = release("v0.3.8");
 const v034 = release("v0.3.4", {
   assets: [
     asset("v0.3.4", "Goop_0.3.4_aarch64.dmg"),
@@ -182,35 +183,36 @@ describe("macOS downloads", () => {
   });
 
   it.each(userAgents)("links the newest eligible DMG and its version on %s", async (_os, ua) => {
-    installPage(ua, async () => response([v037, v034]));
+    installPage(ua, async () => response([v038, v034]));
     await archiveRendered(2);
 
-    expectMacLinks(dmgOf(v037));
-    expectDownloadLinksByLocation(dmgOf(v037));
-    expectVersionLabels((text) => expect(text).toBe("v0.3.7"));
+    expectMacLinks(dmgOf(v038));
+    expectDownloadLinksByLocation(dmgOf(v038));
+    expectVersionLabels((text) => expect(text).toBe("v0.3.8"));
     expectNoWindowsInstaller();
   });
 
-  it.each(userAgents)("never promotes a release older than v0.3.7 on %s", async (_os, ua) => {
-    installPage(ua, async () => response([v036, v034]));
-    await archiveRendered(2);
+  it.each(userAgents)("never promotes a release older than v0.3.8 on %s", async (_os, ua) => {
+    installPage(ua, async () => response([v037, v036, v034]));
+    await archiveRendered(3);
 
     expectMacLinks(latestPage);
-    expectVersionLabels((text) => expect(["v0.3.6", "v0.3.4"]).not.toContain(text));
+    expectVersionLabels((text) => expect(["v0.3.7", "v0.3.6", "v0.3.4"]).not.toContain(text));
+    expect(document.querySelector(`[href="${dmgOf(v037)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v036)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v034)}"]`)).toBeNull();
     expectNoWindowsInstaller();
   });
 
   it.each([
-    ["older first", [v037, release("v0.3.8")]],
-    ["newer first", [release("v0.3.8"), v037]],
+    ["older first", [v038, release("v0.3.9")]],
+    ["newer first", [release("v0.3.9"), v038]],
   ])("picks the highest eligible version, %s", async (_order, releases) => {
     installPage("Mozilla/5.0 (Macintosh)", async () => response(releases));
     await archiveRendered(2);
 
-    expectMacLinks(dmgOf(release("v0.3.8")));
-    expectVersionLabels((text) => expect(text).toBe("v0.3.8"));
+    expectMacLinks(dmgOf(release("v0.3.9")));
+    expectVersionLabels((text) => expect(text).toBe("v0.3.9"));
   });
 
   it("compares versions numerically, so v0.3.10 beats v0.3.9", async () => {
@@ -223,47 +225,47 @@ describe("macOS downloads", () => {
   });
 
   it("labels the version as v<x.y.z> even when the tag has no v prefix", async () => {
-    const bare = release("0.3.8");
-    installPage("Mozilla/5.0 (Macintosh)", async () => response([bare, v037]));
+    const bare = release("0.3.9");
+    installPage("Mozilla/5.0 (Macintosh)", async () => response([bare, v038]));
     await archiveRendered(2);
 
     expectMacLinks(dmgOf(bare));
-    expectVersionLabels((text) => expect(text).toBe("v0.3.8"));
+    expectVersionLabels((text) => expect(text).toBe("v0.3.9"));
   });
 
   it("skips drafts, prereleases and flagged releases", async () => {
     const releases = [
-      release("v0.3.10", { draft: true }),
-      release("v0.3.9", { prerelease: true }),
-      release("v0.3.9-rc.1", { prerelease: true }),
-      release("v0.3.8", { name: "Broken: do not use v0.3.8" }),
-      release("v0.3.8-hotfix"),
-      v037,
+      release("v0.3.11", { draft: true }),
+      release("v0.3.10", { prerelease: true }),
+      release("v0.3.10-rc.1", { prerelease: true }),
+      release("v0.3.9", { name: "Broken: do not use v0.3.9" }),
+      release("v0.3.9-hotfix"),
+      v038,
     ];
     installPage("Mozilla/5.0 (Macintosh)", async () => response(releases));
     await archiveRendered(3);
 
-    expectMacLinks(dmgOf(v037));
+    expectMacLinks(dmgOf(v038));
   });
 
   it("only trusts a DMG served from this repository's own release downloads", async () => {
-    const foreign = release("v0.3.8", {
-      assets: [{ name: "Goop_0.3.8_aarch64.dmg", browser_download_url: "https://example.com/Goop_0.3.8_aarch64.dmg" }],
+    const foreign = release("v0.3.9", {
+      assets: [{ name: "Goop_0.3.9_aarch64.dmg", browser_download_url: "https://example.com/Goop_0.3.9_aarch64.dmg" }],
     });
-    const otherTag = release("v0.3.9", {
-      assets: [asset("v0.3.6", "Goop_0.3.9_aarch64.dmg")],
+    const otherTag = release("v0.3.10", {
+      assets: [asset("v0.3.6", "Goop_0.3.10_aarch64.dmg")],
     });
-    const mismatched = release("v0.3.10", {
-      assets: [asset("v0.3.10", "Goop_0.3.6_aarch64.dmg")],
+    const mismatched = release("v0.3.11", {
+      assets: [asset("v0.3.11", "Goop_0.3.6_aarch64.dmg")],
     });
-    const windowsOnly = release("v0.3.11", {
-      assets: [asset("v0.3.11", "Goop_0.3.11_x64_en-US.msi")],
+    const windowsOnly = release("v0.3.12", {
+      assets: [asset("v0.3.12", "Goop_0.3.12_x64_en-US.msi")],
     });
     installPage("Mozilla/5.0 (Macintosh)", async () =>
-      response([windowsOnly, mismatched, otherTag, foreign, v037]));
+      response([windowsOnly, mismatched, otherTag, foreign, v038]));
     await archiveRendered(3);
 
-    expectMacLinks(dmgOf(v037));
+    expectMacLinks(dmgOf(v038));
     expectNoWindowsInstaller();
   });
 
