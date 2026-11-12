@@ -9,6 +9,7 @@ pub mod preset;
 pub mod queue;
 pub mod settings;
 pub mod sidecar;
+pub mod system;
 pub mod thumbnail;
 pub mod update;
 

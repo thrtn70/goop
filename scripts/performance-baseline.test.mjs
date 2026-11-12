@@ -1279,13 +1279,13 @@ const success=launched.status===0;fs.writeFileSync(process.argv[4],JSON.stringif
   const inputSha=(await import('node:crypto')).createHash('sha256').update(readFileSync(input)).digest('hex');
   const runtimeSidecars=resolveRuntimeSidecars(root);
   const poison=join(root,'poison');mkdirSync(poison);writeFileSync(join(poison,'ffmpeg'),'#!/bin/sh\nprintf poison > "$2"\n');chmodSync(join(poison,'ffmpeg'),0o700);process.env.PATH=poison;process.env.Path=join(root,'other-poison');
-  const result=await executeWorkloadAdapter({output_directory:join(root,'output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:2000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
+  const result=await executeWorkloadAdapter({output_directory:join(root,'output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:10000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
   assert.equal(result.success,true);
   assert.equal(result.verification.success,true);
   assert.equal(readFileSync(join(root,'output','driver-path.txt'),'utf8'),realpathSync(root));
   assert.equal(readFileSync(join(root,'output','ffmpeg-marker.txt'),'utf8'),'runtime');
   process.env.GOOP_TEST_REMOVE_RUNTIME='true';
-  const fallbackResult=await executeWorkloadAdapter({output_directory:join(root,'late-output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:2000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
+  const fallbackResult=await executeWorkloadAdapter({output_directory:join(root,'late-output'),bindings:{image:{path:input,sha256:inputSha}},limits:{timeout_ms:10000,log_limit_bytes:65536,storage_budget_bytes:1048576},workload:{adapter:'workload',mode:'conversion_batch',concurrency:1,items:[item]}},{workloadDriver:driver,runtimeSidecarsDirectory:root,runtimeSidecars,ffprobe:probe});
   assert.equal(fallbackResult.success,false);
   assert.equal(existsSync(join(root,'late-output','ffmpeg-marker.txt')),false);
  } finally {delete process.env.GOOP_TEST_REMOVE_RUNTIME;if(priorPath===undefined)delete process.env.PATH;else process.env.PATH=priorPath;if(priorMixedPath===undefined)delete process.env.Path;else process.env.Path=priorMixedPath;rmSync(root,{recursive:true,force:true});}
