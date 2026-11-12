@@ -44,12 +44,6 @@ function stemOf(p: string): string {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
-function dirname(p: string): string {
-  const normalized = p.replace(/\\/g, "/");
-  const last = normalized.lastIndexOf("/");
-  return last > 0 ? normalized.slice(0, last) : ".";
-}
-
 /**
  * Wraps the three PDF operations into one flow. Detects whether the user
  * has a single file (Split/Compress available) or multiple (Merge only),
@@ -144,8 +138,10 @@ function PdfFlow({
           return;
         }
         const dir = await open({ directory: true, title: "Choose output folder" });
-        const outDir = typeof dir === "string" ? dir : dirname(files[0]);
-        await api.pdf.run(pdfSplit(files[0], ranges, outDir));
+        if (typeof dir !== "string") {
+          return;
+        }
+        await api.pdf.run(pdfSplit(files[0], ranges, dir));
       } else if (op === "compress") {
         const dest = await save({
           defaultPath: `${stemOf(files[0])}-compressed.pdf`,

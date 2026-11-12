@@ -245,3 +245,15 @@ it("retains Resize failure through the actual Watermark selection and route remo
  fireEvent.click(screen.getByRole("button", {name: /^Resize/}));
  expect(screen.getByText("Resize unavailable")).toBeTruthy();
 });
+it("PDF Split queues nothing when the folder picker is cancelled", async () => {
+ mocks.open.mockResolvedValue(null);
+ render(<WorkspaceDraftProvider tool="convert"><PdfFlow files={["/docs/a.pdf"]} defaultOp="split" onFilesChanged={() => {}} onDone={() => {}} /></WorkspaceDraftProvider>);
+ fireEvent.change(await screen.findByLabelText("Page ranges"), {target: {value: "1-2"}});
+ const split = screen.getByRole("button", {name: "Split PDF"});
+ await waitFor(() => expect((split as HTMLButtonElement).disabled).toBe(false));
+ fireEvent.click(split);
+ await waitFor(() => expect(mocks.open).toHaveBeenCalledWith({directory: true, title: "Choose output folder"}));
+ await waitFor(() => expect(screen.queryByRole("button", {name: "Running..."})).toBeNull());
+ expect(mocks.pdf).not.toHaveBeenCalled();
+ expect((screen.getByLabelText("Page ranges") as HTMLInputElement).value).toBe("1-2");
+});
