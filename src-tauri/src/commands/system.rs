@@ -25,6 +25,7 @@ fn os_label() -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn macos_label(version: Option<&str>, build: Option<&str>) -> Option<String> {
     let version = version.map(str::trim).filter(|v| is_dotted_version(v))?;
     Some(match build.map(str::trim).filter(|b| is_build(b)) {
@@ -33,6 +34,7 @@ fn macos_label(version: Option<&str>, build: Option<&str>) -> Option<String> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn is_dotted_version(text: &str) -> bool {
     let parts: Vec<&str> = text.split('.').collect();
     (1..=3).contains(&parts.len())
@@ -41,6 +43,7 @@ fn is_dotted_version(text: &str) -> bool {
             .all(|part| (1..=4).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn is_build(text: &str) -> bool {
     (1..=16).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric())
 }
