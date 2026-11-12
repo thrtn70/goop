@@ -570,11 +570,14 @@ const ALBUM_LIMITS: AlbumLimits = AlbumLimits {
 /// The files this run reported, as paths relative to `output_dir`, sorted.
 ///
 /// Stricter than `tally_reported`: the list is what a later handoff opens,
-/// so a file reached through a link, at the leaf or in a parent folder, is
-/// left out even when it is a regular file, and so is
-/// a path that is not UTF-8 or is longer than `limits.path_bytes`. Every
-/// entry is already inside `output_dir` (`reported_output`). More than
-/// `limits.files` entries, or none, records no list at all.
+/// so a file reached through a link, at the leaf or in any folder below
+/// `output_dir`, is left out even when it is a regular file, and so is a
+/// path that is not UTF-8 or is longer than `limits.path_bytes`. Every
+/// entry is already lexically inside `output_dir` (`reported_output`), and
+/// must also resolve inside it. The reported spelling is kept: on a
+/// case-insensitive volume it can differ in case from the name on disk and
+/// still open the same file. More than `limits.files` entries, or none,
+/// records no list at all.
 fn album_files(
     reported: &HashSet<PathBuf>,
     output_dir: &std::path::Path,
@@ -585,23 +588,20 @@ fn album_files(
     };
     let mut files = Vec::new();
     for path in reported {
-        let Ok(meta) = std::fs::symlink_metadata(path) else {
+        let Ok(relative_path) = path.strip_prefix(output_dir) else {
             continue;
         };
-        if !meta.file_type().is_file() {
-            continue;
-        }
-        let Some(relative) = path.strip_prefix(output_dir).ok().and_then(|p| p.to_str()) else {
+        let Some(relative) = relative_path.to_str() else {
             continue;
         };
         if relative.is_empty() || relative.len() > limits.path_bytes {
             continue;
         }
-        // The leaf check above can't see a linked folder further up, such
-        // as `linked/secret.jpg` with `linked` pointing outside. Resolving
-        // the whole path must land exactly where the lexical one says.
+        if !reached_without_links(output_dir, relative_path) {
+            continue;
+        }
         match std::fs::canonicalize(path) {
-            Ok(resolved) if resolved == resolved_dir.join(relative) => {}
+            Ok(resolved) if resolved.starts_with(&resolved_dir) => {}
             _ => continue,
         }
         files.push(relative.to_string());
@@ -611,6 +611,32 @@ fn album_files(
     }
     files.sort();
     (!files.is_empty()).then_some(files)
+}
+
+/// True when every step from `base` along `relative` is a real folder and
+/// the last one a regular file, with no link at any step.
+fn reached_without_links(base: &std::path::Path, relative: &std::path::Path) -> bool {
+    let mut current = base.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        let Ok(meta) = std::fs::symlink_metadata(&current) else {
+            return false;
+        };
+        let kind = meta.file_type();
+        let expected = if components.peek().is_some() {
+            kind.is_dir()
+        } else {
+            kind.is_file()
+        };
+        if !expected {
+            return false;
+        }
+    }
+    true
 }
 
 /// Walk gallery-dl's `-j` JSON output and extract a representative
@@ -940,6 +966,20 @@ mod tests {
         assert_eq!(
             album_files(&reported, dir.path(), ALBUM_LIMITS),
             Some(vec!["real.jpg".to_string()])
+        );
+    }
+
+    #[test]
+    fn album_files_keeps_a_file_reported_in_another_letter_case() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("MiXeD.JPG"), b"x").unwrap();
+        if !dir.path().join("mixed.jpg").exists() {
+            return; // a case-sensitive volume: the reported spelling names no file
+        }
+        let reported = HashSet::from([dir.path().join("mixed.jpg")]);
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec!["mixed.jpg".to_string()])
         );
     }
 
