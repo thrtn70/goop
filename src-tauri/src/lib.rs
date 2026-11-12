@@ -893,6 +893,7 @@ pub fn run() {
             commands::sidecar::sidecar_tessdata_available,
             commands::sidecar::sidecar_tessdata_download,
             commands::sidecar::sidecar_tessdata_remove,
+            commands::system::system_os_version,
             commands::settings::settings_get,
             commands::settings::settings_set,
             commands::settings::open_logs_folder,

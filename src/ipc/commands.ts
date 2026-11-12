@@ -253,6 +253,9 @@ export const api = {
     tessdataRemove: (code: string) =>
       invoke<void>("sidecar_tessdata_remove", { code }),
   },
+  system: {
+    osVersion: () => invoke<string>("system_os_version"),
+  },
   settings: {
     get: () => invoke<Settings>("settings_get"),
     set: (patch: SettingsPatch) => invoke<Settings>("settings_set", { patch }),

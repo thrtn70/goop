@@ -28,6 +28,7 @@ vi.mock("@/ipc/commands", () => ({
       ghostscriptVersion: vi.fn(),
       mutoolVersion: vi.fn(),
     },
+    system: { osVersion: vi.fn() },
     thumbnail: { get: vi.fn() },
   },
 }));
@@ -92,6 +93,7 @@ describe("app store queue and settings operations", () => {
     vi.mocked(api.sidecar.ffmpegVersion).mockResolvedValue("n7.1");
     vi.mocked(api.sidecar.ghostscriptVersion).mockResolvedValue("10.04.0");
     vi.mocked(api.sidecar.mutoolVersion).mockResolvedValue("1.27.0");
+    vi.mocked(api.system.osVersion).mockResolvedValue("macOS 26.1 (25B78)");
     useAppStore.setState({
       settings: null,
       jobs: [],
@@ -311,6 +313,25 @@ describe("app store queue and settings operations", () => {
 
     expect(api.sidecar.ytDlpVersion).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
+  });
+
+  it("reports the platform the native lookup returns", async () => {
+    const info = await useAppStore.getState().loadVersions(true);
+    expect(api.system.osVersion).toHaveBeenCalledTimes(1);
+    expect(info.os).toBe("macOS 26.1 (25B78)");
+  });
+
+  it("falls back to the web view's platform string when the native lookup fails", async () => {
+    vi.mocked(api.system.osVersion).mockRejectedValue(new Error("unsupported"));
+    const ua = vi
+      .spyOn(navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15");
+    try {
+      const info = await useAppStore.getState().loadVersions(true);
+      expect(info.os).toBe("macOS 10.15.7");
+    } finally {
+      ua.mockRestore();
+    }
   });
 
   it("starts a fresh fan-out once the previous load settled", async () => {
