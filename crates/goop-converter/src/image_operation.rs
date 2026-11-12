@@ -78,6 +78,7 @@ pub async fn run(
         duration_ms: started.elapsed().as_millis() as u64,
         result_kind: output.result_kind,
         file_count: output.file_count,
+        files: None,
         source_bytes: Some(source_bytes),
         target_bytes: None,
         reencoded: Some(true),

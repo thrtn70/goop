@@ -546,6 +546,7 @@ async fn download_resolved(
             ResultKindTag::File
         },
         file_count: total,
+        files: None,
     })
 }
 

@@ -598,6 +598,7 @@ pub fn run() {
                             goop_extractor::ResultKindTag::Folder => ResultKind::Folder,
                         },
                         file_count: outcome.file_count,
+                        files: outcome.files,
                     })
                 })
             });
@@ -749,6 +750,7 @@ pub fn run() {
                         duration_ms: started.elapsed().as_millis() as u64,
                         result_kind,
                         file_count,
+                        files: None,
                     })
                 })
             });

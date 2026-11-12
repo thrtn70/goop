@@ -41,6 +41,8 @@ pub struct BackendOutcome {
     pub result_kind: ResultKindTag,
     /// Number of files produced. `1` for `File`; `N` for `Folder`.
     pub file_count: u32,
+    /// A gallery-dl album's own files, relative to `output_path`.
+    pub files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +534,7 @@ async fn run_one(
                 duration_ms: res.duration_ms,
                 result_kind: ResultKindTag::File,
                 file_count: 1,
+                files: None,
             })
         }
         ExtractorChoice::GalleryDl => {
@@ -562,6 +565,7 @@ async fn run_one(
                 duration_ms: res.duration_ms,
                 result_kind: ResultKindTag::Folder,
                 file_count: res.file_count,
+                files: res.files,
             })
         }
     }
@@ -1371,6 +1375,7 @@ exit 0
                         duration_ms: out.duration_ms,
                         result_kind: goop_core::ResultKind::File,
                         file_count: 1,
+                        files: None,
                         source_bytes: None,
                         target_bytes: None,
                         reencoded: None,
@@ -1635,6 +1640,7 @@ exit 0
             duration_ms: 0,
             result_kind: ResultKind::File,
             file_count: 1,
+            files: None,
             source_bytes: None,
             target_bytes: None,
             reencoded: None,
@@ -1797,6 +1803,7 @@ exit 0
                     duration_ms: result.duration_ms,
                     result_kind: ResultKind::File,
                     file_count: 1,
+                    files: None,
                     source_bytes: None,
                     target_bytes: None,
                     reencoded: None,

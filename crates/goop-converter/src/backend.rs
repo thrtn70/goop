@@ -23,6 +23,7 @@ pub fn conversion_job_result(result: &ConvertResult) -> JobResult {
         duration_ms: result.duration_ms,
         result_kind: ResultKind::File,
         file_count: 1,
+        files: None,
     }
 }
 

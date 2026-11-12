@@ -316,6 +316,7 @@ mod tests {
                 duration_ms: 0,
                 result_kind: goop_core::ResultKind::File,
                 file_count: 1,
+                files: None,
                 source_bytes: None,
                 target_bytes: None,
                 reencoded: None,
