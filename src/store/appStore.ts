@@ -708,7 +708,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
     if (versionsInFlight) return versionsInFlight;
     const load = (async () => {
-      const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool] =
+      const [goop, ytDlp, galleryDl, ffmpeg, ghostscript, mutool, os] =
         await Promise.all([
           getVersion().catch(() => "-"),
           api.sidecar.ytDlpVersion().catch(() => null),
@@ -716,6 +716,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
           api.sidecar.ffmpegVersion().catch(() => null),
           api.sidecar.ghostscriptVersion().catch(() => null),
           api.sidecar.mutoolVersion().catch(() => null),
+          api.system.osVersion().catch(() => detectOs()),
         ]);
       const info: AppVersionInfo = {
         goop,
@@ -724,7 +725,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         ffmpeg,
         ghostscript,
         mutool,
-        os: detectOs(),
+        os,
       };
       set({ versions: info });
       return info;

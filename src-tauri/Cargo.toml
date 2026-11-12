@@ -54,3 +54,6 @@ tempfile = "3"
 
 [dev-dependencies]
 wiremock = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
