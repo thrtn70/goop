@@ -570,7 +570,8 @@ const ALBUM_LIMITS: AlbumLimits = AlbumLimits {
 /// The files this run reported, as paths relative to `output_dir`, sorted.
 ///
 /// Stricter than `tally_reported`: the list is what a later handoff opens,
-/// so a link is left out even when it points at a regular file, and so is
+/// so a file reached through a link, at the leaf or in a parent folder, is
+/// left out even when it is a regular file, and so is
 /// a path that is not UTF-8 or is longer than `limits.path_bytes`. Every
 /// entry is already inside `output_dir` (`reported_output`). More than
 /// `limits.files` entries, or none, records no list at all.
@@ -579,6 +580,9 @@ fn album_files(
     output_dir: &std::path::Path,
     limits: AlbumLimits,
 ) -> Option<Vec<String>> {
+    let Ok(resolved_dir) = std::fs::canonicalize(output_dir) else {
+        return None;
+    };
     let mut files = Vec::new();
     for path in reported {
         let Ok(meta) = std::fs::symlink_metadata(path) else {
@@ -592,6 +596,13 @@ fn album_files(
         };
         if relative.is_empty() || relative.len() > limits.path_bytes {
             continue;
+        }
+        // The leaf check above can't see a linked folder further up, such
+        // as `linked/secret.jpg` with `linked` pointing outside. Resolving
+        // the whole path must land exactly where the lexical one says.
+        match std::fs::canonicalize(path) {
+            Ok(resolved) if resolved == resolved_dir.join(relative) => {}
+            _ => continue,
         }
         files.push(relative.to_string());
         if files.len() > limits.files {
@@ -908,6 +919,24 @@ mod tests {
         )
         .unwrap();
         let reported = HashSet::from([dir.path().join("real.jpg"), dir.path().join("link.jpg")]);
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec!["real.jpg".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn album_files_leaves_out_a_file_reached_through_a_linked_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("real.jpg"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let reported = HashSet::from([
+            dir.path().join("real.jpg"),
+            dir.path().join("linked").join("secret.jpg"),
+        ]);
         assert_eq!(
             album_files(&reported, dir.path(), ALBUM_LIMITS),
             Some(vec!["real.jpg".to_string()])
