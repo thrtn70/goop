@@ -115,6 +115,6 @@ describe("PreviewContent — completed output actions", () => {
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Show in Finder" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open folder" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Convert…" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Convert…" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

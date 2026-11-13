@@ -41,9 +41,21 @@ export function completedOutput(job: Job): CompletedOutput | null {
   return { job, path, kind: job.result?.result_kind ?? "file" };
 }
 
+export const OLD_ALBUM_REASON = "Downloaded before v0.3.9: use Show in Finder";
+
+function isAlbum(job: Job): boolean {
+  return job.kind === "extract" && job.result?.result_kind === "folder";
+}
+
+/** A downloaded album is handed off file by file; other folders are not. */
 export function outputActionIds(
   output: CompletedOutput | null,
 ): readonly CompletedOutputActionId[] {
   if (!output) return [];
-  return output.kind === "folder" ? FOLDER_ACTIONS : FILE_ACTIONS;
+  return output.kind === "folder" && !isAlbum(output.job) ? FOLDER_ACTIONS : FILE_ACTIONS;
+}
+
+/** Why Convert… and Compress… are offered disabled: an album saved before its file list was recorded. */
+export function handoffUnavailable(job: Job): string | null {
+  return isAlbum(job) && !(job.result?.files?.length) ? OLD_ALBUM_REASON : null;
 }

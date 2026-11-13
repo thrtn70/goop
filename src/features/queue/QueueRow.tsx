@@ -260,6 +260,7 @@ export default function QueueRow({
   const completedActions = useCompletedOutputActions(job, onHandoff);
   const revealAction = completedActions.find((action) => action.id === "reveal");
   const menuActions = completedActions.filter((action) => action.id !== "reveal");
+  const menuReason = menuActions.find((action) => action.disabledReason)?.disabledReason ?? null;
   // Download pauses are asynchronous: the IPC returns once the pause is
   // initiated and the row only flips when the worker yields (usually
   // <1s, up to a slow connect's timeout). Disable the button and show
@@ -566,12 +567,26 @@ export default function QueueRow({
                     type="button"
                     role="menuitem"
                     tabIndex={-1}
-                    onClick={() => void handleCompletedAction(action)}
-                    className="block w-full px-3 py-1.5 text-left text-xs text-fg hover:bg-accent-subtle hover:text-accent"
+                    aria-disabled={action.disabledReason ? true : undefined}
+                    aria-describedby={action.disabledReason ? `${completedMenuId}-reason` : undefined}
+                    onClick={() => {
+                      if (!action.disabledReason) void handleCompletedAction(action);
+                    }}
+                    className={clsx(
+                      "block w-full px-3 py-1.5 text-left text-xs",
+                      action.disabledReason
+                        ? "cursor-default text-fg-muted"
+                        : "text-fg hover:bg-accent-subtle hover:text-accent",
+                    )}
                   >
                     {action.label}
                   </button>
                 ))}
+                {menuReason && (
+                  <p id={`${completedMenuId}-reason`} className="border-t border-subtle px-3 py-1.5 text-xs text-fg-muted">
+                    {menuReason}
+                  </p>
+                )}
               </div>
             )}
           </div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Job } from "@/types";
-import { completedOutput, outputActionIds } from "../outputActions";
+import { completedOutput, handoffUnavailable, outputActionIds } from "../outputActions";
 
 function job(state: Job["state"], path: string | null, resultKind: "file" | "folder" = "file"): Job {
   return {
@@ -38,9 +38,20 @@ describe("completed output actions", () => {
     ]);
   });
 
-  it("keeps folders openable/revealable/copyable but never hands them off", () => {
-    const output = completedOutput(job("done", "/tmp/album", "folder"));
-    expect(outputActionIds(output)).toEqual(["open", "reveal", "copy_path"]);
+  it("offers handoffs for a downloaded album, but not for other folders", () => {
+    const album = job("done", "/tmp/album", "folder");
+    expect(outputActionIds(completedOutput(album))).toEqual(["open", "reveal", "copy_path", "convert", "compress"]);
+    const split = { ...album, kind: "pdf" } as Job;
+    expect(outputActionIds(completedOutput(split))).toEqual(["open", "reveal", "copy_path"]);
+  });
+
+  it("explains why an album from before v0.3.9 can't be handed off", () => {
+    const old = job("done", "/tmp/album", "folder");
+    const listed = { ...old, result: { ...old.result!, files: ["1.jpg"] } } as Job;
+    expect(handoffUnavailable(old)).toBe("Downloaded before v0.3.9: use Show in Finder");
+    expect(handoffUnavailable({ ...old, result: { ...old.result!, files: [] } } as Job)).toBe("Downloaded before v0.3.9: use Show in Finder");
+    expect(handoffUnavailable(listed)).toBeNull();
+    expect(handoffUnavailable(job("done", "/tmp/movie.mp4"))).toBeNull();
   });
 
   it("offers no output actions without a done result and path", () => {

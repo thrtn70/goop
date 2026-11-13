@@ -18,16 +18,17 @@ vi.mock("@/ipc/commands", () => ({
   },
 }));
 
-function job(resultKind: "file" | "folder" = "file"): Job {
+function job(resultKind: "file" | "folder" = "file", kind: Job["kind"] = "extract", files?: string[]): Job {
   return {
     id: "source-job",
-    kind: "extract",
+    kind,
     state: "done",
     payload: null,
     result: {
       output_path: resultKind === "file" ? "/tmp/movie.mp4" : "/tmp/album",
       result_kind: resultKind,
       file_count: resultKind === "folder" ? 3 : 1,
+      files,
       bytes: 1n,
       duration_ms: 1n,
     },
@@ -74,8 +75,31 @@ describe("CompletedOutputActions", () => {
     ]);
   });
 
-  it("keeps folder actions truthful and excludes workflow handoffs", () => {
-    render(<CompletedOutputActions job={job("folder")} variant="modal" onHandoff={vi.fn()} />);
+  it("hands off an album with a recorded list", async () => {
+    const user = userEvent.setup();
+    const onHandoff = vi.fn();
+    const album = job("folder", "extract", ["1.jpg"]);
+    render(<CompletedOutputActions job={album} variant="panel" onHandoff={onHandoff} />);
+    await user.click(screen.getByRole("button", { name: "Compress…" }));
+    expect(onHandoff).toHaveBeenCalledWith(album, "compress");
+  });
+
+  it("shows an older album's handoffs disabled with the reason", async () => {
+    const user = userEvent.setup();
+    const onHandoff = vi.fn();
+    render(<CompletedOutputActions job={job("folder")} variant="modal" onHandoff={onHandoff} />);
+    const convert = screen.getByRole("button", { name: "Convert…" }) as HTMLButtonElement;
+    expect(convert.disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Compress…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Downloaded before v0.3.9: use Show in Finder")).toBeTruthy();
+    expect(convert.getAttribute("aria-describedby")).toBeTruthy();
+    expect(document.getElementById(convert.getAttribute("aria-describedby")!)?.textContent).toBe("Downloaded before v0.3.9: use Show in Finder");
+    await user.click(convert);
+    expect(onHandoff).not.toHaveBeenCalled();
+  });
+
+  it("keeps other folder actions truthful and excludes workflow handoffs", () => {
+    render(<CompletedOutputActions job={job("folder", "pdf")} variant="modal" onHandoff={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Show in Finder" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Copy path" })).toBeTruthy();
