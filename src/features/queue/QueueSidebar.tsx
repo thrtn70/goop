@@ -21,8 +21,8 @@ import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import QueueRow from "./QueueRow";
 import SortableQueueRow from "./SortableQueueRow";
-import { useNavigate } from "react-router-dom";
-import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
+import type { HandoffDestination } from "@/features/workspace/handoff";
+import { useHandoff } from "@/features/workspace/useHandoff";
 
 /** Active = running or paused. Paused rows stay in this group so the
  *  user can resume them; whether the job still holds its concurrency
@@ -50,7 +50,7 @@ function formatEta(secs: number | null): string {
 }
 
 export default function QueueSidebar() {
-  const navigate = useNavigate();
+  const handoff = useHandoff();
   const jobs = useAppStore((s) => s.jobs);
   const unseen = useAppStore((s) => s.unseenCompletions);
   const clearUnseen = useAppStore((s) => s.clearUnseen);
@@ -81,9 +81,7 @@ export default function QueueSidebar() {
   const [confirmingCount, setConfirmingCount] = useState<number | null>(null);
 
   function handleHandoff(job: Job, destination: HandoffDestination): void {
-    const handoff = createHandoff(job, destination);
-    if (!handoff) return;
-    navigate(`/${destination}`, { state: { handoff } });
+    void handoff([job], destination);
   }
 
   useEffect(() => {

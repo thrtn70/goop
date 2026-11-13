@@ -1,7 +1,7 @@
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import type { Job } from "@/types";
-import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
+import type { HandoffDestination } from "@/features/workspace/handoff";
+import { useHandoff } from "@/features/workspace/useHandoff";
 import PreviewContent from "./PreviewContent";
 
 interface QuickViewModalProps {
@@ -23,7 +23,7 @@ const DIALOG_FOCUSABLE_SELECTOR = [
  * handlers live in `useQuickView` so they survive backdrop focus changes.
  */
 export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
-  const nav = useNavigate();
+  const handoff = useHandoff();
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
 
@@ -50,11 +50,8 @@ export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
 
   if (!job) return null;
 
-  function handleHandoff(j: Job, destination: HandoffDestination) {
-    const handoff = createHandoff(j, destination);
-    if (!handoff) return;
-    nav("/" + destination, { state: { handoff } });
-    onClose();
+  async function handleHandoff(j: Job, destination: HandoffDestination) {
+    if (await handoff([j], destination)) onClose();
   }
 
   function handleDialogKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {

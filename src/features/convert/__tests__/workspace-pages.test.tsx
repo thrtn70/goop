@@ -321,6 +321,39 @@ for (const tool of ["convert", "compress"] as const) {
   });
 }
 
+for (const tool of ["convert", "compress"] as const) {
+  it(`${tool} takes a handoff list, keeps drafts, selects the first new file and says what happened once`, async () => {
+    clearWorkspaceDrafts(tool);
+    const first = render(page(tool));
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await screen.findByRole("button", { name: "Select a.mp4" });
+    first.unmount();
+
+    const handoff = {
+      id: "transfer-list",
+      destination: tool,
+      items: ["/a.mp4", "/b.mp4", "/c.mp4", "/document.pdf"].map(path => ({ sourceJobId: "album", path })),
+      skipped: { failed: 1, cancelled: 0, unfinished: 0, oldAlbum: 0, folder: 0, missing: 0 },
+    };
+    render(
+      <MemoryRouter initialEntries={[{ pathname: `/${tool}`, state: { handoff } }]}>
+        {tool === "convert" ? <ConvertPage /> : <CompressPage />}
+        <NavigationStateProbe />
+      </MemoryRouter>,
+    );
+
+    const label = tool === "convert" ? "Convert" : "Compress";
+    const line = await screen.findByText(`Added 3 files to ${label}. 1 was already there. Skipped 1: 1 failed.`);
+    expect(line.closest('[role="status"]')).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Select a.mp4" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Select b.mp4" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Select c.mp4" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "PDF operations" })).toBeTruthy();
+    expect(screen.getByTestId("navigation-state").textContent).toBe("null");
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+}
+
 it("bounds active inspection across navigation and both tools, skipping retired queued sources", async () => {
   let settleA!: (value: typeof inspection) => void;
   let active = 0,
