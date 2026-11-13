@@ -32,6 +32,8 @@ export * from './ExtractorChoice';
 export * from './FormatOption';
 export * from './GifOptions';
 export * from './GifSizePreset';
+export * from './HandoffResolved';
+export * from './HandoffSource';
 export * from './HistoryCounts';
 export * from './HistoryFilter';
 export * from './HistorySort';
