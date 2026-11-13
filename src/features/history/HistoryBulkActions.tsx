@@ -3,12 +3,15 @@ import type { Job } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
+import { handoffEligibility, type HandoffDestination } from "@/features/workspace/handoff";
+import { useHandoff } from "@/features/workspace/useHandoff";
 
 /**
  * Pinned bottom bar shown when at least one History row is selected.
- * Provides "Reveal all", "Remove from history", and "Move to Trash" —
- * the latter two surface a confirm-in-toast pattern via the store
- * actions, so there's no modal.
+ * Provides "Convert…" and "Compress…" (when a selected item can be handed
+ * off), "Reveal all", "Remove from history", and "Move to Trash" — the
+ * latter two surface a confirm-in-toast pattern via the store actions, so
+ * there's no modal.
  */
 export default function HistoryBulkActions() {
   const selectedIds = useAppStore((s) => s.history.selectedIds);
@@ -18,6 +21,7 @@ export default function HistoryBulkActions() {
   const trashJobs = useAppStore((s) => s.trashJobs);
   const enqueueToast = useAppStore((s) => s.enqueueToast);
   const [busy, setBusy] = useState(false);
+  const handoff = useHandoff();
 
   const selectedJobs = useMemo(
     () => jobs.filter((j: Job) => selectedIds.has(jobIdKey(j.id))),
@@ -25,6 +29,16 @@ export default function HistoryBulkActions() {
   );
 
   if (selectedJobs.length === 0) return null;
+  const canHandOff = selectedJobs.some((j: Job) => typeof handoffEligibility(j) !== "string");
+
+  async function handleHandoff(destination: HandoffDestination) {
+    setBusy(true);
+    try {
+      await handoff(selectedJobs, destination);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleRevealAll() {
     for (const j of selectedJobs) {
@@ -83,6 +97,17 @@ export default function HistoryBulkActions() {
         Clear
       </button>
       <div className="ml-auto flex gap-2">
+        {canHandOff && (["convert", "compress"] as const).map((destination) => (
+          <button
+            key={destination}
+            type="button"
+            onClick={() => void handleHandoff(destination)}
+            disabled={busy}
+            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
+          >
+            {destination === "convert" ? "Convert…" : "Compress…"}
+          </button>
+        ))}
         <button
           type="button"
           onClick={() => void handleRevealAll()}
