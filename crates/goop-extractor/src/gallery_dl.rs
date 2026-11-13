@@ -45,6 +45,8 @@ pub struct GalleryDlResult {
     pub bytes: u64,
     pub file_count: u32,
     pub duration_ms: u64,
+    /// The album's own files, relative to `output_path`; see `album_files`.
+    pub files: Option<Vec<String>>,
 }
 
 impl<'a> GalleryDl<'a> {
@@ -442,9 +444,17 @@ impl<'a> GalleryDl<'a> {
         // succeed when there are none, which is the normal way to use these
         // sites.
         let reported_count = reported.len();
-        let (file_count, bytes) = tokio::task::spawn_blocking(move || tally_reported(&reported))
-            .await
-            .map_err(std::io::Error::other)?;
+        let album_dir = output_dir.to_path_buf();
+        let (file_count, bytes, files) = tokio::task::spawn_blocking(move || {
+            let (count, bytes) = tally_reported(&reported);
+            (
+                count,
+                bytes,
+                album_files(&reported, &album_dir, ALBUM_LIMITS),
+            )
+        })
+        .await
+        .map_err(std::io::Error::other)?;
         if file_count == 0 {
             // gallery-dl exited 0 having named no file that is on disk —
             // the URL probed cleanly but had no extractable content
@@ -472,6 +482,7 @@ impl<'a> GalleryDl<'a> {
             bytes,
             file_count,
             duration_ms: started.elapsed().as_millis() as u64,
+            files,
         })
     }
 }
@@ -541,6 +552,91 @@ fn tally_reported(reported: &HashSet<PathBuf>) -> (u32, u64) {
         bytes += meta.len();
     }
     (count, bytes)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AlbumLimits {
+    files: usize,
+    path_bytes: usize,
+}
+
+/// A handoff takes at most 200 files (D-62); an album past 2,000 is
+/// recorded as having no list rather than as a partial one.
+const ALBUM_LIMITS: AlbumLimits = AlbumLimits {
+    files: 2_000,
+    path_bytes: 1_024,
+};
+
+/// The files this run reported, as paths relative to `output_dir`, sorted.
+///
+/// Stricter than `tally_reported`: the list is what a later handoff opens,
+/// so a file reached through a link, at the leaf or in any folder below
+/// `output_dir`, is left out even when it is a regular file, and so is a
+/// path that is not UTF-8 or is longer than `limits.path_bytes`. Every
+/// entry is already lexically inside `output_dir` (`reported_output`), and
+/// must also resolve inside it. The reported spelling is kept: on a
+/// case-insensitive volume it can differ in case from the name on disk and
+/// still open the same file. More than `limits.files` entries, or none,
+/// records no list at all.
+fn album_files(
+    reported: &HashSet<PathBuf>,
+    output_dir: &std::path::Path,
+    limits: AlbumLimits,
+) -> Option<Vec<String>> {
+    let Ok(resolved_dir) = std::fs::canonicalize(output_dir) else {
+        return None;
+    };
+    let mut files = Vec::new();
+    for path in reported {
+        let Ok(relative_path) = path.strip_prefix(output_dir) else {
+            continue;
+        };
+        let Some(relative) = relative_path.to_str() else {
+            continue;
+        };
+        if relative.is_empty() || relative.len() > limits.path_bytes {
+            continue;
+        }
+        if !reached_without_links(output_dir, relative_path) {
+            continue;
+        }
+        match std::fs::canonicalize(path) {
+            Ok(resolved) if resolved.starts_with(&resolved_dir) => {}
+            _ => continue,
+        }
+        files.push(relative.to_string());
+        if files.len() > limits.files {
+            return None;
+        }
+    }
+    files.sort();
+    (!files.is_empty()).then_some(files)
+}
+
+/// True when every step from `base` along `relative` is a real folder and
+/// the last one a regular file, with no link at any step.
+fn reached_without_links(base: &std::path::Path, relative: &std::path::Path) -> bool {
+    let mut current = base.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        let Ok(meta) = std::fs::symlink_metadata(&current) else {
+            return false;
+        };
+        let kind = meta.file_type();
+        let expected = if components.peek().is_some() {
+            kind.is_dir()
+        } else {
+            kind.is_file()
+        };
+        if !expected {
+            return false;
+        }
+    }
+    true
 }
 
 /// Walk gallery-dl's `-j` JSON output and extract a representative
@@ -809,6 +905,132 @@ mod tests {
     #[test]
     fn tally_reported_counts_nothing_when_nothing_was_reported() {
         assert_eq!(tally_reported(&HashSet::new()), (0, 0));
+    }
+
+    #[test]
+    fn album_files_lists_reported_regular_files_relative_and_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        for name in ["b.jpg", "a.png", "sub/c.gif", "not-reported.jpg"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let reported = HashSet::from([
+            dir.path().join("b.jpg"),
+            dir.path().join("sub/c.gif"),
+            dir.path().join("a.png"),
+            dir.path().join("vanished.jpg"),
+            dir.path().join("sub"),
+        ]);
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec![
+                "a.png".to_string(),
+                "b.jpg".to_string(),
+                format!("sub{sep}c.gif")
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn album_files_leaves_out_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("real.jpg"), b"x").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("link.jpg"),
+        )
+        .unwrap();
+        let reported = HashSet::from([dir.path().join("real.jpg"), dir.path().join("link.jpg")]);
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec!["real.jpg".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn album_files_leaves_out_a_file_reached_through_a_linked_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("real.jpg"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let reported = HashSet::from([
+            dir.path().join("real.jpg"),
+            dir.path().join("linked").join("secret.jpg"),
+        ]);
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec!["real.jpg".to_string()])
+        );
+    }
+
+    #[test]
+    fn album_files_keeps_a_file_reported_in_another_letter_case() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("MiXeD.JPG"), b"x").unwrap();
+        if !dir.path().join("mixed.jpg").exists() {
+            return; // a case-sensitive volume: the reported spelling names no file
+        }
+        let reported = HashSet::from([dir.path().join("mixed.jpg")]);
+        assert_eq!(
+            album_files(&reported, dir.path(), ALBUM_LIMITS),
+            Some(vec!["mixed.jpg".to_string()])
+        );
+    }
+
+    #[test]
+    fn album_files_records_nothing_past_the_file_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let reported: HashSet<PathBuf> = (0..3)
+            .map(|i| {
+                let path = dir.path().join(format!("{i}.jpg"));
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect();
+        let limits = AlbumLimits {
+            files: 2,
+            path_bytes: 1024,
+        };
+        assert_eq!(album_files(&reported, dir.path(), limits), None);
+        let limits = AlbumLimits {
+            files: 3,
+            path_bytes: 1024,
+        };
+        assert_eq!(
+            album_files(&reported, dir.path(), limits).map(|f| f.len()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn album_files_leaves_out_a_path_over_the_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("short.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("a-much-longer-name.jpg"), b"x").unwrap();
+        let reported = HashSet::from([
+            dir.path().join("short.jpg"),
+            dir.path().join("a-much-longer-name.jpg"),
+        ]);
+        let limits = AlbumLimits {
+            files: 10,
+            path_bytes: 9,
+        };
+        assert_eq!(
+            album_files(&reported, dir.path(), limits),
+            Some(vec!["short.jpg".to_string()])
+        );
+    }
+
+    #[test]
+    fn album_files_records_nothing_for_an_empty_album() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(album_files(&HashSet::new(), dir.path(), ALBUM_LIMITS), None);
     }
 
     #[test]
@@ -1118,6 +1340,25 @@ done
         let resumed = run(bins.path(), &req).await.expect("the resume");
         assert_eq!(resumed.file_count, 2, "the album, not just the new file");
         assert_eq!(resumed.bytes, 2, "sized whole, one byte per fake file");
+    }
+
+    /// The album's file list holds only what gallery-dl named for this URL:
+    /// a file another album left in the same folder stays out of it.
+    #[tokio::test]
+    async fn a_downloaded_album_lists_only_its_own_files() {
+        let bins = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        std::fs::write(out.path().join("another-album.jpg"), b"x").unwrap();
+        write_fake(bins.path(), "gallery-dl", &fake(&["two.jpg"], &["one.jpg"]));
+        let req = request("https://example.com/album", out.path());
+        std::fs::write(out.path().join("one.jpg"), b"x").unwrap();
+
+        let album = run(bins.path(), &req).await.expect("downloads");
+        assert_eq!(album.file_count, 2);
+        assert_eq!(
+            album.files,
+            Some(vec!["one.jpg".to_string(), "two.jpg".to_string()])
+        );
     }
 
     /// The tally reads no clock, so there is no window it stops working

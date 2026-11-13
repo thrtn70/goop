@@ -19,4 +19,12 @@ result_kind: ResultKind,
  * Number of files produced. `1` for `File` results; `N` for
  * `Folder` results. Defaults to `1` for backward compatibility.
  */
-file_count: number, audio_execution?: AudioExecutionSummary | null, track_execution?: TrackExecutionSummary | null, video_track_execution?: VideoTrackExecutionSummary | null, image_metadata_execution?: ImageMetadataExecution | null, image_alpha_execution?: ImageAlphaExecution | null, compression_execution?: CompressionExecution | null, };
+file_count: number, 
+/**
+ * For a gallery-dl album, the files gallery-dl named for this URL,
+ * relative to `output_path`. `None` for every other result and for
+ * albums saved before the list existed. Left out of the JSON when
+ * `None`, so a result written before this field re-serializes
+ * byte-for-byte: publication review compares exactly that.
+ */
+files?: Array<string>, audio_execution?: AudioExecutionSummary | null, track_execution?: TrackExecutionSummary | null, video_track_execution?: VideoTrackExecutionSummary | null, image_metadata_execution?: ImageMetadataExecution | null, image_alpha_execution?: ImageAlphaExecution | null, compression_execution?: CompressionExecution | null, };

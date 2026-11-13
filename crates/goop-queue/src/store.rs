@@ -2419,6 +2419,7 @@ mod tests {
             duration_ms: 1000,
             result_kind: ResultKind::File,
             file_count: 1,
+            files: None,
         });
         j
     }

@@ -111,6 +111,15 @@ pub struct JobResult {
     /// `Folder` results. Defaults to `1` for backward compatibility.
     #[serde(default = "default_file_count")]
     pub file_count: u32,
+    /// For a gallery-dl album, the files gallery-dl named for this URL,
+    /// relative to `output_path`. `None` for every other result and for
+    /// albums saved before the list existed. Left out of the JSON when
+    /// `None`, so a result written before this field re-serializes
+    /// byte-for-byte: publication review compares exactly that.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub files: Option<Vec<String>>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub audio_execution: Option<crate::audio::AudioExecutionSummary>,
@@ -201,6 +210,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit_null.track_execution, None);
+    }
+
+    #[test]
+    fn an_album_result_keeps_its_file_list() {
+        let saved = serde_json::json!({
+            "output_path": "/albums/a", "bytes": 10, "duration_ms": 1,
+            "result_kind": "folder", "file_count": 2,
+            "files": ["one.jpg", "sub/two.png"],
+        });
+        let result: JobResult = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(
+            result.files,
+            Some(vec!["one.jpg".to_string(), "sub/two.png".to_string()])
+        );
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["files"],
+            saved["files"]
+        );
+    }
+
+    #[test]
+    fn a_result_without_a_file_list_reserializes_unchanged() {
+        let written = serde_json::to_value(
+            serde_json::from_value::<JobResult>(
+                serde_json::json!({"output_path":"out", "bytes":10,"duration_ms":1}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            written.get("files").is_none(),
+            "no list is written as no key"
+        );
+        let reread: JobResult = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(reread.files, None);
+        assert_eq!(serde_json::to_value(&reread).unwrap(), written);
     }
 
     #[test]

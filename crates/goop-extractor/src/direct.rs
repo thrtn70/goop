@@ -303,6 +303,7 @@ pub async fn download(
         duration_ms: start.elapsed().as_millis() as u64,
         result_kind: ResultKindTag::File,
         file_count: 1,
+        files: None,
     })
 }
 
