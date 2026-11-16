@@ -75,4 +75,43 @@ describe("useHandoff", () => {
     expect(navigate).not.toHaveBeenCalled();
     expect(toasts()).toEqual([expect.objectContaining({ variant: "error", title: "Couldn't hand off to Convert" })]);
   });
+
+  it("lets only the latest click navigate when an earlier check finishes later", async () => {
+    const pending: Array<(value: { paths: string[]; missing: number }[]) => void> = [];
+    resolve.mockImplementation(() => new Promise(done => { pending.push(done); }));
+    const preview = renderHook(() => useHandoff());
+    const queue = renderHook(() => useHandoff());
+    let first!: Promise<boolean>;
+    let second!: Promise<boolean>;
+    act(() => {
+      first = preview.result.current([file], "convert");
+      second = queue.result.current([file], "compress");
+    });
+    await act(async () => {
+      pending[1]([{ paths: ["/movie.mp4"], missing: 0 }]);
+      await second;
+      pending[0]([{ paths: ["/movie.mp4"], missing: 0 }]);
+      await first;
+    });
+    expect(await first).toBe(false);
+    expect(await second).toBe(true);
+    expect(navigate.mock.calls.map(call => call[0])).toEqual(["/compress"]);
+    expect(toasts()).toEqual([]);
+  });
+
+  it("does nothing once its page has closed", async () => {
+    let finish!: (value: { paths: string[]; missing: number }[]) => void;
+    resolve.mockImplementation(() => new Promise(done => { finish = done; }));
+    const view = renderHook(() => useHandoff());
+    let pendingHandoff!: Promise<boolean>;
+    act(() => { pendingHandoff = view.result.current([file], "convert"); });
+    view.unmount();
+    await act(async () => {
+      finish([{ paths: [], missing: 1 }]);
+      await pendingHandoff;
+    });
+    expect(await pendingHandoff).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(toasts()).toEqual([]);
+  });
 });
