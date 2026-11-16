@@ -6,9 +6,11 @@ import { api } from "@/ipc/commands";
 import { useHandoff } from "../useHandoff";
 
 const navigate = vi.hoisted(() => vi.fn());
+const location = vi.hoisted(() => ({ current: { key: "history-entry", pathname: "/history" } }));
 vi.mock("react-router-dom", async () => ({
   ...(await vi.importActual<typeof import("react-router-dom")>("react-router-dom")),
   useNavigate: () => navigate,
+  useLocation: () => location.current,
 }));
 vi.mock("@/ipc/commands", () => ({ api: { handoff: { resolve: vi.fn() } } }));
 
@@ -23,6 +25,7 @@ function toasts() {
 }
 
 beforeEach(() => {
+  location.current = { key: "history-entry", pathname: "/history" };
   navigate.mockClear();
   resolve.mockReset();
   useAppStore.setState({ toasts: [] });
@@ -113,5 +116,37 @@ describe("useHandoff", () => {
     expect(await pendingHandoff).toBe(false);
     expect(navigate).not.toHaveBeenCalled();
     expect(toasts()).toEqual([]);
+  });
+
+  it("does nothing once you have moved to another page", async () => {
+    let finish!: (value: { paths: string[]; missing: number }[]) => void;
+    resolve.mockImplementation(() => new Promise(done => { finish = done; }));
+    const view = renderHook(() => useHandoff());
+    let pendingHandoff!: Promise<boolean>;
+    act(() => { pendingHandoff = view.result.current([file], "convert"); });
+    location.current = { key: "settings-entry", pathname: "/settings" };
+    view.rerender();
+    await act(async () => {
+      finish([{ paths: ["/movie.mp4"], missing: 0 }]);
+      await pendingHandoff;
+    });
+    expect(await pendingHandoff).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(toasts()).toEqual([]);
+  });
+
+  it("does nothing once the window that started it has closed", async () => {
+    let finish!: (value: { paths: string[]; missing: number }[]) => void;
+    resolve.mockImplementation(() => new Promise(done => { finish = done; }));
+    const view = renderHook(({ open }) => useHandoff(open), { initialProps: { open: true } });
+    let pendingHandoff!: Promise<boolean>;
+    act(() => { pendingHandoff = view.result.current([file], "convert"); });
+    view.rerender({ open: false });
+    await act(async () => {
+      finish([{ paths: ["/movie.mp4"], missing: 0 }]);
+      await pendingHandoff;
+    });
+    expect(await pendingHandoff).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

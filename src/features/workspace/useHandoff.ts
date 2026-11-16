@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { Job } from "@/types";
 import { api } from "@/ipc/commands";
 import { formatError } from "@/ipc/error";
@@ -21,9 +21,18 @@ let latestRequest = 0;
 /**
  * Hand finished files and albums to Convert or Compress. Paths are checked
  * again where they are now; the destination adds them and queues nothing.
+ * A handoff is dropped if a newer one starts, if you move to another page,
+ * or if `active` turns false (a closed Quick View) before its check ends.
  */
-export function useHandoff(): (jobs: readonly Job[], destination: HandoffDestination) => Promise<boolean> {
+export function useHandoff(active = true): (jobs: readonly Job[], destination: HandoffDestination) => Promise<boolean> {
   const navigate = useNavigate();
+  const location = useLocation();
+  const entry = useRef(location.key);
+  const open = useRef(active);
+  useEffect(() => {
+    entry.current = location.key;
+    open.current = active;
+  }, [location.key, active]);
   const enqueueToast = useAppStore(state => state.enqueueToast);
   const mounted = useRef(true);
   useEffect(() => {
@@ -35,7 +44,9 @@ export function useHandoff(): (jobs: readonly Job[], destination: HandoffDestina
   return useCallback(
     async (jobs, destination) => {
       const request = ++latestRequest;
-      const current = () => request === latestRequest && mounted.current;
+      const startedOn = entry.current;
+      const current = () =>
+        request === latestRequest && mounted.current && open.current && entry.current === startedOn;
       const plan = planHandoff(jobs);
       if (plan.kind === "too_many") {
         enqueueToast({ variant: "info", title: tooManyMessage(destination, plan) });

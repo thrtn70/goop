@@ -11,6 +11,7 @@ const navigate = vi.hoisted(() => vi.fn());
 vi.mock("react-router-dom", async () => ({
   ...(await vi.importActual<typeof import("react-router-dom")>("react-router-dom")),
   useNavigate: () => navigate,
+  useLocation: () => ({ key: "test-entry", pathname: "/history" }),
 }));
 vi.mock("@/ipc/commands", () => ({ api: { queue: { cancelMany: vi.fn().mockResolvedValue(1) }, handoff: { resolve: vi.fn().mockResolvedValue([{ paths: ["/tmp/movie.mp4"], missing: 0 }]) } } }));
 vi.mock("../QueueRow", () => ({ default: ({job,onHandoff}: {job: Job;onHandoff?:(job:Job,destination:"convert"|"compress")=>void}) => <button onClick={()=>onHandoff?.(job,"convert")}>Job {String(job.id)}</button> }));

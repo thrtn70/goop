@@ -23,7 +23,7 @@ const DIALOG_FOCUSABLE_SELECTOR = [
  * handlers live in `useQuickView` so they survive backdrop focus changes.
  */
 export default function QuickViewModal({ job, onClose }: QuickViewModalProps) {
-  const handoff = useHandoff();
+  const handoff = useHandoff(job !== null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
 
