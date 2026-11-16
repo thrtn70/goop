@@ -80,4 +80,13 @@ describe("HistoryBulkActions handoffs", () => {
     expect(screen.queryByRole("button", { name: "Convert…" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Compress…" })).toBeNull();
   });
+
+  it("lets the bar and its actions wrap in a narrow History column", () => {
+    select([job("a")]);
+    render(<HistoryBulkActions />);
+    const bar = screen.getByText("1 selected").parentElement!;
+    const actions = screen.getByRole("button", { name: "Convert…" }).parentElement!;
+    expect(bar.className.split(" ")).toContain("flex-wrap");
+    expect(actions.className.split(" ")).toContain("flex-wrap");
+  });
 });

@@ -87,7 +87,7 @@ export default function HistoryBulkActions() {
   }
 
   return (
-    <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t border-subtle bg-surface-1 px-6 py-2 text-xs">
+    <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-subtle bg-surface-1 px-6 py-2 text-xs">
       <span className="text-fg-muted">{selectedJobs.length} selected</span>
       <button
         type="button"
@@ -96,14 +96,14 @@ export default function HistoryBulkActions() {
       >
         Clear
       </button>
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex flex-wrap justify-end gap-2">
         {canHandOff && (["convert", "compress"] as const).map((destination) => (
           <button
             key={destination}
             type="button"
             onClick={() => void handleHandoff(destination)}
             disabled={busy}
-            className="btn-press rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
+            className="btn-press whitespace-nowrap rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
           >
             {destination === "convert" ? "Convert…" : "Compress…"}
           </button>
@@ -112,7 +112,7 @@ export default function HistoryBulkActions() {
           type="button"
           onClick={() => void handleRevealAll()}
           disabled={busy}
-          className="btn-press rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
+          className="btn-press whitespace-nowrap rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
         >
           Reveal all
         </button>
@@ -120,7 +120,7 @@ export default function HistoryBulkActions() {
           type="button"
           onClick={() => void handleForget()}
           disabled={busy}
-          className="btn-press rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
+          className="btn-press whitespace-nowrap rounded-md bg-surface-2 px-3 py-1.5 font-medium text-fg-secondary transition duration-fast ease-out enabled:hover:text-fg disabled:opacity-50"
         >
           Remove from history
         </button>
@@ -128,7 +128,7 @@ export default function HistoryBulkActions() {
           type="button"
           onClick={() => void handleTrash()}
           disabled={busy}
-          className="btn-press rounded-md bg-surface-2 px-3 py-1.5 font-medium text-error transition duration-fast ease-out disabled:opacity-50"
+          className="btn-press whitespace-nowrap rounded-md bg-surface-2 px-3 py-1.5 font-medium text-error transition duration-fast ease-out disabled:opacity-50"
         >
           Move to Trash
         </button>
