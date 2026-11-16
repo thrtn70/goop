@@ -23,16 +23,22 @@ let latestRequest = 0;
  * again where they are now; the destination adds them and queues nothing.
  * A handoff is dropped if a newer one starts, if you move to another page,
  * or if `active` turns false (a closed Quick View) before its check ends.
+ * Coming back or reopening does not revive it. A page replacing its own
+ * navigation state (same path) is not a departure.
  */
 export function useHandoff(active = true): (jobs: readonly Job[], destination: HandoffDestination) => Promise<boolean> {
   const navigate = useNavigate();
-  const location = useLocation();
-  const entry = useRef(location.key);
-  const open = useRef(active);
+  const { pathname } = useLocation();
+  const cancellations = useRef(0);
+  const lastPath = useRef(pathname);
   useEffect(() => {
-    entry.current = location.key;
-    open.current = active;
-  }, [location.key, active]);
+    if (lastPath.current === pathname) return;
+    lastPath.current = pathname;
+    cancellations.current++;
+  }, [pathname]);
+  useEffect(() => {
+    if (!active) cancellations.current++;
+  }, [active]);
   const enqueueToast = useAppStore(state => state.enqueueToast);
   const mounted = useRef(true);
   useEffect(() => {
@@ -44,9 +50,9 @@ export function useHandoff(active = true): (jobs: readonly Job[], destination: H
   return useCallback(
     async (jobs, destination) => {
       const request = ++latestRequest;
-      const startedOn = entry.current;
+      const startedAt = cancellations.current;
       const current = () =>
-        request === latestRequest && mounted.current && open.current && entry.current === startedOn;
+        request === latestRequest && mounted.current && cancellations.current === startedAt;
       const plan = planHandoff(jobs);
       if (plan.kind === "too_many") {
         enqueueToast({ variant: "info", title: tooManyMessage(destination, plan) });
