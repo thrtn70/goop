@@ -873,19 +873,39 @@ describe("QueueRow completed output actions", () => {
     expect(onHandoff).toHaveBeenCalledWith(job, "convert");
   });
 
-  it("opens folders but never offers folder handoffs", async () => {
+  it("opens folders and offers an older album's handoffs disabled with the reason", async () => {
     const user = userEvent.setup();
+    const onHandoff = vi.fn();
     const job = makeJob({
+      kind: "extract",
       state: "done",
       result: { ...result, output_path: "/tmp/album", result_kind: "folder", file_count: 3 },
     });
-    render(<QueueRow job={job} index={0} onHandoff={vi.fn()} />);
+    render(<QueueRow job={job} index={0} onHandoff={onHandoff} />);
     await user.click(screen.getByRole("button", { name: "More actions for album" }));
     await user.click(screen.getByRole("menuitem", { name: "Open" }));
     expect(queueMocks.open).toHaveBeenCalledWith("/tmp/album", "folder");
     await user.click(screen.getByRole("button", { name: "More actions for album" }));
-    expect(screen.queryByRole("menuitem", { name: "Convert…" })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: "Compress…" })).toBeNull();
+    const convert = screen.getByRole("menuitem", { name: "Convert…" });
+    expect(convert.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByText("Downloaded before v0.3.9: use Show in Finder")).toBeTruthy();
+    await user.click(convert);
+    expect(onHandoff).not.toHaveBeenCalled();
+  });
+
+  it("hands off an album with a recorded list from the menu", async () => {
+    const user = userEvent.setup();
+    const onHandoff = vi.fn();
+    const job = makeJob({
+      kind: "extract",
+      state: "done",
+      result: { ...result, output_path: "/tmp/album", result_kind: "folder", file_count: 2, files: ["1.jpg", "2.jpg"] },
+    });
+    render(<QueueRow job={job} index={0} onHandoff={onHandoff} />);
+    await user.click(screen.getByRole("button", { name: "More actions for album" }));
+    expect(screen.getByRole("menuitem", { name: "Convert…" }).getAttribute("aria-disabled")).toBeNull();
+    await user.click(screen.getByRole("menuitem", { name: "Compress…" }));
+    expect(onHandoff).toHaveBeenCalledWith(job, "compress");
   });
 
   it("closes the completed menu on Escape and restores trigger focus", async () => {

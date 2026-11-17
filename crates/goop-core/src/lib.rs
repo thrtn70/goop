@@ -1,3 +1,4 @@
+pub mod album;
 pub mod audio;
 pub use audio::{
     validate_audio_request, AudioBitrate, AudioChannels, AudioConvertOptions,

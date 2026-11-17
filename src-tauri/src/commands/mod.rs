@@ -1,6 +1,7 @@
 pub mod convert;
 pub mod extract;
 pub mod file;
+pub mod handoff;
 pub mod history;
 pub mod image;
 pub mod metadata;

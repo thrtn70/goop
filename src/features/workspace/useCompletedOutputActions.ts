@@ -5,6 +5,7 @@ import { useAppStore } from "@/store/appStore";
 import type { HandoffDestination } from "./handoff";
 import {
   completedOutput,
+  handoffUnavailable,
   outputActionIds,
   OUTPUT_ACTION_LABELS,
   type CompletedOutputActionId,
@@ -13,6 +14,8 @@ import {
 export interface CompletedOutputAction {
   readonly id: CompletedOutputActionId;
   readonly label: string;
+  /** Set when the action is shown but can't run; says why. */
+  readonly disabledReason: string | null;
   readonly run: () => Promise<void>;
 }
 
@@ -22,6 +25,7 @@ export function useCompletedOutputActions(
 ): readonly CompletedOutputAction[] {
   const enqueueToast = useAppStore((state) => state.enqueueToast);
   const output = completedOutput(job);
+  const unavailable = handoffUnavailable(job);
 
   async function run(action: CompletedOutputActionId): Promise<void> {
     if (!output) return;
@@ -55,9 +59,13 @@ export function useCompletedOutputActions(
 
   return outputActionIds(output)
     .filter((id) => onHandoff || (id !== "convert" && id !== "compress"))
-    .map((id) => ({
-      id,
-      label: OUTPUT_ACTION_LABELS[id],
-      run: () => run(id),
-    }));
+    .map((id) => {
+      const disabledReason = id === "convert" || id === "compress" ? unavailable : null;
+      return {
+        id,
+        label: OUTPUT_ACTION_LABELS[id],
+        disabledReason,
+        run: disabledReason ? async () => {} : () => run(id),
+      };
+    });
 }

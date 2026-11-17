@@ -29,7 +29,7 @@ import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { readHandoff } from "@/features/workspace/handoff";
+import { handoffOutcome, intakeHandoff, readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
 import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
 import { applyButtonLabel, applyOutcome, applyTooltip, convertSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, outputBreakdown, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
@@ -97,6 +97,22 @@ function isPdf(p: string): boolean {
   return p.toLowerCase().endsWith(".pdf");
 }
 
+function newConvertRow(path: string): FileEntry {
+  return {
+    ...newIdentity(),
+    path,
+    target: "mp4" as TargetFormat,
+    sourceDir: dirname(path),
+    gifOptions: null,
+    metadataPolicy: "preserve" as MetadataPolicy,
+    imageColorPolicy: "preserve" as ImageColorPolicy,
+    imageAlphaPolicy: null,
+    subtitle: null,
+    qualityPreset: null,
+    resolutionCap: null,
+  };
+}
+
 function ConvertPage() {
   const location = useLocation();
   const nav = useNavigate();
@@ -118,6 +134,15 @@ function ConvertPage() {
   const draftEntries = useWorkspaceDraftEntries();
   const [applicationError, setApplicationError] = useState<string | null>(null);
   const [applicationStatus, setApplicationStatus] = useOutcomeStatus(files.map(file => file.id ?? file.path).join("\n"));
+  // A handoff's status line is announced after its rows render, so it
+  // describes the list it was added to.
+  const [handoffNote, setHandoffNote] = useState<string | null>(null);
+  const consumedEntry = useRef<string | null>(null);
+  useEffect(() => {
+    if (handoffNote === null) return;
+    setApplicationStatus(handoffNote);
+    setHandoffNote(null);
+  }, [handoffNote, setApplicationStatus]);
   const [alphaDraftProblems, setAlphaDraftProblems] = useState<Record<string, string>>({});
   const handleAlphaValidityChange = useCallback((id: string, problem: string | null) => {
     setAlphaDraftProblems(previous => {
@@ -371,42 +396,24 @@ function ConvertPage() {
     [setFiles],
   );
 
-  // Convert-again from the History preview lands here with location.state.
-  // Seed a FileRow from the pre-fill so the user arrives ready-to-edit.
+  // A handoff from History, Quick View or the queue lands here with
+  // location.state. Its files join the drafts; nothing is queued.
   useEffect(() => {
+    if (consumedEntry.current === location.key) return;
     const state = location.state as { prefill?: { path: string } } | null;
     const handoff = readHandoff(location.state, "convert");
-    const path = handoff?.path ?? state?.prefill?.path;
-    if (typeof path !== "string" || !path) return;
-    if (isPdf(path)) {
-      setPdfs((prev) => (prev.includes(path) ? prev : [...prev, path]));
-    } else {
-      const identity = newIdentity();
-      setSelectedId(files.find(f => f.path === path)?.id ?? identity.id);
-      setFiles((prev) =>
-        prev.some((f) => f.path === path)
-          ? prev
-          : [
-              ...prev,
-              {
-                ...identity,
-                path,
-                target: "mp4" as TargetFormat,
-                sourceDir: dirname(path),
-                gifOptions: null,
-                metadataPolicy: "preserve",
-                imageColorPolicy: "preserve",
-                imageAlphaPolicy: null,
-                subtitle: null,
-                qualityPreset: null,
-                resolutionCap: null,
-              },
-            ],
-      );
-    }
+    const prefill = state?.prefill?.path;
+    const items = handoff?.items ?? (typeof prefill === "string" && prefill ? [{ sourceJobId: "", path: prefill }] : null);
+    if (!items) return;
+    const intake = intakeHandoff(files, pdfs, items, newConvertRow);
+    setFiles(intake.rows);
+    setPdfs(intake.pdfs);
+    if (intake.selectId) setSelectedId(intake.selectId);
+    if (handoff) setHandoffNote(handoffOutcome("convert", intake.added, intake.existing, handoff.skipped));
     // Clear the navigation state so a back/forward doesn't re-seed.
+    consumedEntry.current = location.key;
     nav(location.pathname, { replace: true, state: null });
-  }, [location, nav, setFiles, setPdfs, setSelectedId, files]);
+  }, [location, nav, setFiles, setPdfs, setSelectedId, files, pdfs]);
 
   const addPaths = useCallback(
     (paths: string[]) => {
@@ -423,19 +430,7 @@ function ConvertPage() {
           const existing = new Set(prev.map((f) => f.path));
           const fresh: FileEntry[] = nonPdfPaths
             .filter((p) => !existing.has(p))
-            .map((p) => ({
-              ...newIdentity(),
-              path: p,
-              target: "mp4" as TargetFormat,
-              sourceDir: dirname(p),
-              gifOptions: null,
-              metadataPolicy: "preserve" as MetadataPolicy,
-              imageColorPolicy: "preserve" as ImageColorPolicy,
-              imageAlphaPolicy: null,
-              subtitle: null,
-              qualityPreset: null,
-              resolutionCap: null,
-            }));
+            .map(newConvertRow);
           return [...prev, ...fresh];
         });
       }

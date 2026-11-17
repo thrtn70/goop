@@ -1,8 +1,8 @@
-import { useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import type { Job } from "@/types";
 import { jobIdKey, useAppStore } from "@/store/appStore";
-import { createHandoff, type HandoffDestination } from "@/features/workspace/handoff";
+import type { HandoffDestination } from "@/features/workspace/handoff";
+import { useHandoff } from "@/features/workspace/useHandoff";
 import PreviewContent from "./PreviewContent";
 
 /**
@@ -12,7 +12,7 @@ import PreviewContent from "./PreviewContent";
  * the list reclaims the full width.
  */
 export default function PreviewPanel() {
-  const nav = useNavigate();
+  const handoff = useHandoff();
   const selectedId = useAppStore((s) => s.history.previewSelectedId);
   const jobs = useAppStore((s) => s.history.jobs);
   const setPreview = useAppStore((s) => s.setHistoryPreview);
@@ -21,9 +21,7 @@ export default function PreviewPanel() {
   if (!job) return null;
 
   function handleHandoff(j: Job, destination: HandoffDestination) {
-    const handoff = createHandoff(j, destination);
-    if (!handoff) return;
-    nav("/" + destination, { state: { handoff } });
+    void handoff([j], destination);
   }
   return (
     <aside

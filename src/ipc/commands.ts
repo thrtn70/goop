@@ -34,6 +34,8 @@ import type {
   PreviewRequest,
   PreviewResult,
   ResizeMode,
+  HandoffResolved,
+  HandoffSource,
   ResultKind,
   RotationDegrees,
   Settings,
@@ -230,6 +232,10 @@ export const api = {
   output: {
     open: (path: string, expectedKind: ResultKind) =>
       invoke<void>("output_open", { path, expectedKind }),
+  },
+  handoff: {
+    resolve: (sources: HandoffSource[]) =>
+      invoke<HandoffResolved[]>("handoff_resolve", { sources }),
   },
   sidecar: {
     status: () => invoke<SidecarStatus>("sidecar_status"),

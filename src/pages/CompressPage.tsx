@@ -16,8 +16,8 @@ import { forgetWorkspaceSource } from "@/store/workspaceDrafts";
 import { withWorkspaceDrafts } from "@/store/workspaceDrafts";
 import { useWorkspaceDraftState } from "@/store/workspaceDrafts";
 import { clearWorkspaceDraftSlots } from "@/store/workspaceDrafts";
-import { useCallback, useEffect, useState } from "react";
-import { readHandoff } from "@/features/workspace/handoff";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { handoffOutcome, intakeHandoff, readHandoff } from "@/features/workspace/handoff";
 import { batchKind, kindCounts, kindScope, targetScope, type ApplyScopeAction } from "@/features/workspace/batchScope";
 import { batchResetSource, batchState, newBatchStampId, stampEntries } from "@/features/workspace/batchStamp";
 import { applyButtonLabel, applyOutcome, applyTooltip, compressSettingsLine, FIX_SELECTED_FIRST, noPresetTarget, presetOutcome, WAIT_FOR_INSPECTION } from "@/features/workspace/batchCopy";
@@ -176,23 +176,23 @@ function CompressPage() {
     [policy, setFiles, setPdfs],
   );
 
+  // A handoff's files join the drafts; nothing is queued.
   useEffect(() => {
+    if (consumedEntry.current === location.key) return;
     const handoff = readHandoff(location.state, "compress");
     if (!handoff) return;
-    const path = handoff.path;
-    if (isPdf(path)) {
-      setPdfs(previous => previous.includes(path) ? previous : [...previous, path]);
-    } else {
-      const identity = newIdentity();
-      setSelectedId(files.find(file => file.path === path)?.id ?? identity.id);
-      setFiles(previous => previous.some(file => file.path === path) ? previous : [...previous, {
-        ...identity, path, target: targetFromPath(path), sourceDir: dirname(path),
-        mode: {kind:"quality",value:75},
-        metadataPolicy: policy,
-      }]);
-    }
+    const intake = intakeHandoff(files, pdfs, handoff.items, (path): CompressFileEntry => ({
+      ...newIdentity(), path, target: targetFromPath(path), sourceDir: dirname(path),
+      mode: {kind:"quality",value:75},
+      metadataPolicy: policy,
+    }));
+    setFiles(intake.rows);
+    setPdfs(intake.pdfs);
+    if (intake.selectId) setSelectedId(intake.selectId);
+    setHandoffNote(handoffOutcome("compress", intake.added, intake.existing, handoff.skipped));
+    consumedEntry.current = location.key;
     nav(location.pathname, {replace:true,state:null});
-  }, [location, nav, files, policy, setFiles, setPdfs, setSelectedId]);
+  }, [location, nav, files, pdfs, policy, setFiles, setPdfs, setSelectedId]);
 
   // Partial text is still a newer edit, even before blur commits request fields.
   const handleDraftEdit = useCallback(
@@ -240,6 +240,15 @@ function CompressPage() {
 
   const [applicationError, setApplicationError] = useState<string | null>(null);
   const [applicationStatus, setApplicationStatus] = useOutcomeStatus(files.map(file => file.id ?? file.path).join("\n"));
+  // A handoff's status line is announced after its rows render, so it
+  // describes the list it was added to.
+  const [handoffNote, setHandoffNote] = useState<string | null>(null);
+  const consumedEntry = useRef<string | null>(null);
+  useEffect(() => {
+    if (handoffNote === null) return;
+    setApplicationStatus(handoffNote);
+    setHandoffNote(null);
+  }, [handoffNote, setApplicationStatus]);
   const refuse = (message: string) => { setApplicationError(message); setApplicationStatus(null); };
   // Validate every row in scope before changing any; rows outside it are
   // returned untouched. Without an explicit target each row keeps its own

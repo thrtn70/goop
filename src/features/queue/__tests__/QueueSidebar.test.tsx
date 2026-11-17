@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import QueueSidebar from "../QueueSidebar";
 import { QUEUE_SHORTCUT } from "@/hooks/useQueueHotkey";
 import { useAppStore } from "@/store/appStore";
@@ -11,8 +11,9 @@ const navigate = vi.hoisted(() => vi.fn());
 vi.mock("react-router-dom", async () => ({
   ...(await vi.importActual<typeof import("react-router-dom")>("react-router-dom")),
   useNavigate: () => navigate,
+  useLocation: () => ({ key: "test-entry", pathname: "/history" }),
 }));
-vi.mock("@/ipc/commands", () => ({ api: { queue: { cancelMany: vi.fn().mockResolvedValue(1) } } }));
+vi.mock("@/ipc/commands", () => ({ api: { queue: { cancelMany: vi.fn().mockResolvedValue(1) }, handoff: { resolve: vi.fn().mockResolvedValue([{ paths: ["/tmp/movie.mp4"], missing: 0 }]) } } }));
 vi.mock("../QueueRow", () => ({ default: ({job,onHandoff}: {job: Job;onHandoff?:(job:Job,destination:"convert"|"compress")=>void}) => <button onClick={()=>onHandoff?.(job,"convert")}>Job {String(job.id)}</button> }));
 vi.mock("../SortableQueueRow", () => ({ default: ({job}: {job: Job}) => <button>Job {String(job.id)}</button> }));
 const job = { id: "queued-one", kind: "convert", state: "queued", payload: {}, result: null } as Job;
@@ -65,7 +66,7 @@ describe("bottom queue", () => {
     act(() => useAppStore.setState({ jobs: [] }));
     expect(screen.getByRole("button", {name: "Collapse queue"}).getAttribute("aria-expanded")).toBe("true");
   });
-  it("creates a fresh deliberate handoff from a completed row", () => {
+  it("creates a fresh deliberate handoff from a completed row", async () => {
     useAppStore.setState({
       jobs: [{
         ...job,
@@ -77,15 +78,15 @@ describe("bottom queue", () => {
     });
     render(<QueueSidebar />);
     fireEvent.click(screen.getByRole("button", { name: "Job done-one" }));
-    expect(navigate).toHaveBeenCalledWith("/convert", {
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/convert", {
       state: {
         handoff: expect.objectContaining({
-          sourceJobId: "done-one",
-          path: "/tmp/movie.mp4",
+          items: [{ sourceJobId: "done-one", path: "/tmp/movie.mp4" }],
           destination: "convert",
         }),
       },
-    });
+    }));
+    expect(api.handoff.resolve).toHaveBeenCalledWith([{ output_path: "/tmp/movie.mp4" }]);
   });
   it("restores the preferred height when a pointer resize is cancelled", () => {
     vi.stubGlobal("PointerEvent", MouseEvent);

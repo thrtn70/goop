@@ -564,7 +564,7 @@ struct AlbumLimits {
 /// recorded as having no list rather than as a partial one.
 const ALBUM_LIMITS: AlbumLimits = AlbumLimits {
     files: 2_000,
-    path_bytes: 1_024,
+    path_bytes: goop_core::album::ALBUM_PATH_BYTES,
 };
 
 /// The files this run reported, as paths relative to `output_dir`, sorted.
@@ -583,9 +583,7 @@ fn album_files(
     output_dir: &std::path::Path,
     limits: AlbumLimits,
 ) -> Option<Vec<String>> {
-    let Ok(resolved_dir) = std::fs::canonicalize(output_dir) else {
-        return None;
-    };
+    let root = goop_core::album::AlbumRoot::open(output_dir)?;
     let mut files = Vec::new();
     for path in reported {
         let Ok(relative_path) = path.strip_prefix(output_dir) else {
@@ -594,15 +592,8 @@ fn album_files(
         let Some(relative) = relative_path.to_str() else {
             continue;
         };
-        if relative.is_empty() || relative.len() > limits.path_bytes {
+        if relative.len() > limits.path_bytes || root.entry(relative).is_none() {
             continue;
-        }
-        if !reached_without_links(output_dir, relative_path) {
-            continue;
-        }
-        match std::fs::canonicalize(path) {
-            Ok(resolved) if resolved.starts_with(&resolved_dir) => {}
-            _ => continue,
         }
         files.push(relative.to_string());
         if files.len() > limits.files {
@@ -611,32 +602,6 @@ fn album_files(
     }
     files.sort();
     (!files.is_empty()).then_some(files)
-}
-
-/// True when every step from `base` along `relative` is a real folder and
-/// the last one a regular file, with no link at any step.
-fn reached_without_links(base: &std::path::Path, relative: &std::path::Path) -> bool {
-    let mut current = base.to_path_buf();
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        current.push(name);
-        let Ok(meta) = std::fs::symlink_metadata(&current) else {
-            return false;
-        };
-        let kind = meta.file_type();
-        let expected = if components.peek().is_some() {
-            kind.is_dir()
-        } else {
-            kind.is_file()
-        };
-        if !expected {
-            return false;
-        }
-    }
-    true
 }
 
 /// Walk gallery-dl's `-j` JSON output and extract a representative
