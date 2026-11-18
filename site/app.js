@@ -4,11 +4,11 @@
   const REPO = 'thrtn70/goop';
   const RELEASES_API = `https://api.github.com/repos/${REPO}/releases?per_page=12`;
   const ARCHIVE_LIMIT = 3;
-  // v0.3.8 is the first build whose bundled yt-dlp and gallery-dl carry
-  // certifi 2026.10.23, which no longer trusts the emSign C1 and C3 roots.
-  // Nothing older is ever promoted as the current download, even if GitHub
-  // still reports it as the latest release.
-  const MIN_MAC_VERSION = [0, 3, 8];
+  // v0.3.9 is the first build with SQLite 3.54.1, which fixes
+  // RUSTSEC-2026-0459, on top of v0.3.8's certifi 2026.10.23. Nothing older
+  // is ever promoted as the current download, even if GitHub still reports
+  // it as the latest release.
+  const MIN_MAC_VERSION = [0, 3, 9];
   const MAC_DMG = /^Goop_(\d+\.\d+\.\d+)_aarch64\.dmg$/;
   const RELEASE_DOWNLOADS = `https://github.com/${REPO}/releases/download/`;
 
