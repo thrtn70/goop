@@ -888,7 +888,7 @@ describe("QueueRow completed output actions", () => {
     await user.click(screen.getByRole("button", { name: "More actions for album" }));
     const convert = screen.getByRole("menuitem", { name: "Convert…" });
     expect(convert.getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByText("Downloaded before v0.3.9: use Show in Finder")).toBeTruthy();
+    expect(screen.getByText("No file list was saved for this album: use Show in Finder")).toBeTruthy();
     await user.click(convert);
     expect(onHandoff).not.toHaveBeenCalled();
   });

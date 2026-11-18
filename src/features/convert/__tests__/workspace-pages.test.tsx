@@ -333,7 +333,7 @@ for (const tool of ["convert", "compress"] as const) {
       id: "transfer-list",
       destination: tool,
       items: ["/a.mp4", "/b.mp4", "/c.mp4", "/document.pdf"].map(path => ({ sourceJobId: "album", path })),
-      skipped: { failed: 1, cancelled: 0, unfinished: 0, oldAlbum: 0, folder: 0, missing: 0 },
+      skipped: { failed: 1, cancelled: 0, unfinished: 0, noFileList: 0, folder: 0, missing: 0 },
     };
     render(
       <MemoryRouter initialEntries={[{ pathname: `/${tool}`, state: { handoff } }]}>

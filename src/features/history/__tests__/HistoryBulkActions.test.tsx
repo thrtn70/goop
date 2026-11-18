@@ -38,7 +38,7 @@ function job(id: string, overrides: Partial<Job> = {}): Job {
 }
 
 const failed = job("failed", { state: { error: { message: "x", detail: null } }, result: null });
-const oldAlbum = job("old", { result: { output_path: "/out/old", result_kind: "folder", file_count: 3, bytes: 1n, duration_ms: 1n } as Job["result"] });
+const noFileList = job("old", { result: { output_path: "/out/old", result_kind: "folder", file_count: 3, bytes: 1n, duration_ms: 1n } as Job["result"] });
 
 function select(jobs: Job[]) {
   useAppStore.setState(state => ({
@@ -75,7 +75,7 @@ describe("HistoryBulkActions handoffs", () => {
     const view = render(<HistoryBulkActions />);
     expect(screen.getByRole("button", { name: "Compress…" })).toBeTruthy();
     view.unmount();
-    select([failed, oldAlbum]);
+    select([failed, noFileList]);
     render(<HistoryBulkActions />);
     expect(screen.getByText("2 selected")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Convert…" })).toBeNull();
