@@ -7,7 +7,7 @@ const bodyMarkup = siteHtml.match(/<body[^>]*>([\s\S]*)<\/body>/)?.[1]
 
 const repo = "https://github.com/thrtn70/goop";
 const releasesPage = `${repo}/releases`;
-const latestPage = `${repo}/releases/latest`;
+const latestPage = `${repo}/releases/tag/v0.3.9`;
 
 type Asset = { name: string; browser_download_url: string };
 type Release = {
@@ -147,7 +147,7 @@ afterEach(() => {
 });
 
 describe("macOS downloads", () => {
-  it("ships a macOS download that falls back to the latest release page, and no pause copy", () => {
+  it("ships a macOS download that falls back to the v0.3.9 release page, and no pause copy", () => {
     document.body.innerHTML = bodyMarkup;
     expectMacLinks(latestPage);
     expect(document.querySelector('[data-cta="mac"]')?.textContent).toMatch(/download for macos/i);
@@ -198,7 +198,7 @@ describe("macOS downloads", () => {
     await archiveRendered(3);
 
     expectMacLinks(latestPage);
-    expectVersionLabels((text) => expect(["v0.3.8", "v0.3.7", "v0.3.6"]).not.toContain(text));
+    expectVersionLabels((text) => expect(text).toBe("v0.3.9"));
     expect(document.querySelector(`[href="${dmgOf(v038)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v037)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v036)}"]`)).toBeNull();
@@ -282,6 +282,7 @@ describe("macOS downloads", () => {
     });
     expectMacLinks(latestPage);
     expectDownloadLinksByLocation(latestPage);
+    expectVersionLabels((text) => expect(text).toBe("v0.3.9"));
     expect(document.querySelector(".archive__fallback-row")).not.toBeNull();
   });
 
