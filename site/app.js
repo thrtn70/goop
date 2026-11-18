@@ -178,7 +178,7 @@
   /* ----------------------------------------------------------------
    * Current macOS download
    *
-   * The static markup links the latest-release page. When the release list
+   * The static markup links the v0.3.9 release page. When the release list
    * loads, the download points straight at the newest stable DMG at or above
    * MIN_MAC_VERSION, served from this repository's own release downloads.
    * ---------------------------------------------------------------- */
@@ -223,6 +223,10 @@
     });
     document.querySelectorAll('[data-latest-version]').forEach((label) => {
       label.textContent = `v${best.version.join('.')}`;
+    });
+    // best.tag already matched parseVersion, so it is safe in a path.
+    document.querySelectorAll('[data-latest-url]').forEach((link) => {
+      link.href = `https://github.com/${REPO}/releases/tag/${best.tag}`;
     });
   }
 

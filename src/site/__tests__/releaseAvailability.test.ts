@@ -199,6 +199,7 @@ describe("macOS downloads", () => {
 
     expectMacLinks(latestPage);
     expectVersionLabels((text) => expect(text).toBe("v0.3.9"));
+    expect(document.querySelector<HTMLAnchorElement>("[data-latest-url]")?.href).toBe(latestPage);
     expect(document.querySelector(`[href="${dmgOf(v038)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v037)}"]`)).toBeNull();
     expect(document.querySelector(`[href="${dmgOf(v036)}"]`)).toBeNull();
@@ -214,6 +215,7 @@ describe("macOS downloads", () => {
 
     expectMacLinks(dmgOf(release("v0.3.10")));
     expectVersionLabels((text) => expect(text).toBe("v0.3.10"));
+    expect(document.querySelector<HTMLAnchorElement>("[data-latest-url]")?.href).toBe(`${repo}/releases/tag/v0.3.10`);
   });
 
   it("compares versions numerically, so v0.3.10 beats v0.3.9", async () => {
