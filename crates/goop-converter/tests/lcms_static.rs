@@ -20,7 +20,7 @@ fn bundled_little_cms_executes_rgb_profile_transform() {
     transform.transform_pixels(&source, &mut output);
 
     assert_eq!(source, output);
-    assert_eq!(lcms2::version(), 2_190);
+    assert_eq!(lcms2::version(), 2_200);
 }
 
 #[test]

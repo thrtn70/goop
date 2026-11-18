@@ -555,8 +555,9 @@ test("audit executes the pinned static Little CMS transform on both release targ
   const step = smoke.match(/ {6}- name: Portable color static link\n([\s\S]*?)\n {6}- name: Image conversion correctness/);
   assert.ok(step, "missing bounded portable color static-link step");
   assert.doesNotMatch(step[0], /^\s*if:/m);
-  assert.match(step[0], /cargo tree -p lcms2@6\.2\.0 --depth 1 --prefix none/);
-  assert.match(step[0], /grep -qx 'lcms2-sys v4\.0\.7'/);
+  assert.match(step[0], /cargo tree -p lcms2@6\.3\.0 --depth 1 --prefix none/);
+  assert.match(step[0], /grep -qx 'lcms2 v6\.3\.0'/);
+  assert.match(step[0], /grep -qx 'lcms2-sys v4\.2\.0'/);
   assert.match(step[0], /cargo clean -p lcms2-sys/);
   assert.match(step[0], /env -u LCMS2_LIB_DIR -u LCMS2_INCLUDE_DIR cargo test/);
   assert.match(step[0], /--test lcms_static/);
