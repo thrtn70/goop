@@ -683,10 +683,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RESOLVED=$(cargo tree -p lcms2@6.2.0 --depth 1 --prefix none)
+          RESOLVED=$(cargo tree -p lcms2@6.3.0 --depth 1 --prefix none)
           echo "$RESOLVED"
-          grep -qx 'lcms2 v6.2.0' <<<"$RESOLVED"
-          grep -qx 'lcms2-sys v4.0.7' <<<"$RESOLVED"
+          grep -qx 'lcms2 v6.3.0' <<<"$RESOLVED"
+          grep -qx 'lcms2-sys v4.2.0' <<<"$RESOLVED"
           # lcms2-sys gives LCMS2_LIB_DIR precedence over its static feature.
           # Remove any cached sys artifact, then clear both override variables
           # for the exact proof build so a host archive cannot be substituted.
