@@ -45,11 +45,11 @@ describe("completed output actions", () => {
     expect(outputActionIds(completedOutput(split))).toEqual(["open", "reveal", "copy_path"]);
   });
 
-  it("explains why an album from before v0.3.9 can't be handed off", () => {
+  it("explains why an album without a saved file list can't be handed off", () => {
     const old = job("done", "/tmp/album", "folder");
     const listed = { ...old, result: { ...old.result!, files: ["1.jpg"] } } as Job;
-    expect(handoffUnavailable(old)).toBe("Downloaded before v0.3.9: use Show in Finder");
-    expect(handoffUnavailable({ ...old, result: { ...old.result!, files: [] } } as Job)).toBe("Downloaded before v0.3.9: use Show in Finder");
+    expect(handoffUnavailable(old)).toBe("No file list was saved for this album: use Show in Finder");
+    expect(handoffUnavailable({ ...old, result: { ...old.result!, files: [] } } as Job)).toBe("No file list was saved for this album: use Show in Finder");
     expect(handoffUnavailable(listed)).toBeNull();
     expect(handoffUnavailable(job("done", "/tmp/movie.mp4"))).toBeNull();
   });

@@ -18,7 +18,7 @@ const failed = { ...file, id: "failed-job", state: { error: { message: "x", deta
 const cancelled = { ...file, id: "cancelled-job", state: "cancelled" } as Job;
 const running = { ...file, id: "running-job", state: "running", result: null } as Job;
 const pdfSplit = { ...album("split"), kind: "pdf" } as Job;
-const none = { failed: 0, cancelled: 0, unfinished: 0, oldAlbum: 0, folder: 0, missing: 0 };
+const none = { failed: 0, cancelled: 0, unfinished: 0, noFileList: 0, folder: 0, missing: 0 };
 
 describe("planHandoff", () => {
   it("takes finished files and albums with a recorded list", () => {
@@ -37,11 +37,11 @@ describe("planHandoff", () => {
   it("names why each other item is left out", () => {
     const plan = planHandoff([file, failed, cancelled, running, album("old"), album("empty", []), pdfSplit]);
     expect(plan.kind).toBe("ready");
-    expect(plan.skipped).toEqual({ ...none, failed: 1, cancelled: 1, unfinished: 1, oldAlbum: 2, folder: 1 });
+    expect(plan.skipped).toEqual({ ...none, failed: 1, cancelled: 1, unfinished: 1, noFileList: 2, folder: 1 });
   });
 
   it("offers nothing when no item qualifies", () => {
-    expect(planHandoff([failed, album("old")])).toEqual({ kind: "none", skipped: { ...none, failed: 1, oldAlbum: 1 } });
+    expect(planHandoff([failed, album("old")])).toEqual({ kind: "none", skipped: { ...none, failed: 1, noFileList: 1 } });
     expect(planHandoff([])).toEqual({ kind: "none", skipped: none });
   });
 
@@ -104,8 +104,8 @@ describe("wording", () => {
     );
     expect(handoffOutcome("compress", 1, 0, none)).toBe("Added 1 file to Compress.");
     expect(handoffOutcome("convert", 2, 1, none)).toBe("Added 2 files to Convert. 1 was already there.");
-    expect(handoffOutcome("convert", 0, 3, { ...none, oldAlbum: 2 })).toBe(
-      "3 files were already in Convert. Skipped 2: 2 albums from before v0.3.9.",
+    expect(handoffOutcome("convert", 0, 3, { ...none, noFileList: 2 })).toBe(
+      "3 files were already in Convert. Skipped 2: 2 albums without a file list.",
     );
     expect(handoffOutcome("convert", 1, 0, { ...none, cancelled: 1, unfinished: 2, folder: 1, missing: 3 })).toBe(
       "Added 1 file to Convert. Skipped 7: 1 cancelled, 2 not finished, 1 folder, 3 missing files.",

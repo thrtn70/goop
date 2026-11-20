@@ -13,7 +13,7 @@ export interface HandoffSkips {
   readonly failed: number;
   readonly cancelled: number;
   readonly unfinished: number;
-  readonly oldAlbum: number;
+  readonly noFileList: number;
   readonly folder: number;
   readonly missing: number;
 }
@@ -37,7 +37,7 @@ export type HandoffPlan =
 
 type SkipReason = keyof HandoffSkips;
 
-const NO_SKIPS: HandoffSkips = { failed: 0, cancelled: 0, unfinished: 0, oldAlbum: 0, folder: 0, missing: 0 };
+const NO_SKIPS: HandoffSkips = { failed: 0, cancelled: 0, unfinished: 0, noFileList: 0, folder: 0, missing: 0 };
 
 const DESTINATION_LABELS: Readonly<Record<HandoffDestination, string>> = { convert: "Convert", compress: "Compress" };
 
@@ -45,12 +45,12 @@ const SKIP_LABELS: Readonly<Record<SkipReason, readonly [string, string]>> = {
   failed: ["failed", "failed"],
   cancelled: ["cancelled", "cancelled"],
   unfinished: ["not finished", "not finished"],
-  oldAlbum: ["album from before v0.3.9", "albums from before v0.3.9"],
+  noFileList: ["album without a file list", "albums without a file list"],
   folder: ["folder", "folders"],
   missing: ["missing file", "missing files"],
 };
 
-const SKIP_ORDER: readonly SkipReason[] = ["failed", "cancelled", "unfinished", "oldAlbum", "folder", "missing"];
+const SKIP_ORDER: readonly SkipReason[] = ["failed", "cancelled", "unfinished", "noFileList", "folder", "missing"];
 
 /** What a job hands off, or why it can't be handed off. */
 export function handoffEligibility(job: Job): HandoffSource | SkipReason {
@@ -61,7 +61,7 @@ export function handoffEligibility(job: Job): HandoffSource | SkipReason {
   if (!result?.output_path) return "missing";
   if (result.result_kind !== "folder") return { output_path: result.output_path };
   if (job.kind !== "extract") return "folder";
-  return result.files && result.files.length > 0 ? { output_path: result.output_path, files: result.files } : "oldAlbum";
+  return result.files && result.files.length > 0 ? { output_path: result.output_path, files: result.files } : "noFileList";
 }
 
 function addSkip(skips: HandoffSkips, reason: SkipReason, by = 1): HandoffSkips {

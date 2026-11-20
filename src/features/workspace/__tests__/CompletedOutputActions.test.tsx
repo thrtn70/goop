@@ -91,9 +91,9 @@ describe("CompletedOutputActions", () => {
     const convert = screen.getByRole("button", { name: "Convert…" }) as HTMLButtonElement;
     expect(convert.disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Compress…" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText("Downloaded before v0.3.9: use Show in Finder")).toBeTruthy();
+    expect(screen.getByText("No file list was saved for this album: use Show in Finder")).toBeTruthy();
     expect(convert.getAttribute("aria-describedby")).toBeTruthy();
-    expect(document.getElementById(convert.getAttribute("aria-describedby")!)?.textContent).toBe("Downloaded before v0.3.9: use Show in Finder");
+    expect(document.getElementById(convert.getAttribute("aria-describedby")!)?.textContent).toBe("No file list was saved for this album: use Show in Finder");
     await user.click(convert);
     expect(onHandoff).not.toHaveBeenCalled();
   });

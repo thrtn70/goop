@@ -41,7 +41,9 @@ export function completedOutput(job: Job): CompletedOutput | null {
   return { job, path, kind: job.result?.result_kind ?? "file" };
 }
 
-export const OLD_ALBUM_REASON = "Downloaded before v0.3.9: use Show in Finder";
+// Older albums, albums over 2,000 files and albums with no safely listable
+// file all lack a list; the job does not record which, so one reason fits all.
+export const NO_FILE_LIST_REASON = "No file list was saved for this album: use Show in Finder";
 
 function isAlbum(job: Job): boolean {
   return job.kind === "extract" && job.result?.result_kind === "folder";
@@ -55,7 +57,7 @@ export function outputActionIds(
   return output.kind === "folder" && !isAlbum(output.job) ? FOLDER_ACTIONS : FILE_ACTIONS;
 }
 
-/** Why Convert… and Compress… are offered disabled: an album saved before its file list was recorded. */
+/** Why Convert… and Compress… are offered disabled: an album with no saved file list. */
 export function handoffUnavailable(job: Job): string | null {
-  return isAlbum(job) && !(job.result?.files?.length) ? OLD_ALBUM_REASON : null;
+  return isAlbum(job) && !(job.result?.files?.length) ? NO_FILE_LIST_REASON : null;
 }
