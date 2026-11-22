@@ -993,8 +993,8 @@ test("Windows audit records fresh-process HEIC preview memory evidence", () => {
   assert.match(step[0], /if \(\$primaryDelta -gt 16MB\)/);
 });
 
-const version = "0.3.9";
-const replacementCandidateVersion = "0.3.9";
+const version = "0.3.10";
+const replacementCandidateVersion = "0.3.10";
 const installers = [
   `Goop_${version}_aarch64.dmg`,
   "Goop_aarch64.app.tar.gz",
@@ -1011,7 +1011,7 @@ test("candidate manifests agree on the release version", () => {
   assert.equal(cargoVersion, version);
 });
 
-test("replacement candidate advances every release version authority to v0.3.9", () => {
+test("replacement candidate advances every release version authority to v0.3.10", () => {
   assert.deepEqual(
     {
       workspaceCargo: cargoVersion,
