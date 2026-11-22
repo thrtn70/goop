@@ -43,7 +43,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
   const start = nowMs();
   const activeDeadline = start + Math.max(1, readinessTimeoutMs - killGraceMs);
   const child = spawn(binary, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...environment, GOOP_CONFIG_DIR: join(directory, 'config'), GOOP_DATA_DIR: join(directory, 'data'), GOOP_STARTUP_REPORT: reportPath } });
-  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false, stdioError = null;
+  let exited = false, exitCode = null, exitSignal = null, spawnError = null, aborted = false, stdioError;
   // The root's exit, not its pipes' EOF: a process that left the group can hold
   // the pipes open for as long as it lives. A failed spawn emits close, not exit.
   const rootExited = new Promise(resolve => {
@@ -88,7 +88,7 @@ export async function runStartup({ binary, args = [], directory, settings, jobs 
     } catch { return null; }
   };
   const sampling = setInterval(sample, 100);
-  let marker = null, launchMs = null, idleRss = null, timedOut = false;
+  let marker = null, launchMs = null, idleRss = null, timedOut;
   try {
     while (!exited && !aborted && nowMs() < activeDeadline) {
       try {
@@ -187,7 +187,7 @@ async function main(abortSignal) {
       if (!result.success) {
         summary[jobs] = summarizeStartup(samples);
         const failure = `Startup failed for ${jobs} jobs, run ${i}; retained sample excludes it from medians`;
-        try { saveSummary(); } catch (error) { throw Error(`${failure}; summary not saved: ${error.message}`); }
+        try { saveSummary(); } catch (error) { throw Error(`${failure}; summary not saved: ${error.message}`, { cause: error }); }
         throw Error(failure);
       }
     }

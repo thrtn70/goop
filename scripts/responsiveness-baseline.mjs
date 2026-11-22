@@ -981,7 +981,7 @@ function publishCanonicalExclusive(directory, value, { filename, temporaryPrefix
     if (targetCreated) { try { unlinkSync(target); } catch { /* Best-effort rollback of an unpublished target. */ } }
     if (temporaryCreated) { try { unlinkSync(temporary); } catch { /* Best-effort removal of an unpublished temp name. */ } }
     try { syncDirectoryPortable(directory); } catch { /* The original publication failure remains authoritative. */ }
-    throw Error(`Exclusive ${label} publish failed: ${error.code ?? error.message}`);
+    throw Error(`Exclusive ${label} publish failed: ${error.code ?? error.message}`, { cause: error });
   }
   return { path: target, bytes, sha256: createHash('sha256').update(canonical).digest('hex') };
 }

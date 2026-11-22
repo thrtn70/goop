@@ -545,7 +545,7 @@ export async function executeWorkloadAdapter(run, drivers) {
   if (evidenceError !== null) {
     return { ...processResult, stdout: undefined, stderr: undefined, success: false, evidence_error: evidenceError, error: `Workload logs could not be retained: ${evidenceError}` };
   }
-  let metrics = null;
+  let metrics;
   try {
     // A link or FIFO the driver left at the metrics path is refused rather than
     // followed or waited on.
