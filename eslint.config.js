@@ -92,7 +92,11 @@ export default tseslint.config(
       "react-refresh": reactRefresh,
     },
     rules: {
-      ...reactHooks.configs.recommended.rules,
+      // The two classic hook rules, as eslint-plugin-react-hooks 5 recommended
+      // them. Version 7's recommended set adds the React Compiler rules, which
+      // would be a separate decision.
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
       // Off by choice, not by accident. This is a dev-server ergonomics hint
       // (fast refresh degrades to a full reload when a module exports a
       // component *and* something else), not a correctness rule, and ~14
