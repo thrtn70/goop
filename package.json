@@ -1,7 +1,7 @@
 {
   "name": "goop",
   "private": true,
-  "version": "0.3.9",
+  "version": "0.3.10",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
