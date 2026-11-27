@@ -1036,9 +1036,9 @@ test("static website offers only a macOS installer at or above the minimum safe 
   assert.doesNotMatch(siteHtml, /data-download-paused|temporarily paused/i);
   assert.match(siteHtml, /data-cta="mac"/);
   assert.doesNotMatch(siteHtml, /data-win-url|\.msi\b|\.exe\b|Download for Windows/);
-  // v0.3.9 is the first build with SQLite 3.54.1 (RUSTSEC-2026-0459);
+  // v0.3.10 is the first build with lcms2 6.3.0 and Little CMS 2.20;
   // the site must never promote an older one as current.
-  assert.match(siteScript, /MIN_MAC_VERSION\s*=\s*\[\s*0\s*,\s*3\s*,\s*9\s*\]/);
+  assert.match(siteScript, /MIN_MAC_VERSION\s*=\s*\[\s*0\s*,\s*3\s*,\s*10\s*\]/);
   assert.doesNotMatch(siteScript, /\.msi\b|\.exe\b|data-win-url/);
   assert.match(siteScript, /makeLink\(notesURL, 'Release page'\)/);
 });
