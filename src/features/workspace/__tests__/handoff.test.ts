@@ -107,6 +107,9 @@ describe("wording", () => {
     expect(handoffOutcome("convert", 0, 3, { ...none, noFileList: 2 })).toBe(
       "3 files were already in Convert. Skipped 2: 2 albums without a file list.",
     );
+    expect(handoffOutcome("compress", 1, 0, { ...none, noFileList: 1 })).toBe(
+      "Added 1 file to Compress. Skipped 1: 1 album without a file list.",
+    );
     expect(handoffOutcome("convert", 1, 0, { ...none, cancelled: 1, unfinished: 2, folder: 1, missing: 3 })).toBe(
       "Added 1 file to Convert. Skipped 7: 1 cancelled, 2 not finished, 1 folder, 3 missing files.",
     );
