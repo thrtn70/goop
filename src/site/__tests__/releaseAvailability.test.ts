@@ -219,13 +219,13 @@ describe("macOS downloads", () => {
     expect(document.querySelector<HTMLAnchorElement>("[data-latest-url]")?.href).toBe(`${repo}/releases/tag/v0.3.11`);
   });
 
-  it("compares versions numerically, so v0.3.20 beats v0.3.11", async () => {
-    const v0320 = release("v0.3.20");
-    installPage("Mozilla/5.0 (Macintosh)", async () => response([release("v0.3.11"), v0320]));
+  it("compares versions numerically, so v0.3.100 beats v0.3.99", async () => {
+    const v03100 = release("v0.3.100");
+    installPage("Mozilla/5.0 (Macintosh)", async () => response([release("v0.3.99"), v03100]));
     await archiveRendered(2);
 
-    expectMacLinks(dmgOf(v0320));
-    expectVersionLabels((text) => expect(text).toBe("v0.3.20"));
+    expectMacLinks(dmgOf(v03100));
+    expectVersionLabels((text) => expect(text).toBe("v0.3.100"));
   });
 
   it("labels the version as v<x.y.z> even when the tag has no v prefix", async () => {

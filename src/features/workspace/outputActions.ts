@@ -41,8 +41,9 @@ export function completedOutput(job: Job): CompletedOutput | null {
   return { job, path, kind: job.result?.result_kind ?? "file" };
 }
 
-// Older albums, albums over 2,000 files and albums with no safely listable
-// file all lack a list; the job does not record which, so one reason fits all.
+// Older albums, albums with more than 2,000 safely listable files and albums
+// with no safely listable file all lack a list; the job does not record which,
+// so one reason fits all.
 export const NO_FILE_LIST_REASON = "No file list was saved for this album: use Show in Finder";
 
 function isAlbum(job: Job): boolean {
