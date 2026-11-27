@@ -50,6 +50,10 @@ function stemOf(p: string): string {
  * probes the single file to learn its page count, then hands the user a
  * picker + operation-specific sub-form + a primary action button.
  */
+// Images to PDF and image OCR take their own images as input, so finishing one
+// must not retire the PDFs loaded in the host page.
+function keepHostPdfs(): void {}
+
 function PdfFlow({
   files,
   onFilesChanged,
@@ -236,11 +240,11 @@ function PdfFlow({
       {files.length === 1 && op === "extract_images" && (
         <PdfToImagesFlow file={files[0]} onDone={onDone} />
       )}
-      {op === "images_to_pdf" && <ImagesToPdfFlow onDone={onDone} />}
+      {op === "images_to_pdf" && <ImagesToPdfFlow onDone={keepHostPdfs} />}
       {files.length === 1 && op === "pdf_ocr" && (
         <PdfOcrFlow file={files[0]} onDone={onDone} />
       )}
-      {op === "image_ocr" && <ImageOcrFlow onDone={onDone} />}
+      {op === "image_ocr" && <ImageOcrFlow onDone={keepHostPdfs} />}
 
       {(op === "merge" || op === "split" || op === "compress") && (
         <div className="mt-2 flex items-center gap-3 border-t border-subtle pt-4">
