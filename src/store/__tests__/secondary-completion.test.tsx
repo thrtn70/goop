@@ -257,3 +257,27 @@ it("PDF Split queues nothing when the folder picker is cancelled", async () => {
  expect(mocks.pdf).not.toHaveBeenCalled();
  expect((screen.getByLabelText("Page ranges") as HTMLInputElement).value).toBe("1-2");
 });
+for (const ocr of [false, true]) it(`image-only PDF tools leave the host's loaded PDFs alone (OCR=${ocr})`, async () => {
+ const request = deferred(); mocks.pdf.mockReturnValue(request.promise); mocks.open.mockResolvedValue(["/a.png"]); mocks.save.mockResolvedValue("/out.pdf");
+ const onDone = vi.fn();
+ render(<MemoryRouter><WorkspaceDraftProvider tool="convert"><PdfFlow files={["/docs/a.pdf"]} defaultOp={ocr ? "image_ocr" : "images_to_pdf"} onFilesChanged={() => {}} onDone={onDone} /></WorkspaceDraftProvider></MemoryRouter>);
+ fireEvent.click(await screen.findByRole("button", {name: "Pick images…"}));
+ const action = await screen.findByRole("button", {name: ocr ? "Run OCR" : "Combine 1 image into PDF"});
+ await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(action);
+ await waitFor(() => expect(mocks.pdf).toHaveBeenCalledTimes(1));
+ await act(async () => request.resolve("job"));
+ expect(onDone).not.toHaveBeenCalled();
+});
+for (const tool of ["convert", "compress"] as const) it(`${tool} keeps its loaded PDFs after Images to PDF is queued`, async () => {
+ const request = deferred(); mocks.pdf.mockReturnValue(request.promise); mocks.save.mockResolvedValue("/out.pdf");
+ mocks.open.mockResolvedValueOnce(["/docs/a.pdf"]).mockResolvedValueOnce(["/a.png"]);
+ render(page(tool)); fireEvent.click(screen.getByRole("button", {name: "Add files"}));
+ await screen.findByText("a.pdf");
+ fireEvent.click(await screen.findByRole("button", {name: /Images to PDF/}));
+ fireEvent.click(await screen.findByRole("button", {name: "Pick images…"}));
+ const action = await screen.findByRole("button", {name: "Combine 1 image into PDF"});
+ await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(action);
+ await waitFor(() => expect(mocks.pdf).toHaveBeenCalledTimes(1));
+ await act(async () => request.resolve("job"));
+ expect(screen.getByText("a.pdf")).toBeTruthy();
+});
